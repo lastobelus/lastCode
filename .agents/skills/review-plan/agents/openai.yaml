@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Plan"
+  short_description: "Review LastCode plans before implementation"
+  default_prompt: "Use $review-plan to review the plan at PLAN_FILE."
