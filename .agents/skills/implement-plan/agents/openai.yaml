@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Plan"
+  short_description: "Implement reviewed LastCode plans"
+  default_prompt: "Use $implement-plan to implement the plan at PLAN_FILE."
