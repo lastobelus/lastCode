@@ -45,7 +45,33 @@ Packaging identity:
 - Product name: `†Code`
 - ASCII artifact/app identifiers: `LastCode`
 - Bundle id: `codes.lastobelus.lastcode`
-- URL scheme: `lastcode`
+- URL schemes: `lastcode` and `lastcode-dev`
+
+## Running Alongside T3 Code
+
+LastCode uses a separate desktop identity and can run at the same time as an
+installed T3 Code or T3 Code Nightly build. The isolated runtime resources are:
+
+- Electron profiles: `lastcode` and `lastcode-dev`, instead of `t3code` and
+  `t3code-dev`
+- Application state: `~/.lastcode`, instead of `~/.t3`
+- URL schemes: `lastcode` and `lastcode-dev`, instead of `t3code` and
+  `t3code-dev`
+- Bundle/application identifiers and Linux desktop identities under the
+  `codes.lastobelus.lastcode` and `lastcode` namespaces
+
+The separate Electron profile also scopes LastCode's single-instance lock, so
+launching it cannot focus or terminate T3 Code. Backend ports are selected from
+the existing available-port range, allowing both local servers to start.
+
+Provider credentials remain in their provider-owned locations, such as
+`~/.codex`, so signing into a coding provider does not need to be duplicated.
+LastCode settings, sessions, logs, attachments, browser artifacts, and local
+server data remain isolated.
+
+Tailscale Serve is machine-global. Do not enable the same Serve port in both
+applications at once; keep it disabled in the fallback app or configure
+different ports.
 
 ## Fork Workflow Bootstrap Branch
 
