@@ -550,10 +550,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       const mac = config.mac as Record<string, unknown>;
-      assert.deepStrictEqual(mac.sign, {
-        identity: "-",
-        hardenedRuntime: false,
-      });
+      assert.equal(mac.identity, "-");
+      assert.equal(mac.hardenedRuntime, false);
+      assert.notProperty(mac, "sign");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 

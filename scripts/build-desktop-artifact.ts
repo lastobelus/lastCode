@@ -1564,10 +1564,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       ...(!signed
         ? {
-            sign: {
-              identity: "-",
-              hardenedRuntime: false,
-            },
+            identity: "-",
+            hardenedRuntime: false,
           }
         : {}),
       protocols: [
