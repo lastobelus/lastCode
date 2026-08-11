@@ -17,9 +17,11 @@ pnpm lastcode:ci:quick
 ```
 
 The quick gate ensures the Electron runtime exists, then runs repository format
-and lint checks, workspace typechecking, and workspace tests. Tests receive an
-isolated Git configuration so personal hooks and default-branch preferences do
-not make their temporary repositories behave differently from clean CI runners.
+and lint checks, workspace typechecking, and workspace tests. Workspace tests
+use bounded concurrency so CPU-heavy browser tests retain their normal timeout
+budget on a local machine. Tests also receive an isolated Git configuration so
+personal hooks and default-branch preferences do not make their temporary
+repositories behave differently from clean CI runners.
 
 Before merging or building a release, run the full gate from a clean worktree:
 

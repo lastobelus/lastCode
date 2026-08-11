@@ -31,7 +31,8 @@ describe("lastcode-local-ci", () => {
   });
 
   it("keeps release, native, Rust, and preload checks in the full gate", () => {
-    const quickLabels = resolveLocalCiSteps("quick").map(({ label }) => label);
+    const quickSteps = resolveLocalCiSteps("quick");
+    const quickLabels = quickSteps.map(({ label }) => label);
     const fullLabels = resolveLocalCiSteps("full").map(({ label }) => label);
 
     expect(quickLabels).toEqual([
@@ -50,6 +51,10 @@ describe("lastcode-local-ci", () => {
         "Release smoke",
       ]),
     );
+    expect(quickSteps.find(({ label }) => label === "Workspace tests")).toMatchObject({
+      kind: "command",
+      args: ["run", "--concurrency-limit", "2", "test"],
+    });
   });
 
   it("checks the built preload bridge contract", () => {
