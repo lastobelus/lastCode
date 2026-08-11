@@ -1,8 +1,53 @@
-# LastCode Private Release Workflow
+# LastCode Personal Release Workflow
 
-LastCode is the private fork of `pingdotgg/t3code` used from the
+LastCode is a personal downstream of `pingdotgg/t3code` used from the
 `lastcode/main` branch. `main` remains an upstream mirror for clean pull request
 work against `pingdotgg/t3code`.
+
+GitHub Actions are intentionally disabled. Validation and Apple Silicon builds
+run locally under the repository's Node 24.13.1 engine through `mise`, and
+releases are created ad hoc rather than on a schedule.
+
+## Local CI
+
+Every push runs the quick gate through `.vite-hooks/pre-push`:
+
+```bash
+pnpm lastcode:ci:quick
+```
+
+The quick gate ensures the Electron runtime exists, then runs repository format
+and lint checks, workspace typechecking, and workspace tests. Tests receive an
+isolated Git configuration so personal hooks and default-branch preferences do
+not make their temporary repositories behave differently from clean CI runners.
+
+Before merging or building a release, run the full gate from a clean worktree:
+
+```bash
+pnpm lastcode:ci
+```
+
+The full gate fetches `origin/lastcode/main`, verifies that the branch contains
+that exact base commit, and runs everything in the quick gate plus:
+
+- Rust formatting and resource-monitor tests
+- the desktop build and upstream's preload-bundle assertions
+- mobile native static analysis
+- release smoke tests
+
+Success writes a local stamp for both the tested head commit and base commit in
+the repository's shared Git directory. If the base branch advances, the stamp
+is invalid and CI must be rerun after rebasing.
+
+Merge the current branch's ready PR with:
+
+```bash
+pnpm lastcode:merge
+```
+
+The wrapper refuses dirty worktrees, unstamped commits, stale bases, draft PRs,
+conflicting PRs, and PRs that do not target `lastcode/main`. It then uses a
+squash merge guarded by GitHub's exact-head match.
 
 ## Nightly Sync
 
@@ -39,6 +84,10 @@ pnpm lastcode:build:mac:arm64
 
 The wrapper resolves the latest upstream nightly tag and runs the desktop
 artifact builder with that version. Output goes to `release-lastcode/`.
+
+Run the full local CI gate on the exact commit being packaged first. Artifacts
+stay local unless a GitHub release is explicitly created; releases in the
+public fork are public.
 
 Packaging identity:
 
