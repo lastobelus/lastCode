@@ -126,11 +126,11 @@ different ports.
 
 `topic/fork-workflow-bootstrap` is not merged into `lastcode/main`.
 
-It added a useful idea, resolving the repository root from Git's common dir so
-scripts work from linked worktrees, and the LastCode nightly scripts use that
-pattern. The branch also encodes an older vendor/product workflow with Aadit
-fork tracking. That does not match the current strategy, which intentionally
-does not pull from Aadit.
+It encodes an older vendor/product workflow with Aadit fork tracking. That does
+not match the current strategy, which intentionally does not pull from Aadit.
+LastCode commands resolve the current worktree with `git rev-parse
+--show-toplevel`; only cross-worktree metadata such as local CI stamps belongs
+under Git's common directory.
 
 ## In-App Update Direction
 

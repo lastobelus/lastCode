@@ -2,7 +2,6 @@
 
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
-import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -99,14 +98,7 @@ export const runGit = Effect.fn("lastcode.runGit")(function* (
 export const resolveRepoRoot = Effect.fn("lastcode.resolveRepoRoot")(function* (
   cwd = process.cwd(),
 ) {
-  const path = yield* Path.Path;
-  const topLevel = yield* runGit(cwd, ["rev-parse", "--show-toplevel"]);
-  const commonGitDir = yield* runGit(cwd, [
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir",
-  ]);
-  return path.dirname(path.resolve(topLevel, commonGitDir));
+  return yield* runGit(cwd, ["rev-parse", "--show-toplevel"]);
 });
 
 export const listLocalTags = Effect.fn("lastcode.listLocalTags")(function* (repoRoot: string) {
