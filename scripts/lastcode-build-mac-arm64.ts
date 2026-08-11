@@ -4,6 +4,7 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -59,6 +60,7 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
 const runBuildCommand = Effect.fn("lastcode.runBuildCommand")(function* (
   repoRoot: string,
   args: ReadonlyArray<string>,
+  rustToolchainBin: string,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const child = yield* spawner.spawn(
@@ -66,6 +68,7 @@ const runBuildCommand = Effect.fn("lastcode.runBuildCommand")(function* (
       cwd: repoRoot,
       env: {
         ...process.env,
+        PATH: `${rustToolchainBin}:${process.env.PATH ?? ""}`,
         T3CODE_DESKTOP_UPDATE_REPOSITORY:
           process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY ?? "lastobelus/lastCode",
       },
@@ -93,6 +96,33 @@ const runBuildCommand = Effect.fn("lastcode.runBuildCommand")(function* (
   }
 });
 
+const resolveRustToolchainBin = Effect.fn("lastcode.resolveRustToolchainBin")(function* (
+  repoRoot: string,
+) {
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const child = yield* spawner.spawn(
+    ChildProcess.make("rustup", ["which", "cargo", "--toolchain", "stable"], {
+      cwd: repoRoot,
+    }),
+  );
+  const [stdout, stderr, exitCode] = yield* Effect.all(
+    [
+      collectStreamAsString(child.stdout),
+      collectStreamAsString(child.stderr),
+      child.exitCode.pipe(Effect.map(Number)),
+    ],
+    { concurrency: "unbounded" },
+  );
+  const cargoPath = stdout.trim();
+  if (exitCode !== 0 || cargoPath.length === 0) {
+    return yield* new LastCodeNightlyError({
+      message: `Failed to resolve stable Rust cargo${stderr.trim() ? `: ${stderr.trim()}` : "."}`,
+    });
+  }
+  return path.dirname(cargoPath);
+});
+
 const parseCliOptions = Effect.try({
   try: () => parseArgs(process.argv.slice(2)),
   catch: (cause) =>
@@ -111,23 +141,28 @@ const main = Effect.gen(function* () {
   }
 
   const latest = yield* resolveLatestLocalNightlyTag(repoRoot);
+  const rustToolchainBin = yield* resolveRustToolchainBin(repoRoot);
   const version = versionFromNightlyTag(latest.tag);
   yield* Console.log(`[lastcode] Building Apple Silicon LastCode artifact for ${latest.tag}.`);
 
-  yield* runBuildCommand(repoRoot, [
-    "scripts/build-desktop-artifact.ts",
-    "--platform",
-    "mac",
-    "--target",
-    "dmg",
-    "--arch",
-    "arm64",
-    "--build-version",
-    version,
-    "--output-dir",
-    options.outputDir,
-    ...(options.verbose ? ["--verbose"] : []),
-  ]);
+  yield* runBuildCommand(
+    repoRoot,
+    [
+      "scripts/build-desktop-artifact.ts",
+      "--platform",
+      "mac",
+      "--target",
+      "dmg",
+      "--arch",
+      "arm64",
+      "--build-version",
+      version,
+      "--output-dir",
+      options.outputDir,
+      ...(options.verbose ? ["--verbose"] : []),
+    ],
+    rustToolchainBin,
+  );
 });
 
 if (import.meta.main) {
