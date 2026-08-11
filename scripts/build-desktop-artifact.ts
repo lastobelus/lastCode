@@ -1562,6 +1562,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(!signed
+        ? {
+            sign: {
+              identity: "-",
+              hardenedRuntime: false,
+            },
+          }
+        : {}),
       protocols: [
         {
           name: LASTCODE_DESKTOP_DISTRIBUTION.asciiName,

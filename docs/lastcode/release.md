@@ -82,6 +82,10 @@ Build the local macOS Apple Silicon artifact:
 pnpm lastcode:build:mac:arm64
 ```
 
+Local macOS packages are sealed with Electron Builder's ad-hoc identity, so the
+app bundle and its resources pass macOS code-signature verification without an
+Apple Developer certificate. They are not notarized for public distribution.
+
 The wrapper resolves the latest upstream nightly tag and runs the desktop
 artifact builder with that version. Output goes to `release-lastcode/`.
 
