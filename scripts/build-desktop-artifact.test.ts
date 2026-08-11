@@ -44,7 +44,7 @@ import {
   STAGE_INSTALL_ARGS,
   WINDOWS_ASAR_UNPACK,
 } from "./build-desktop-artifact.ts";
-import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+import { LASTCODE_BRAND_ASSET_PATHS } from "./lib/lastcode-brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 function mockProcess(exitCode: number) {
@@ -97,15 +97,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), {
-      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.productionMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.productionLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.productionWindowsIconIco,
     });
 
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17-nightly.20260413.42"), {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     });
   });
 
