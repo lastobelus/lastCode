@@ -127,6 +127,11 @@ and then runs the checkpoint command. It never uses or modifies a human
 development worktree. Uninstall leaves the automation worktree available for
 inspection.
 
+When a new nightly needs an isolated sync worktree, dependency bootstrap uses
+the automation worktree's installed Vite+ runner. Once installation completes,
+all smoke checks use the sync worktree's own runner. This keeps scheduled runs
+independent of shell PATH configuration and global `vp` installations.
+
 The launch agent is opt-in. Repository installation and tests never register it.
 
 ## Selecting a Build
