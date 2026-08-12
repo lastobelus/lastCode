@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -7,7 +8,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   assertCheckpointCiStamp,
   assertFullCiStamp,
+  assertRepositoryIntegrity,
   assertSupportedNodeVersion,
+  captureRepositoryIntegrity,
   parseLocalCiOptions,
   readFullCiStamp,
   resolveLocalCiSteps,
@@ -16,6 +19,16 @@ import {
 } from "./lastcode-local-ci.ts";
 
 describe("lastcode-local-ci", () => {
+  it("clears Git-local hook variables before starting the pre-push gate", () => {
+    const hook = NodeFS.readFileSync(
+      NodePath.resolve(import.meta.dirname, "../.vite-hooks/pre-push"),
+      "utf8",
+    );
+    expect(hook).toContain("git_local_env=$(git rev-parse --local-env-vars) || exit 1");
+    expect(hook).toContain("unset $git_local_env");
+    expect(hook.indexOf("unset $git_local_env")).toBeLessThan(hook.indexOf("lastcode:ci:quick"));
+  });
+
   it("requires the repository's supported Node release line", () => {
     expect(() => assertSupportedNodeVersion("24.13.1")).not.toThrow();
     expect(() => assertSupportedNodeVersion("24.99.0")).not.toThrow();
@@ -72,6 +85,29 @@ describe("lastcode-local-ci", () => {
     expect(() => verifyPreloadBundle(root)).not.toThrow();
     NodeFS.writeFileSync(preloadPath, "desktopBridge");
     expect(() => verifyPreloadBundle(root)).toThrow("getLocalEnvironmentBootstraps");
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("rejects bare repositories and shared config changes during CI", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-test-"));
+    const repository = NodePath.join(root, "repository");
+    const bareRepository = NodePath.join(root, "bare.git");
+    NodeFS.mkdirSync(repository);
+    NodeFS.mkdirSync(bareRepository);
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    NodeChildProcess.execFileSync("git", ["init", "--quiet", "--bare"], {
+      cwd: bareRepository,
+    });
+
+    const snapshot = captureRepositoryIntegrity(repository);
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    NodeChildProcess.execFileSync("git", ["config", "test.integrity", "changed"], {
+      cwd: repository,
+    });
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+      "Shared repository integrity",
+    );
+    expect(() => captureRepositoryIntegrity(bareRepository)).toThrow("core.bare=true");
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 

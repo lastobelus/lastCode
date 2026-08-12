@@ -55,6 +55,12 @@ export interface LocalCiOptions {
   readonly checkpointTag?: string;
 }
 
+export interface RepositoryIntegritySnapshot {
+  readonly commonGitDir: string;
+  readonly configContents: Buffer;
+  readonly configPath: string;
+}
+
 export function assertSupportedNodeVersion(version = process.versions.node): void {
   const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
   const supported = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
@@ -302,6 +308,57 @@ export function resolveCommonGitDir(repoRoot: string): string {
   return runGit(repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 }
 
+function readCoreBare(repoRoot: string, configPath: string): string {
+  return runProcess(
+    repoRoot,
+    "git",
+    ["config", "--file", configPath, "--bool", "--get", "core.bare"],
+    {
+      capture: true,
+    },
+  );
+}
+
+export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegritySnapshot {
+  const commonGitDir = resolveCommonGitDir(repoRoot);
+  const configPath = NodePath.join(commonGitDir, "config");
+  const coreBare = readCoreBare(repoRoot, configPath);
+  if (coreBare !== "false") {
+    throw new Error(
+      `Refusing local CI because the shared repository config reports core.bare=${coreBare || "unset"}. Inspect ${configPath} before continuing.`,
+    );
+  }
+  return {
+    commonGitDir,
+    configContents: NodeFS.readFileSync(configPath),
+    configPath,
+  };
+}
+
+export function assertRepositoryIntegrity(
+  repoRoot: string,
+  before: RepositoryIntegritySnapshot,
+): void {
+  const coreBare = readCoreBare(repoRoot, before.configPath);
+  if (coreBare !== "false") {
+    throw new Error(
+      `Shared repository integrity changed during local CI: core.bare=${coreBare || "unset"}. Stop and inspect ${before.configPath}.`,
+    );
+  }
+  const configContents = NodeFS.readFileSync(before.configPath);
+  if (!configContents.equals(before.configContents)) {
+    throw new Error(
+      `Shared repository integrity changed during local CI: ${before.configPath} was modified. Stop and inspect its diff before continuing.`,
+    );
+  }
+  const commonGitDir = resolveCommonGitDir(repoRoot);
+  if (commonGitDir !== before.commonGitDir) {
+    throw new Error(
+      `Shared repository integrity changed during local CI: common Git directory moved from ${before.commonGitDir} to ${commonGitDir}.`,
+    );
+  }
+}
+
 export function assertCleanWorktree(repoRoot: string): void {
   const status = runGit(repoRoot, ["status", "--porcelain", "--untracked-files=all"]);
   if (status) {
@@ -331,16 +388,11 @@ function printPlan(mode: LocalCiMode): void {
   }
 }
 
-function runLocalCi(options: LocalCiOptions): void {
-  assertSupportedNodeVersion();
-  const repoRoot = resolveRepoRoot();
-  const steps = resolveLocalCiSteps(options.mode);
-
-  if (options.dryRun) {
-    printPlan(options.mode);
-    return;
-  }
-
+function executeLocalCi(
+  options: LocalCiOptions,
+  repoRoot: string,
+  steps: ReadonlyArray<LocalCiStep>,
+): void {
   let commitBefore: string | undefined;
   let baseCommit: string | undefined;
   let checkpointContext: Extract<FullCiStamp["context"], { kind: "checkpoint" }> | undefined;
@@ -458,6 +510,24 @@ function runLocalCi(options: LocalCiOptions): void {
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);
   } else {
     console.log("\n[lastcode:ci] Quick local CI passed.");
+  }
+}
+
+function runLocalCi(options: LocalCiOptions): void {
+  assertSupportedNodeVersion();
+  const repoRoot = resolveRepoRoot();
+  const steps = resolveLocalCiSteps(options.mode);
+
+  if (options.dryRun) {
+    printPlan(options.mode);
+    return;
+  }
+
+  const repositoryIntegrity = captureRepositoryIntegrity(repoRoot);
+  try {
+    executeLocalCi(options, repoRoot, steps);
+  } finally {
+    assertRepositoryIntegrity(repoRoot, repositoryIntegrity);
   }
 }
 
