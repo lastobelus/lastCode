@@ -8,9 +8,11 @@ import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
 
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
+
 export const DESKTOP_HOST = "app";
-export const DESKTOP_PRODUCTION_SCHEME = "t3code";
-export const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+export const DESKTOP_PRODUCTION_SCHEME = LASTCODE_DESKTOP_DISTRIBUTION.productionScheme;
+export const DESKTOP_DEVELOPMENT_SCHEME = LASTCODE_DESKTOP_DISTRIBUTION.developmentScheme;
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
