@@ -28,6 +28,7 @@ export function renderLaunchAgentPlist(input: {
   const command = [
     "git fetch origin +refs/heads/lastcode/main:refs/remotes/origin/lastcode/main",
     "&amp;&amp; git checkout --detach --force refs/remotes/origin/lastcode/main",
+    "&amp;&amp; ./node_modules/.bin/vp install --frozen-lockfile",
     "&amp;&amp;",
     "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
     "--push-tags",
@@ -70,9 +71,12 @@ export function renderLaunchAgentPlist(input: {
 function run(
   command: string,
   args: ReadonlyArray<string>,
-  options: { readonly allowFailure?: boolean } = {},
+  options: { readonly allowFailure?: boolean; readonly cwd?: string } = {},
 ): void {
-  const result = NodeChildProcess.spawnSync(command, args, { stdio: "inherit" });
+  const result = NodeChildProcess.spawnSync(command, args, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    stdio: "inherit",
+  });
   if (result.error) throw result.error;
   if (result.status !== 0 && !options.allowFailure) {
     throw new Error(`${command} ${args.join(" ")} failed with ${result.status ?? "unknown"}.`);
@@ -154,6 +158,10 @@ function main(argv: ReadonlyArray<string>): void {
       "refs/remotes/origin/lastcode/main",
     ]);
   }
+  console.log("[lastcode:service] Installing automation worktree dependencies...");
+  run(NodePath.join(repoRoot, "node_modules", ".bin", "vp"), ["install", "--frozen-lockfile"], {
+    cwd: automationWorktree,
+  });
   NodeFS.mkdirSync(NodePath.dirname(plistPath), { recursive: true });
   NodeFS.mkdirSync(logDirectory, { recursive: true });
   NodeFS.writeFileSync(
