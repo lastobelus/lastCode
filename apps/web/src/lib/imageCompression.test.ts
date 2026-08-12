@@ -173,9 +173,9 @@ describe("compressImageForStash", () => {
   });
 
   it("reports too-large when even the smallest encoding overflows the budget", async () => {
-    const { close } = stubCanvasPipeline(() => 8_000_000);
+    const { close } = stubCanvasPipeline(() => 8_000);
 
-    const result = await compressImageForStash(makeFile(9_000_000));
+    const result = await compressImageForStash(makeFile(9_000), 1_000);
 
     expect(result).toEqual({ ok: false, reason: "too-large" });
     // The bitmap must still be released on the give-up path.
@@ -256,9 +256,9 @@ describe("compressImageForStash", () => {
   });
 
   it("compressImageToByteLimit reports too-large when no encoding fits", async () => {
-    const { close } = stubCanvasPipeline(() => 3_000_000);
+    const { close } = stubCanvasPipeline(() => 3_000);
 
-    const result = await compressImageToByteLimit(makeFile(2_000_000), 1_000_000);
+    const result = await compressImageToByteLimit(makeFile(2_000), 1_000);
 
     expect(result).toEqual({ ok: false, reason: "too-large" });
     expect(close).toHaveBeenCalled();
