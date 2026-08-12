@@ -6,7 +6,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { nightlyTagFromCheckpointTag } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment, nightlyTagFromCheckpointTag } from "./lastcode-nightly.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -265,7 +265,7 @@ function runProcess(
     readonly failureHelp?: string;
   } = {},
 ): string {
-  const inheritedEnv = options.env ?? process.env;
+  const inheritedEnv = cleanGitEnvironment(options.env ?? process.env);
   const result = NodeChildProcess.spawnSync(command, args, {
     cwd: repoRoot,
     encoding: "utf8",
@@ -313,7 +313,7 @@ export function assertBaseIsAncestor(repoRoot: string, baseCommit: string, commi
   const result = NodeChildProcess.spawnSync(
     "git",
     ["merge-base", "--is-ancestor", baseCommit, commit],
-    { cwd: repoRoot, stdio: "ignore" },
+    { cwd: repoRoot, env: cleanGitEnvironment(process.env), stdio: "ignore" },
   );
   if (result.error) throw result.error;
   if (result.status !== 0) {
