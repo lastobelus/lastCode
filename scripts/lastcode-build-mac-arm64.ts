@@ -69,8 +69,6 @@ const runBuildCommand = Effect.fn("lastcode.runBuildCommand")(function* (
       env: {
         ...process.env,
         PATH: `${rustToolchainBin}:${process.env.PATH ?? ""}`,
-        T3CODE_DESKTOP_UPDATE_REPOSITORY:
-          process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY ?? "lastobelus/lastCode",
       },
     }),
   );
