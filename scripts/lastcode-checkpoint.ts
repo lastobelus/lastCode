@@ -179,6 +179,10 @@ export function worktreeVp(worktree: string): string {
   return NodePath.join(worktree, "node_modules", ".bin", "vp");
 }
 
+export function promotionNeeded(remoteCommit: string, checkpointCommit: string): boolean {
+  return remoteCommit !== checkpointCommit;
+}
+
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
@@ -343,6 +347,14 @@ function promoteCheckpoint(
   platform: NodeJS.Platform,
 ): void {
   if (options.promotion === "never") return;
+  git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
+  const expected = git(repoRoot, ["rev-parse", `refs/remotes/${options.pushRemote}/lastcode/main`]);
+  if (!promotionNeeded(expected, commit)) {
+    console.log(
+      `[lastcode:checkpoint] ${options.pushRemote}/lastcode/main is already at ${commit}.`,
+    );
+    return;
+  }
   if (options.promotion === "if-no-open-prs") {
     const count = openPullRequestCount(repoRoot);
     if (count > 0) {
@@ -358,8 +370,6 @@ function promoteCheckpoint(
     }
   }
 
-  git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
-  const expected = git(repoRoot, ["rev-parse", `refs/remotes/${options.pushRemote}/lastcode/main`]);
   run(repoRoot, "git", [
     "push",
     `--force-with-lease=refs/heads/lastcode/main:${expected}`,
