@@ -10,11 +10,11 @@ import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import { resolveWebAssetBrandForPackageVersion } from "../../../scripts/lib/brand-assets.ts";
 import {
-  DEVELOPMENT_ICON_OVERRIDES,
-  resolveWebAssetBrandForPackageVersion,
-  resolveWebIconOverrides,
-} from "../../../scripts/lib/brand-assets.ts";
+  LASTCODE_DEVELOPMENT_ICON_OVERRIDES,
+  resolveLastCodeWebIconOverrides,
+} from "../../../scripts/lib/lastcode-brand-assets.ts";
 import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
@@ -90,7 +90,7 @@ const preparePublishIcons = Effect.fn("preparePublishIcons")(function* (
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const brand = resolveWebAssetBrandForPackageVersion(version);
-  const icons = resolveWebIconOverrides(brand, "dist/client").map((override) => ({
+  const icons = resolveLastCodeWebIconOverrides(brand, "dist/client").map((override) => ({
     sourcePath: path.join(repoRoot, override.sourceRelativePath),
     targetPath: path.join(serverDir, override.targetRelativePath),
   }));
@@ -119,7 +119,7 @@ const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
 
-  for (const override of DEVELOPMENT_ICON_OVERRIDES) {
+  for (const override of LASTCODE_DEVELOPMENT_ICON_OVERRIDES) {
     const sourcePath = path.join(repoRoot, override.sourceRelativePath);
     const targetPath = path.join(serverDir, override.targetRelativePath);
 
