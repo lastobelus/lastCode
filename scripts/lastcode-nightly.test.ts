@@ -6,6 +6,7 @@ import * as Path from "effect/Path";
 import {
   buildTagFromCheckpointTag,
   checkpointTagFromNightlyTag,
+  cleanGitEnvironment,
   compareNightlyTags,
   nightlyTagFromCheckpointTag,
   parseNightlyTag,
@@ -14,6 +15,23 @@ import {
   resolveUncheckpointedNightlies,
   versionFromNightlyTag,
 } from "./lastcode-nightly.ts";
+
+it("removes repository-local Git variables without removing authentication", () => {
+  assert.deepStrictEqual(
+    cleanGitEnvironment({
+      GIT_DIR: "/tmp/repo/.git",
+      GIT_WORK_TREE: "/tmp/repo",
+      GIT_INDEX_FILE: "/tmp/repo/.git/index",
+      GIT_SSH_COMMAND: "ssh -i key",
+      PATH: "/usr/bin",
+      UNDEFINED_VALUE: undefined,
+    }),
+    {
+      GIT_SSH_COMMAND: "ssh -i key",
+      PATH: "/usr/bin",
+    },
+  );
+});
 
 it("parses upstream nightly tags", () => {
   assert.deepStrictEqual(parseNightlyTag("v0.0.25-nightly.20260606.480"), {

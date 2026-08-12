@@ -22,6 +22,35 @@ export class LastCodeNightlyError extends Data.TaggedError("LastCodeNightlyError
   readonly cause?: unknown;
 }> {}
 
+const GIT_LOCAL_ENVIRONMENT_VARIABLES = new Set([
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_PREFIX",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_SHALLOW_FILE",
+  "GIT_WORK_TREE",
+]);
+
+export function cleanGitEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && !GIT_LOCAL_ENVIRONMENT_VARIABLES.has(entry[0]),
+    ),
+  );
+}
+
 export function parseNightlyTag(tag: string): NightlyTag | undefined {
   const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(tag);
   if (!match) return undefined;
@@ -113,7 +142,12 @@ export const runGit = Effect.fn("lastcode.runGit")(function* (
   options: { readonly allowFailure?: boolean } = {},
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const child = yield* spawner.spawn(ChildProcess.make("git", args, { cwd: repoRoot }));
+  const child = yield* spawner.spawn(
+    ChildProcess.make("git", args, {
+      cwd: repoRoot,
+      env: cleanGitEnvironment(process.env),
+    }),
+  );
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectStreamAsString(child.stdout),
