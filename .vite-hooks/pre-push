@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+vp run --workspace-root lastcode:ci:quick
