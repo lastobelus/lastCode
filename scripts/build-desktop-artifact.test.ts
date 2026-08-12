@@ -91,8 +91,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("uses LastCode desktop packaging product names", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "†Code");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "†Code");
+    assert.equal(resolveDesktopProductName("0.0.17"), "LastCode");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "LastCode");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -350,7 +350,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.notProperty(linux, "asarUnpack");
       assert.deepStrictEqual(win.asarUnpack, WINDOWS_ASAR_UNPACK);
       assert.equal(mac.appId, "codes.lastobelus.lastcode");
-      assert.equal(mac.productName, "†Code");
+      assert.equal(mac.productName, "LastCode");
       assert.equal(mac.artifactName, "LastCode-${version}-${arch}.${ext}");
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises LastCode's OAuth deep links.

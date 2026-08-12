@@ -95,8 +95,7 @@ public fork are public.
 
 Packaging identity:
 
-- Product name: `†Code`
-- ASCII artifact/app identifiers: `LastCode`
+- Product and artifact name: `LastCode`
 - Bundle id: `codes.lastobelus.lastcode`
 - URL schemes: `lastcode` and `lastcode-dev`
 

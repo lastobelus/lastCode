@@ -1,5 +1,5 @@
 export const LASTCODE_DESKTOP_DISTRIBUTION = {
-  productName: "†Code",
+  productName: "LastCode",
   asciiName: "LastCode",
   appId: "codes.lastobelus.lastcode",
   developmentAppId: "codes.lastobelus.lastcode.dev",

@@ -22,7 +22,7 @@ const makeEnvironment = (overrides: Record<string, unknown> = {}) =>
     platform: "linux",
     isPackaged: true,
     isDevelopment: false,
-    displayName: "†Code (Alpha)",
+    displayName: "LastCode (Alpha)",
     linuxWmClass: "lastcode",
     linuxApplicationsDir: "/home/alice/.local/share/applications",
     appImagePath: Option.some("/home/alice/Applications/LastCode.AppImage"),
@@ -105,13 +105,13 @@ const emptyRecording = (): RecordedRegistration => ({
 describe("DesktopLinuxUrlHandler", () => {
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-      displayName: "†Code (Nightly)",
+      displayName: "LastCode (Nightly)",
       execTarget: '/home/al ice/Apps/LastCode "100%" $HOME\\x.AppImage',
       scheme: "lastcode",
     });
 
     assert.include(entry, "[Desktop Entry]");
-    assert.include(entry, "Name=†Code (Nightly)");
+    assert.include(entry, "Name=LastCode (Nightly)");
     // Exec composes both escaping layers: a literal backslash becomes four
     // backslashes in the file, a quote three characters, a dollar sign two
     // backslashes plus the sign.

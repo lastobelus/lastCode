@@ -13,9 +13,9 @@ const defaultInput = {
   platform: "darwin",
   processArch: "arm64",
   appVersion: "0.0.22",
-  appPath: "/Applications/†Code.app/Contents/Resources/app.asar",
+  appPath: "/Applications/LastCode.app/Contents/Resources/app.asar",
   isPackaged: false,
-  resourcesPath: "/Applications/†Code.app/Contents/Resources",
+  resourcesPath: "/Applications/LastCode.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -70,7 +70,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.appUserModelId, "codes.lastobelus.lastcode.dev");
       assert.equal(environment.linuxWmClass, "lastcode-dev");
       assert.equal(environment.userDataDirName, "lastcode-dev");
-      assert.equal(environment.displayName, "†Code (Dev)");
+      assert.equal(environment.displayName, "LastCode (Dev)");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),
@@ -112,7 +112,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.stateDir, "/Users/alice/.lastcode/userdata");
       assert.equal(production.userDataDirName, "lastcode");
       assert.equal(production.appUserModelId, "codes.lastobelus.lastcode");
-      assert.equal(production.displayName, "†Code (Alpha)");
+      assert.equal(production.displayName, "LastCode (Alpha)");
     }),
   );
 
