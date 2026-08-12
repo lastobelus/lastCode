@@ -179,6 +179,13 @@ export function worktreeVp(worktree: string): string {
   return NodePath.join(worktree, "node_modules", ".bin", "vp");
 }
 
+export function checkpointVpPaths(repoRoot: string, worktree: string) {
+  return {
+    bootstrap: worktreeVp(repoRoot),
+    isolated: worktreeVp(worktree),
+  };
+}
+
 export function promotionNeeded(remoteCommit: string, checkpointCommit: string): boolean {
   return remoteCommit !== checkpointCommit;
 }
@@ -269,12 +276,12 @@ function assertForkInvariants(worktree: string): void {
   run(worktree, "git", ["diff", "--check"]);
 }
 
-function runSmokeGate(worktree: string): void {
+function runSmokeGate(repoRoot: string, worktree: string): void {
+  const vp = checkpointVpPaths(repoRoot, worktree);
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
-  run(worktree, "vp", ["install", "--frozen-lockfile"]);
+  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"]);
   assertForkInvariants(worktree);
-  const vp = worktreeVp(worktree);
-  run(worktree, vp, [
+  run(worktree, vp.isolated, [
     "test",
     "run",
     "scripts/lastcode-nightly.test.ts",
@@ -283,7 +290,7 @@ function runSmokeGate(worktree: string): void {
     "scripts/build-desktop-artifact.test.ts",
     "apps/desktop/src/electron/ElectronProtocol.test.ts",
   ]);
-  run(worktree, vp, ["run", "--filter", "@t3tools/scripts", "typecheck"]);
+  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"]);
 }
 
 function notify(platform: NodeJS.Platform, title: string, message: string): void {
@@ -480,7 +487,7 @@ function main(argv: ReadonlyArray<string>): void {
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
       run(worktree, "git", ["rebase", "--onto", nightly.tag, baseTag]);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
-      if (options.smoke) runSmokeGate(worktree);
+      if (options.smoke) runSmokeGate(repoRoot, worktree);
       const checkpointTag = createCheckpointTag(
         repoRoot,
         nightly,
