@@ -167,6 +167,14 @@ export function resolveCheckpointPlan(input: {
   };
 }
 
+export function worktreeAddArgs(
+  branch: string,
+  worktree: string,
+  candidateRef: string,
+): ReadonlyArray<string> {
+  return ["worktree", "add", "-b", branch, worktree, candidateRef];
+}
+
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
@@ -444,7 +452,7 @@ function main(argv: ReadonlyArray<string>): void {
     throw new Error(`Recovery branch ${branch} already exists.`);
   }
 
-  run(repoRoot, "git", ["worktree", "add", "--branch", branch, worktree, candidateRef]);
+  run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
   let completed = false;
   try {
     let baseTag = plan.baseNightly.tag;
