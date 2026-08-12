@@ -101,6 +101,8 @@ pnpm lastcode:checkpoint:service install
 
 The job runs at login and hourly while the Mac is awake. Missed intervals do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.
+When the latest checkpoint is already promoted, the job exits without running
+the local push gate or pushing an unchanged branch.
 The job executes:
 
 ```bash
@@ -118,9 +120,12 @@ pnpm lastcode:checkpoint:service uninstall
 Logs are written to `~/.lastcode/automation/`. Uninstalling unloads the job and
 moves its plist to a timestamped disabled backup instead of deleting it.
 The installer creates a dedicated `lastcode-automation` Git worktree. Before
-each run, that worktree fetches and force-checks out `origin/lastcode/main`; it
-never uses or modifies a human development worktree. Uninstall leaves the
-automation worktree available for inspection.
+loading the launch agent, it installs that worktree's dependencies. Before each
+scheduled run, the worktree fetches and force-checks out
+`origin/lastcode/main`, reconciles its dependencies from the checked-out lockfile,
+and then runs the checkpoint command. It never uses or modifies a human
+development worktree. Uninstall leaves the automation worktree available for
+inspection.
 
 The launch agent is opt-in. Repository installation and tests never register it.
 
