@@ -1,4 +1,5 @@
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -81,7 +82,9 @@ export function resolveEarlyLinuxElectronOptions(
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
   return {
-    linuxWmClass: isDevelopmentEnvironment(input.env) ? "t3code-dev" : "t3code",
+    linuxWmClass: isDevelopmentEnvironment(input.env)
+      ? LASTCODE_DESKTOP_DISTRIBUTION.developmentExecutableName
+      : LASTCODE_DESKTOP_DISTRIBUTION.executableName,
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,
