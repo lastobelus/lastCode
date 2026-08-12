@@ -1,0 +1,16 @@
+export const LASTCODE_DESKTOP_DISTRIBUTION = {
+  productName: "LastCode",
+  asciiName: "LastCode",
+  appId: "codes.lastobelus.lastcode",
+  developmentAppId: "codes.lastobelus.lastcode.dev",
+  productionScheme: "lastcode",
+  developmentScheme: "lastcode-dev",
+  executableName: "lastcode",
+  developmentExecutableName: "lastcode-dev",
+  defaultHomeDirName: ".lastcode",
+  userDataDirName: "lastcode",
+  developmentUserDataDirName: "lastcode-dev",
+  linuxDesktopEntryName: "lastcode.desktop",
+  developmentLinuxDesktopEntryName: "lastcode-dev.desktop",
+  linuxUrlHandlerDesktopEntryName: "lastcode-url-handler.desktop",
+} as const;
