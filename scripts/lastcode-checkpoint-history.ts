@@ -24,10 +24,19 @@ export function checkpointRunHistoryPath(home = NodeOS.homedir()): string {
 export function appendCheckpointRun(
   record: CheckpointRunRecord,
   historyPath = checkpointRunHistoryPath(),
-): void {
-  NodeFS.mkdirSync(NodePath.dirname(historyPath), { recursive: true });
-  NodeFS.appendFileSync(historyPath, `${JSON.stringify(record)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  warn: (message: string) => void = console.warn,
+): boolean {
+  try {
+    NodeFS.mkdirSync(NodePath.dirname(historyPath), { recursive: true });
+    NodeFS.appendFileSync(historyPath, `${JSON.stringify(record)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return true;
+  } catch (error) {
+    warn(
+      `[lastcode:checkpoint] Could not record dashboard history at ${historyPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
 }

@@ -185,17 +185,43 @@ function installCommand(repoRoot, home) {
   console.log(`Exposed on PATH as ${exposed}`);
 }
 
-function checkpointRows(repoRoot, home) {
+export function selectCheckpointTags(tags, count) {
+  return tags
+    .toSorted((left, right) =>
+      compareNightlies(right.slice(CHECKPOINT_PREFIX.length), left.slice(CHECKPOINT_PREFIX.length)),
+    )
+    .slice(0, count);
+}
+
+function latestBuildNumbers(tags) {
+  const latestByUpstreamTag = new Map();
+  for (const tag of tags) {
+    const match = /^(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)\.(\d+)$/.exec(
+      tag.slice(BUILD_PREFIX.length),
+    );
+    if (!match) continue;
+    const upstreamTag = match[1];
+    const build = Number(match[2]);
+    latestByUpstreamTag.set(
+      upstreamTag,
+      Math.max(latestByUpstreamTag.get(upstreamTag) ?? 0, build),
+    );
+  }
+  return latestByUpstreamTag;
+}
+
+function checkpointRows(repoRoot, home, count) {
   const checkpointTags = splitLines(
     git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
-  ).sort((left, right) =>
-    compareNightlies(right.slice(CHECKPOINT_PREFIX.length), left.slice(CHECKPOINT_PREFIX.length)),
   );
-  const buildTags = splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`]));
+  const selectedCheckpointTags = selectCheckpointTags(checkpointTags, count);
+  const buildNumbers = latestBuildNumbers(
+    splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`])),
+  );
   const remoteMain = git(repoRoot, ["rev-parse", "refs/remotes/origin/lastcode/main"], {
     allowFailure: true,
   });
-  const successes = checkpointTags.map((checkpointTag) => {
+  const successes = selectedCheckpointTags.map((checkpointTag) => {
     const upstreamTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
     const contents = git(repoRoot, [
       "for-each-ref",
@@ -213,12 +239,7 @@ function checkpointRows(repoRoot, home) {
     const inferredCommits = git(repoRoot, ["rev-list", "--count", `${upstreamTag}..${commit}`], {
       allowFailure: true,
     });
-    const builds = buildTags
-      .map((tag) =>
-        new RegExp(`^${BUILD_PREFIX}${upstreamTag.replaceAll(".", "\\.")}\\.(\\d+)$`).exec(tag),
-      )
-      .filter(Boolean)
-      .map((match) => Number(match[1]));
+    const build = buildNumbers.get(upstreamTag);
     return {
       status: "success",
       upstreamTag,
@@ -227,7 +248,7 @@ function checkpointRows(repoRoot, home) {
       durationMs: Number(trailers["Duration-Ms"]),
       checkpoint: commit.slice(0, 9),
       main: commit === remoteMain ? "yes" : "—",
-      build: builds.length > 0 ? `#${Math.max(...builds)}` : "—",
+      build: build === undefined ? "—" : `#${build}`,
     };
   });
   const failures = readFailures(home).map((record) => ({
@@ -268,7 +289,7 @@ function daemonSummary() {
 }
 
 function printDashboard(repoRoot, home, count) {
-  const rows = checkpointRows(repoRoot, home).slice(0, count);
+  const rows = checkpointRows(repoRoot, home, count).slice(0, count);
   const columns = [
     { key: "status", label: "STATUS", value: (row) => (row.status === "success" ? "✓" : "✗") },
     { key: "upstreamTag", label: "UPSTREAM NIGHTLY", value: (row) => row.upstreamTag },
