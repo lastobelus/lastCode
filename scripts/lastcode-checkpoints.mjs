@@ -112,6 +112,11 @@ export function formatDuration(durationMs) {
   return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+export function checkpointFreshness(latestUpstream, latestCheckpoint) {
+  if (!latestUpstream) return "Upstream unavailable";
+  return latestUpstream === latestCheckpoint ? "Up to date" : "Checkpoint pending";
+}
+
 function formatFinished(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
@@ -346,12 +351,16 @@ function printDashboard(repoRoot, home, count) {
     .sort((left, right) => compareNightlies(right, left))
     .at(0);
   const latestUpstream = upstreamTags.at(0);
-  const freshness = latestUpstream === latestCheckpoint ? "Up to date" : "Checkpoint pending";
+  const freshness = checkpointFreshness(latestUpstream, latestCheckpoint);
   console.log("");
   console.log(style(ansi.lavender, daemonSummary()));
   console.log(
     style(
-      freshness === "Up to date" ? ansi.green : ansi.yellow,
+      freshness === "Up to date"
+        ? ansi.green
+        : freshness === "Checkpoint pending"
+          ? ansi.yellow
+          : ansi.pacific,
       `Latest upstream: ${latestUpstream ?? "—"} · Latest checkpoint: ${latestCheckpoint ?? latestVisibleCheckpoint?.upstreamTag ?? "—"} · ${freshness}`,
     ),
   );

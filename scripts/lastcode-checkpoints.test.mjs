@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  checkpointFreshness,
   formatDuration,
   parseOptions,
   parseTrailers,
@@ -41,5 +42,13 @@ describe("LastCode checkpoint dashboard", () => {
       "lastcode/checkpoint/v0.0.1-nightly.20260812.3",
       "lastcode/checkpoint/v0.0.1-nightly.20260812.2",
     ]);
+  });
+
+  it("does not report missing checkpoint data as up to date", () => {
+    expect(checkpointFreshness(undefined, undefined)).toBe("Upstream unavailable");
+    expect(checkpointFreshness("v0.0.1-nightly.20260812.1", undefined)).toBe("Checkpoint pending");
+    expect(checkpointFreshness("v0.0.1-nightly.20260812.1", "v0.0.1-nightly.20260812.1")).toBe(
+      "Up to date",
+    );
   });
 });
