@@ -1,6 +1,11 @@
 import { assert, it } from "@effect/vitest";
 
-import { resolveCheckpointPlan, worktreeAddArgs, worktreeVp } from "./lastcode-checkpoint.ts";
+import {
+  promotionNeeded,
+  resolveCheckpointPlan,
+  worktreeAddArgs,
+  worktreeVp,
+} from "./lastcode-checkpoint.ts";
 import { parseNightlyTag } from "./lastcode-nightly.ts";
 
 function nightly(tag: string) {
@@ -22,6 +27,11 @@ it("uses Git's supported short option when creating the recovery branch", () => 
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
   assert.equal(worktreeVp("/tmp/sync"), "/tmp/sync/node_modules/.bin/vp");
+});
+
+it("skips promotion when main already points at the checkpoint", () => {
+  assert.equal(promotionNeeded("same", "same"), false);
+  assert.equal(promotionNeeded("main", "checkpoint"), true);
 });
 
 it("bootstraps at the source nightly and checkpoints every later nightly", () => {
