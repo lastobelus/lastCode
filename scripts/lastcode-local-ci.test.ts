@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  assertCheckpointCiStamp,
   assertFullCiStamp,
   assertSupportedNodeVersion,
   parseLocalCiOptions,
@@ -27,6 +28,13 @@ describe("lastcode-local-ci", () => {
     expect(parseLocalCiOptions(["--quick", "--", "--dry-run"])).toEqual({
       mode: "quick",
       dryRun: true,
+    });
+    expect(
+      parseLocalCiOptions(["--checkpoint", "lastcode/checkpoint/v1.2.3-nightly.20260811.1"]),
+    ).toEqual({
+      mode: "full",
+      dryRun: false,
+      checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260811.1",
     });
   });
 
@@ -67,23 +75,51 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("binds a full-CI stamp to both the head and tested base commits", () => {
+  it("binds a PR full-CI stamp to both the head and tested base commits", () => {
     const commonGitDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-stamp-test-"));
     const stamp = {
       commit: "head-sha",
-      baseCommit: "base-sha",
       completedAt: "2026-08-11T00:00:00.000Z",
+      context: {
+        kind: "pull-request" as const,
+        baseCommit: "base-sha",
+        baseRef: "lastcode/main" as const,
+      },
     } as const;
 
     writeFullCiStamp(commonGitDir, stamp);
-    expect(readFullCiStamp(commonGitDir, stamp.commit)).toEqual({ schemaVersion: 1, ...stamp });
-    expect(assertFullCiStamp(commonGitDir, stamp.commit, stamp.baseCommit)).toEqual({
-      schemaVersion: 1,
+    expect(readFullCiStamp(commonGitDir, stamp.commit)).toEqual({ schemaVersion: 2, ...stamp });
+    expect(assertFullCiStamp(commonGitDir, stamp.commit, stamp.context.baseCommit)).toEqual({
+      schemaVersion: 2,
       ...stamp,
     });
     expect(() => assertFullCiStamp(commonGitDir, stamp.commit, "new-base-sha")).toThrow(
       "Rebase and rerun",
     );
+    NodeFS.rmSync(commonGitDir, { recursive: true, force: true });
+  });
+
+  it("binds a checkpoint full-CI stamp to its immutable tag and upstream commit", () => {
+    const commonGitDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-stamp-test-"));
+    const checkpointTag = "lastcode/checkpoint/v1.2.3-nightly.20260811.1";
+    const stamp = {
+      commit: "checkpoint-sha",
+      completedAt: "2026-08-11T00:00:00.000Z",
+      context: {
+        kind: "checkpoint" as const,
+        checkpointTag,
+        upstreamCommit: "upstream-sha",
+        upstreamTag: "v1.2.3-nightly.20260811.1",
+      },
+    };
+
+    writeFullCiStamp(commonGitDir, stamp);
+    expect(
+      assertCheckpointCiStamp(commonGitDir, stamp.commit, checkpointTag, "upstream-sha"),
+    ).toEqual({ schemaVersion: 2, ...stamp });
+    expect(() =>
+      assertCheckpointCiStamp(commonGitDir, stamp.commit, checkpointTag, "new-upstream-sha"),
+    ).toThrow("does not match checkpoint");
     NodeFS.rmSync(commonGitDir, { recursive: true, force: true });
   });
 });

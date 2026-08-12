@@ -1,14 +1,13 @@
-# LastCode Personal Release Workflow
+# LastCode Local Release Workflow
 
-LastCode is a personal downstream of `pingdotgg/t3code` used from the
-`lastcode/main` branch. `main` remains an upstream mirror for clean pull request
-work against `pingdotgg/t3code`.
+LastCode uses local validation and ad-hoc macOS releases. GitHub Actions are
+intentionally disabled, releases have no schedule, and artifacts remain local
+unless an explicit publishing operation is performed.
 
-GitHub Actions are intentionally disabled. Validation and Apple Silicon builds
-run locally under the repository's Node 24.13.1 engine through `mise`, and
-releases are created ad hoc rather than on a schedule.
+Nightly source tracking is documented separately in
+[Nightly Checkpoint Workflow](nightly-workflow.md).
 
-## Local CI
+## Pull Request CI
 
 Every push runs the quick gate through `.vite-hooks/pre-push`:
 
@@ -16,141 +15,87 @@ Every push runs the quick gate through `.vite-hooks/pre-push`:
 pnpm lastcode:ci:quick
 ```
 
-The quick gate ensures the Electron runtime exists, then runs repository format
-and lint checks, workspace typechecking, and workspace tests. Tests receive an
-isolated Git configuration so personal hooks and default-branch preferences do
-not make their temporary repositories behave differently from clean CI runners.
-
-Before merging or building a release, run the full gate from a clean worktree:
+Before merging a LastCode PR, run the full gate from a clean feature branch:
 
 ```bash
 pnpm lastcode:ci
 ```
 
-The full gate fetches `origin/lastcode/main`, verifies that the branch contains
-that exact base commit, and runs everything in the quick gate plus:
+The full PR gate fetches `origin/lastcode/main`, verifies that the tested head
+contains that exact base commit, and runs formatting, linting, workspace
+typechecks and tests, desktop build assertions, Rust tests, native static
+analysis, and release smoke tests. Success writes a local stamp bound to both the
+head commit and tested base.
 
-- Rust formatting and resource-monitor tests
-- the desktop build and upstream's preload-bundle assertions
-- mobile native static analysis
-- release smoke tests
-
-Success writes a local stamp for both the tested head commit and base commit in
-the repository's shared Git directory. If the base branch advances, the stamp
-is invalid and CI must be rerun after rebasing.
-
-Merge the current branch's ready PR with:
+Merge the current ready PR with:
 
 ```bash
 pnpm lastcode:merge
 ```
 
-The wrapper refuses dirty worktrees, unstamped commits, stale bases, draft PRs,
-conflicting PRs, and PRs that do not target `lastcode/main`. It then uses a
-squash merge guarded by GitHub's exact-head match.
+The merge wrapper refuses dirty worktrees, unstamped commits, stale bases, draft
+or conflicting PRs, and PRs that do not target `lastcode/main`. It squash-merges
+with an exact-head guard.
 
-## Nightly Sync
+## Checkpoint CI
 
-Update `lastcode/main` to the latest upstream nightly tag:
-
-```bash
-pnpm lastcode:sync-nightly
-```
-
-Push the rebased branch when the result is ready to share:
+A release build uses a different full-CI context because rebasing intentionally
+rewrites ancestry. Check out the immutable checkpoint and run:
 
 ```bash
-pnpm lastcode:sync-nightly --push
+pnpm lastcode:ci --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-The script:
-
-- fetches tags from `upstream`
-- resolves the newest `vX.Y.Z-nightly.YYYYMMDD.N` tag
-- switches to `lastcode/main`
-- rebases LastCode-only commits on that tag
-- optionally pushes with `--force-with-lease`
-
-Use this before starting new LastCode development and whenever upstream
-publishes a nightly that should become the private fork base.
+The resulting stamp binds the exact LastCode commit, checkpoint tag, upstream
+tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
+checkpoint stamp cannot authorize a PR merge.
 
 ## Apple Silicon Build
 
-Build the local macOS Apple Silicon artifact:
+Build the selected checkpoint:
 
 ```bash
-pnpm lastcode:build:mac:arm64
+pnpm lastcode:build:mac:arm64 \
+  --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-Local macOS packages are sealed with Electron Builder's ad-hoc identity, so the
-app bundle and its resources pass macOS code-signature verification without an
-Apple Developer certificate. They are not notarized for public distribution.
-Local-only packages omit an update feed, which keeps the built-in hosted-release
-updater disabled until LastCode intentionally starts publishing releases.
+The wrapper requires:
 
-The wrapper resolves the latest upstream nightly tag and runs the desktop
-artifact builder with that version. Output goes to `release-lastcode/`.
+- a clean worktree;
+- `HEAD` equal to the annotated checkpoint target;
+- a valid full checkpoint-CI stamp; and
+- a new, non-overwriting output directory.
 
-Run the full local CI gate on the exact commit being packaged first. Artifacts
-stay local unless a GitHub release is explicitly created; releases in the
-public fork are public.
+The app bundle is sealed with Electron Builder's ad-hoc identity, so the bundle
+and its resources pass macOS code-signature verification without an Apple
+Developer certificate. It is not notarized for public distribution.
 
-Packaging identity:
+Local builds omit the hosted update feed. The built-in updater remains disabled
+until LastCode intentionally publishes compatible releases.
 
-- Product and artifact name: `LastCode`
-- Bundle id: `codes.lastobelus.lastcode`
-- URL schemes: `lastcode` and `lastcode-dev`
+## Runtime Identity
 
-## Running Alongside T3 Code
+LastCode can run alongside T3 Code and T3 Code Nightly because it owns separate
+runtime resources:
 
-LastCode uses a separate desktop identity and can run at the same time as an
-installed T3 Code or T3 Code Nightly build. The isolated runtime resources are:
+| Resource         | LastCode                    | T3 Code                 |
+| ---------------- | --------------------------- | ----------------------- |
+| Product          | `LastCode`                  | `T3 Code`               |
+| Bundle ID        | `codes.lastobelus.lastcode` | `com.t3tools.t3code`    |
+| Electron profile | `lastcode` / `lastcode-dev` | `t3code` / `t3code-dev` |
+| State home       | `~/.lastcode`               | `~/.t3`                 |
+| URL schemes      | `lastcode`, `lastcode-dev`  | `t3code`, `t3code-dev`  |
 
-- Electron profiles: `lastcode` and `lastcode-dev`, instead of `t3code` and
-  `t3code-dev`
-- Application state: `~/.lastcode`, instead of `~/.t3`
-- URL schemes: `lastcode` and `lastcode-dev`, instead of `t3code` and
-  `t3code-dev`
-- Bundle/application identifiers and Linux desktop identities under the
-  `codes.lastobelus.lastcode` and `lastcode` namespaces
+The profile split also separates Chromium storage and the Electron
+single-instance lock. Provider credentials remain in provider-owned locations,
+such as `~/.codex`, so they do not need to be duplicated.
 
-The separate Electron profile also scopes LastCode's single-instance lock, so
-launching it cannot focus or terminate T3 Code. Backend ports are selected from
-the existing available-port range, allowing both local servers to start.
-
-Provider credentials remain in their provider-owned locations, such as
-`~/.codex`, so signing into a coding provider does not need to be duplicated.
-LastCode settings, sessions, logs, attachments, browser artifacts, and local
-server data remain isolated.
-
-Tailscale Serve is machine-global. Do not enable the same Serve port in both
-applications at once; keep it disabled in the fallback app or configure
-different ports.
-
-## Fork Workflow Bootstrap Branch
-
-`topic/fork-workflow-bootstrap` is not merged into `lastcode/main`.
-
-It encodes an older vendor/product workflow with Aadit fork tracking. That does
-not match the current strategy, which intentionally does not pull from Aadit.
-LastCode commands resolve the current worktree with `git rev-parse
---show-toplevel`; only cross-worktree metadata such as local CI stamps belongs
-under Git's common directory.
+Tailscale Serve is machine-global. Do not configure both applications to claim
+the same Serve port simultaneously.
 
 ## In-App Update Direction
 
-The existing update button is backed by `electron-updater`: it checks a release
-feed, downloads a published artifact, then restarts into the downloaded update.
-
-The requested LastCode updater is a different operation. It needs a local
-orchestrator that:
-
-1. fetches the latest nightly tag from `pingdotgg/t3code`
-2. rebases released LastCode work onto that tag
-3. invokes Codex if the rebase or follow-up work needs agent assistance
-4. builds a new Apple Silicon artifact locally
-5. exposes the same update states the UI already understands: downloading,
-   downloaded, and install/restart
-
-That should be implemented as a separate LastCode update backend instead of
-overloading `electron-updater` internals.
+The hosted `electron-updater` path downloads published releases. A future local
+LastCode updater would instead need to invoke the checkpoint, local CI, and build
+workflow and then install the resulting artifact. It should be a separate local
+orchestrator rather than an overload of the hosted updater.

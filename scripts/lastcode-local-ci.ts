@@ -6,6 +6,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { nightlyTagFromCheckpointTag } from "./lastcode-nightly.ts";
+
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
 
@@ -30,15 +32,27 @@ interface VerifyPreloadStep {
 export type LocalCiStep = CommandStep | VerifyPreloadStep;
 
 export interface FullCiStamp {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly commit: string;
-  readonly baseCommit: string;
   readonly completedAt: string;
+  readonly context:
+    | {
+        readonly kind: "pull-request";
+        readonly baseCommit: string;
+        readonly baseRef: typeof LASTCODE_BASE_BRANCH;
+      }
+    | {
+        readonly kind: "checkpoint";
+        readonly checkpointTag: string;
+        readonly upstreamCommit: string;
+        readonly upstreamTag: string;
+      };
 }
 
 export interface LocalCiOptions {
   readonly mode: LocalCiMode;
   readonly dryRun: boolean;
+  readonly checkpointTag?: string;
 }
 
 export function assertSupportedNodeVersion(version = process.versions.node): void {
@@ -124,8 +138,10 @@ const PRELOAD_EXPECTED_EXPORTS = [
 export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions {
   let mode: LocalCiMode = "full";
   let dryRun = false;
+  let checkpointTag: string | undefined;
 
-  for (const arg of argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === "--") {
       continue;
     } else if (arg === "--full") {
@@ -134,12 +150,16 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
       mode = "quick";
     } else if (arg === "--dry-run") {
       dryRun = true;
+    } else if (arg === "--checkpoint") {
+      checkpointTag = argv[index + 1];
+      if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
+      index += 1;
     } else {
       throw new Error(`Unknown argument '${arg}'.`);
     }
   }
 
-  return { mode, dryRun };
+  return { mode, dryRun, ...(checkpointTag ? { checkpointTag } : {}) };
 }
 
 export function resolveLocalCiSteps(mode: LocalCiMode): ReadonlyArray<LocalCiStep> {
@@ -172,7 +192,7 @@ export function writeFullCiStamp(
   NodeFS.mkdirSync(NodePath.dirname(stampPath), { recursive: true });
   NodeFS.writeFileSync(
     stampPath,
-    `${JSON.stringify({ schemaVersion: 1, ...stamp } satisfies FullCiStamp, null, 2)}\n`,
+    `${JSON.stringify({ schemaVersion: 2, ...stamp } satisfies FullCiStamp, null, 2)}\n`,
   );
   return stampPath;
 }
@@ -183,9 +203,10 @@ export function readFullCiStamp(commonGitDir: string, commit: string): FullCiSta
 
   const value = JSON.parse(NodeFS.readFileSync(stampPath, "utf8")) as Partial<FullCiStamp>;
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.commit !== commit ||
-    typeof value.baseCommit !== "string" ||
+    typeof value.context !== "object" ||
+    value.context === null ||
     typeof value.completedAt !== "string"
   ) {
     throw new Error(`Invalid LastCode CI stamp at ${stampPath}.`);
@@ -202,9 +223,33 @@ export function assertFullCiStamp(
   if (!stamp) {
     throw new Error(`Commit ${commit} has not passed full local CI. Run: pnpm lastcode:ci`);
   }
-  if (stamp.baseCommit !== baseCommit) {
+  if (stamp.context.kind !== "pull-request" || stamp.context.baseCommit !== baseCommit) {
     throw new Error(
-      `Full local CI passed against ${stamp.baseCommit}, but ${LASTCODE_BASE_BRANCH} is now ${baseCommit}. Rebase and rerun: pnpm lastcode:ci`,
+      `Full local CI was not run against the current ${LASTCODE_BASE_BRANCH} commit ${baseCommit}. Rebase and rerun: pnpm lastcode:ci`,
+    );
+  }
+  return stamp;
+}
+
+export function assertCheckpointCiStamp(
+  commonGitDir: string,
+  commit: string,
+  checkpointTag: string,
+  upstreamCommit: string,
+): FullCiStamp {
+  const stamp = readFullCiStamp(commonGitDir, commit);
+  if (!stamp) {
+    throw new Error(
+      `Checkpoint ${checkpointTag} at ${commit} has not passed full local CI. Run: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
+    );
+  }
+  if (
+    stamp.context.kind !== "checkpoint" ||
+    stamp.context.checkpointTag !== checkpointTag ||
+    stamp.context.upstreamCommit !== upstreamCommit
+  ) {
+    throw new Error(
+      `Full local CI stamp for ${commit} does not match checkpoint ${checkpointTag}. Rerun: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
     );
   }
   return stamp;
@@ -298,15 +343,36 @@ function runLocalCi(options: LocalCiOptions): void {
 
   let commitBefore: string | undefined;
   let baseCommit: string | undefined;
+  let checkpointContext: Extract<FullCiStamp["context"], { kind: "checkpoint" }> | undefined;
   if (options.mode === "full") {
     assertCleanWorktree(repoRoot);
-    runProcess(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
     commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
-    baseCommit = runGit(repoRoot, [
-      "rev-parse",
-      `refs/remotes/${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH}`,
-    ]);
-    assertBaseIsAncestor(repoRoot, baseCommit, commitBefore);
+    if (options.checkpointTag) {
+      const upstreamTag = nightlyTagFromCheckpointTag(options.checkpointTag);
+      if (!upstreamTag)
+        throw new Error(`Invalid LastCode checkpoint tag '${options.checkpointTag}'.`);
+      const checkpointCommit = runGit(repoRoot, ["rev-parse", `${options.checkpointTag}^{commit}`]);
+      if (checkpointCommit !== commitBefore) {
+        throw new Error(
+          `HEAD ${commitBefore} does not match checkpoint ${options.checkpointTag} at ${checkpointCommit}.`,
+        );
+      }
+      const upstreamCommit = runGit(repoRoot, ["rev-parse", `${upstreamTag}^{commit}`]);
+      assertBaseIsAncestor(repoRoot, upstreamCommit, commitBefore);
+      checkpointContext = {
+        kind: "checkpoint",
+        checkpointTag: options.checkpointTag,
+        upstreamCommit,
+        upstreamTag,
+      };
+    } else {
+      runProcess(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
+      baseCommit = runGit(repoRoot, [
+        "rev-parse",
+        `refs/remotes/${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH}`,
+      ]);
+      assertBaseIsAncestor(repoRoot, baseCommit, commitBefore);
+    }
   }
 
   const transferOutputDirectory = NodeFS.mkdtempSync(
@@ -373,7 +439,7 @@ function runLocalCi(options: LocalCiOptions): void {
     NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
   }
 
-  if (options.mode === "full" && commitBefore && baseCommit) {
+  if (options.mode === "full" && commitBefore && (baseCommit || checkpointContext)) {
     const commitAfter = runGit(repoRoot, ["rev-parse", "HEAD"]);
     if (commitAfter !== commitBefore) {
       throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
@@ -381,8 +447,12 @@ function runLocalCi(options: LocalCiOptions): void {
     assertCleanWorktree(repoRoot);
     const stampPath = writeFullCiStamp(resolveCommonGitDir(repoRoot), {
       commit: commitBefore,
-      baseCommit,
       completedAt: new Date().toISOString(),
+      context: checkpointContext ?? {
+        kind: "pull-request",
+        baseCommit: baseCommit!,
+        baseRef: LASTCODE_BASE_BRANCH,
+      },
     });
     console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);

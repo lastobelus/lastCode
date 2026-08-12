@@ -4,10 +4,14 @@ import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 
 import {
+  buildTagFromCheckpointTag,
+  checkpointTagFromNightlyTag,
   compareNightlyTags,
+  nightlyTagFromCheckpointTag,
   parseNightlyTag,
   resolveLatestNightlyTag,
   resolveRepoRoot,
+  resolveUncheckpointedNightlies,
   versionFromNightlyTag,
 } from "./lastcode-nightly.ts";
 
@@ -46,6 +50,34 @@ it("derives package versions from nightly tags", () => {
   assert.equal(
     versionFromNightlyTag("v0.0.25-nightly.20260606.480"),
     "0.0.25-nightly.20260606.480",
+  );
+});
+
+it("maps immutable LastCode checkpoint and build tags", () => {
+  const nightly = "v0.0.25-nightly.20260606.480";
+  const checkpoint = `lastcode/checkpoint/${nightly}`;
+
+  assert.equal(checkpointTagFromNightlyTag(nightly), checkpoint);
+  assert.equal(nightlyTagFromCheckpointTag(checkpoint), nightly);
+  assert.equal(
+    buildTagFromCheckpointTag(checkpoint, 2),
+    "lastcode/build/v0.0.25-nightly.20260606.480.2",
+  );
+  assert.equal(nightlyTagFromCheckpointTag("v0.0.25-nightly.20260606.480"), undefined);
+});
+
+it("lists every uncheckpointed nightly oldest first", () => {
+  assert.deepStrictEqual(
+    resolveUncheckpointedNightlies(
+      [
+        "v0.0.26-nightly.20260607.482",
+        "not-a-nightly",
+        "v0.0.25-nightly.20260606.480",
+        "v0.0.26-nightly.20260607.481",
+      ],
+      ["lastcode/checkpoint/v0.0.26-nightly.20260607.481", "unrelated/tag"],
+    ).map(({ tag }) => tag),
+    ["v0.0.25-nightly.20260606.480", "v0.0.26-nightly.20260607.482"],
   );
 });
 
