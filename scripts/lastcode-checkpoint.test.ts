@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 
-import { resolveCheckpointPlan } from "./lastcode-checkpoint.ts";
+import { resolveCheckpointPlan, worktreeAddArgs } from "./lastcode-checkpoint.ts";
 import { parseNightlyTag } from "./lastcode-nightly.ts";
 
 function nightly(tag: string) {
@@ -8,6 +8,17 @@ function nightly(tag: string) {
   assert.ok(value);
   return value;
 }
+
+it("uses Git's supported short option when creating the recovery branch", () => {
+  assert.deepStrictEqual(worktreeAddArgs("sync/nightly/v1", "/tmp/sync", "checkpoint"), [
+    "worktree",
+    "add",
+    "-b",
+    "sync/nightly/v1",
+    "/tmp/sync",
+    "checkpoint",
+  ]);
+});
 
 it("bootstraps at the source nightly and checkpoints every later nightly", () => {
   const plan = resolveCheckpointPlan({
