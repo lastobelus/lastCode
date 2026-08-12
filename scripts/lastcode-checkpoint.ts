@@ -175,6 +175,10 @@ export function worktreeAddArgs(
   return ["worktree", "add", "-b", branch, worktree, candidateRef];
 }
 
+export function worktreeVp(worktree: string): string {
+  return NodePath.join(worktree, "node_modules", ".bin", "vp");
+}
+
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
@@ -265,7 +269,8 @@ function runSmokeGate(worktree: string): void {
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
   run(worktree, "vp", ["install", "--frozen-lockfile"]);
   assertForkInvariants(worktree);
-  run(worktree, "vp", [
+  const vp = worktreeVp(worktree);
+  run(worktree, vp, [
     "test",
     "run",
     "scripts/lastcode-nightly.test.ts",
@@ -274,7 +279,7 @@ function runSmokeGate(worktree: string): void {
     "scripts/build-desktop-artifact.test.ts",
     "apps/desktop/src/electron/ElectronProtocol.test.ts",
   ]);
-  run(worktree, "vp", ["run", "--filter", "@t3tools/scripts", "typecheck"]);
+  run(worktree, vp, ["run", "--filter", "@t3tools/scripts", "typecheck"]);
 }
 
 function notify(platform: NodeJS.Platform, title: string, message: string): void {
