@@ -1,4 +1,4 @@
-# Fork Evaluation Conventions
+# LastCode Fork Evaluation Conventions
 
 This document defines how `lastCode` tracks the upstream project, the canonical
 LastCode fork branch, notable forks, and candidate pull requests.
