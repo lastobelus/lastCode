@@ -2,6 +2,7 @@
 
 import * as NodeModule from "node:module";
 
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -11,11 +12,8 @@ import desktopPackageJson from "../apps/desktop/package.json" with { type: "json
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 import { applyWebBrandAssets } from "./apply-web-brand-assets.ts";
-import {
-  BRAND_ASSET_PATHS,
-  resolveWebAssetBrandForChannel,
-  type WebAssetBrand,
-} from "./lib/brand-assets.ts";
+import { resolveWebAssetBrandForChannel, type WebAssetBrand } from "./lib/brand-assets.ts";
+import { LASTCODE_BRAND_ASSET_PATHS } from "./lib/lastcode-brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
@@ -36,12 +34,6 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
-const LASTCODE_PRODUCT_NAME = "†Code";
-const LASTCODE_ASCII_NAME = "LastCode";
-const LASTCODE_APP_ID = "codes.lastobelus.lastcode";
-const LASTCODE_PROTOCOL_SCHEME = "lastcode";
-const LASTCODE_EXECUTABLE_NAME = "lastcode";
-
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 
@@ -822,7 +814,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: LASTCODE_DESKTOP_DISTRIBUTION.appId,
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -1489,16 +1481,16 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
   if (resolveDesktopUpdateChannel(version) === "nightly") {
     return {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     };
   }
 
   return {
-    macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-    linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-    windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    macIconPng: LASTCODE_BRAND_ASSET_PATHS.productionMacIconPng,
+    linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.productionLinuxIconPng,
+    windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.productionWindowsIconIco,
   };
 }
 
@@ -1520,7 +1512,7 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 }
 
 export function resolveDesktopProductName(_version: string): string {
-  return LASTCODE_PRODUCT_NAME;
+  return LASTCODE_DESKTOP_DISTRIBUTION.productName;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1536,11 +1528,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
-  ) {
+) {
   const buildConfig: Record<string, unknown> = {
-    appId: LASTCODE_APP_ID,
+    appId: LASTCODE_DESKTOP_DISTRIBUTION.appId,
     productName: resolveDesktopProductName(version),
-    artifactName: "LastCode-${version}-${arch}.${ext}",
+    artifactName: `${LASTCODE_DESKTOP_DISTRIBUTION.asciiName}-\${version}-\${arch}.\${ext}`,
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [...DESKTOP_FILE_EXCLUSIONS],
     directories: {
@@ -1570,10 +1562,19 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(!signed
+        ? {
+            identity: "-",
+            hardenedRuntime: false,
+          }
+        : {}),
       protocols: [
         {
-          name: LASTCODE_ASCII_NAME,
-          schemes: [LASTCODE_PROTOCOL_SCHEME],
+          name: LASTCODE_DESKTOP_DISTRIBUTION.asciiName,
+          schemes: [
+            LASTCODE_DESKTOP_DISTRIBUTION.productionScheme,
+            LASTCODE_DESKTOP_DISTRIBUTION.developmentScheme,
+          ],
         },
       ],
       ...(macPasskeySigning
@@ -1588,21 +1589,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: LASTCODE_EXECUTABLE_NAME,
+      executableName: LASTCODE_DESKTOP_DISTRIBUTION.executableName,
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // t3code:// OAuth callbacks to the app.
+      // LastCode OAuth callbacks to the app.
       protocols: [
         {
-          name: LASTCODE_ASCII_NAME,
-          schemes: [LASTCODE_PROTOCOL_SCHEME],
+          name: LASTCODE_DESKTOP_DISTRIBUTION.asciiName,
+          schemes: [
+            LASTCODE_DESKTOP_DISTRIBUTION.productionScheme,
+            LASTCODE_DESKTOP_DISTRIBUTION.developmentScheme,
+          ],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: LASTCODE_EXECUTABLE_NAME,
+          StartupWMClass: LASTCODE_DESKTOP_DISTRIBUTION.executableName,
         },
       },
     };
