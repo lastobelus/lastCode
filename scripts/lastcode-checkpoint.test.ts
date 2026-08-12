@@ -1,6 +1,7 @@
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 
 import {
+  checkpointMessage,
   checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
@@ -35,6 +36,25 @@ it("bootstraps dependencies with the invoking worktree runner before using the i
     bootstrap: "/tmp/automation/node_modules/.bin/vp",
     isolated: "/tmp/sync/node_modules/.bin/vp",
   });
+});
+
+it("records dashboard metadata in annotated checkpoint tags", () => {
+  expect(
+    checkpointMessage({
+      upstreamTag: "v1.2.3-nightly.20260812.8",
+      upstreamCommit: "upstream-sha",
+      commit: "lastcode-sha",
+      sourceRef: "origin/lastcode/main",
+      timing: {
+        commitsRebased: 8,
+        startedAt: "2026-08-12T18:00:00.000Z",
+        finishedAt: "2026-08-12T18:03:08.000Z",
+        durationMs: 188_000,
+      },
+    }),
+  ).toContain(
+    "Fork-Commits-Rebased: 8\nStarted-At: 2026-08-12T18:00:00.000Z\nFinished-At: 2026-08-12T18:03:08.000Z\nDuration-Ms: 188000",
+  );
 });
 
 it("skips promotion when main already points at the checkpoint", () => {

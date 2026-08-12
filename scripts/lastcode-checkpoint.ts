@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
+import { appendCheckpointRun } from "./lastcode-checkpoint-history.ts";
 import {
   checkpointTagFromNightlyTag,
   compareNightlyTags,
@@ -224,20 +225,30 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   return { dryRun, fetch, promotion, pushTags, smoke, sourceRef, upstreamRemote, pushRemote };
 }
 
-function checkpointMessage(
-  repoRoot: string,
-  nightly: NightlyTag,
-  commit: string,
-  sourceRef: string,
-): string {
+export function checkpointMessage(input: {
+  readonly upstreamTag: string;
+  readonly upstreamCommit: string;
+  readonly commit: string;
+  readonly sourceRef: string;
+  readonly timing: {
+    readonly commitsRebased: number;
+    readonly durationMs: number;
+    readonly finishedAt: string;
+    readonly startedAt: string;
+  };
+}): string {
   return [
-    `LastCode checkpoint for ${nightly.tag}`,
+    `LastCode checkpoint for ${input.upstreamTag}`,
     "",
-    `Upstream-Tag: ${nightly.tag}`,
-    `Upstream-Commit: ${git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`])}`,
-    `LastCode-Commit: ${commit}`,
-    `Source-Ref: ${sourceRef}`,
-    `Created-At: ${new Date().toISOString()}`,
+    `Upstream-Tag: ${input.upstreamTag}`,
+    `Upstream-Commit: ${input.upstreamCommit}`,
+    `LastCode-Commit: ${input.commit}`,
+    `Source-Ref: ${input.sourceRef}`,
+    `Fork-Commits-Rebased: ${input.timing.commitsRebased}`,
+    `Started-At: ${input.timing.startedAt}`,
+    `Finished-At: ${input.timing.finishedAt}`,
+    `Duration-Ms: ${input.timing.durationMs}`,
+    `Created-At: ${input.timing.finishedAt}`,
   ].join("\n");
 }
 
@@ -246,6 +257,12 @@ function createCheckpointTag(
   nightly: NightlyTag,
   commit: string,
   sourceRef: string,
+  timing: {
+    readonly commitsRebased: number;
+    readonly durationMs: number;
+    readonly finishedAt: string;
+    readonly startedAt: string;
+  },
 ): string {
   const checkpointTag = checkpointTagFromNightlyTag(nightly.tag);
   git(repoRoot, [
@@ -254,7 +271,13 @@ function createCheckpointTag(
     checkpointTag,
     commit,
     "--message",
-    checkpointMessage(repoRoot, nightly, commit, sourceRef),
+    checkpointMessage({
+      upstreamTag: nightly.tag,
+      upstreamCommit: git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`]),
+      commit,
+      sourceRef,
+      timing,
+    }),
   ]);
   return checkpointTag;
 }
@@ -445,13 +468,33 @@ function main(argv: ReadonlyArray<string>): void {
   let candidateRef = plan.candidateRef;
   let candidateCommit = git(repoRoot, ["rev-parse", `${candidateRef}^{commit}`]);
   if (plan.bootstrapCheckpoint) {
+    const startedAtMs = Date.now();
+    const commitsRebased = Number(
+      git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
+    );
+    const finishedAtMs = Date.now();
+    const timing = {
+      commitsRebased,
+      durationMs: finishedAtMs - startedAtMs,
+      finishedAt: new Date(finishedAtMs).toISOString(),
+      startedAt: new Date(startedAtMs).toISOString(),
+    };
     const checkpointTag = createCheckpointTag(
       repoRoot,
       plan.baseNightly,
       candidateCommit,
       options.sourceRef,
+      timing,
     );
     if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+    appendCheckpointRun({
+      schemaVersion: 1,
+      status: "success",
+      upstreamTag: plan.baseNightly.tag,
+      ...timing,
+      checkpointCommit: candidateCommit,
+      checkpointTag,
+    });
   }
 
   if (plan.missingNightlies.length === 0) {
@@ -476,6 +519,13 @@ function main(argv: ReadonlyArray<string>): void {
 
   run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
   let completed = false;
+  let attempt:
+    | {
+        readonly commitsRebased: number;
+        readonly nightly: NightlyTag;
+        readonly startedAtMs: number;
+      }
+    | undefined;
   try {
     let baseTag = plan.baseNightly.tag;
     for (const nightly of plan.missingNightlies) {
@@ -484,23 +534,61 @@ function main(argv: ReadonlyArray<string>): void {
         run(worktree, "git", ["branch", "--move", recoveryBranch]);
         branch = recoveryBranch;
       }
+      attempt = {
+        commitsRebased: Number(
+          git(repoRoot, ["rev-list", "--count", `${baseTag}..${candidateRef}^{commit}`]),
+        ),
+        nightly,
+        startedAtMs: Date.now(),
+      };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
       run(worktree, "git", ["rebase", "--onto", nightly.tag, baseTag]);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      const finishedAtMs = Date.now();
+      const timing = {
+        commitsRebased: attempt.commitsRebased,
+        durationMs: finishedAtMs - attempt.startedAtMs,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        startedAt: new Date(attempt.startedAtMs).toISOString(),
+      };
       const checkpointTag = createCheckpointTag(
         repoRoot,
         nightly,
         candidateCommit,
         options.sourceRef,
+        timing,
       );
       if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      appendCheckpointRun({
+        schemaVersion: 1,
+        status: "success",
+        upstreamTag: nightly.tag,
+        ...timing,
+        checkpointCommit: candidateCommit,
+        checkpointTag,
+      });
       baseTag = nightly.tag;
       candidateRef = checkpointTag;
+      attempt = undefined;
       console.log(`[lastcode:checkpoint] Created ${checkpointTag} at ${candidateCommit}.`);
     }
     completed = true;
   } catch (error) {
+    if (attempt) {
+      const finishedAtMs = Date.now();
+      appendCheckpointRun({
+        schemaVersion: 1,
+        status: "failed",
+        upstreamTag: attempt.nightly.tag,
+        startedAt: new Date(attempt.startedAtMs).toISOString(),
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        durationMs: finishedAtMs - attempt.startedAtMs,
+        commitsRebased: attempt.commitsRebased,
+        error: error instanceof Error ? error.message : String(error),
+        recoveryBranch: branch,
+      });
+    }
     notify(
       hostPlatform,
       "LastCode nightly sync needs attention",

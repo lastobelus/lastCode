@@ -117,6 +117,43 @@ pnpm lastcode:checkpoint:service run-now
 pnpm lastcode:checkpoint:service uninstall
 ```
 
+### Checkpoint dashboard
+
+Install the checkpoint dashboard as a user command:
+
+```bash
+pnpm lastcode:checkpoints --install
+```
+
+The installer puts the executable at `~/.lastcode/bin/lastcode-checkpoints`
+and exposes it through the existing `~/.local/bin` PATH directory. It records
+the dedicated automation worktree in `~/.lastcode/dashboard.json`, so the
+command works from any directory without depending on a human development
+worktree.
+
+Show the latest eight checkpoint activities, or choose another count:
+
+```bash
+lastcode-checkpoints
+lastcode-checkpoints -n 20
+```
+
+The dashboard shows success or failure, upstream nightly, number of downstream
+commits replayed, finish time, duration, checkpoint commit, promotion to
+`lastcode/main`, and whether a local build tag exists. It also summarizes the
+launch agent and whether the local checkpoint set has caught up to the latest
+known upstream tag. Failed rows include the retained recovery branch and error.
+
+Successful checkpoint metadata is stored in the annotated checkpoint tag, so
+it travels with the Git repository. Failed and successful local attempts are
+also appended to `~/.lastcode/automation/checkpoint-runs.jsonl`. Checkpoints
+created before dashboard metadata was introduced infer the replayed commit
+count and finish time from Git; their duration is shown as `—`.
+
+Interactive output uses the amber, ice, pacific, lavender, success, warning,
+and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,
+and `TERM=dumb` produce plain text.
+
 Logs are written to `~/.lastcode/automation/`. Uninstalling unloads the job and
 moves its plist to a timestamped disabled backup instead of deleting it.
 The installer creates a dedicated `lastcode-automation` Git worktree. Before
