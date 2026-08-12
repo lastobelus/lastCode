@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 
 import {
+  checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
   worktreeAddArgs,
@@ -27,6 +28,13 @@ it("uses Git's supported short option when creating the recovery branch", () => 
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
   assert.equal(worktreeVp("/tmp/sync"), "/tmp/sync/node_modules/.bin/vp");
+});
+
+it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {
+  assert.deepStrictEqual(checkpointVpPaths("/tmp/automation", "/tmp/sync"), {
+    bootstrap: "/tmp/automation/node_modules/.bin/vp",
+    isolated: "/tmp/sync/node_modules/.bin/vp",
+  });
 });
 
 it("skips promotion when main already points at the checkpoint", () => {
