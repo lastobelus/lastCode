@@ -41,7 +41,7 @@ permissions:
 jobs:
   check_changes:
     name: Check for changes since last nightly
-    if: github.event_name == 'schedule'
+    if: github.repository == 'pingdotgg/t3code' && github.event_name == 'schedule'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
@@ -67,7 +67,6 @@ jobs:
 
           last_nightly_sha=$(git rev-parse "$last_nightly_tag^{commit}")
           head_sha=$(git rev-parse HEAD)
-
           if [[ "$last_nightly_sha" == "$head_sha" ]]; then
             echo "No changes on main since last nightly release ($last_nightly_tag). Skipping."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
@@ -80,6 +79,7 @@ jobs:
     name: Preflight
     needs: [check_changes]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       !failure() && !cancelled() &&
       (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -230,6 +230,7 @@ jobs:
     # nor success, so success() would be wrong here).
     needs: [check_changes]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       !failure() && !cancelled() &&
       (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -330,6 +331,7 @@ jobs:
     # runs alongside preflight. See the condition comment there.
     needs: [check_changes]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       !failure() && !cancelled() &&
       (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
