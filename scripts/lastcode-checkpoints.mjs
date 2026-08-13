@@ -152,17 +152,10 @@ export function latestRunsByUpstreamTag(records) {
   return latest;
 }
 
-export function checkpointTagsWithoutFailedRuns(tags, records) {
-  const latestRuns = latestRunsByUpstreamTag(records);
-  return tags.filter(
-    (tag) => latestRuns.get(tag.slice(CHECKPOINT_PREFIX.length))?.status !== "failed",
-  );
-}
-
-function usableCheckpointTags(repoRoot, home) {
-  return checkpointTagsWithoutFailedRuns(
-    splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
-    readRuns(home),
+export function failedRunsWithoutCheckpointTags(tags, records) {
+  const checkpointedNightlies = new Set(tags.map((tag) => tag.slice(CHECKPOINT_PREFIX.length)));
+  return [...latestRunsByUpstreamTag(records).values()].filter(
+    (record) => record.status === "failed" && !checkpointedNightlies.has(record.upstreamTag),
   );
 }
 
@@ -259,9 +252,8 @@ function latestBuildNumbers(tags) {
 
 function checkpointRows(repoRoot, home, count) {
   const runs = readRuns(home);
-  const checkpointTags = checkpointTagsWithoutFailedRuns(
-    splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
-    runs,
+  const checkpointTags = splitLines(
+    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
   );
   const selectedCheckpointTags = selectCheckpointTags(checkpointTags, count);
   const buildNumbers = latestBuildNumbers(
@@ -300,20 +292,18 @@ function checkpointRows(repoRoot, home, count) {
       build: build === undefined ? "—" : `#${build}`,
     };
   });
-  const failures = [...latestRunsByUpstreamTag(runs).values()]
-    .filter((record) => record.status === "failed")
-    .map((record) => ({
-      status: "failed",
-      upstreamTag: record.upstreamTag,
-      commitsRebased: Number(record.commitsRebased),
-      finishedAt: record.finishedAt,
-      durationMs: Number(record.durationMs),
-      checkpoint: "—",
-      main: "—",
-      build: "—",
-      error: record.error,
-      recoveryBranch: record.recoveryBranch,
-    }));
+  const failures = failedRunsWithoutCheckpointTags(checkpointTags, runs).map((record) => ({
+    status: "failed",
+    upstreamTag: record.upstreamTag,
+    commitsRebased: Number(record.commitsRebased),
+    finishedAt: record.finishedAt,
+    durationMs: Number(record.durationMs),
+    checkpoint: "—",
+    main: "—",
+    build: "—",
+    error: record.error,
+    recoveryBranch: record.recoveryBranch,
+  }));
   return [...successes, ...failures].sort(
     (left, right) => new Date(right.finishedAt).getTime() - new Date(left.finishedAt).getTime(),
   );
@@ -390,7 +380,9 @@ function printDashboard(repoRoot, home, count) {
     (left, right) => compareNightlies(right, left),
   );
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
-  const latestCheckpoint = usableCheckpointTags(repoRoot, home)
+  const latestCheckpoint = splitLines(
+    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
+  )
     .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))
     .sort((left, right) => compareNightlies(right, left))
     .at(0);

@@ -155,9 +155,9 @@ created before dashboard metadata was introduced infer the replayed commit
 count and finish time from Git; their duration is shown as `—`.
 
 If publishing a newly created tag fails, the job removes its local copy so a
-later run can retry it. The dashboard also treats the latest run record as
-authoritative and never presents a tag retained from a failed attempt as a
-successful or current checkpoint.
+later run can retry it. A checkpoint tag fetched from the fork is authoritative
+over a failed local run record: this reconciles the case where the remote
+accepted a push but the client lost its acknowledgement.
 
 Interactive output uses the amber, ice, pacific, lavender, success, warning,
 and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  checkpointTagsWithoutFailedRuns,
   checkpointFreshness,
+  failedRunsWithoutCheckpointTags,
   formatDuration,
   parseOptions,
   parseTrailers,
@@ -70,17 +70,13 @@ describe("LastCode checkpoint dashboard", () => {
     expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
   });
 
-  it("does not show a locally retained tag as successful after its run failed", () => {
-    const failedTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
-    const successfulTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.1";
-    expect(
-      checkpointTagsWithoutFailedRuns(
-        [successfulTag, failedTag],
-        [
-          { upstreamTag: "v0.0.1-nightly.20260812.2", status: "success" },
-          { upstreamTag: "v0.0.1-nightly.20260812.2", status: "failed" },
-        ],
-      ),
-    ).toEqual([successfulTag]);
+  it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {
+    const publishedTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
+    const failedRecord = {
+      upstreamTag: "v0.0.1-nightly.20260812.2",
+      status: "failed",
+    };
+    expect(failedRunsWithoutCheckpointTags([publishedTag], [failedRecord])).toEqual([]);
+    expect(failedRunsWithoutCheckpointTags([], [failedRecord])).toEqual([failedRecord]);
   });
 });
