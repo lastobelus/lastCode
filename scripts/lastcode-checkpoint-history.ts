@@ -17,6 +17,29 @@ export interface CheckpointRunRecord {
   readonly recoveryBranch?: string;
 }
 
+export function checkpointFailureRecord(
+  input: {
+    readonly commitsRebased: number;
+    readonly error: unknown;
+    readonly recoveryBranch?: string;
+    readonly startedAtMs: number;
+    readonly upstreamTag: string;
+  },
+  finishedAtMs = Date.now(),
+): CheckpointRunRecord {
+  return {
+    schemaVersion: 1,
+    status: "failed",
+    upstreamTag: input.upstreamTag,
+    startedAt: new Date(input.startedAtMs).toISOString(),
+    finishedAt: new Date(finishedAtMs).toISOString(),
+    durationMs: finishedAtMs - input.startedAtMs,
+    commitsRebased: input.commitsRebased,
+    error: input.error instanceof Error ? input.error.message : String(input.error),
+    ...(input.recoveryBranch ? { recoveryBranch: input.recoveryBranch } : {}),
+  };
+}
+
 export function checkpointRunHistoryPath(home = NodeOS.homedir()): string {
   return NodePath.join(home, ".lastcode", "automation", "checkpoint-runs.jsonl");
 }

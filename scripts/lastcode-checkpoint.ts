@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
-import { appendCheckpointRun } from "./lastcode-checkpoint-history.ts";
+import { appendCheckpointRun, checkpointFailureRecord } from "./lastcode-checkpoint-history.ts";
 import {
   checkpointTagFromNightlyTag,
   compareNightlyTags,
@@ -472,29 +472,45 @@ function main(argv: ReadonlyArray<string>): void {
     const commitsRebased = Number(
       git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
     );
-    const finishedAtMs = Date.now();
-    const timing = {
-      commitsRebased,
-      durationMs: finishedAtMs - startedAtMs,
-      finishedAt: new Date(finishedAtMs).toISOString(),
-      startedAt: new Date(startedAtMs).toISOString(),
-    };
-    const checkpointTag = createCheckpointTag(
-      repoRoot,
-      plan.baseNightly,
-      candidateCommit,
-      options.sourceRef,
-      timing,
-    );
-    if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
-    appendCheckpointRun({
-      schemaVersion: 1,
-      status: "success",
-      upstreamTag: plan.baseNightly.tag,
-      ...timing,
-      checkpointCommit: candidateCommit,
-      checkpointTag,
-    });
+    try {
+      const finishedAtMs = Date.now();
+      const timing = {
+        commitsRebased,
+        durationMs: finishedAtMs - startedAtMs,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        startedAt: new Date(startedAtMs).toISOString(),
+      };
+      const checkpointTag = createCheckpointTag(
+        repoRoot,
+        plan.baseNightly,
+        candidateCommit,
+        options.sourceRef,
+        timing,
+      );
+      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      appendCheckpointRun({
+        schemaVersion: 1,
+        status: "success",
+        upstreamTag: plan.baseNightly.tag,
+        ...timing,
+        checkpointCommit: candidateCommit,
+        checkpointTag,
+      });
+    } catch (error) {
+      const finishedAtMs = Date.now();
+      appendCheckpointRun(
+        checkpointFailureRecord(
+          {
+            commitsRebased,
+            error,
+            startedAtMs,
+            upstreamTag: plan.baseNightly.tag,
+          },
+          finishedAtMs,
+        ),
+      );
+      throw error;
+    }
   }
 
   if (plan.missingNightlies.length === 0) {
@@ -577,17 +593,18 @@ function main(argv: ReadonlyArray<string>): void {
   } catch (error) {
     if (attempt) {
       const finishedAtMs = Date.now();
-      appendCheckpointRun({
-        schemaVersion: 1,
-        status: "failed",
-        upstreamTag: attempt.nightly.tag,
-        startedAt: new Date(attempt.startedAtMs).toISOString(),
-        finishedAt: new Date(finishedAtMs).toISOString(),
-        durationMs: finishedAtMs - attempt.startedAtMs,
-        commitsRebased: attempt.commitsRebased,
-        error: error instanceof Error ? error.message : String(error),
-        recoveryBranch: branch,
-      });
+      appendCheckpointRun(
+        checkpointFailureRecord(
+          {
+            commitsRebased: attempt.commitsRebased,
+            error,
+            recoveryBranch: branch,
+            startedAtMs: attempt.startedAtMs,
+            upstreamTag: attempt.nightly.tag,
+          },
+          finishedAtMs,
+        ),
+      );
     }
     notify(
       hostPlatform,
