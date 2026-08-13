@@ -48,6 +48,7 @@ describe("checkpoint run history", () => {
         {
           commitsRebased: 3,
           error: new Error("push failed"),
+          localTagRetained: true,
           startedAtMs: 1_000,
           upstreamTag: "v0.0.1-nightly.20260812.1",
         },
@@ -62,6 +63,7 @@ describe("checkpoint run history", () => {
       durationMs: 3_000,
       commitsRebased: 3,
       error: "push failed",
+      localTagRetained: true,
     });
   });
 });

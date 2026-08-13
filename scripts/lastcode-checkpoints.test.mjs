@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  checkpointTagsWithoutRecoveryFailures,
   checkpointFreshness,
   failedRunsWithoutCheckpointTags,
   formatDuration,
@@ -78,5 +79,17 @@ describe("LastCode checkpoint dashboard", () => {
     };
     expect(failedRunsWithoutCheckpointTags([publishedTag], [failedRecord])).toEqual([]);
     expect(failedRunsWithoutCheckpointTags([], [failedRecord])).toEqual([failedRecord]);
+  });
+
+  it("keeps a tag with retained recovery state in the failed state", () => {
+    const tag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
+    const failedRecord = {
+      upstreamTag: "v0.0.1-nightly.20260812.2",
+      status: "failed",
+      localTagRetained: true,
+      recoveryBranch: "sync/nightly/v0.0.1-nightly.20260812.2",
+    };
+    expect(checkpointTagsWithoutRecoveryFailures([tag], [failedRecord])).toEqual([]);
+    expect(failedRunsWithoutCheckpointTags([tag], [failedRecord])).toEqual([failedRecord]);
   });
 });

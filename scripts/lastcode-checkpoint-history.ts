@@ -14,6 +14,7 @@ export interface CheckpointRunRecord {
   readonly checkpointCommit?: string;
   readonly checkpointTag?: string;
   readonly error?: string;
+  readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
 }
 
@@ -21,6 +22,7 @@ export function checkpointFailureRecord(
   input: {
     readonly commitsRebased: number;
     readonly error: unknown;
+    readonly localTagRetained?: boolean;
     readonly recoveryBranch?: string;
     readonly startedAtMs: number;
     readonly upstreamTag: string;
@@ -36,6 +38,7 @@ export function checkpointFailureRecord(
     durationMs: finishedAtMs - input.startedAtMs,
     commitsRebased: input.commitsRebased,
     error: input.error instanceof Error ? input.error.message : String(input.error),
+    ...(input.localTagRetained ? { localTagRetained: true } : {}),
     ...(input.recoveryBranch ? { recoveryBranch: input.recoveryBranch } : {}),
   };
 }

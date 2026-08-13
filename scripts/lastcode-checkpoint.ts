@@ -194,8 +194,20 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
 export function checkpointFailureDisposition(
   pendingCheckpointTag: string | undefined,
   recoveryBranch: string,
+  tagDeleted = true,
 ): { readonly cleanup: boolean; readonly recoveryBranch?: string } {
-  return pendingCheckpointTag ? { cleanup: true } : { cleanup: false, recoveryBranch };
+  return pendingCheckpointTag && tagDeleted
+    ? { cleanup: true }
+    : { cleanup: false, recoveryBranch };
+}
+
+function deleteCheckpointTag(repoRoot: string, checkpointTag: string): boolean {
+  const result = NodeChildProcess.spawnSync("git", ["tag", "--delete", checkpointTag], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  if (result.error) return false;
+  return result.status === 0;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
@@ -507,15 +519,16 @@ function main(argv: ReadonlyArray<string>): void {
         checkpointTag,
       });
     } catch (error) {
-      if (pendingCheckpointTag) {
-        git(repoRoot, ["tag", "--delete", pendingCheckpointTag], { allowFailure: true });
-      }
+      const localTagRetained = pendingCheckpointTag
+        ? !deleteCheckpointTag(repoRoot, pendingCheckpointTag)
+        : false;
       const finishedAtMs = Date.now();
       appendCheckpointRun(
         checkpointFailureRecord(
           {
             commitsRebased,
             error,
+            ...(localTagRetained ? { localTagRetained: true } : {}),
             startedAtMs,
             upstreamTag: plan.baseNightly.tag,
           },
@@ -607,10 +620,10 @@ function main(argv: ReadonlyArray<string>): void {
     }
     completed = true;
   } catch (error) {
-    const disposition = checkpointFailureDisposition(pendingCheckpointTag, branch);
-    if (pendingCheckpointTag) {
-      git(repoRoot, ["tag", "--delete", pendingCheckpointTag], { allowFailure: true });
-    }
+    const tagDeleted = pendingCheckpointTag
+      ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
+      : true;
+    const disposition = checkpointFailureDisposition(pendingCheckpointTag, branch, tagDeleted);
     completed = disposition.cleanup;
     if (attempt) {
       const finishedAtMs = Date.now();
@@ -619,6 +632,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased: attempt.commitsRebased,
             error,
+            ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
             startedAtMs: attempt.startedAtMs,
             upstreamTag: attempt.nightly.tag,

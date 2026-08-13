@@ -72,6 +72,10 @@ it("cleans up publication failures but retains recovery state for earlier failur
     cleanup: false,
     recoveryBranch: "sync/nightly/v1",
   });
+  assert.deepStrictEqual(
+    checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1", false),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
 });
 
 it("bootstraps at the source nightly and checkpoints every later nightly", () => {
