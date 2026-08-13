@@ -61,6 +61,11 @@ export interface RepositoryIntegritySnapshot {
   readonly configPath: string;
 }
 
+export interface PreparedLocalCiRepository {
+  readonly integrity: RepositoryIntegritySnapshot;
+  readonly repoRoot: string;
+}
+
 export function assertSupportedNodeVersion(version = process.versions.node): void {
   const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
   const supported = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
@@ -335,6 +340,13 @@ export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegrit
   };
 }
 
+export function prepareLocalCiRepository(cwd = process.cwd()): PreparedLocalCiRepository {
+  // Validate the shared config before asking Git for a worktree root. A damaged
+  // core.bare setting makes --show-toplevel fail before we can name the config.
+  const integrity = captureRepositoryIntegrity(cwd);
+  return { integrity, repoRoot: resolveRepoRoot(cwd) };
+}
+
 export function assertRepositoryIntegrity(
   repoRoot: string,
   before: RepositoryIntegritySnapshot,
@@ -357,6 +369,15 @@ export function assertRepositoryIntegrity(
       `Shared repository integrity changed during local CI: common Git directory moved from ${before.commonGitDir} to ${commonGitDir}.`,
     );
   }
+}
+
+export function writeVerifiedFullCiStamp(
+  repoRoot: string,
+  integrity: RepositoryIntegritySnapshot,
+  stamp: Omit<FullCiStamp, "schemaVersion">,
+): string {
+  assertRepositoryIntegrity(repoRoot, integrity);
+  return writeFullCiStamp(integrity.commonGitDir, stamp);
 }
 
 export function assertCleanWorktree(repoRoot: string): void {
@@ -392,6 +413,7 @@ function executeLocalCi(
   options: LocalCiOptions,
   repoRoot: string,
   steps: ReadonlyArray<LocalCiStep>,
+  repositoryIntegrity: RepositoryIntegritySnapshot,
 ): void {
   let commitBefore: string | undefined;
   let baseCommit: string | undefined;
@@ -497,7 +519,7 @@ function executeLocalCi(
       throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
     }
     assertCleanWorktree(repoRoot);
-    const stampPath = writeFullCiStamp(resolveCommonGitDir(repoRoot), {
+    const stampPath = writeVerifiedFullCiStamp(repoRoot, repositoryIntegrity, {
       commit: commitBefore,
       completedAt: new Date().toISOString(),
       context: checkpointContext ?? {
@@ -515,7 +537,7 @@ function executeLocalCi(
 
 function runLocalCi(options: LocalCiOptions): void {
   assertSupportedNodeVersion();
-  const repoRoot = resolveRepoRoot();
+  const { integrity: repositoryIntegrity, repoRoot } = prepareLocalCiRepository();
   const steps = resolveLocalCiSteps(options.mode);
 
   if (options.dryRun) {
@@ -523,9 +545,8 @@ function runLocalCi(options: LocalCiOptions): void {
     return;
   }
 
-  const repositoryIntegrity = captureRepositoryIntegrity(repoRoot);
   try {
-    executeLocalCi(options, repoRoot, steps);
+    executeLocalCi(options, repoRoot, steps, repositoryIntegrity);
   } finally {
     assertRepositoryIntegrity(repoRoot, repositoryIntegrity);
   }

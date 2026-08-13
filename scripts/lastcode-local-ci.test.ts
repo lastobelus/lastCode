@@ -12,10 +12,13 @@ import {
   assertSupportedNodeVersion,
   captureRepositoryIntegrity,
   parseLocalCiOptions,
+  prepareLocalCiRepository,
   readFullCiStamp,
+  resolveFullCiStampPath,
   resolveLocalCiSteps,
   verifyPreloadBundle,
   writeFullCiStamp,
+  writeVerifiedFullCiStamp,
 } from "./lastcode-local-ci.ts";
 
 describe("lastcode-local-ci", () => {
@@ -109,6 +112,47 @@ describe("lastcode-local-ci", () => {
     );
     expect(() => captureRepositoryIntegrity(bareRepository)).toThrow("core.bare=true");
     NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("diagnoses a damaged shared config before resolving the worktree root", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-entry-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    NodeChildProcess.execFileSync("git", ["config", "core.bare", "true"], { cwd: repository });
+
+    expect(() => prepareLocalCiRepository(repository)).toThrow(
+      /core\.bare=true[\s\S]*\.git\/config/,
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
+  it("does not write a success stamp after shared config mutation", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-stamp-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    const snapshot = captureRepositoryIntegrity(repository);
+    const stamp = {
+      commit: "head-sha",
+      completedAt: "2026-08-11T00:00:00.000Z",
+      context: {
+        kind: "pull-request" as const,
+        baseCommit: "base-sha",
+        baseRef: "lastcode/main" as const,
+      },
+    };
+    NodeChildProcess.execFileSync("git", ["config", "test.integrity", "changed"], {
+      cwd: repository,
+    });
+
+    expect(() => writeVerifiedFullCiStamp(repository, snapshot, stamp)).toThrow(
+      "Shared repository integrity",
+    );
+    expect(NodeFS.existsSync(resolveFullCiStampPath(snapshot.commonGitDir, stamp.commit))).toBe(
+      false,
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
   it("binds a PR full-CI stamp to both the head and tested base commits", () => {
