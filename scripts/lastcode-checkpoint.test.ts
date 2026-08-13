@@ -1,9 +1,12 @@
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 
 import {
+  checkpointFailureDisposition,
+  checkpointMessage,
   checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
+  unpublishedCheckpointTags,
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
@@ -37,9 +40,53 @@ it("bootstraps dependencies with the invoking worktree runner before using the i
   });
 });
 
+it("records dashboard metadata in annotated checkpoint tags", () => {
+  expect(
+    checkpointMessage({
+      upstreamTag: "v1.2.3-nightly.20260812.8",
+      upstreamCommit: "upstream-sha",
+      commit: "lastcode-sha",
+      sourceRef: "origin/lastcode/main",
+      timing: {
+        commitsRebased: 8,
+        startedAt: "2026-08-12T18:00:00.000Z",
+        finishedAt: "2026-08-12T18:03:08.000Z",
+        durationMs: 188_000,
+      },
+    }),
+  ).toContain(
+    "Fork-Commits-Rebased: 8\nStarted-At: 2026-08-12T18:00:00.000Z\nFinished-At: 2026-08-12T18:03:08.000Z\nDuration-Ms: 188000",
+  );
+});
+
 it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("same", "same"), false);
   assert.equal(promotionNeeded("main", "checkpoint"), true);
+});
+
+it("cleans up publication failures but retains recovery state for earlier failures", () => {
+  assert.deepStrictEqual(
+    checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1"),
+    { cleanup: true },
+  );
+  assert.deepStrictEqual(checkpointFailureDisposition(undefined, "sync/nightly/v1"), {
+    cleanup: false,
+    recoveryBranch: "sync/nightly/v1",
+  });
+  assert.deepStrictEqual(
+    checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1", false),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
+});
+
+it("retries checkpoint tags that are local but not published", () => {
+  assert.deepStrictEqual(
+    unpublishedCheckpointTags(
+      ["lastcode/checkpoint/v1", "lastcode/checkpoint/v2"],
+      "abc\trefs/tags/lastcode/checkpoint/v1\ndef\trefs/tags/lastcode/checkpoint/v1^{}\n",
+    ),
+    ["lastcode/checkpoint/v2"],
+  );
 });
 
 it("bootstraps at the source nightly and checkpoints every later nightly", () => {

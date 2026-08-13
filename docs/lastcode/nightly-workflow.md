@@ -117,6 +117,63 @@ pnpm lastcode:checkpoint:service run-now
 pnpm lastcode:checkpoint:service uninstall
 ```
 
+### Checkpoint dashboard
+
+Install the launch agent first so its dedicated automation worktree exists, then
+install the checkpoint dashboard as a user command:
+
+```bash
+pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoints --install
+```
+
+The installer puts the executable at `~/.lastcode/bin/lastcode-checkpoints`
+and exposes it through the existing `~/.local/bin` PATH directory. It records
+the dedicated automation worktree in `~/.lastcode/dashboard.json`, so the
+command works from any directory without depending on a human development
+worktree. Installation fails instead of recording the current checkout when the
+automation worktree is missing. The installed launcher uses the repository's
+pinned Node 24 runtime through `mise`, independent of the shell's default Node.
+
+Show the latest eight checkpoint activities, or choose another count:
+
+```bash
+lastcode-checkpoints
+lastcode-checkpoints -n 20
+```
+
+The dashboard shows success or failure, upstream nightly, number of downstream
+commits replayed, finish time, duration, checkpoint commit, promotion to
+`lastcode/main`, and whether a local build tag exists. It also summarizes the
+launch agent and whether the local checkpoint set has caught up to the latest
+known upstream tag. Failed rows include the retained recovery branch and error.
+
+Successful checkpoint metadata is stored in the annotated checkpoint tag, so
+it travels with the Git repository. Failed and successful local attempts are
+also appended to `~/.lastcode/automation/checkpoint-runs.jsonl`. Checkpoints
+created before dashboard metadata was introduced infer the replayed commit
+count and finish time from Git; their duration is shown as `—`.
+
+If publishing a newly created tag fails, the job removes its local copy so a
+later run can retry it, and cleans up the completed temporary rebase worktree.
+Before planning any pushed run, the job also removes checkpoint tags that exist
+only locally; this recovers bootstrap attempts whose first cleanup was blocked.
+Failures during the rebase or smoke gate still retain their recovery worktree.
+A local tag deletion failure is recorded explicitly (and retains recovery state
+when a worktree exists), preventing that local tag from being displayed as a
+published checkpoint.
+A checkpoint tag fetched from the fork is authoritative over a failed local run
+record: this reconciles the case where the remote accepted a push but the client
+lost its acknowledgement or an operator manually completed recovery. The
+dashboard verifies checkpoint publication against `origin`; while offline, an
+unconfirmed local tag with a failed run remains failed rather than being shown
+as current. The bounded remote probe also reads `lastcode/main` for the `MAIN`
+column and falls back to the cached branch ref if the remote does not respond.
+
+Interactive output uses the amber, ice, pacific, lavender, success, warning,
+and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,
+and `TERM=dumb` produce plain text.
+
 Logs are written to `~/.lastcode/automation/`. Uninstalling unloads the job and
 moves its plist to a timestamped disabled backup instead of deleting it.
 The installer creates a dedicated `lastcode-automation` Git worktree. Before
