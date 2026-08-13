@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
+import { appendCheckpointRun, checkpointFailureRecord } from "./lastcode-checkpoint-history.ts";
 import {
   checkpointTagFromNightlyTag,
   compareNightlyTags,
@@ -119,6 +120,22 @@ function listCheckpointRefs(repoRoot: string): ReadonlyArray<CheckpointRef> {
     .toSorted((left, right) => compareNightlyTags(left.nightly, right.nightly));
 }
 
+export function unpublishedCheckpointTags(
+  localTags: ReadonlyArray<string>,
+  remoteOutput: string,
+): ReadonlyArray<string> {
+  const published = new Set(
+    splitLines(remoteOutput)
+      .map((line) => line.split(/\s+/)[1])
+      .filter(
+        (ref): ref is string =>
+          ref !== undefined && ref.startsWith("refs/tags/") && !ref.endsWith("^{}"),
+      )
+      .map((ref) => ref.slice("refs/tags/".length)),
+  );
+  return localTags.filter((tag) => !published.has(tag));
+}
+
 function latestCheckpointAncestor(
   repoRoot: string,
   checkpoints: ReadonlyArray<CheckpointRef>,
@@ -190,6 +207,35 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
   return remoteCommit !== checkpointCommit;
 }
 
+export function checkpointFailureDisposition(
+  pendingCheckpointTag: string | undefined,
+  recoveryBranch: string,
+  tagDeleted = true,
+): { readonly cleanup: boolean; readonly recoveryBranch?: string } {
+  return pendingCheckpointTag && tagDeleted
+    ? { cleanup: true }
+    : { cleanup: false, recoveryBranch };
+}
+
+function deleteCheckpointTag(repoRoot: string, checkpointTag: string): boolean {
+  const result = NodeChildProcess.spawnSync("git", ["tag", "--delete", checkpointTag], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  if (result.error) return false;
+  return result.status === 0;
+}
+
+function pruneUnpublishedCheckpointTags(repoRoot: string, pushRemote: string): void {
+  const localTags = splitLines(git(repoRoot, ["tag", "--list", CHECKPOINT_TAG_GLOB]));
+  const remoteOutput = git(repoRoot, ["ls-remote", pushRemote, `refs/tags/${CHECKPOINT_TAG_GLOB}`]);
+  for (const checkpointTag of unpublishedCheckpointTags(localTags, remoteOutput)) {
+    if (!deleteCheckpointTag(repoRoot, checkpointTag)) {
+      throw new Error(`Could not remove unpublished local checkpoint tag ${checkpointTag}.`);
+    }
+  }
+}
+
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
@@ -224,20 +270,30 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   return { dryRun, fetch, promotion, pushTags, smoke, sourceRef, upstreamRemote, pushRemote };
 }
 
-function checkpointMessage(
-  repoRoot: string,
-  nightly: NightlyTag,
-  commit: string,
-  sourceRef: string,
-): string {
+export function checkpointMessage(input: {
+  readonly upstreamTag: string;
+  readonly upstreamCommit: string;
+  readonly commit: string;
+  readonly sourceRef: string;
+  readonly timing: {
+    readonly commitsRebased: number;
+    readonly durationMs: number;
+    readonly finishedAt: string;
+    readonly startedAt: string;
+  };
+}): string {
   return [
-    `LastCode checkpoint for ${nightly.tag}`,
+    `LastCode checkpoint for ${input.upstreamTag}`,
     "",
-    `Upstream-Tag: ${nightly.tag}`,
-    `Upstream-Commit: ${git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`])}`,
-    `LastCode-Commit: ${commit}`,
-    `Source-Ref: ${sourceRef}`,
-    `Created-At: ${new Date().toISOString()}`,
+    `Upstream-Tag: ${input.upstreamTag}`,
+    `Upstream-Commit: ${input.upstreamCommit}`,
+    `LastCode-Commit: ${input.commit}`,
+    `Source-Ref: ${input.sourceRef}`,
+    `Fork-Commits-Rebased: ${input.timing.commitsRebased}`,
+    `Started-At: ${input.timing.startedAt}`,
+    `Finished-At: ${input.timing.finishedAt}`,
+    `Duration-Ms: ${input.timing.durationMs}`,
+    `Created-At: ${input.timing.finishedAt}`,
   ].join("\n");
 }
 
@@ -246,6 +302,12 @@ function createCheckpointTag(
   nightly: NightlyTag,
   commit: string,
   sourceRef: string,
+  timing: {
+    readonly commitsRebased: number;
+    readonly durationMs: number;
+    readonly finishedAt: string;
+    readonly startedAt: string;
+  },
 ): string {
   const checkpointTag = checkpointTagFromNightlyTag(nightly.tag);
   git(repoRoot, [
@@ -254,7 +316,13 @@ function createCheckpointTag(
     checkpointTag,
     commit,
     "--message",
-    checkpointMessage(repoRoot, nightly, commit, sourceRef),
+    checkpointMessage({
+      upstreamTag: nightly.tag,
+      upstreamCommit: git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`]),
+      commit,
+      sourceRef,
+      timing,
+    }),
   ]);
   return checkpointTag;
 }
@@ -412,6 +480,10 @@ function main(argv: ReadonlyArray<string>): void {
     ]);
   }
 
+  if (options.pushTags && !options.dryRun) {
+    pruneUnpublishedCheckpointTags(repoRoot, options.pushRemote);
+  }
+
   const sourceCommit = git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]);
   const checkpoints = listCheckpointRefs(repoRoot);
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, options.sourceRef);
@@ -445,13 +517,56 @@ function main(argv: ReadonlyArray<string>): void {
   let candidateRef = plan.candidateRef;
   let candidateCommit = git(repoRoot, ["rev-parse", `${candidateRef}^{commit}`]);
   if (plan.bootstrapCheckpoint) {
-    const checkpointTag = createCheckpointTag(
-      repoRoot,
-      plan.baseNightly,
-      candidateCommit,
-      options.sourceRef,
+    const startedAtMs = Date.now();
+    let pendingCheckpointTag: string | undefined;
+    const commitsRebased = Number(
+      git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
     );
-    if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+    try {
+      const finishedAtMs = Date.now();
+      const timing = {
+        commitsRebased,
+        durationMs: finishedAtMs - startedAtMs,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        startedAt: new Date(startedAtMs).toISOString(),
+      };
+      const checkpointTag = createCheckpointTag(
+        repoRoot,
+        plan.baseNightly,
+        candidateCommit,
+        options.sourceRef,
+        timing,
+      );
+      pendingCheckpointTag = checkpointTag;
+      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      pendingCheckpointTag = undefined;
+      appendCheckpointRun({
+        schemaVersion: 1,
+        status: "success",
+        upstreamTag: plan.baseNightly.tag,
+        ...timing,
+        checkpointCommit: candidateCommit,
+        checkpointTag,
+      });
+    } catch (error) {
+      const localTagRetained = pendingCheckpointTag
+        ? !deleteCheckpointTag(repoRoot, pendingCheckpointTag)
+        : false;
+      const finishedAtMs = Date.now();
+      appendCheckpointRun(
+        checkpointFailureRecord(
+          {
+            commitsRebased,
+            error,
+            ...(localTagRetained ? { localTagRetained: true } : {}),
+            startedAtMs,
+            upstreamTag: plan.baseNightly.tag,
+          },
+          finishedAtMs,
+        ),
+      );
+      throw error;
+    }
   }
 
   if (plan.missingNightlies.length === 0) {
@@ -476,6 +591,14 @@ function main(argv: ReadonlyArray<string>): void {
 
   run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
   let completed = false;
+  let pendingCheckpointTag: string | undefined;
+  let attempt:
+    | {
+        readonly commitsRebased: number;
+        readonly nightly: NightlyTag;
+        readonly startedAtMs: number;
+      }
+    | undefined;
   try {
     let baseTag = plan.baseNightly.tag;
     for (const nightly of plan.missingNightlies) {
@@ -484,29 +607,85 @@ function main(argv: ReadonlyArray<string>): void {
         run(worktree, "git", ["branch", "--move", recoveryBranch]);
         branch = recoveryBranch;
       }
+      attempt = {
+        commitsRebased: Number(
+          git(repoRoot, ["rev-list", "--count", `${baseTag}..${candidateRef}^{commit}`]),
+        ),
+        nightly,
+        startedAtMs: Date.now(),
+      };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
       run(worktree, "git", ["rebase", "--onto", nightly.tag, baseTag]);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      const finishedAtMs = Date.now();
+      const timing = {
+        commitsRebased: attempt.commitsRebased,
+        durationMs: finishedAtMs - attempt.startedAtMs,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        startedAt: new Date(attempt.startedAtMs).toISOString(),
+      };
       const checkpointTag = createCheckpointTag(
         repoRoot,
         nightly,
         candidateCommit,
         options.sourceRef,
+        timing,
       );
+      pendingCheckpointTag = checkpointTag;
       if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      pendingCheckpointTag = undefined;
+      appendCheckpointRun({
+        schemaVersion: 1,
+        status: "success",
+        upstreamTag: nightly.tag,
+        ...timing,
+        checkpointCommit: candidateCommit,
+        checkpointTag,
+      });
       baseTag = nightly.tag;
       candidateRef = checkpointTag;
+      attempt = undefined;
       console.log(`[lastcode:checkpoint] Created ${checkpointTag} at ${candidateCommit}.`);
     }
     completed = true;
   } catch (error) {
-    notify(
-      hostPlatform,
-      "LastCode nightly sync needs attention",
-      `${branch} is retained at ${worktree}.`,
-    );
-    console.error(`[lastcode:checkpoint] Recovery branch ${branch} is retained at ${worktree}.`);
+    const tagDeleted = pendingCheckpointTag
+      ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
+      : true;
+    const disposition = checkpointFailureDisposition(pendingCheckpointTag, branch, tagDeleted);
+    completed = disposition.cleanup;
+    if (attempt) {
+      const finishedAtMs = Date.now();
+      appendCheckpointRun(
+        checkpointFailureRecord(
+          {
+            commitsRebased: attempt.commitsRebased,
+            error,
+            ...(!tagDeleted ? { localTagRetained: true } : {}),
+            ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
+            startedAtMs: attempt.startedAtMs,
+            upstreamTag: attempt.nightly.tag,
+          },
+          finishedAtMs,
+        ),
+      );
+    }
+    if (disposition.recoveryBranch) {
+      notify(
+        hostPlatform,
+        "LastCode nightly sync needs attention",
+        `${branch} is retained at ${worktree}.`,
+      );
+      console.error(`[lastcode:checkpoint] Recovery branch ${branch} is retained at ${worktree}.`);
+    } else {
+      notify(
+        hostPlatform,
+        "LastCode checkpoint publication failed",
+        "The temporary worktree was cleaned up; the next run will retry.",
+      );
+      console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
+    }
     throw error;
   } finally {
     if (completed) {
