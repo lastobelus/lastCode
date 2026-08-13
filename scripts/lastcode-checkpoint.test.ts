@@ -1,6 +1,7 @@
 import { assert, expect, it } from "@effect/vitest";
 
 import {
+  checkpointFailureDisposition,
   checkpointMessage,
   checkpointVpPaths,
   promotionNeeded,
@@ -60,6 +61,17 @@ it("records dashboard metadata in annotated checkpoint tags", () => {
 it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("same", "same"), false);
   assert.equal(promotionNeeded("main", "checkpoint"), true);
+});
+
+it("cleans up publication failures but retains recovery state for earlier failures", () => {
+  assert.deepStrictEqual(
+    checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1"),
+    { cleanup: true },
+  );
+  assert.deepStrictEqual(checkpointFailureDisposition(undefined, "sync/nightly/v1"), {
+    cleanup: false,
+    recoveryBranch: "sync/nightly/v1",
+  });
 });
 
 it("bootstraps at the source nightly and checkpoints every later nightly", () => {

@@ -191,6 +191,13 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
   return remoteCommit !== checkpointCommit;
 }
 
+export function checkpointFailureDisposition(
+  pendingCheckpointTag: string | undefined,
+  recoveryBranch: string,
+): { readonly cleanup: boolean; readonly recoveryBranch?: string } {
+  return pendingCheckpointTag ? { cleanup: true } : { cleanup: false, recoveryBranch };
+}
+
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
@@ -600,9 +607,11 @@ function main(argv: ReadonlyArray<string>): void {
     }
     completed = true;
   } catch (error) {
+    const disposition = checkpointFailureDisposition(pendingCheckpointTag, branch);
     if (pendingCheckpointTag) {
       git(repoRoot, ["tag", "--delete", pendingCheckpointTag], { allowFailure: true });
     }
+    completed = disposition.cleanup;
     if (attempt) {
       const finishedAtMs = Date.now();
       appendCheckpointRun(
@@ -610,7 +619,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased: attempt.commitsRebased,
             error,
-            recoveryBranch: branch,
+            ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
             startedAtMs: attempt.startedAtMs,
             upstreamTag: attempt.nightly.tag,
           },
@@ -618,12 +627,21 @@ function main(argv: ReadonlyArray<string>): void {
         ),
       );
     }
-    notify(
-      hostPlatform,
-      "LastCode nightly sync needs attention",
-      `${branch} is retained at ${worktree}.`,
-    );
-    console.error(`[lastcode:checkpoint] Recovery branch ${branch} is retained at ${worktree}.`);
+    if (disposition.recoveryBranch) {
+      notify(
+        hostPlatform,
+        "LastCode nightly sync needs attention",
+        `${branch} is retained at ${worktree}.`,
+      );
+      console.error(`[lastcode:checkpoint] Recovery branch ${branch} is retained at ${worktree}.`);
+    } else {
+      notify(
+        hostPlatform,
+        "LastCode checkpoint publication failed",
+        "The temporary worktree was cleaned up; the next run will retry.",
+      );
+      console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
+    }
     throw error;
   } finally {
     if (completed) {
