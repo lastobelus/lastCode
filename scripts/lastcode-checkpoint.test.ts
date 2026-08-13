@@ -3,6 +3,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointTagPushArgs,
   checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
@@ -38,6 +39,36 @@ it("bootstraps dependencies with the invoking worktree runner before using the i
     bootstrap: "/tmp/automation/node_modules/.bin/vp",
     isolated: "/tmp/sync/node_modules/.bin/vp",
   });
+});
+
+it("publishes smoke-validated checkpoint tags without rerunning the generic pre-push gate", () => {
+  assert.deepStrictEqual(
+    checkpointTagPushArgs("origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8", {
+      kind: "smoke",
+    }),
+    ["push", "--no-verify", "origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8"],
+  );
+});
+
+it("retains the generic pre-push gate when it will validate the checkpoint commit", () => {
+  assert.deepStrictEqual(
+    checkpointTagPushArgs("origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8", {
+      kind: "pre-push",
+      candidateCommit: "checkpoint",
+      checkoutHead: "checkpoint",
+    }),
+    ["push", "origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8"],
+  );
+});
+
+it("refuses fallback publication when the pre-push hook would validate another commit", () => {
+  expect(() =>
+    checkpointTagPushArgs("origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8", {
+      kind: "pre-push",
+      candidateCommit: "checkpoint",
+      checkoutHead: "invoking-worktree",
+    }),
+  ).toThrow(/would validate invoking-worktree, not checkpoint commit checkpoint/);
 });
 
 it("records dashboard metadata in annotated checkpoint tags", () => {
