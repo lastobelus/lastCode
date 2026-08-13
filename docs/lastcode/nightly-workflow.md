@@ -156,6 +156,8 @@ count and finish time from Git; their duration is shown as `—`.
 
 If publishing a newly created tag fails, the job removes its local copy so a
 later run can retry it, and cleans up the completed temporary rebase worktree.
+Before planning any pushed run, the job also removes checkpoint tags that exist
+only locally; this recovers bootstrap attempts whose first cleanup was blocked.
 Failures during the rebase or smoke gate still retain their recovery worktree.
 A local tag deletion failure is recorded explicitly (and retains recovery state
 when a worktree exists), preventing that local tag from being displayed as a
@@ -165,7 +167,8 @@ record: this reconciles the case where the remote accepted a push but the client
 lost its acknowledgement or an operator manually completed recovery. The
 dashboard verifies checkpoint publication against `origin`; while offline, an
 unconfirmed local tag with a failed run remains failed rather than being shown
-as current.
+as current. The bounded remote probe also reads `lastcode/main` for the `MAIN`
+column and falls back to the cached branch ref if the remote does not respond.
 
 Interactive output uses the amber, ice, pacific, lavender, success, warning,
 and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,

@@ -6,6 +6,7 @@ import {
   failedRunsWithoutPublishedTags,
   formatDuration,
   parseOptions,
+  parseRemotePublicationState,
   parseTrailers,
   renderLauncher,
   selectAutomationWorktree,
@@ -93,5 +94,16 @@ describe("LastCode checkpoint dashboard", () => {
     expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
     expect(checkpointTagsWithoutUnpublishedFailures([tag], [tag], [failedRecord])).toEqual([tag]);
     expect(failedRunsWithoutPublishedTags([tag], [failedRecord])).toEqual([]);
+  });
+
+  it("reads published tags and main from one remote snapshot", () => {
+    expect(
+      parseRemotePublicationState(
+        "main-sha\trefs/heads/lastcode/main\ntag-sha\trefs/tags/lastcode/checkpoint/v1\npeeled\trefs/tags/lastcode/checkpoint/v1^{}\n",
+      ),
+    ).toEqual({
+      publishedTags: ["lastcode/checkpoint/v1"],
+      remoteMain: "main-sha",
+    });
   });
 });

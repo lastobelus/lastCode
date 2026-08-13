@@ -120,6 +120,22 @@ function listCheckpointRefs(repoRoot: string): ReadonlyArray<CheckpointRef> {
     .toSorted((left, right) => compareNightlyTags(left.nightly, right.nightly));
 }
 
+export function unpublishedCheckpointTags(
+  localTags: ReadonlyArray<string>,
+  remoteOutput: string,
+): ReadonlyArray<string> {
+  const published = new Set(
+    splitLines(remoteOutput)
+      .map((line) => line.split(/\s+/)[1])
+      .filter(
+        (ref): ref is string =>
+          ref !== undefined && ref.startsWith("refs/tags/") && !ref.endsWith("^{}"),
+      )
+      .map((ref) => ref.slice("refs/tags/".length)),
+  );
+  return localTags.filter((tag) => !published.has(tag));
+}
+
 function latestCheckpointAncestor(
   repoRoot: string,
   checkpoints: ReadonlyArray<CheckpointRef>,
@@ -208,6 +224,16 @@ function deleteCheckpointTag(repoRoot: string, checkpointTag: string): boolean {
   });
   if (result.error) return false;
   return result.status === 0;
+}
+
+function pruneUnpublishedCheckpointTags(repoRoot: string, pushRemote: string): void {
+  const localTags = splitLines(git(repoRoot, ["tag", "--list", CHECKPOINT_TAG_GLOB]));
+  const remoteOutput = git(repoRoot, ["ls-remote", pushRemote, `refs/tags/${CHECKPOINT_TAG_GLOB}`]);
+  for (const checkpointTag of unpublishedCheckpointTags(localTags, remoteOutput)) {
+    if (!deleteCheckpointTag(repoRoot, checkpointTag)) {
+      throw new Error(`Could not remove unpublished local checkpoint tag ${checkpointTag}.`);
+    }
+  }
 }
 
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
@@ -452,6 +478,10 @@ function main(argv: ReadonlyArray<string>): void {
       options.pushRemote,
       `+refs/heads/lastcode/main:refs/remotes/${options.pushRemote}/lastcode/main`,
     ]);
+  }
+
+  if (options.pushTags && !options.dryRun) {
+    pruneUnpublishedCheckpointTags(repoRoot, options.pushRemote);
   }
 
   const sourceCommit = git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]);

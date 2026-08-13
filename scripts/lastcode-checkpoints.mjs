@@ -10,6 +10,7 @@ const DEFAULT_COUNT = 8;
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const BUILD_PREFIX = "lastcode/build/";
 const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
+const REMOTE_PROBE_TIMEOUT_MS = 3_000;
 
 const ansiEnabled =
   process.stdout.isTTY && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb";
@@ -170,15 +171,43 @@ export function checkpointTagsWithoutUnpublishedFailures(tags, publishedTags, re
   });
 }
 
-function publishedCheckpointTags(repoRoot) {
-  return splitLines(
-    git(repoRoot, ["ls-remote", "--tags", "origin", `refs/tags/${CHECKPOINT_PREFIX}v*-nightly.*`], {
-      allowFailure: true,
-    }),
-  )
-    .map((line) => line.split(/\s+/)[1])
-    .filter((ref) => ref?.startsWith("refs/tags/") && !ref.endsWith("^{}"))
-    .map((ref) => ref.slice("refs/tags/".length));
+export function parseRemotePublicationState(output) {
+  let remoteMain;
+  const publishedTags = [];
+  for (const line of splitLines(output)) {
+    const [commit, ref] = line.split(/\s+/);
+    if (ref === "refs/heads/lastcode/main") remoteMain = commit;
+    else if (ref?.startsWith("refs/tags/") && !ref.endsWith("^{}")) {
+      publishedTags.push(ref.slice("refs/tags/".length));
+    }
+  }
+  return { publishedTags, remoteMain };
+}
+
+function remotePublicationState(repoRoot) {
+  const cachedRemoteMain = git(repoRoot, ["rev-parse", "refs/remotes/origin/lastcode/main"], {
+    allowFailure: true,
+  });
+  const result = NodeChildProcess.spawnSync(
+    "git",
+    [
+      "ls-remote",
+      "origin",
+      "refs/heads/lastcode/main",
+      `refs/tags/${CHECKPOINT_PREFIX}v*-nightly.*`,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: REMOTE_PROBE_TIMEOUT_MS,
+    },
+  );
+  if (result.error || result.status !== 0) {
+    return { publishedTags: [], remoteMain: cachedRemoteMain };
+  }
+  const remote = parseRemotePublicationState(result.stdout);
+  return { ...remote, remoteMain: remote.remoteMain ?? cachedRemoteMain };
 }
 
 function resolveConfiguredRepo(home, override) {
@@ -272,23 +301,20 @@ function latestBuildNumbers(tags) {
   return latestByUpstreamTag;
 }
 
-function checkpointRows(repoRoot, home, count, publishedTags) {
+function checkpointRows(repoRoot, home, count, remoteState) {
   const runs = readRuns(home);
   const allCheckpointTags = splitLines(
     git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
   );
   const checkpointTags = checkpointTagsWithoutUnpublishedFailures(
     allCheckpointTags,
-    publishedTags,
+    remoteState.publishedTags,
     runs,
   );
   const selectedCheckpointTags = selectCheckpointTags(checkpointTags, count);
   const buildNumbers = latestBuildNumbers(
     splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`])),
   );
-  const remoteMain = git(repoRoot, ["rev-parse", "refs/remotes/origin/lastcode/main"], {
-    allowFailure: true,
-  });
   const successes = selectedCheckpointTags.map((checkpointTag) => {
     const upstreamTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
     const contents = git(repoRoot, [
@@ -315,22 +341,24 @@ function checkpointRows(repoRoot, home, count, publishedTags) {
       finishedAt: trailers["Finished-At"] ?? trailers["Created-At"] ?? taggerDate,
       durationMs: Number(trailers["Duration-Ms"]),
       checkpoint: commit.slice(0, 9),
-      main: commit === remoteMain ? "yes" : "—",
+      main: commit === remoteState.remoteMain ? "yes" : "—",
       build: build === undefined ? "—" : `#${build}`,
     };
   });
-  const failures = failedRunsWithoutPublishedTags(publishedTags, runs).map((record) => ({
-    status: "failed",
-    upstreamTag: record.upstreamTag,
-    commitsRebased: Number(record.commitsRebased),
-    finishedAt: record.finishedAt,
-    durationMs: Number(record.durationMs),
-    checkpoint: "—",
-    main: "—",
-    build: "—",
-    error: record.error,
-    recoveryBranch: record.recoveryBranch,
-  }));
+  const failures = failedRunsWithoutPublishedTags(remoteState.publishedTags, runs).map(
+    (record) => ({
+      status: "failed",
+      upstreamTag: record.upstreamTag,
+      commitsRebased: Number(record.commitsRebased),
+      finishedAt: record.finishedAt,
+      durationMs: Number(record.durationMs),
+      checkpoint: "—",
+      main: "—",
+      build: "—",
+      error: record.error,
+      recoveryBranch: record.recoveryBranch,
+    }),
+  );
   return [...successes, ...failures].sort(
     (left, right) => new Date(right.finishedAt).getTime() - new Date(left.finishedAt).getTime(),
   );
@@ -357,8 +385,8 @@ function daemonSummary() {
 }
 
 function printDashboard(repoRoot, home, count) {
-  const publishedTags = publishedCheckpointTags(repoRoot);
-  const rows = checkpointRows(repoRoot, home, count, publishedTags).slice(0, count);
+  const remoteState = remotePublicationState(repoRoot);
+  const rows = checkpointRows(repoRoot, home, count, remoteState).slice(0, count);
   const columns = [
     { key: "status", label: "STATUS", value: (row) => (row.status === "success" ? "✓" : "✗") },
     { key: "upstreamTag", label: "UPSTREAM NIGHTLY", value: (row) => row.upstreamTag },
@@ -410,7 +438,7 @@ function printDashboard(repoRoot, home, count) {
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
   const latestCheckpoint = checkpointTagsWithoutUnpublishedFailures(
     splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
-    publishedTags,
+    remoteState.publishedTags,
     readRuns(home),
   )
     .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))

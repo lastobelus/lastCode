@@ -6,6 +6,7 @@ import {
   checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
+  unpublishedCheckpointTags,
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
@@ -75,6 +76,16 @@ it("cleans up publication failures but retains recovery state for earlier failur
   assert.deepStrictEqual(
     checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1", false),
     { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
+});
+
+it("retries checkpoint tags that are local but not published", () => {
+  assert.deepStrictEqual(
+    unpublishedCheckpointTags(
+      ["lastcode/checkpoint/v1", "lastcode/checkpoint/v2"],
+      "abc\trefs/tags/lastcode/checkpoint/v1\ndef\trefs/tags/lastcode/checkpoint/v1^{}\n",
+    ),
+    ["lastcode/checkpoint/v2"],
   );
 });
 
