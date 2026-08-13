@@ -469,6 +469,7 @@ function main(argv: ReadonlyArray<string>): void {
   let candidateCommit = git(repoRoot, ["rev-parse", `${candidateRef}^{commit}`]);
   if (plan.bootstrapCheckpoint) {
     const startedAtMs = Date.now();
+    let pendingCheckpointTag: string | undefined;
     const commitsRebased = Number(
       git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
     );
@@ -487,7 +488,9 @@ function main(argv: ReadonlyArray<string>): void {
         options.sourceRef,
         timing,
       );
+      pendingCheckpointTag = checkpointTag;
       if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,
         status: "success",
@@ -497,6 +500,9 @@ function main(argv: ReadonlyArray<string>): void {
         checkpointTag,
       });
     } catch (error) {
+      if (pendingCheckpointTag) {
+        git(repoRoot, ["tag", "--delete", pendingCheckpointTag], { allowFailure: true });
+      }
       const finishedAtMs = Date.now();
       appendCheckpointRun(
         checkpointFailureRecord(
@@ -535,6 +541,7 @@ function main(argv: ReadonlyArray<string>): void {
 
   run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
   let completed = false;
+  let pendingCheckpointTag: string | undefined;
   let attempt:
     | {
         readonly commitsRebased: number;
@@ -575,7 +582,9 @@ function main(argv: ReadonlyArray<string>): void {
         options.sourceRef,
         timing,
       );
+      pendingCheckpointTag = checkpointTag;
       if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,
         status: "success",
@@ -591,6 +600,9 @@ function main(argv: ReadonlyArray<string>): void {
     }
     completed = true;
   } catch (error) {
+    if (pendingCheckpointTag) {
+      git(repoRoot, ["tag", "--delete", pendingCheckpointTag], { allowFailure: true });
+    }
     if (attempt) {
       const finishedAtMs = Date.now();
       appendCheckpointRun(

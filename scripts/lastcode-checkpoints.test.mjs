@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  checkpointTagsWithoutFailedRuns,
   checkpointFreshness,
   formatDuration,
   parseOptions,
@@ -67,5 +68,19 @@ describe("LastCode checkpoint dashboard", () => {
       ),
     ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-automation");
     expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+  });
+
+  it("does not show a locally retained tag as successful after its run failed", () => {
+    const failedTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
+    const successfulTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.1";
+    expect(
+      checkpointTagsWithoutFailedRuns(
+        [successfulTag, failedTag],
+        [
+          { upstreamTag: "v0.0.1-nightly.20260812.2", status: "success" },
+          { upstreamTag: "v0.0.1-nightly.20260812.2", status: "failed" },
+        ],
+      ),
+    ).toEqual([successfulTag]);
   });
 });

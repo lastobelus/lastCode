@@ -128,7 +128,7 @@ function formatFinished(value) {
   }).format(date);
 }
 
-function readFailures(home) {
+function readRuns(home) {
   const historyPath = NodePath.join(home, ".lastcode", "automation", "checkpoint-runs.jsonl");
   if (!NodeFS.existsSync(historyPath)) return [];
   return NodeFS.readFileSync(historyPath, "utf8")
@@ -137,11 +137,33 @@ function readFailures(home) {
     .flatMap((line) => {
       try {
         const record = JSON.parse(line);
-        return record.schemaVersion === 1 && record.status === "failed" ? [record] : [];
+        return record.schemaVersion === 1 && ["failed", "success"].includes(record.status)
+          ? [record]
+          : [];
       } catch {
         return [];
       }
     });
+}
+
+export function latestRunsByUpstreamTag(records) {
+  const latest = new Map();
+  for (const record of records) latest.set(record.upstreamTag, record);
+  return latest;
+}
+
+export function checkpointTagsWithoutFailedRuns(tags, records) {
+  const latestRuns = latestRunsByUpstreamTag(records);
+  return tags.filter(
+    (tag) => latestRuns.get(tag.slice(CHECKPOINT_PREFIX.length))?.status !== "failed",
+  );
+}
+
+function usableCheckpointTags(repoRoot, home) {
+  return checkpointTagsWithoutFailedRuns(
+    splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
+    readRuns(home),
+  );
 }
 
 function resolveConfiguredRepo(home, override) {
@@ -236,8 +258,10 @@ function latestBuildNumbers(tags) {
 }
 
 function checkpointRows(repoRoot, home, count) {
-  const checkpointTags = splitLines(
-    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
+  const runs = readRuns(home);
+  const checkpointTags = checkpointTagsWithoutFailedRuns(
+    splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
+    runs,
   );
   const selectedCheckpointTags = selectCheckpointTags(checkpointTags, count);
   const buildNumbers = latestBuildNumbers(
@@ -276,18 +300,20 @@ function checkpointRows(repoRoot, home, count) {
       build: build === undefined ? "—" : `#${build}`,
     };
   });
-  const failures = readFailures(home).map((record) => ({
-    status: "failed",
-    upstreamTag: record.upstreamTag,
-    commitsRebased: Number(record.commitsRebased),
-    finishedAt: record.finishedAt,
-    durationMs: Number(record.durationMs),
-    checkpoint: "—",
-    main: "—",
-    build: "—",
-    error: record.error,
-    recoveryBranch: record.recoveryBranch,
-  }));
+  const failures = [...latestRunsByUpstreamTag(runs).values()]
+    .filter((record) => record.status === "failed")
+    .map((record) => ({
+      status: "failed",
+      upstreamTag: record.upstreamTag,
+      commitsRebased: Number(record.commitsRebased),
+      finishedAt: record.finishedAt,
+      durationMs: Number(record.durationMs),
+      checkpoint: "—",
+      main: "—",
+      build: "—",
+      error: record.error,
+      recoveryBranch: record.recoveryBranch,
+    }));
   return [...successes, ...failures].sort(
     (left, right) => new Date(right.finishedAt).getTime() - new Date(left.finishedAt).getTime(),
   );
@@ -364,9 +390,7 @@ function printDashboard(repoRoot, home, count) {
     (left, right) => compareNightlies(right, left),
   );
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
-  const latestCheckpoint = splitLines(
-    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
-  )
+  const latestCheckpoint = usableCheckpointTags(repoRoot, home)
     .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))
     .sort((left, right) => compareNightlies(right, left))
     .at(0);
