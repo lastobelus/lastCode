@@ -5,6 +5,8 @@ import {
   formatDuration,
   parseOptions,
   parseTrailers,
+  renderLauncher,
+  selectAutomationWorktree,
   selectCheckpointTags,
 } from "./lastcode-checkpoints.mjs";
 
@@ -50,5 +52,20 @@ describe("LastCode checkpoint dashboard", () => {
     expect(checkpointFreshness("v0.0.1-nightly.20260812.1", "v0.0.1-nightly.20260812.1")).toBe(
       "Up to date",
     );
+  });
+
+  it("launches the installed dashboard with the repository's pinned Node runtime", () => {
+    expect(renderLauncher("/tmp/Last Code/checkpoints.mjs")).toContain(
+      "mise exec node@24.13.1 -- node '/tmp/Last Code/checkpoints.mjs' \"$@\"",
+    );
+  });
+
+  it("requires the dedicated automation worktree for a durable installation", () => {
+    expect(
+      selectAutomationWorktree(
+        "worktree /Users/lasto/projects/lastCode\n\nworktree /Users/lasto/projects/lastCode-worktrees/lastcode-automation\n",
+      ),
+    ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-automation");
+    expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
   });
 });

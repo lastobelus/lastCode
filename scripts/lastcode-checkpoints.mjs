@@ -155,27 +155,47 @@ function resolveConfiguredRepo(home, override) {
   return git(process.cwd(), ["rev-parse", "--show-toplevel"]);
 }
 
-function findAutomationWorktree(repoRoot) {
-  const worktrees = git(repoRoot, ["worktree", "list", "--porcelain"])
+export function selectAutomationWorktree(worktreeList) {
+  const worktrees = worktreeList
     .split(/\r?\n/)
     .filter((line) => line.startsWith("worktree "))
     .map((line) => line.slice("worktree ".length));
-  return worktrees.find((path) => NodePath.basename(path) === "lastcode-automation") ?? repoRoot;
+  return worktrees.find((path) => NodePath.basename(path) === "lastcode-automation");
+}
+
+function findAutomationWorktree(repoRoot) {
+  return selectAutomationWorktree(git(repoRoot, ["worktree", "list", "--porcelain"]));
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+export function renderLauncher(modulePath) {
+  return `#!/bin/sh\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 function installCommand(repoRoot, home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const target = NodePath.join(binDirectory, "lastcode-checkpoints");
+  const moduleTarget = NodePath.join(binDirectory, "lastcode-checkpoints.mjs");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-checkpoints");
   const configPath = NodePath.join(home, ".lastcode", "dashboard.json");
+  const automationWorktree = findAutomationWorktree(repoRoot);
+  if (!automationWorktree) {
+    throw new Error(
+      "LastCode automation worktree is not installed. Run pnpm lastcode:checkpoint:service install first.",
+    );
+  }
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
-  NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), target);
+  NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
+  NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
   NodeFS.writeFileSync(
     configPath,
-    `${JSON.stringify({ repoRoot: findAutomationWorktree(repoRoot) }, undefined, 2)}\n`,
+    `${JSON.stringify({ repoRoot: automationWorktree }, undefined, 2)}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
   if (NodeFS.existsSync(exposed) || NodeFS.lstatSync(exposed, { throwIfNoEntry: false })) {
@@ -186,7 +206,7 @@ function installCommand(repoRoot, home) {
     NodeFS.unlinkSync(exposed);
   }
   NodeFS.symlinkSync(target, exposed);
-  console.log(`Installed ${target}`);
+  console.log(`Installed ${target} with the pinned Node 24 runtime`);
   console.log(`Exposed on PATH as ${exposed}`);
 }
 

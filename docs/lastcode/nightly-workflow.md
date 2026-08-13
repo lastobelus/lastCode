@@ -119,9 +119,11 @@ pnpm lastcode:checkpoint:service uninstall
 
 ### Checkpoint dashboard
 
-Install the checkpoint dashboard as a user command:
+Install the launch agent first so its dedicated automation worktree exists, then
+install the checkpoint dashboard as a user command:
 
 ```bash
+pnpm lastcode:checkpoint:service install
 pnpm lastcode:checkpoints --install
 ```
 
@@ -129,7 +131,9 @@ The installer puts the executable at `~/.lastcode/bin/lastcode-checkpoints`
 and exposes it through the existing `~/.local/bin` PATH directory. It records
 the dedicated automation worktree in `~/.lastcode/dashboard.json`, so the
 command works from any directory without depending on a human development
-worktree.
+worktree. Installation fails instead of recording the current checkout when the
+automation worktree is missing. The installed launcher uses the repository's
+pinned Node 24 runtime through `mise`, independent of the shell's default Node.
 
 Show the latest eight checkpoint activities, or choose another count:
 
