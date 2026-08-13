@@ -15,6 +15,31 @@ Every push runs the quick gate through `.vite-hooks/pre-push`:
 pnpm lastcode:ci:quick
 ```
 
+### Repository integrity guards
+
+Local CI has three independent Git-safety boundaries:
+
+1. The pre-push hook clears every repository-local environment variable listed
+   by `git rev-parse --local-env-vars` before invoking the package runner. This
+   prevents Git's hook-only `GIT_DIR`, `GIT_WORK_TREE`, index, object, shallow,
+   and replacement-ref paths from leaking into nested commands.
+2. Every child process started by the LastCode CI runner receives the same
+   repository-local environment cleanup. Repository tests also receive a
+   disposable global Git config, so fixture identities and defaults cannot be
+   written into the shared repository config.
+3. Before quick or full CI starts, the runner requires `core.bare=false` in the
+   shared Git config and snapshots that config byte-for-byte. It checks the
+   value, config contents, and common Git directory again on every exit,
+   including failed CI runs. Any change fails the gate with the config path to
+   inspect.
+
+These guards protect the primary checkout and every linked worktree, which all
+share the same Git config. They specifically prevent temporary-repository tests
+from reinitializing or reconfiguring the real repository when CI is launched by
+a Git hook. They do not automatically repair an integrity failure: stop, inspect
+the reported config and worktree state, and preserve evidence before changing
+anything.
+
 Before merging a LastCode PR, run the full gate from a clean feature branch:
 
 ```bash
