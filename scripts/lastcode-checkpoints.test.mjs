@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  checkpointTagsWithoutRecoveryFailures,
+  checkpointTagsWithoutUnpublishedFailures,
   checkpointFreshness,
-  failedRunsWithoutCheckpointTags,
+  failedRunsWithoutPublishedTags,
   formatDuration,
   parseOptions,
   parseTrailers,
@@ -77,8 +77,8 @@ describe("LastCode checkpoint dashboard", () => {
       upstreamTag: "v0.0.1-nightly.20260812.2",
       status: "failed",
     };
-    expect(failedRunsWithoutCheckpointTags([publishedTag], [failedRecord])).toEqual([]);
-    expect(failedRunsWithoutCheckpointTags([], [failedRecord])).toEqual([failedRecord]);
+    expect(failedRunsWithoutPublishedTags([publishedTag], [failedRecord])).toEqual([]);
+    expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
   });
 
   it("keeps a tag with retained recovery state in the failed state", () => {
@@ -89,7 +89,9 @@ describe("LastCode checkpoint dashboard", () => {
       localTagRetained: true,
       recoveryBranch: "sync/nightly/v0.0.1-nightly.20260812.2",
     };
-    expect(checkpointTagsWithoutRecoveryFailures([tag], [failedRecord])).toEqual([]);
-    expect(failedRunsWithoutCheckpointTags([tag], [failedRecord])).toEqual([failedRecord]);
+    expect(checkpointTagsWithoutUnpublishedFailures([tag], [], [failedRecord])).toEqual([]);
+    expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
+    expect(checkpointTagsWithoutUnpublishedFailures([tag], [tag], [failedRecord])).toEqual([tag]);
+    expect(failedRunsWithoutPublishedTags([tag], [failedRecord])).toEqual([]);
   });
 });

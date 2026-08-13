@@ -162,7 +162,10 @@ when a worktree exists), preventing that local tag from being displayed as a
 published checkpoint.
 A checkpoint tag fetched from the fork is authoritative over a failed local run
 record: this reconciles the case where the remote accepted a push but the client
-lost its acknowledgement.
+lost its acknowledgement or an operator manually completed recovery. The
+dashboard verifies checkpoint publication against `origin`; while offline, an
+unconfirmed local tag with a failed run remains failed rather than being shown
+as current.
 
 Interactive output uses the amber, ice, pacific, lavender, success, warning,
 and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,
