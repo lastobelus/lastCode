@@ -3,6 +3,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointTagPushArgs,
   checkpointVpPaths,
   promotionNeeded,
   resolveCheckpointPlan,
@@ -38,6 +39,20 @@ it("bootstraps dependencies with the invoking worktree runner before using the i
     bootstrap: "/tmp/automation/node_modules/.bin/vp",
     isolated: "/tmp/sync/node_modules/.bin/vp",
   });
+});
+
+it("publishes smoke-validated checkpoint tags without rerunning the generic pre-push gate", () => {
+  assert.deepStrictEqual(
+    checkpointTagPushArgs("origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8", true),
+    ["push", "--no-verify", "origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8"],
+  );
+});
+
+it("retains the generic pre-push gate when checkpoint smoke did not run", () => {
+  assert.deepStrictEqual(
+    checkpointTagPushArgs("origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8", false),
+    ["push", "origin", "lastcode/checkpoint/v1.2.3-nightly.20260812.8"],
+  );
 });
 
 it("records dashboard metadata in annotated checkpoint tags", () => {

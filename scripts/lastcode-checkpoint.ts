@@ -203,6 +203,16 @@ export function checkpointVpPaths(repoRoot: string, worktree: string) {
   };
 }
 
+export function checkpointTagPushArgs(
+  pushRemote: string,
+  checkpointTag: string,
+  smokeValidated: boolean,
+): ReadonlyArray<string> {
+  return smokeValidated
+    ? ["push", "--no-verify", pushRemote, checkpointTag]
+    : ["push", pushRemote, checkpointTag];
+}
+
 export function promotionNeeded(remoteCommit: string, checkpointCommit: string): boolean {
   return remoteCommit !== checkpointCommit;
 }
@@ -538,7 +548,9 @@ function main(argv: ReadonlyArray<string>): void {
         timing,
       );
       pendingCheckpointTag = checkpointTag;
-      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      if (options.pushTags) {
+        run(repoRoot, "git", checkpointTagPushArgs(options.pushRemote, checkpointTag, false));
+      }
       pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,
@@ -633,7 +645,13 @@ function main(argv: ReadonlyArray<string>): void {
         timing,
       );
       pendingCheckpointTag = checkpointTag;
-      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      if (options.pushTags) {
+        run(
+          repoRoot,
+          "git",
+          checkpointTagPushArgs(options.pushRemote, checkpointTag, options.smoke),
+        );
+      }
       pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,

@@ -9,11 +9,16 @@ Nightly source tracking is documented separately in
 
 ## Pull Request CI
 
-Every push runs the quick gate through `.vite-hooks/pre-push`:
+Ordinary branch pushes run the quick gate through `.vite-hooks/pre-push`:
 
 ```bash
 pnpm lastcode:ci:quick
 ```
+
+The checkpoint runner is the narrow exception: after an immutable checkpoint
+commit passes its dedicated smoke gate, its tag is pushed with `--no-verify` so
+catch-up does not rerun the entire workspace suite for every tag. Promotion of
+`lastcode/main` still runs the quick pre-push gate.
 
 ### Repository integrity guards
 
