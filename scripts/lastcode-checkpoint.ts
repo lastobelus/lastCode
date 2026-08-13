@@ -203,6 +203,28 @@ export function checkpointVpPaths(repoRoot: string, worktree: string) {
   };
 }
 
+export function checkpointTagPushArgs(
+  pushRemote: string,
+  checkpointTag: string,
+  validation:
+    | { readonly kind: "smoke" }
+    | {
+        readonly candidateCommit: string;
+        readonly checkoutHead: string;
+        readonly kind: "pre-push";
+      },
+): ReadonlyArray<string> {
+  if (validation.kind === "smoke") {
+    return ["push", "--no-verify", pushRemote, checkpointTag];
+  }
+  if (validation.candidateCommit !== validation.checkoutHead) {
+    throw new Error(
+      `Refusing to publish ${checkpointTag}: the pre-push hook would validate ${validation.checkoutHead}, not checkpoint commit ${validation.candidateCommit}. Run with checkpoint smoke enabled.`,
+    );
+  }
+  return ["push", pushRemote, checkpointTag];
+}
+
 export function promotionNeeded(remoteCommit: string, checkpointCommit: string): boolean {
   return remoteCommit !== checkpointCommit;
 }
@@ -538,7 +560,17 @@ function main(argv: ReadonlyArray<string>): void {
         timing,
       );
       pendingCheckpointTag = checkpointTag;
-      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      if (options.pushTags) {
+        run(
+          repoRoot,
+          "git",
+          checkpointTagPushArgs(options.pushRemote, checkpointTag, {
+            kind: "pre-push",
+            candidateCommit,
+            checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]),
+          }),
+        );
+      }
       pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,
@@ -633,7 +665,23 @@ function main(argv: ReadonlyArray<string>): void {
         timing,
       );
       pendingCheckpointTag = checkpointTag;
-      if (options.pushTags) run(repoRoot, "git", ["push", options.pushRemote, checkpointTag]);
+      if (options.pushTags) {
+        run(
+          repoRoot,
+          "git",
+          checkpointTagPushArgs(
+            options.pushRemote,
+            checkpointTag,
+            options.smoke
+              ? { kind: "smoke" }
+              : {
+                  kind: "pre-push",
+                  candidateCommit,
+                  checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]),
+                },
+          ),
+        );
+      }
       pendingCheckpointTag = undefined;
       appendCheckpointRun({
         schemaVersion: 1,
