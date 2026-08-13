@@ -11,8 +11,9 @@ be checkpointed, while only selected checkpoints need full local CI and a build.
   scheduling, recovery, and provenance.
 - [Release workflow](release.md): local CI, PR merging, ad-hoc signing, builds,
   and runtime isolation.
-- [Fork conventions](fork-conventions.md): remotes, branch intent, upstream pull
-  requests, alternate forks, and evaluation tags.
+- [Contribution and fork conventions](fork-conventions.md): the two workstreams,
+  contribution bases, paired upstream/LastCode changes, remotes, branches, and
+  evaluation tags.
 
 ## Command Summary
 
