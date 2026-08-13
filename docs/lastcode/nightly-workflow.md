@@ -64,6 +64,14 @@ The smoke gate checks fork identity invariants, `git diff --check`, focused
 LastCode tests, desktop protocol tests, and the scripts workspace typecheck. It
 is intentionally smaller than the full build gate.
 
+Checkpoint-tag publication uses `git push --no-verify` after that dedicated
+smoke gate passes. This avoids rerunning the generic repository-wide pre-push
+gate for every immutable tag while catching up across multiple nightlies.
+Ordinary branch pushes and promotion of `lastcode/main` still run the pre-push
+quick gate. If checkpoint smoke is disabled, tag publication is allowed only
+when the invoking checkout is already at the checkpoint commit, so that fallback
+gate cannot validate the wrong revision.
+
 ### Promotion and open PRs
 
 `--promote-if-no-open-prs` keeps `lastcode/main` stable while any PR targeting it
