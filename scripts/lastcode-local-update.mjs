@@ -11,6 +11,33 @@ import * as NodePath from "node:path";
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 
+export function resolveDeterministicBuildEnvironment(environment = process.env) {
+  return { ...environment, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
+}
+
+export function resolveLocalBuildEnvironment(worktreePath, environment = process.env) {
+  const resolved = resolveDeterministicBuildEnvironment(environment);
+  return {
+    ...resolved,
+    PATH: `${NodePath.join(worktreePath, "node_modules", ".bin")}${NodePath.delimiter}${resolved.PATH ?? ""}`,
+  };
+}
+
+export function isReusableCheckpointCiStamp(
+  stamp,
+  checkpointTag,
+  checkpointCommit,
+  upstreamCommit,
+) {
+  return (
+    stamp?.schemaVersion === 2 &&
+    stamp.commit === checkpointCommit &&
+    stamp.context?.kind === "checkpoint" &&
+    stamp.context.checkpointTag === checkpointTag &&
+    stamp.context.upstreamCommit === upstreamCommit
+  );
+}
+
 function run(cwd, command, args, options = {}) {
   const result = NodeChildProcess.spawnSync(command, args, {
     cwd,
@@ -270,6 +297,7 @@ function build(options) {
     }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
+    const buildEnvironment = resolveLocalBuildEnvironment(worktreePath);
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
@@ -277,18 +305,42 @@ function build(options) {
     run(worktreePath, installer, ["install", "--frozen-lockfile"], { logFd });
     const mise = resolveMise(options.home);
     const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
-    run(
-      worktreePath,
-      mise,
-      [
-        ...nodeCommand,
-        "scripts/lastcode-local-ci.ts",
-        "--full",
-        "--checkpoint",
-        options.checkpointTag,
-      ],
-      { logFd },
+    const nightlyTag = options.checkpointTag.slice(CHECKPOINT_PREFIX.length);
+    const upstreamCommit = git(options.repoRoot, ["rev-parse", `${nightlyTag}^{commit}`]);
+    const commonGitDirectory = NodePath.resolve(
+      options.repoRoot,
+      git(options.repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     );
+    const stampPath = NodePath.join(commonGitDirectory, "lastcode-ci", `${checkpointCommit}.json`);
+    let reusableCiStamp = false;
+    if (NodeFS.existsSync(stampPath)) {
+      try {
+        reusableCiStamp = isReusableCheckpointCiStamp(
+          JSON.parse(NodeFS.readFileSync(stampPath, "utf8")),
+          options.checkpointTag,
+          checkpointCommit,
+          upstreamCommit,
+        );
+      } catch {
+        reusableCiStamp = false;
+      }
+    }
+    if (reusableCiStamp) {
+      NodeFS.writeSync(logFd, `Reusing full local CI stamp: ${stampPath}\n`);
+    } else {
+      run(
+        worktreePath,
+        mise,
+        [
+          ...nodeCommand,
+          "scripts/lastcode-local-ci.ts",
+          "--full",
+          "--checkpoint",
+          options.checkpointTag,
+        ],
+        { logFd, env: buildEnvironment },
+      );
+    }
     run(
       worktreePath,
       mise,
@@ -300,7 +352,7 @@ function build(options) {
         "--output-root",
         outputRoot,
       ],
-      { logFd },
+      { logFd, env: buildEnvironment },
     );
   } catch (error) {
     throw new Error(

@@ -5,9 +5,47 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import * as NodeUtil from "node:util";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
+const LOG_POLL_INTERVAL_MS = 400;
+
+export const BUILD_PHASES = [
+  { marker: "Building lastcode/checkpoint/", start: 0, estimateMs: 10_000 },
+  { marker: "Preparing worktree", start: 0.01, estimateMs: 20_000 },
+  { marker: "Scope: all", start: 0.03, estimateMs: 45_000 },
+  { marker: "Done in", start: 0.08, estimateMs: 5_000 },
+  { marker: "[lastcode:ci] 1/11", start: 0.09, estimateMs: 5_000 },
+  { marker: "[lastcode:ci] 2/11", start: 0.1, estimateMs: 30_000 },
+  { marker: "[lastcode:ci] 3/11", start: 0.14, estimateMs: 50_000 },
+  { marker: "[lastcode:ci] 4/11", start: 0.2, estimateMs: 300_000 },
+  { marker: "[lastcode:ci] 5/11", start: 0.35, estimateMs: 10_000 },
+  { marker: "[lastcode:ci] 6/11", start: 0.36, estimateMs: 120_000 },
+  { marker: "[lastcode:ci] 7/11", start: 0.49, estimateMs: 5_000 },
+  { marker: "[lastcode:ci] 8/11", start: 0.5, estimateMs: 60_000 },
+  { marker: "[lastcode:ci] 9/11", start: 0.55, estimateMs: 5_000 },
+  { marker: "[lastcode:ci] 10/11", start: 0.56, estimateMs: 90_000 },
+  { marker: "[lastcode:ci] 11/11", start: 0.64, estimateMs: 120_000 },
+  { marker: "[lastcode:ci] Full local CI passed", start: 0.75, estimateMs: 5_000 },
+  { marker: "Reusing full local CI stamp", start: 0.75, estimateMs: 5_000 },
+  { marker: "[lastcode:build] Building", start: 0.76, estimateMs: 10_000 },
+  {
+    marker: "[desktop-artifact] Building desktop/server/web artifacts",
+    start: 0.78,
+    estimateMs: 35_000,
+  },
+  { marker: "web client branding", start: 0.84, estimateMs: 10_000 },
+  { marker: "[desktop-artifact] Staging release app", start: 0.86, estimateMs: 15_000 },
+  {
+    marker: "[desktop-artifact] Installing staged production dependencies",
+    start: 0.88,
+    estimateMs: 12_000,
+  },
+  { marker: "[desktop-artifact] Building mac/dmg", start: 0.94, estimateMs: 110_000 },
+  { marker: "[desktop-artifact] Done. Artifacts", start: 0.99, estimateMs: 10_000 },
+  { marker: "[lastcode:build] Created", start: 0.995, estimateMs: 5_000 },
+];
 
 const ansiEnabled =
   process.stdout.isTTY && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb";
@@ -23,6 +61,120 @@ const ansi = {
 
 function style(code, value) {
   return ansiEnabled ? `${code}${value}${ansi.reset}` : value;
+}
+
+export function resolveBuildPhaseIndex(logChunk, currentIndex = 0) {
+  let resolved = currentIndex;
+  for (let index = currentIndex; index < BUILD_PHASES.length; index += 1) {
+    if (logChunk.includes(BUILD_PHASES[index].marker)) resolved = index;
+  }
+  return resolved;
+}
+
+export function estimateBuildProgress(phaseIndex, elapsedMs) {
+  const phase = BUILD_PHASES[phaseIndex] ?? BUILD_PHASES[0];
+  const nextStart = BUILD_PHASES[phaseIndex + 1]?.start ?? 1;
+  const phaseFraction = Math.min(0.95, Math.max(0, elapsedMs) / phase.estimateMs);
+  return phase.start + (nextStart - phase.start) * phaseFraction;
+}
+
+export function renderProgressBar(progress, width = 44) {
+  const bounded = Math.min(1, Math.max(0, progress));
+  const filled = Math.round(bounded * width);
+  return `<${"=".repeat(filled)}${"-".repeat(width - filled)}> ${String(Math.round(bounded * 100)).padStart(3)}% est.`;
+}
+
+export function sanitizeLogLine(value, width = 80) {
+  const normalized = NodeUtil.stripVTControlCharacters(value).replaceAll(/\s+/g, " ").trim();
+  if (normalized.length <= width) return normalized;
+  return `${normalized.slice(0, Math.max(1, width - 1))}…`;
+}
+
+class BuildProgressDisplay {
+  constructor(logPath) {
+    this.logPath = logPath;
+    this.offset = NodeFS.existsSync(logPath) ? NodeFS.statSync(logPath).size : 0;
+    this.phaseIndex = 0;
+    this.phaseStartedAt = Date.now();
+    this.lastLine = "Starting local build…";
+    this.scanCarry = "";
+    this.rendered = false;
+    this.lastNonTtyPhase = -1;
+  }
+
+  readNewLog() {
+    if (!NodeFS.existsSync(this.logPath)) return;
+    const size = NodeFS.statSync(this.logPath).size;
+    if (size < this.offset) this.offset = 0;
+    if (size === this.offset) return;
+    const maximumRead = 2 * 1024 * 1024;
+    const position = Math.max(this.offset, size - maximumRead);
+    const length = size - position;
+    const buffer = Buffer.alloc(length);
+    const descriptor = NodeFS.openSync(this.logPath, "r");
+    try {
+      NodeFS.readSync(descriptor, buffer, 0, length, position);
+    } finally {
+      NodeFS.closeSync(descriptor);
+    }
+    this.offset = size;
+    const chunk = buffer.toString("utf8");
+    const scanText = `${this.scanCarry}${NodeUtil.stripVTControlCharacters(chunk)}`;
+    this.scanCarry = scanText.slice(-256);
+    const resolvedPhase = resolveBuildPhaseIndex(scanText, this.phaseIndex);
+    if (resolvedPhase !== this.phaseIndex) {
+      this.phaseIndex = resolvedPhase;
+      this.phaseStartedAt = Date.now();
+    }
+    const lines = chunk.replaceAll("\r", "\n").split("\n");
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = sanitizeLogLine(lines[index], Math.max(30, (process.stdout.columns ?? 80) - 1));
+      if (line) {
+        this.lastLine = line;
+        break;
+      }
+    }
+  }
+
+  progress() {
+    return estimateBuildProgress(this.phaseIndex, Date.now() - this.phaseStartedAt);
+  }
+
+  render() {
+    this.readNewLog();
+    const progress = this.progress();
+    if (!process.stdout.isTTY) {
+      if (this.lastNonTtyPhase !== this.phaseIndex) {
+        console.log(`[${Math.round(progress * 100)}% est.] ${this.lastLine}`);
+        this.lastNonTtyPhase = this.phaseIndex;
+      }
+      return;
+    }
+    const terminalWidth = process.stdout.columns ?? 80;
+    const barWidth = Math.max(16, Math.min(52, terminalWidth - 12));
+    const status = sanitizeLogLine(this.lastLine, Math.max(30, terminalWidth - 1));
+    const bar = renderProgressBar(progress, barWidth);
+    if (this.rendered) process.stdout.write("\r\u001b[2K\u001b[1A\r\u001b[2K");
+    process.stdout.write(`${status}\n${bar}`);
+    this.rendered = true;
+  }
+
+  start() {
+    this.render();
+    this.timer = setInterval(() => this.render(), LOG_POLL_INTERVAL_MS);
+  }
+
+  stop(completed) {
+    if (this.timer) clearInterval(this.timer);
+    this.readNewLog();
+    if (completed) {
+      this.phaseIndex = BUILD_PHASES.length - 1;
+      this.phaseStartedAt = Date.now() - BUILD_PHASES.at(-1).estimateMs;
+      this.lastLine = "Build complete";
+    }
+    this.render();
+    if (process.stdout.isTTY && this.rendered) process.stdout.write("\n");
+  }
 }
 
 function shellQuote(value) {
@@ -169,6 +321,7 @@ function installCommand(repoRoot, home) {
   }
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
+  const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const target = NodePath.join(binDirectory, "lastcode-build");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-build");
@@ -177,6 +330,13 @@ function installCommand(repoRoot, home) {
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
   NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
+  NodeFS.copyFileSync(
+    NodePath.join(
+      NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+      "lastcode-local-update.mjs",
+    ),
+    helperTarget,
+  );
   NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
   NodeFS.writeFileSync(
@@ -204,8 +364,11 @@ export function parseBuildResult(stdout) {
   return result;
 }
 
-function buildCheckpoint(repoRoot, home, checkpointTag) {
-  const helperPath = NodePath.join(repoRoot, "scripts", "lastcode-local-update.mjs");
+async function buildCheckpoint(repoRoot, home, checkpointTag) {
+  const helperPath = NodePath.join(
+    NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+    "lastcode-local-update.mjs",
+  );
   if (!NodeFS.existsSync(helperPath)) {
     throw new Error(`Local build helper is missing at ${helperPath}.`);
   }
@@ -215,23 +378,57 @@ function buildCheckpoint(repoRoot, home, checkpointTag) {
   );
   console.log(style(ansi.lavender, `Full CI and packaging logs: ${logPath}`));
 
-  const result = NodeChildProcess.spawnSync(
+  const display = new BuildProgressDisplay(logPath);
+  const child = NodeChildProcess.spawn(
     process.execPath,
     [helperPath, "build", "--repo", repoRoot, "--home", home, "--checkpoint", checkpointTag],
-    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        LANG: "en_US.UTF-8",
+        LC_ALL: "en_US.UTF-8",
+        PATH: `${NodePath.join(repoRoot, "node_modules", ".bin")}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || `Local build failed with exit code ${result.status}.`);
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  display.start();
+  let completed = false;
+  try {
+    const result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (result.code !== 0) {
+      throw new Error(
+        stderr.trim() ||
+          `Local build failed with ${result.signal ? `signal ${result.signal}` : `exit code ${result.code}`}.`,
+      );
+    }
+    const build = parseBuildResult(stdout);
+    const dmg = NodeFS.readdirSync(build.outputDir).find((entry) => entry.endsWith(".dmg"));
+    if (!dmg) throw new Error(`Build completed without a DMG in ${build.outputDir}.`);
+    completed = true;
+    display.stop(true);
+    console.log(style(ansi.green, "Build ready"));
+    console.log(NodePath.join(build.outputDir, dmg));
+  } finally {
+    if (!completed) display.stop(false);
   }
-  const build = parseBuildResult(result.stdout);
-  const dmg = NodeFS.readdirSync(build.outputDir).find((entry) => entry.endsWith(".dmg"));
-  if (!dmg) throw new Error(`Build completed without a DMG in ${build.outputDir}.`);
-  console.log(style(ansi.green, "Build ready"));
-  console.log(NodePath.join(build.outputDir, dmg));
 }
 
-function main(argv) {
+async function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log("Usage: lastcode-build [CHECKPOINT]");
@@ -248,7 +445,7 @@ function main(argv) {
     return;
   }
   const tags = splitLines(runGit(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]));
-  buildCheckpoint(repoRoot, home, resolveCheckpointTag(tags, options.checkpoint));
+  await buildCheckpoint(repoRoot, home, resolveCheckpointTag(tags, options.checkpoint));
 }
 
 if (
@@ -257,7 +454,7 @@ if (
     NodeFS.realpathSync(NodeURL.fileURLToPath(import.meta.url))
 ) {
   try {
-    main(process.argv.slice(2));
+    await main(process.argv.slice(2));
   } catch (error) {
     console.error(
       style(

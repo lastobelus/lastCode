@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  BUILD_PHASES,
+  estimateBuildProgress,
   parseBuildResult,
   parseOptions,
+  renderProgressBar,
   renderLauncher,
+  resolveBuildPhaseIndex,
   resolveCheckpointTag,
+  sanitizeLogLine,
 } from "./lastcode-build.mjs";
 
 const tags = [
@@ -56,6 +61,27 @@ describe("LastCode userland build command", () => {
         'noise\nLASTCODE_LOCAL_UPDATE_RESULT={"schemaVersion":1,"status":"built","outputDir":"/tmp/build"}\n',
       ),
     ).toMatchObject({ status: "built", outputDir: "/tmp/build" });
+  });
+
+  it("advances estimated progress from build log stage markers", () => {
+    const testsPhase = resolveBuildPhaseIndex("[lastcode:ci] 4/11 Workspace tests");
+    expect(BUILD_PHASES[testsPhase].start).toBe(0.2);
+    expect(estimateBuildProgress(testsPhase, 75_000)).toBeGreaterThan(0.2);
+    expect(estimateBuildProgress(testsPhase, 1_000_000)).toBeLessThan(0.35);
+    expect(resolveBuildPhaseIndex("older output", testsPhase)).toBe(testsPhase);
+    expect(
+      resolveBuildPhaseIndex("[desktop-artifact] Building mac/dmg", testsPhase),
+    ).toBeGreaterThan(testsPhase);
+  });
+
+  it("renders a bounded estimated progress bar", () => {
+    expect(renderProgressBar(0.25, 8)).toBe("<==------>  25% est.");
+    expect(renderProgressBar(2, 4)).toBe("<====> 100% est.");
+  });
+
+  it("turns colored, long log output into one terminal-safe status line", () => {
+    expect(sanitizeLogLine("\u001b[32mhello\u001b[0m\tworld", 80)).toBe("hello world");
+    expect(sanitizeLogLine("a very long status line", 10)).toBe("a very lo…");
   });
 
   it("launches with the repository's pinned Node runtime", () => {

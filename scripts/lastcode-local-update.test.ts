@@ -7,15 +7,58 @@ import * as NodeChildProcess from "node:child_process";
 
 import {
   compareNightlyVersions,
+  isReusableCheckpointCiStamp,
   parseNightlyVersion,
   parseOptions,
   prepareBuildWorktree,
   quarantineIncompleteBuild,
+  resolveDeterministicBuildEnvironment,
   resolveExistingBuild,
   resolveLatestCheckpointTag,
+  resolveLocalBuildEnvironment,
 } from "./lastcode-local-update.mjs";
 
 describe("lastcode-local-update", () => {
+  it("uses a deterministic locale for checkpoint validation and packaging", () => {
+    assert.deepInclude(resolveDeterministicBuildEnvironment({ PATH: "/bin" }), {
+      PATH: "/bin",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+    });
+    assert.match(
+      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }).PATH,
+      /^\/tmp\/build tree\/node_modules\/\.bin:/,
+    );
+  });
+
+  it("only reuses a full CI stamp for the exact checkpoint context", () => {
+    const stamp = {
+      schemaVersion: 2,
+      commit: "checkpoint-commit",
+      context: {
+        kind: "checkpoint",
+        checkpointTag: "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
+        upstreamCommit: "upstream-commit",
+      },
+    };
+    assert.isTrue(
+      isReusableCheckpointCiStamp(
+        stamp,
+        "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
+        "checkpoint-commit",
+        "upstream-commit",
+      ),
+    );
+    assert.isFalse(
+      isReusableCheckpointCiStamp(
+        stamp,
+        "lastcode/checkpoint/v0.0.34-nightly.20260814.1091",
+        "checkpoint-commit",
+        "upstream-commit",
+      ),
+    );
+  });
+
   it("orders and selects immutable checkpoint tags", () => {
     assert.deepEqual(
       parseNightlyVersion("0.0.34-nightly.20260814.1089")?.parts,

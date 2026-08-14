@@ -228,7 +228,9 @@ lastcode-build --checkpoint 1090
 `lastcode/checkpoint/*-nightly.*.1090` tag. A full upstream nightly tag or full
 checkpoint tag is also accepted. The command uses the same dedicated worktree,
 full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
-local updater. Completed builds are reused.
+local updater. During a build it shows the latest log line above a stage-weighted
+estimated progress bar; the complete output remains in
+`~/.lastcode/local-updates/build.log`. Completed builds are reused.
 
 For lower-level or diagnostic use, check out the desired checkpoint, run full
 checkpoint CI, then build that same tag:
