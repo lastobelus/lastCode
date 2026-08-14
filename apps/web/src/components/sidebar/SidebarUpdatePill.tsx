@@ -81,7 +81,9 @@ function SidebarUpdateReleaseNotesTooltip({
         {state.status === "available" ? (
           <div>
             <div className="whitespace-nowrap text-sm leading-5 font-medium">
-              Update ready to download
+              {state.source === "lastcode-local"
+                ? "Local nightly ready to build"
+                : "Update ready to download"}
             </div>
             {state.availableVersion ? (
               <div className="mt-0.5 text-xs leading-4 text-update-foreground">
@@ -201,7 +203,10 @@ function SidebarUpdateControl() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not download update",
+              title:
+                state.source === "lastcode-local"
+                  ? "Could not build local nightly"
+                  : "Could not download update",
               description: actionError,
             }),
           );
@@ -210,7 +215,10 @@ function SidebarUpdateControl() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not start update download",
+              title:
+                state.source === "lastcode-local"
+                  ? "Could not start local nightly build"
+                  : "Could not start update download",
               description: error instanceof Error ? error.message : "An unexpected error occurred.",
             }),
           );
@@ -304,6 +312,8 @@ function SidebarUpdateControl() {
       }),
     );
   }, [prefersReducedMotion, state?.status]);
+
+  if (state?.source === "lastcode-local" && !state.enabled) return null;
 
   return (
     <SidebarMenuItem className="ml-auto shrink-0">
