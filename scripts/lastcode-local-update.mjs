@@ -128,6 +128,24 @@ export function resolveExistingBuild(outputRoot, checkpointTag, checkpointCommit
   return { outputDir, manifestPath };
 }
 
+export function quarantineIncompleteBuild(
+  outputRoot,
+  checkpointTag,
+  checkpointCommit,
+  suffix = `${new Date().toISOString().replaceAll(":", "").replaceAll(".", "")}-${process.pid}`,
+) {
+  const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
+  const shortCommit = checkpointCommit.slice(0, 10);
+  const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
+  if (!NodeFS.existsSync(outputDir)) return undefined;
+  const quarantinePath = `${outputDir}.incomplete-${suffix}`;
+  if (NodeFS.existsSync(quarantinePath)) {
+    throw new Error(`Incomplete-build quarantine already exists at ${quarantinePath}.`);
+  }
+  NodeFS.renameSync(outputDir, quarantinePath);
+  return quarantinePath;
+}
+
 function inspect(options) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
@@ -206,7 +224,13 @@ function build(options) {
   ]);
   const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
   const outputRoot = NodePath.join(updateRoot, "artifacts");
-  const existing = resolveExistingBuild(outputRoot, options.checkpointTag, checkpointCommit);
+  let existing;
+  let incompleteBuildError;
+  try {
+    existing = resolveExistingBuild(outputRoot, options.checkpointTag, checkpointCommit);
+  } catch (error) {
+    incompleteBuildError = error;
+  }
   if (existing) {
     return { schemaVersion: 1, status: "built", checkpointTag: options.checkpointTag, ...existing };
   }
@@ -216,6 +240,19 @@ function build(options) {
   const logFd = NodeFS.openSync(logPath, "a", 0o600);
   try {
     NodeFS.writeSync(logFd, `\n[${new Date().toISOString()}] Building ${options.checkpointTag}\n`);
+    const quarantinePath = quarantineIncompleteBuild(
+      outputRoot,
+      options.checkpointTag,
+      checkpointCommit,
+    );
+    if (quarantinePath) {
+      NodeFS.writeSync(
+        logFd,
+        `Quarantined incomplete output at ${quarantinePath}.${
+          incompleteBuildError instanceof Error ? ` ${incompleteBuildError.message}` : ""
+        }\n`,
+      );
+    }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");

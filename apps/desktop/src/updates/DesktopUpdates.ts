@@ -309,6 +309,22 @@ export const make = Effect.gen(function* () {
     Effect.map((appUpdateYmlConfig) => Option.isSome(appUpdateYmlConfig) || config.mockUpdates),
   );
 
+  const applyHostedFeed = Effect.gen(function* () {
+    if (config.mockUpdates) {
+      yield* electronUpdater.setFeedURL({
+        provider: "generic",
+        url: `http://localhost:${config.mockUpdateServerPort}`,
+      } as ElectronUpdater.ElectronUpdaterFeedUrl);
+      return;
+    }
+    const appUpdateYmlConfig = yield* Ref.get(appUpdateYmlConfigRef);
+    if (Option.isSome(appUpdateYmlConfig)) {
+      yield* electronUpdater.setFeedURL(
+        appUpdateYmlConfig.value as ElectronUpdater.ElectronUpdaterFeedUrl,
+      );
+    }
+  });
+
   const resolveDisabledReason = Effect.gen(function* () {
     const settings = yield* desktopSettings.get;
     if (settings.showAndInstallLocalNightlies && localUpdates.supported) {
@@ -857,12 +873,22 @@ export const make = Effect.gen(function* () {
         if (Option.isSome(yield* activeUpdateAction)) {
           return yield* makeLastCodeSettingsState;
         }
-        const enabled = requestedEnabled && localUpdates.supported;
-        yield* desktopSettings.setShowAndInstallLocalNightlies(enabled);
+        const localEnabled = requestedEnabled && localUpdates.supported;
+        const settings = (yield* desktopSettings.setShowAndInstallLocalNightlies(localEnabled))
+          .settings;
+        const hostedEnabled = yield* shouldEnableAutoUpdates;
+        const source = localEnabled || !hostedEnabled ? "lastcode-local" : "hosted";
+        const enabled = source === "lastcode-local" ? localEnabled : hostedEnabled;
+        const channel = source === "lastcode-local" ? "nightly" : settings.updateChannel;
         yield* Ref.set(localCheckpointTagRef, Option.none());
-        yield* setState(createBaseUpdateState("nightly", enabled, environment, "lastcode-local"));
+        yield* setState(createBaseUpdateState(channel, enabled, environment, source));
+        if (yield* Ref.get(updaterConfiguredRef)) {
+          if (source === "hosted") {
+            yield* applyHostedFeed;
+          }
+          yield* applyAutoUpdaterChannel(channel);
+        }
         if (enabled && (yield* Ref.get(updaterConfiguredRef))) {
-          yield* applyAutoUpdaterChannel("nightly");
           yield* checkForUpdates("local-nightlies-setting-change");
         }
         return yield* makeLastCodeSettingsState;
@@ -879,12 +905,7 @@ export const make = Effect.gen(function* () {
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
-      if (config.mockUpdates) {
-        yield* electronUpdater.setFeedURL({
-          provider: "generic",
-          url: `http://localhost:${config.mockUpdateServerPort}`,
-        } as ElectronUpdater.ElectronUpdaterFeedUrl);
-      }
+      yield* applyHostedFeed;
 
       const settings = yield* desktopSettings.get;
       const hostedEnabled = yield* shouldEnableAutoUpdates;

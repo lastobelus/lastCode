@@ -25,6 +25,12 @@ export function resolveExistingBuild(
   checkpointTag: string,
   checkpointCommit: string,
 ): ExistingBuild | undefined;
+export function quarantineIncompleteBuild(
+  outputRoot: string,
+  checkpointTag: string,
+  checkpointCommit: string,
+  suffix?: string,
+): string | undefined;
 export function prepareBuildWorktree(
   repoRoot: string,
   worktreePath: string,

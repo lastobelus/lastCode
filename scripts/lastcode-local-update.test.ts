@@ -10,6 +10,7 @@ import {
   parseNightlyVersion,
   parseOptions,
   prepareBuildWorktree,
+  quarantineIncompleteBuild,
   resolveExistingBuild,
   resolveLatestCheckpointTag,
 } from "./lastcode-local-update.mjs";
@@ -73,6 +74,28 @@ describe("lastcode-local-update", () => {
       assert.equal(resolveExistingBuild(root, checkpoint, commit)?.outputDir, output);
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
       assert.throws(() => resolveExistingBuild(root, checkpoint, commit), /missing \.zip/);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("quarantines incomplete output so a local build can be retried", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-local-update-"));
+    try {
+      const checkpoint = "lastcode/checkpoint/v0.0.34-nightly.20260814.1089";
+      const commit = "0123456789abcdef";
+      const output = NodePath.join(root, "v0.0.34-nightly.20260814.1089", "0123456789");
+      NodeFS.mkdirSync(output, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(output, "partial.dmg"), "partial");
+
+      const quarantine = quarantineIncompleteBuild(root, checkpoint, commit, "test");
+
+      assert.equal(quarantine, `${output}.incomplete-test`);
+      assert.isFalse(NodeFS.existsSync(output));
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(quarantine!, "partial.dmg"), "utf8"),
+        "partial",
+      );
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

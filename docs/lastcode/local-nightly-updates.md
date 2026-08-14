@@ -61,7 +61,9 @@ sidebar button to a retry state. Build output is appended to:
 The dedicated build worktree is preserved for inspection. The helper refuses
 to reuse that path if it belongs to another Git repository, refuses a dirty
 tracked/untracked worktree, and never removes or resets the canonical checkout
-or the checkpoint daemon's automation worktree.
+or the checkpoint daemon's automation worktree. If packaging left an incomplete
+artifact directory, the next attempt renames it with an `.incomplete-*` suffix
+for inspection before creating fresh output at the immutable build path.
 
 Turning the setting off hides the local updater and stops future checks. It
 does not delete build artifacts, CI stamps, Git tags, or worktrees.

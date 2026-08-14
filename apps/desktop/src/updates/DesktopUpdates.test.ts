@@ -379,6 +379,42 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("restores hosted updates immediately when local nightlies are disabled", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 1,
+        status: "up-to-date",
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+        availableVersion: "1.2.3-nightly.20260814.1089",
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const local = yield* updates.getState;
+        assert.equal(local.source, "lastcode-local");
+        assert.equal(local.channel, "nightly");
+
+        const settings = yield* updates.setShowAndInstallLocalNightlies(false);
+        const hosted = yield* updates.getState;
+
+        assert.isFalse(settings.showAndInstallLocalNightlies);
+        assert.equal(hosted.source, "hosted");
+        assert.equal(hosted.channel, "latest");
+        assert.isTrue(hosted.enabled);
+        assert.equal(harness.checkCount(), 1);
+        assert.deepEqual(harness.feedUrls().at(-1), {
+          provider: "generic",
+          url: "http://localhost:4141",
+        });
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("enables nightly full changelog release notes and broadcasts summaries", () => {
     const harness = makeHarness();
 
