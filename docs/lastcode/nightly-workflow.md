@@ -40,13 +40,13 @@ LastCode tags record the rebased downstream state and never move.
 Preview the operation:
 
 ```bash
-pnpm lastcode:checkpoint --dry-run
+pnpm run lastcode:checkpoint -- --dry-run
 ```
 
 Run it and publish checkpoint tags:
 
 ```bash
-pnpm lastcode:checkpoint \
+pnpm run lastcode:checkpoint -- \
   --push-tags \
   --promote-if-no-open-prs \
   --mirror-upstream-main
@@ -122,7 +122,7 @@ the local push gate or pushing an unchanged branch.
 The job executes:
 
 ```bash
-pnpm lastcode:checkpoint \
+pnpm run lastcode:checkpoint -- \
   --push-tags \
   --promote-if-no-open-prs \
   --mirror-upstream-main
@@ -150,7 +150,7 @@ install the checkpoint dashboard as a user command:
 
 ```bash
 pnpm lastcode:checkpoint:service install
-pnpm lastcode:checkpoints --install
+pnpm run lastcode:checkpoints -- --install
 ```
 
 The installer puts the executable at `~/.lastcode/bin/lastcode-checkpoints`
@@ -223,7 +223,7 @@ For routine use, install the userland build command beside the checkpoint
 dashboard:
 
 ```bash
-pnpm lastcode:build --install
+pnpm run lastcode:build -- --install
 ```
 
 The installer places the versioned command under `~/.lastcode/bin` and exposes
@@ -250,8 +250,8 @@ checkpoint CI, then build that same tag:
 
 ```bash
 git switch --detach lastcode/checkpoint/v0.0.34-nightly.20260812.1072
-pnpm lastcode:ci --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
-pnpm lastcode:build:mac:arm64 \
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+pnpm run lastcode:build:mac:arm64 -- \
   --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
 ```
 

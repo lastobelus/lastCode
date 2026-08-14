@@ -75,7 +75,7 @@ A release build uses a different full-CI context because rebasing intentionally
 rewrites ancestry. Check out the immutable checkpoint and run:
 
 ```bash
-pnpm lastcode:ci --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
 The resulting stamp binds the exact LastCode commit, checkpoint tag, upstream

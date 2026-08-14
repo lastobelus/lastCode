@@ -17,8 +17,8 @@ Before enabling it, install the checkpoint service and dashboard:
 
 ```bash
 pnpm lastcode:checkpoint:service install
-pnpm lastcode:checkpoints --install
-pnpm lastcode:build --install
+pnpm run lastcode:checkpoints -- --install
+pnpm run lastcode:build -- --install
 ```
 
 The dashboard installer records the dedicated automation worktree in
