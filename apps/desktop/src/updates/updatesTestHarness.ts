@@ -12,6 +12,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 
 /** Shared DesktopUpdates test harness: a fully stubbed updater layer whose
     electron-updater events are driven by hand via `emit`. Used by
@@ -32,6 +33,12 @@ export interface UpdatesHarnessOptions {
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
   readonly env?: Record<string, string | undefined>;
+  readonly localNightliesEnabled?: boolean;
+  readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
+  readonly localInspect?: (
+    currentVersion: string,
+  ) => Effect.Effect<LastCodeLocalUpdates.LastCodeLocalUpdateInspection>;
+  readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -40,6 +47,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let downloadCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
+  let localFeedCloseCount = 0;
+  const differentialDownloadValues: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -80,12 +89,20 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         fullChangelog = value;
       }),
-    setDisableDifferentialDownload: () => options.setDisableDifferentialDownload ?? Effect.void,
+    setDisableDifferentialDownload: (value) =>
+      Effect.sync(() => {
+        differentialDownloadValues.push(value);
+      }).pipe(Effect.andThen(options.setDisableDifferentialDownload ?? Effect.void)),
     checkForUpdates: Effect.sync(() => {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
     downloadUpdate: Effect.sync(() => {
       downloadCount += 1;
+      if (options.localNightliesEnabled) {
+        for (const listener of listeners.get("update-downloaded") ?? []) {
+          listener({ version: options.localInspection?.availableVersion });
+        }
+      }
     }).pipe(Effect.andThen(options.downloadUpdate ?? Effect.void)),
     quitAndInstall: () =>
       Effect.sync(() => {
@@ -167,10 +184,11 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   let testSettings: DesktopAppSettings.DesktopSettings = {
     ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+    showAndInstallLocalNightlies: options.localNightliesEnabled ?? false,
   };
   const setUpdateChannelError = options.setUpdateChannelError;
   const settingsLayer =
-    setUpdateChannelError || options.beforeSetUpdateChannel
+    setUpdateChannelError || options.beforeSetUpdateChannel || options.localNightliesEnabled
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
@@ -193,6 +211,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
                     }),
                   ),
                 ),
+          setShowAndInstallLocalNightlies: (enabled) =>
+            Effect.sync(() => {
+              const changed = testSettings.showAndInstallLocalNightlies !== enabled;
+              testSettings = { ...testSettings, showAndInstallLocalNightlies: enabled };
+              return { settings: testSettings, changed };
+            }),
           setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
           setWslDistro: () => Effect.die("unexpected WSL distro change"),
           setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
@@ -200,6 +224,27 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
           applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
         } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
       : DesktopAppSettings.layer;
+
+  const localUpdatesLayer = LastCodeLocalUpdates.layerTest({
+    supported: options.localNightliesEnabled ?? false,
+    inspect: (currentVersion) =>
+      options.localInspect
+        ? options.localInspect(currentVersion)
+        : options.localInspection
+          ? Effect.succeed(options.localInspection)
+          : Effect.die("unexpected local update inspection"),
+    build: () =>
+      options.localBuild
+        ? Effect.succeed(options.localBuild)
+        : Effect.die("unexpected local update build"),
+    startFeed: () =>
+      Effect.succeed({
+        url: "http://127.0.0.1:4242",
+        close: Effect.sync(() => {
+          localFeedCloseCount += 1;
+        }),
+      }),
+  });
 
   const layer = DesktopUpdates.layer.pipe(
     Layer.provideMerge(updaterLayer),
@@ -216,6 +261,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     ),
     Layer.provideMerge(environmentLayer),
+    Layer.provideMerge(localUpdatesLayer),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -226,7 +272,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     installSteps,
     downloadCount: () => downloadCount,
     feedUrls: () => feedUrls,
+    differentialDownloadValues: () => differentialDownloadValues,
     fullChangelog: () => fullChangelog,
+    localFeedCloseCount: () => localFeedCloseCount,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
