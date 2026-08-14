@@ -128,6 +128,7 @@ describe("LastCodeSettingsImport", () => {
     const destinationOpenCode = record(destinationProviders.opencode);
     const destinationCodex = record(destinationProviders.codex);
     destinationServer.addProjectBaseDirectory = "/src/lastcode-projects";
+    destinationOpenCode.serverUrl = "http://127.0.0.1:7777";
     destinationOpenCode.serverPassword = "lastcode-secret";
     destinationCodex.launchArgs = "--lastcode-only";
     destinationServer.providerInstances = {
@@ -178,7 +179,7 @@ describe("LastCodeSettingsImport", () => {
       codex: { hiddenModels: ["hidden-source"], modelOrder: ["gpt-source"] },
     });
     assert.equal(importedServer.addProjectBaseDirectory, "/src/t3-projects");
-    assert.equal(importedOpenCode.serverUrl, "http://127.0.0.1:4096");
+    assert.equal(importedOpenCode.serverUrl, "http://127.0.0.1:7777");
     assert.equal(importedOpenCode.serverPassword, "lastcode-secret");
     assert.equal(importedCodex.launchArgs, "--lastcode-only");
     assert.deepEqual(importedServer.providerInstances, destinationServer.providerInstances);
@@ -191,6 +192,31 @@ describe("LastCodeSettingsImport", () => {
       JSON.parse(await fs.readFile(NodePath.join(result.backupDirectory, "manifest.json"), "utf8"))
         .files.length,
       3,
+    );
+  });
+
+  it("imports usable keybindings while omitting invalid entries", async () => {
+    const paths = await makePaths();
+    await fs.writeFile(
+      NodePath.join(paths.sourceDirectory, "keybindings.json"),
+      `[
+        // Obsolete commands and malformed shortcuts are ignored by T3 Code.
+        { "key": "mod+j", "command": "terminal.toggle" },
+        { "key": "mod+x", "command": "removed.command" },
+        { "key": "mod+shift+d+o", "command": "terminal.new" },
+      ]`,
+    );
+
+    const preview = await previewT3SettingsImport(paths);
+    assert.equal(preview.categories.find(({ id }) => id === "keybindings")?.status, "ready");
+
+    await importT3Settings(paths);
+
+    assert.deepEqual(
+      JSON.parse(
+        await fs.readFile(NodePath.join(paths.destinationDirectory, "keybindings.json"), "utf8"),
+      ),
+      [{ key: "mod+j", command: "terminal.toggle" }],
     );
   });
 

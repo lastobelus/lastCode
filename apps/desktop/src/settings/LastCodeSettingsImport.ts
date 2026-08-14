@@ -1,13 +1,16 @@
 // @effect-diagnostics nodeBuiltinImport:off cryptoRandomUUID:off globalDate:off -- This adapter performs one bounded, transactional import against host profile files before the desktop process relaunches.
 import {
   ClientSettingsSchema,
+  KeybindingRule,
   KeybindingsConfig,
+  MAX_KEYBINDINGS_COUNT,
   ServerSettings,
   type LastCodeSettingsImportCategory,
   type LastCodeSettingsImportCategoryId,
   type LastCodeSettingsImportPreview,
   type LastCodeSettingsImportResult,
 } from "@t3tools/contracts";
+import { compileResolvedKeybindingRule } from "@t3tools/shared/keybindings";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -19,6 +22,7 @@ const fsConstants = NodeFS.constants;
 const ClientSettingsDocumentSchema = Schema.Struct({ settings: ClientSettingsSchema });
 const ClientSettingsJson = fromLenientJson(ClientSettingsSchema);
 const LegacyClientSettingsDocumentJson = fromLenientJson(ClientSettingsDocumentSchema);
+const RawKeybindingsJson = fromLenientJson(Schema.Array(Schema.Unknown));
 const KeybindingsJson = fromLenientJson(KeybindingsConfig);
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 
@@ -27,7 +31,8 @@ const decodeLegacyClientSettingsDocumentJson = Schema.decodeUnknownSync(
   LegacyClientSettingsDocumentJson,
 );
 const encodeClientSettingsJson = Schema.encodeSync(ClientSettingsJson);
-const decodeKeybindingsJson = Schema.decodeUnknownSync(KeybindingsJson);
+const decodeRawKeybindingsJson = Schema.decodeUnknownSync(RawKeybindingsJson);
+const decodeKeybindingRule = Schema.decodeUnknownSync(KeybindingRule);
 const encodeKeybindingsJson = Schema.encodeSync(KeybindingsJson);
 const decodeServerSettingsJson = Schema.decodeUnknownSync(ServerSettingsJson);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
@@ -71,7 +76,7 @@ const SAFE_PROVIDER_SETTING_KEYS = {
   claudeAgent: ["enabled", "binaryPath", "homePath", "customModels"],
   cursor: ["enabled", "binaryPath", "apiEndpoint", "customModels"],
   grok: ["enabled", "binaryPath", "customModels"],
-  opencode: ["enabled", "binaryPath", "serverUrl", "customModels"],
+  opencode: ["enabled", "binaryPath", "customModels"],
 } as const;
 const SAFE_MODEL_SELECTION_INSTANCE_IDS = new Set(Object.keys(SAFE_PROVIDER_SETTING_KEYS));
 
@@ -123,6 +128,20 @@ function decodeSourceClientSettings(raw: string) {
   }
 }
 
+function decodeUsableKeybindings(raw: string) {
+  const keybindings = [];
+  for (const entry of decodeRawKeybindingsJson(raw)) {
+    try {
+      const rule = decodeKeybindingRule(entry);
+      if (compileResolvedKeybindingRule(rule) !== null) keybindings.push(rule);
+    } catch {
+      // T3 Code ignores obsolete or malformed entries while retaining the rest of the file.
+    }
+    if (keybindings.length === MAX_KEYBINDINGS_COUNT) break;
+  }
+  return keybindings;
+}
+
 function safeServerPreferences(raw: string): JsonRecord {
   const encoded = asRecord(
     encodeServerSettings(decodeServerSettingsJson(raw)),
@@ -162,7 +181,7 @@ function validateSource(id: LastCodeSettingsImportCategoryId, raw: string): void
       decodeSourceClientSettings(raw);
       return;
     case "keybindings":
-      decodeKeybindingsJson(raw);
+      decodeUsableKeybindings(raw);
       return;
     case "server-preferences":
       safeServerPreferences(raw);
@@ -270,7 +289,7 @@ function buildImportedContent(
     case "client-preferences":
       return mergeClientSettings(sourceRaw, destinationRaw);
     case "keybindings":
-      return `${encodeKeybindingsJson(decodeKeybindingsJson(sourceRaw))}\n`;
+      return `${encodeKeybindingsJson(decodeUsableKeybindings(sourceRaw))}\n`;
     case "server-preferences":
       return mergeServerSettings(sourceRaw, destinationRaw);
   }

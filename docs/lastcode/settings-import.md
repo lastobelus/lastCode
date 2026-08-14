@@ -22,9 +22,11 @@ Windows primary profile as expected.
 | Keyboard shortcuts              | `keybindings.json`          | Valid custom keybinding rules                                                                                                                    |
 | Server and provider preferences | `settings.json`             | Background behavior, Git fetch behavior, thread defaults, source-control writing preferences, model selection, and legacy provider paths/toggles |
 
-Only non-secret provider fields are copied. Provider launch arguments, the
-OpenCode server password, and provider-instance records are excluded. Existing
-LastCode values for excluded fields remain unchanged.
+Only non-secret provider fields are copied. Provider launch arguments and
+provider-instance records are excluded. The OpenCode server URL and password
+are preserved together from LastCode so the import cannot split an endpoint
+from its credential. Existing LastCode values for excluded fields remain
+unchanged.
 
 Favorites and model-display preferences for built-in providers are imported.
 Source-only custom-provider references are omitted because their provider
