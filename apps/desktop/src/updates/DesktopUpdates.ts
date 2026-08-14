@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -270,6 +271,7 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const localCheckpointTagRef = yield* Ref.make<Option.Option<string>>(Option.none());
+  const checkTransitionMutex = yield* Semaphore.make(1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -439,7 +441,9 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const checkForUpdates = Effect.fn("desktop.updates.checkForUpdates")(function* (reason: string) {
+  const checkForUpdatesUnlocked = Effect.fn("desktop.updates.checkForUpdatesUnlocked")(function* (
+    reason: string,
+  ) {
     yield* Effect.annotateCurrentSpan({ reason });
     if (yield* Ref.get(desktopState.quitting)) return false;
     if (!(yield* Ref.get(updaterConfiguredRef))) return false;
@@ -487,6 +491,10 @@ export const make = Effect.gen(function* () {
       Effect.ensuring(Ref.set(updateCheckInFlightRef, false)),
     );
   });
+
+  const checkForUpdates = Effect.fn("desktop.updates.checkForUpdates")((reason: string) =>
+    checkTransitionMutex.withPermit(checkForUpdatesUnlocked(reason)),
+  );
 
   const downloadAvailableUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
@@ -869,33 +877,36 @@ export const make = Effect.gen(function* () {
     getState: Ref.get(updateStateRef),
     getLastCodeSettings: makeLastCodeSettingsState,
     setShowAndInstallLocalNightlies: Effect.fn("desktop.updates.setShowAndInstallLocalNightlies")(
-      function* (requestedEnabled: boolean) {
-        if (Option.isSome(yield* activeUpdateAction)) {
-          return yield* makeLastCodeSettingsState;
-        }
-        const localEnabled = requestedEnabled && localUpdates.supported;
-        const settings = (yield* desktopSettings.setShowAndInstallLocalNightlies(localEnabled))
-          .settings;
-        const hostedEnabled = yield* shouldEnableAutoUpdates;
-        const source = localEnabled || !hostedEnabled ? "lastcode-local" : "hosted";
-        const enabled = source === "lastcode-local" ? localEnabled : hostedEnabled;
-        const channel = source === "lastcode-local" ? "nightly" : settings.updateChannel;
-        yield* Ref.set(localCheckpointTagRef, Option.none());
-        yield* setState(createBaseUpdateState(channel, enabled, environment, source));
-        if (yield* Ref.get(updaterConfiguredRef)) {
-          if (source === "hosted") {
-            yield* applyHostedFeed;
-          }
-          yield* applyAutoUpdaterChannel(channel);
-          yield* electronUpdater.setDisableDifferentialDownload(
-            isArm64HostRunningIntelBuild(environment.runtimeInfo),
-          );
-        }
-        if (enabled && (yield* Ref.get(updaterConfiguredRef))) {
-          yield* checkForUpdates("local-nightlies-setting-change");
-        }
-        return yield* makeLastCodeSettingsState;
-      },
+      (requestedEnabled: boolean) =>
+        checkTransitionMutex.withPermit(
+          Effect.gen(function* () {
+            if (Option.isSome(yield* activeUpdateAction)) {
+              return yield* makeLastCodeSettingsState;
+            }
+            const localEnabled = requestedEnabled && localUpdates.supported;
+            const settings = (yield* desktopSettings.setShowAndInstallLocalNightlies(localEnabled))
+              .settings;
+            const hostedEnabled = yield* shouldEnableAutoUpdates;
+            const source = localEnabled || !hostedEnabled ? "lastcode-local" : "hosted";
+            const enabled = source === "lastcode-local" ? localEnabled : hostedEnabled;
+            const channel = source === "lastcode-local" ? "nightly" : settings.updateChannel;
+            yield* Ref.set(localCheckpointTagRef, Option.none());
+            yield* setState(createBaseUpdateState(channel, enabled, environment, source));
+            if (yield* Ref.get(updaterConfiguredRef)) {
+              if (source === "hosted") {
+                yield* applyHostedFeed;
+              }
+              yield* applyAutoUpdaterChannel(channel);
+              yield* electronUpdater.setDisableDifferentialDownload(
+                isArm64HostRunningIntelBuild(environment.runtimeInfo),
+              );
+            }
+            if (enabled && (yield* Ref.get(updaterConfiguredRef))) {
+              yield* checkForUpdatesUnlocked("local-nightlies-setting-change");
+            }
+            return yield* makeLastCodeSettingsState;
+          }),
+        ),
     ),
     emitState,
     disabledReason: resolveDisabledReason,

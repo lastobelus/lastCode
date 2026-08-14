@@ -35,6 +35,9 @@ cleans a human development worktree.
 3. The first click creates or reuses
    `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
    runs full checkpoint CI, and builds the checkpoint's DMG plus updater ZIP.
+   The build generates updater metadata for `lastobelus/lastCode` by default;
+   a fork can set `LASTCODE_GITHUB_REPOSITORY=owner/repo` in its configured
+   environment to select its own metadata source.
 4. The resulting files are immutable under
    `~/.lastcode/local-updates/artifacts/<nightly>/<commit>/`. Existing complete
    output is reused instead of overwritten.
@@ -72,6 +75,8 @@ group so CI and packaging cannot continue orphaned against that worktree.
 
 Turning the setting off hides the local updater and stops future checks. It
 does not delete build artifacts, CI stamps, Git tags, or worktrees.
+The transition waits for any checkpoint inspection already in progress before
+restoring hosted updater state, so a late poll cannot turn the feature back on.
 
 ## Current scope
 
