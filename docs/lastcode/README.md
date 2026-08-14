@@ -5,6 +5,11 @@ patch stack onto upstream nightly releases. Tracking an upstream nightly and
 building an application are deliberately separate operations: every nightly can
 be checkpointed, while only selected checkpoints need full local CI and a build.
 
+This directory is the deliberate namespace for LastCode-only contributor and
+operations documentation. Product documentation and material intended for an
+upstream contribution continue to use T3 Code's audience-based documentation
+directories.
+
 ## Documents
 
 - [Nightly workflow](nightly-workflow.md): checkpoint tags, rebasing, promotion,

@@ -18,8 +18,10 @@ and should be proposed upstream, switch to `upstream-fix`.
 2. Create `lastcode/markover/<topic>` for Markover integration or
    `lastcode/<topic>` for other fork-only work from the exact
    `origin/lastcode/main`.
-3. Keep one concern per branch and PR. Put downstream contributor and operations
-   documentation under `docs/lastcode/`.
+3. Keep one concern per branch and PR. Put LastCode-only contributor and
+   operations documentation under the fork's deliberate `docs/lastcode/`
+   namespace. Keep product and upstream-facing documentation in the
+   audience-based directories required by `AGENTS.md`.
 4. Never target `main` or `pingdotgg/t3code` from this workflow.
 
 ## Implement and Validate
