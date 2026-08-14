@@ -134,6 +134,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getLastCodeSettings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_GET_CHANNEL),
   setShowAndInstallLocalNightlies: (enabled) =>
     ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL, enabled),
+  previewT3SettingsImport: () =>
+    ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_PREVIEW_CHANNEL),
+  importT3Settings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_CHANNEL),
   setUpdateChannel: (channel) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),
   checkForUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL),
