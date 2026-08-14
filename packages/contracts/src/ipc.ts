@@ -151,6 +151,7 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
+export type DesktopUpdateSource = "hosted" | "lastcode-local";
 export type DesktopAppStageLabel = "Alpha" | "Dev" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
@@ -166,6 +167,7 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
+export const DesktopUpdateSourceSchema = Schema.Literals(["hosted", "lastcode-local"]);
 export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Dev", "Nightly"]);
 
 export interface DesktopAppBranding {
@@ -194,6 +196,7 @@ export const DesktopRuntimeInfoSchema = Schema.Struct({
 
 export interface DesktopUpdateState {
   enabled: boolean;
+  source: DesktopUpdateSource;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
   currentVersion: string;
@@ -222,6 +225,7 @@ export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
 
 export const DesktopUpdateStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
+  source: DesktopUpdateSourceSchema,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,
   currentVersion: Schema.String,
@@ -236,6 +240,18 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   message: Schema.NullOr(Schema.String),
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
+});
+
+export interface DesktopLastCodeSettingsState {
+  supported: boolean;
+  showAndInstallLocalNightlies: boolean;
+  message: string | null;
+}
+
+export const DesktopLastCodeSettingsStateSchema = Schema.Struct({
+  supported: Schema.Boolean,
+  showAndInstallLocalNightlies: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
 });
 
 export interface DesktopUpdateActionResult {
@@ -1083,6 +1099,8 @@ export interface DesktopBridge {
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
+  getLastCodeSettings: () => Promise<DesktopLastCodeSettingsState>;
+  setShowAndInstallLocalNightlies: (enabled: boolean) => Promise<DesktopLastCodeSettingsState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
