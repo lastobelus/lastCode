@@ -1,9 +1,13 @@
-import type { DesktopLastCodeSettingsState } from "@t3tools/contracts";
-import { MoonStarIcon } from "lucide-react";
+import type {
+  DesktopLastCodeSettingsState,
+  LastCodeSettingsImportPreview,
+} from "@t3tools/contracts";
+import { DownloadIcon, MoonStarIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { isElectron } from "../../env";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { searchableSetting } from "./settingsSearch";
@@ -12,7 +16,9 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
+  const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
     const bridge = window.desktopBridge;
@@ -26,6 +32,23 @@ export function LastCodeSettingsPanel() {
             type: "error",
             title: "Could not load LastCode settings",
             description: error instanceof Error ? error.message : "Desktop settings read failed.",
+          }),
+        );
+      });
+  }, []);
+
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;
+    void bridge
+      .previewT3SettingsImport()
+      .then(setImportPreview)
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not inspect T3 Code settings",
+            description: error instanceof Error ? error.message : "Settings preview failed.",
           }),
         );
       });
@@ -47,6 +70,31 @@ export function LastCodeSettingsPanel() {
       );
     } finally {
       setIsSaving(false);
+    }
+  }, []);
+
+  const importSettings = useCallback(async () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.importT3Settings !== "function") return;
+    setIsImporting(true);
+    try {
+      const result = await bridge.importT3Settings();
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "T3 Code settings imported",
+          description: `Backed up the previous LastCode settings to ${result.backupDirectory}. Restarting LastCode…`,
+        }),
+      );
+    } catch (error) {
+      setIsImporting(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not import T3 Code settings",
+          description: error instanceof Error ? error.message : "Settings import failed.",
+        }),
+      );
     }
   }, []);
 
@@ -78,6 +126,45 @@ export function LastCodeSettingsPanel() {
               onCheckedChange={(checked) => void setLocalNightlies(Boolean(checked))}
               aria-label="Show and install local nightlies"
             />
+          }
+        />
+      </SettingsSection>
+      <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("import-t3-settings")}
+          description="Copy selected preferences into LastCode once, back up the current LastCode files, then restart. The two apps remain independent after the import."
+          status={
+            !isElectron ? (
+              "Open this page in the LastCode desktop app to import settings."
+            ) : importPreview ? (
+              <div className="space-y-1.5">
+                <p>Source: {importPreview.sourceDirectory}</p>
+                <ul className="space-y-0.5">
+                  {importPreview.categories.map((category) => (
+                    <li key={category.id}>
+                      <span className="text-foreground/80">{category.label}</span>{" "}
+                      <span>
+                        ({category.sourceFile}) — {category.status}
+                      </span>
+                      {category.status === "ready" ? <span>: {category.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <p>Not imported: {importPreview.excluded.join("; ")}.</p>
+              </div>
+            ) : (
+              "Inspecting ~/.t3/userdata…"
+            )
+          }
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!importPreview?.canImport || isImporting}
+              onClick={() => void importSettings()}
+            >
+              {isImporting ? "Importing…" : "Import and restart"}
+            </Button>
           }
         />
       </SettingsSection>

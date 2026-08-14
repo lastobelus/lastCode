@@ -253,6 +253,63 @@ export const DesktopLastCodeSettingsStateSchema = Schema.Struct({
   message: Schema.NullOr(Schema.String),
 });
 
+export const LastCodeSettingsImportCategoryIdSchema = Schema.Literals([
+  "client-preferences",
+  "keybindings",
+  "server-preferences",
+]);
+export type LastCodeSettingsImportCategoryId = typeof LastCodeSettingsImportCategoryIdSchema.Type;
+
+export const LastCodeSettingsImportCategoryStatusSchema = Schema.Literals([
+  "ready",
+  "missing",
+  "invalid",
+]);
+export type LastCodeSettingsImportCategoryStatus =
+  typeof LastCodeSettingsImportCategoryStatusSchema.Type;
+
+export interface LastCodeSettingsImportCategory {
+  id: LastCodeSettingsImportCategoryId;
+  label: string;
+  sourceFile: string;
+  status: LastCodeSettingsImportCategoryStatus;
+  detail: string;
+}
+
+export const LastCodeSettingsImportCategorySchema = Schema.Struct({
+  id: LastCodeSettingsImportCategoryIdSchema,
+  label: Schema.String,
+  sourceFile: Schema.String,
+  status: LastCodeSettingsImportCategoryStatusSchema,
+  detail: Schema.String,
+});
+
+export interface LastCodeSettingsImportPreview {
+  sourceDirectory: string;
+  destinationDirectory: string;
+  categories: readonly LastCodeSettingsImportCategory[];
+  excluded: readonly string[];
+  canImport: boolean;
+}
+
+export const LastCodeSettingsImportPreviewSchema = Schema.Struct({
+  sourceDirectory: Schema.String,
+  destinationDirectory: Schema.String,
+  categories: Schema.Array(LastCodeSettingsImportCategorySchema),
+  excluded: Schema.Array(Schema.String),
+  canImport: Schema.Boolean,
+});
+
+export interface LastCodeSettingsImportResult {
+  imported: readonly LastCodeSettingsImportCategoryId[];
+  backupDirectory: string;
+}
+
+export const LastCodeSettingsImportResultSchema = Schema.Struct({
+  imported: Schema.Array(LastCodeSettingsImportCategoryIdSchema),
+  backupDirectory: Schema.String,
+});
+
 export interface DesktopUpdateActionResult {
   accepted: boolean;
   completed: boolean;
@@ -1070,6 +1127,8 @@ export interface DesktopBridge {
   getUpdateState: () => Promise<DesktopUpdateState>;
   getLastCodeSettings: () => Promise<DesktopLastCodeSettingsState>;
   setShowAndInstallLocalNightlies: (enabled: boolean) => Promise<DesktopLastCodeSettingsState>;
+  previewT3SettingsImport: () => Promise<LastCodeSettingsImportPreview>;
+  importT3Settings: () => Promise<LastCodeSettingsImportResult>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
