@@ -19,6 +19,8 @@ directories.
 - [Contribution and fork conventions](fork-conventions.md): the two workstreams,
   contribution bases, paired upstream/LastCode changes, remotes, branches, and
   evaluation tags.
+- [Local nightly updates](local-nightly-updates.md): the opt-in in-app
+  checkpoint build, staging, installation, safety boundaries, and logs.
 
 ## Command Summary
 
@@ -42,5 +44,6 @@ pnpm lastcode:ci --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 pnpm lastcode:build:mac:arm64 --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-None of the checkpoint commands builds an application. No build is uploaded or
-published unless a separate explicit release operation is added later.
+None of the checkpoint commands builds an application. An opted-in packaged
+desktop app can build a selected checkpoint locally from its sidebar update
+button; no build is uploaded or published.
