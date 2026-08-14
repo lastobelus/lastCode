@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
+  ProviderInstanceId,
   ServerSettings,
 } from "@t3tools/contracts";
 import * as NodeFS from "node:fs";
@@ -86,7 +87,25 @@ describe("LastCodeSettingsImport", () => {
 
   it("imports allowlisted preferences while preserving LastCode-only state and secrets", async () => {
     const paths = await makePaths();
+    const codex = ProviderInstanceId.make("codex");
+    const sourceCustom = ProviderInstanceId.make("source_custom");
+    const lastCodeCustom = ProviderInstanceId.make("lastcode_custom");
     const sourceClient = { ...DEFAULT_CLIENT_SETTINGS, fontSizeInterface: 17 };
+    sourceClient.favorites = [
+      { provider: codex, model: "gpt-source" },
+      { provider: sourceCustom, model: "source-model" },
+    ];
+    sourceClient.providerModelPreferences = {
+      [codex]: { hiddenModels: ["hidden-source"], modelOrder: ["gpt-source"] },
+      [sourceCustom]: { hiddenModels: [], modelOrder: ["source-model"] },
+    };
+    const destinationClient = {
+      ...DEFAULT_CLIENT_SETTINGS,
+      favorites: [{ provider: lastCodeCustom, model: "lastcode-model" }],
+      providerModelPreferences: {
+        [lastCodeCustom]: { hiddenModels: [], modelOrder: ["lastcode-model"] },
+      },
+    };
     const sourceServer = record(structuredClone(encodeServerSettings(DEFAULT_SERVER_SETTINGS)));
     const sourceProviders = record(sourceServer.providers);
     const sourceOpenCode = record(sourceProviders.opencode);
@@ -131,6 +150,10 @@ describe("LastCodeSettingsImport", () => {
         NodePath.join(paths.destinationDirectory, "settings.json"),
         `// LastCode accepts JSONC here too.\n${json(destinationServer)}`,
       ),
+      fs.writeFile(
+        NodePath.join(paths.destinationDirectory, "client-settings.json"),
+        json(destinationClient),
+      ),
     ]);
 
     const result = await importT3Settings(paths);
@@ -146,6 +169,14 @@ describe("LastCodeSettingsImport", () => {
     const importedOpenCode = record(importedProviders.opencode);
     const importedCodex = record(importedProviders.codex);
     assert.equal(importedClient.fontSizeInterface, 17);
+    assert.deepEqual(importedClient.favorites, [
+      { provider: "lastcode_custom", model: "lastcode-model" },
+      { provider: "codex", model: "gpt-source" },
+    ]);
+    assert.deepEqual(importedClient.providerModelPreferences, {
+      lastcode_custom: { hiddenModels: [], modelOrder: ["lastcode-model"] },
+      codex: { hiddenModels: ["hidden-source"], modelOrder: ["gpt-source"] },
+    });
     assert.equal(importedServer.addProjectBaseDirectory, "/src/t3-projects");
     assert.equal(importedOpenCode.serverUrl, "http://127.0.0.1:4096");
     assert.equal(importedOpenCode.serverPassword, "lastcode-secret");

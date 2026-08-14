@@ -218,6 +218,29 @@ function stringifyJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): string {
+  const source = decodeSourceClientSettings(sourceRaw);
+  const destination =
+    destinationRaw === null
+      ? decodeClientSettingsJson("{}")
+      : decodeSourceClientSettings(destinationRaw);
+  const isBuiltInProviderPreference = (provider: string) =>
+    SAFE_MODEL_SELECTION_INSTANCE_IDS.has(provider);
+  const favorites = [
+    ...destination.favorites.filter(({ provider }) => !isBuiltInProviderPreference(provider)),
+    ...source.favorites.filter(({ provider }) => isBuiltInProviderPreference(provider)),
+  ];
+  const providerModelPreferences = Object.fromEntries([
+    ...Object.entries(destination.providerModelPreferences).filter(
+      ([provider]) => !isBuiltInProviderPreference(provider),
+    ),
+    ...Object.entries(source.providerModelPreferences).filter(([provider]) =>
+      isBuiltInProviderPreference(provider),
+    ),
+  ]);
+  return `${encodeClientSettingsJson({ ...source, favorites, providerModelPreferences })}\n`;
+}
+
 function mergeServerSettings(sourceRaw: string, destinationRaw: string | null): string {
   const destination =
     destinationRaw === null
@@ -245,7 +268,7 @@ function buildImportedContent(
 ): string {
   switch (id) {
     case "client-preferences":
-      return `${encodeClientSettingsJson(decodeSourceClientSettings(sourceRaw))}\n`;
+      return mergeClientSettings(sourceRaw, destinationRaw);
     case "keybindings":
       return `${encodeKeybindingsJson(decodeKeybindingsJson(sourceRaw))}\n`;
     case "server-preferences":

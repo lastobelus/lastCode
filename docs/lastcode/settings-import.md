@@ -26,6 +26,11 @@ Only non-secret provider fields are copied. Provider launch arguments, the
 OpenCode server password, and provider-instance records are excluded. Existing
 LastCode values for excluded fields remain unchanged.
 
+Favorites and model-display preferences for built-in providers are imported.
+Source-only custom-provider references are omitted because their provider
+instances are not copied; existing LastCode custom-provider preferences are
+preserved.
+
 ## Deliberate exclusions
 
 The importer never copies:
