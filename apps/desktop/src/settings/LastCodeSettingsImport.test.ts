@@ -242,13 +242,18 @@ describe("LastCodeSettingsImport", () => {
 
   it("imports usable keybindings while omitting invalid entries", async () => {
     const paths = await makePaths();
+    const usable = Array.from({ length: 258 }, (_, index) => ({
+      key: "mod+j",
+      command: "terminal.toggle",
+      when: `context${index}`,
+    }));
     await fs.writeFile(
       NodePath.join(paths.sourceDirectory, "keybindings.json"),
       `[
         // Obsolete commands and malformed shortcuts are ignored by T3 Code.
-        { "key": "mod+j", "command": "terminal.toggle" },
         { "key": "mod+x", "command": "removed.command" },
         { "key": "mod+shift+d+o", "command": "terminal.new" },
+        ${usable.map((rule) => JSON.stringify(rule)).join(",\n        ")},
       ]`,
     );
 
@@ -261,7 +266,7 @@ describe("LastCodeSettingsImport", () => {
       JSON.parse(
         await fs.readFile(NodePath.join(paths.destinationDirectory, "keybindings.json"), "utf8"),
       ),
-      [{ key: "mod+j", command: "terminal.toggle" }],
+      usable.slice(-256),
     );
   });
 

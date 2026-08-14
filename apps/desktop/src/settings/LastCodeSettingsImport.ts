@@ -136,9 +136,8 @@ function decodeUsableKeybindings(raw: string) {
     } catch {
       // T3 Code ignores obsolete or malformed entries while retaining the rest of the file.
     }
-    if (keybindings.length === MAX_KEYBINDINGS_COUNT) break;
   }
-  return keybindings;
+  return keybindings.slice(-MAX_KEYBINDINGS_COUNT);
 }
 
 function safeServerPreferences(raw: string): JsonRecord {

@@ -28,7 +28,7 @@ function resolveImportPaths(
 }
 
 const WSL_ONLY_IMPORT_MESSAGE =
-  "Import is unavailable while WSL-only mode is enabled because the active server settings live inside WSL.";
+  "Import is unavailable while WSL-only mode is selected. Disable WSL-only mode before importing the Windows profile.";
 
 class LastCodeSettingsImportUnavailableError extends Schema.TaggedErrorClass<LastCodeSettingsImportUnavailableError>()(
   "LastCodeSettingsImportUnavailableError",
