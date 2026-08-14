@@ -128,6 +128,137 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("builds and stages an opted-in local checkpoint through electron-updater", () => {
+    const checkpointTag = "lastcode/checkpoint/v1.2.4-nightly.20260814.1089";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 1,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089",
+        releaseNotes: ["feat(lastcode): local update"],
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const available = yield* updates.getState;
+        assert.equal(available.source, "lastcode-local");
+        assert.equal(available.status, "available");
+        assert.deepEqual(available.releaseNotes[0]?.items, ["feat(lastcode): local update"]);
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+        yield* flushCallbacks;
+
+        const downloaded = yield* updates.getState;
+        assert.equal(downloaded.status, "downloaded");
+        assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089");
+        assert.deepInclude(harness.feedUrls().at(-1), {
+          provider: "generic",
+          url: "http://127.0.0.1:4242",
+        });
+        assert.equal(harness.localFeedCloseCount(), 1);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("restores hosted updates immediately when local nightlies are disabled", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 1,
+        status: "up-to-date",
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+        availableVersion: "1.2.3-nightly.20260814.1089",
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const local = yield* updates.getState;
+        assert.equal(local.source, "lastcode-local");
+        assert.equal(local.channel, "nightly");
+
+        const settings = yield* updates.setShowAndInstallLocalNightlies(false);
+        const hosted = yield* updates.getState;
+
+        assert.isFalse(settings.showAndInstallLocalNightlies);
+        assert.equal(hosted.source, "hosted");
+        assert.equal(hosted.channel, "latest");
+        assert.isTrue(hosted.enabled);
+        assert.equal(harness.checkCount(), 1);
+        assert.deepEqual(harness.feedUrls().at(-1), {
+          provider: "generic",
+          url: "http://localhost:4141",
+        });
+        assert.deepEqual(harness.differentialDownloadValues(), [false, false]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("serializes disabling local nightlies with an active checkpoint inspection", () =>
+    Effect.gen(function* () {
+      const inspectionStarted = yield* Deferred.make<void>();
+      const releaseInspection = yield* Deferred.make<void>();
+      let blockInspection = false;
+      const inspection = {
+        schemaVersion: 1 as const,
+        status: "up-to-date" as const,
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+        availableVersion: "1.2.3-nightly.20260814.1089",
+      };
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: () =>
+          blockInspection
+            ? Deferred.succeed(inspectionStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseInspection)),
+                Effect.as(inspection),
+              )
+            : Effect.succeed(inspection),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          blockInspection = true;
+
+          const checkFiber = yield* updates.check("poll").pipe(Effect.forkScoped);
+          yield* Deferred.await(inspectionStarted);
+          const toggleFiber = yield* updates
+            .setShowAndInstallLocalNightlies(false)
+            .pipe(Effect.forkScoped);
+
+          yield* Deferred.succeed(releaseInspection, undefined);
+          yield* Fiber.join(checkFiber);
+          const settings = yield* Fiber.join(toggleFiber);
+          const state = yield* updates.getState;
+
+          assert.isFalse(settings.showAndInstallLocalNightlies);
+          assert.equal(state.source, "hosted");
+          assert.isTrue(state.enabled);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    }),
+  );
+
   it.effect("enables nightly full changelog release notes and broadcasts summaries", () => {
     const harness = makeHarness();
 
