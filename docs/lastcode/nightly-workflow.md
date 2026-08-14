@@ -82,6 +82,11 @@ checkpoint after the PR queue is empty.
 Promotion uses an exact `--force-with-lease` value. It refuses to overwrite a
 remote branch that changed after the job fetched it.
 
+Checkpoint metadata records the exact `lastcode/main` source commit used for a
+rebase. If publication succeeds but promotion fails, a later run recognizes the
+published checkpoint as belonging to the unchanged source commit and retries
+promotion instead of treating the older main branch as current.
+
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
 ### Failure recovery
