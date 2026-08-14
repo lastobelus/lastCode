@@ -102,7 +102,7 @@ export function parseOptions(argv) {
   return { command, repoRoot, home, currentVersion, checkpointTag };
 }
 
-export function resolveExistingBuild(outputRoot, checkpointTag, checkpointCommit) {
+export function resolveExistingBuild(repoRoot, outputRoot, checkpointTag, checkpointCommit) {
   const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
@@ -112,11 +112,13 @@ export function resolveExistingBuild(outputRoot, checkpointTag, checkpointCommit
   if (
     manifest.schemaVersion !== 1 ||
     manifest.checkpointTag !== checkpointTag ||
-    manifest.lastCodeCommit !== checkpointCommit
+    manifest.lastCodeCommit !== checkpointCommit ||
+    typeof manifest.buildTag !== "string" ||
+    !manifest.buildTag.startsWith(checkpointTag.replace(CHECKPOINT_PREFIX, "lastcode/build/") + ".")
   ) {
     throw new Error(`Existing build manifest does not match ${checkpointTag}: ${manifestPath}`);
   }
-  const required = ["nightly-mac.yml", ".dmg", ".zip"];
+  const required = ["nightly-mac.yml", "SHA256SUMS", ".dmg", ".zip"];
   const artifacts = NodeFS.readdirSync(outputDir);
   for (const suffix of required) {
     if (
@@ -124,6 +126,14 @@ export function resolveExistingBuild(outputRoot, checkpointTag, checkpointCommit
     ) {
       throw new Error(`Existing build is incomplete at ${outputDir}; missing ${suffix}.`);
     }
+  }
+  if (
+    git(repoRoot, ["cat-file", "-t", manifest.buildTag]) !== "tag" ||
+    git(repoRoot, ["rev-parse", `${manifest.buildTag}^{commit}`]) !== checkpointCommit
+  ) {
+    throw new Error(
+      `Existing build is incomplete at ${outputDir}; annotated tag ${manifest.buildTag} is missing or mismatched.`,
+    );
   }
   return { outputDir, manifestPath };
 }
@@ -227,7 +237,12 @@ function build(options) {
   let existing;
   let incompleteBuildError;
   try {
-    existing = resolveExistingBuild(outputRoot, options.checkpointTag, checkpointCommit);
+    existing = resolveExistingBuild(
+      options.repoRoot,
+      outputRoot,
+      options.checkpointTag,
+      checkpointCommit,
+    );
   } catch (error) {
     incompleteBuildError = error;
   }

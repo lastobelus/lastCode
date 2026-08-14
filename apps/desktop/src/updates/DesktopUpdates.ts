@@ -887,6 +887,9 @@ export const make = Effect.gen(function* () {
             yield* applyHostedFeed;
           }
           yield* applyAutoUpdaterChannel(channel);
+          yield* electronUpdater.setDisableDifferentialDownload(
+            isArm64HostRunningIntelBuild(environment.runtimeInfo),
+          );
         }
         if (enabled && (yield* Ref.get(updaterConfiguredRef))) {
           yield* checkForUpdates("local-nightlies-setting-change");

@@ -63,7 +63,10 @@ to reuse that path if it belongs to another Git repository, refuses a dirty
 tracked/untracked worktree, and never removes or resets the canonical checkout
 or the checkpoint daemon's automation worktree. If packaging left an incomplete
 artifact directory, the next attempt renames it with an `.incomplete-*` suffix
-for inspection before creating fresh output at the immutable build path.
+for inspection before creating fresh output at the immutable build path. Reuse
+also requires the checksum file and the manifest's annotated
+`lastcode/build/*` tag to exist and point at the checkpoint commit, so an
+interrupted finalization is retried instead of treated as complete.
 Interrupting or quitting during a build terminates the helper's entire process
 group so CI and packaging cannot continue orphaned against that worktree.
 

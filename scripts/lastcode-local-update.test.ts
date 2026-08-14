@@ -60,20 +60,52 @@ describe("lastcode-local-update", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-local-update-"));
     try {
       const checkpoint = "lastcode/checkpoint/v0.0.34-nightly.20260814.1089";
-      const commit = "0123456789abcdef";
-      const output = NodePath.join(root, "v0.0.34-nightly.20260814.1089", "0123456789");
+      const repo = NodePath.join(root, "repo");
+      NodeFS.mkdirSync(repo);
+      NodeChildProcess.execFileSync("git", ["init"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["config", "user.name", "LastCode Test"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["config", "user.email", "test@lastcode.invalid"], {
+        cwd: repo,
+      });
+      NodeFS.writeFileSync(NodePath.join(repo, "tracked.txt"), "complete\n");
+      NodeChildProcess.execFileSync("git", ["add", "tracked.txt"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["commit", "-m", "complete build"], { cwd: repo });
+      const commit = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim();
+      const output = NodePath.join(root, "v0.0.34-nightly.20260814.1089", commit.slice(0, 10));
+      const buildTag = "lastcode/build/v0.0.34-nightly.20260814.1089.1";
+      NodeChildProcess.execFileSync("git", ["tag", "--annotate", buildTag, "-m", "complete"], {
+        cwd: repo,
+      });
       NodeFS.mkdirSync(output, { recursive: true });
       NodeFS.writeFileSync(
         NodePath.join(output, "build-manifest.json"),
-        JSON.stringify({ schemaVersion: 1, checkpointTag: checkpoint, lastCodeCommit: commit }),
+        JSON.stringify({
+          schemaVersion: 1,
+          checkpointTag: checkpoint,
+          lastCodeCommit: commit,
+          buildTag,
+        }),
       );
       NodeFS.writeFileSync(NodePath.join(output, "nightly-mac.yml"), "version: test\n");
+      NodeFS.writeFileSync(NodePath.join(output, "SHA256SUMS"), "test\n");
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.dmg"), "dmg");
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");
 
-      assert.equal(resolveExistingBuild(root, checkpoint, commit)?.outputDir, output);
+      assert.equal(resolveExistingBuild(repo, root, checkpoint, commit)?.outputDir, output);
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
-      assert.throws(() => resolveExistingBuild(root, checkpoint, commit), /missing \.zip/);
+      assert.throws(() => resolveExistingBuild(repo, root, checkpoint, commit), /missing \.zip/);
+      NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");
+      NodeFS.unlinkSync(NodePath.join(output, "SHA256SUMS"));
+      assert.throws(
+        () => resolveExistingBuild(repo, root, checkpoint, commit),
+        /missing SHA256SUMS/,
+      );
+      NodeFS.writeFileSync(NodePath.join(output, "SHA256SUMS"), "test\n");
+      NodeChildProcess.execFileSync("git", ["tag", "--delete", buildTag], { cwd: repo });
+      assert.throws(() => resolveExistingBuild(repo, root, checkpoint, commit));
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

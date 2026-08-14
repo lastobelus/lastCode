@@ -44,6 +44,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   let allowDowngrade = false;
   let fullChangelog = false;
   let localFeedCloseCount = 0;
+  const differentialDownloadValues: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -83,7 +84,10 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         fullChangelog = value;
       }),
-    setDisableDifferentialDownload: () => options.setDisableDifferentialDownload ?? Effect.void,
+    setDisableDifferentialDownload: (value) =>
+      Effect.sync(() => {
+        differentialDownloadValues.push(value);
+      }).pipe(Effect.andThen(options.setDisableDifferentialDownload ?? Effect.void)),
     checkForUpdates: Effect.sync(() => {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
@@ -229,6 +233,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     layer,
     checkCount: () => checkCount,
     feedUrls: () => feedUrls,
+    differentialDownloadValues: () => differentialDownloadValues,
     fullChangelog: () => fullChangelog,
     localFeedCloseCount: () => localFeedCloseCount,
     listenerCount: () =>
@@ -411,6 +416,7 @@ describe("DesktopUpdates", () => {
           provider: "generic",
           url: "http://localhost:4141",
         });
+        assert.deepEqual(harness.differentialDownloadValues(), [false, false]);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

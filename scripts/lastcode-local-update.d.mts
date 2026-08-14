@@ -21,6 +21,7 @@ export function compareNightlyVersions(left: string, right: string): number;
 export function resolveLatestCheckpointTag(tags: ReadonlyArray<string>): string | undefined;
 export function parseOptions(argv: ReadonlyArray<string>): LocalUpdateOptions;
 export function resolveExistingBuild(
+  repoRoot: string,
   outputRoot: string,
   checkpointTag: string,
   checkpointCommit: string,
