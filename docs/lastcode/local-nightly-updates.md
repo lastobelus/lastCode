@@ -64,6 +64,8 @@ tracked/untracked worktree, and never removes or resets the canonical checkout
 or the checkpoint daemon's automation worktree. If packaging left an incomplete
 artifact directory, the next attempt renames it with an `.incomplete-*` suffix
 for inspection before creating fresh output at the immutable build path.
+Interrupting or quitting during a build terminates the helper's entire process
+group so CI and packaging cannot continue orphaned against that worktree.
 
 Turning the setting off hides the local updater and stops future checks. It
 does not delete build artifacts, CI stamps, Git tags, or worktrees.

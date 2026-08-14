@@ -102,6 +102,25 @@ export function isSafeFeedArtifactName(name: string): boolean {
   );
 }
 
+export function usesDetachedHelperProcessGroup(platform: NodeJS.Platform): boolean {
+  return platform !== "win32";
+}
+
+export function terminateHelperProcess(
+  child: Pick<NodeChildProcess.ChildProcess, "pid" | "kill">,
+  platform: NodeJS.Platform,
+  killProcess: (pid: number, signal: NodeJS.Signals) => boolean = process.kill,
+): boolean {
+  if (child.pid !== undefined && usesDetachedHelperProcessGroup(platform)) {
+    try {
+      return killProcess(-child.pid, "SIGKILL");
+    } catch {
+      // Fall through if the process group disappeared or cannot be signalled.
+    }
+  }
+  return child.kill("SIGKILL");
+}
+
 function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"]) {
   const dashboardPath = NodePath.join(environment.homeDirectory, ".lastcode", "dashboard.json");
 
@@ -143,6 +162,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
             ],
             {
               cwd: repoRoot,
+              detached: usesDetachedHelperProcessGroup(environment.platform),
               env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
               stdio: ["ignore", "pipe", "pipe"],
             },
@@ -157,7 +177,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
           child.stderr.on("data", (chunk: string) => {
             stderr = `${stderr}${chunk}`.slice(-32_000);
           });
-          const abort = () => child.kill("SIGTERM");
+          const abort = () => terminateHelperProcess(child, environment.platform);
           signal.addEventListener("abort", abort, { once: true });
           child.once("error", reject);
           child.once("close", (exitCode) => {
