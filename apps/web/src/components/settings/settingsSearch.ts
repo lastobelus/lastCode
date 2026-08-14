@@ -7,6 +7,7 @@ export type SettingsPath =
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/lastcode"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -30,6 +31,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/providers": "Providers",
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
+  "/settings/lastcode": "LastCode",
   "/settings/archived": "Archive",
 };
 
@@ -204,6 +206,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Remote environments",
     to: "/settings/connections",
+  },
+  {
+    id: "local-nightlies",
+    title: "Show and install local nightlies",
+    to: "/settings/lastcode",
   },
   {
     id: "archive",
