@@ -12,6 +12,7 @@ import {
   parseOptions,
   prepareBuildWorktree,
   quarantineIncompleteBuild,
+  readLocalSigningConfiguration,
   resolveDeterministicBuildEnvironment,
   resolveExistingBuild,
   resolveLatestCheckpointTag,
@@ -26,9 +27,38 @@ describe("lastcode-local-update", () => {
       LC_ALL: "en_US.UTF-8",
     });
     assert.match(
-      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }).PATH,
+      resolveLocalBuildEnvironment("/tmp/build tree", "/tmp/unsigned-home", { PATH: "/bin" })
+        .PATH ?? "",
       /^\/tmp\/build tree\/node_modules\/\.bin:/,
     );
+  });
+
+  it("adds a configured persistent signing identity to local builds", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-signing-"));
+    try {
+      const configDirectory = NodePath.join(home, ".lastcode");
+      NodeFS.mkdirSync(configDirectory);
+      NodeFS.writeFileSync(
+        NodePath.join(configDirectory, "local-signing.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          identityHash: "0123456789ABCDEF0123456789ABCDEF01234567",
+          identityName: "Apple Development: LastCode Test",
+        }),
+      );
+
+      assert.deepEqual(readLocalSigningConfiguration(home), {
+        schemaVersion: 1,
+        identityHash: "0123456789ABCDEF0123456789ABCDEF01234567",
+        identityName: "Apple Development: LastCode Test",
+      });
+      assert.equal(
+        resolveLocalBuildEnvironment("/tmp/build", home, {}).LASTCODE_LOCAL_MAC_SIGNING_IDENTITY,
+        "0123456789ABCDEF0123456789ABCDEF01234567",
+      );
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("only reuses a full CI stamp for the exact checkpoint context", () => {
@@ -144,6 +174,14 @@ describe("lastcode-local-update", () => {
         checkpointCommit: commit,
       };
       assert.equal(resolveExistingBuild(buildOptions)?.outputDir, output);
+      assert.throws(
+        () =>
+          resolveExistingBuild({
+            ...buildOptions,
+            signingIdentity: "0123456789ABCDEF0123456789ABCDEF01234567",
+          }),
+        /does not match/,
+      );
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
       assert.throws(() => resolveExistingBuild(buildOptions), /missing \.zip/);
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");

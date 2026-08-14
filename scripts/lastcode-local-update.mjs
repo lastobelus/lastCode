@@ -15,11 +15,29 @@ export function resolveDeterministicBuildEnvironment(environment = process.env) 
   return { ...environment, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
 }
 
-export function resolveLocalBuildEnvironment(worktreePath, environment = process.env) {
+export function readLocalSigningConfiguration(home) {
+  const configPath = NodePath.join(home, ".lastcode", "local-signing.json");
+  if (!NodeFS.existsSync(configPath)) return undefined;
+  const config = JSON.parse(NodeFS.readFileSync(configPath, "utf8"));
+  if (
+    config?.schemaVersion !== 1 ||
+    typeof config.identityHash !== "string" ||
+    !/^[0-9A-F]{40}$/.test(config.identityHash) ||
+    typeof config.identityName !== "string" ||
+    config.identityName.length === 0
+  ) {
+    throw new Error(`Invalid LastCode signing configuration at ${configPath}.`);
+  }
+  return config;
+}
+
+export function resolveLocalBuildEnvironment(worktreePath, home, environment = process.env) {
   const resolved = resolveDeterministicBuildEnvironment(environment);
+  const signing = readLocalSigningConfiguration(home);
   return {
     ...resolved,
     PATH: `${NodePath.join(worktreePath, "node_modules", ".bin")}${NodePath.delimiter}${resolved.PATH ?? ""}`,
+    ...(signing ? { LASTCODE_LOCAL_MAC_SIGNING_IDENTITY: signing.identityHash } : {}),
   };
 }
 
@@ -129,7 +147,13 @@ export function parseOptions(argv) {
   return { command, repoRoot, home, currentVersion, checkpointTag };
 }
 
-export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
+export function resolveExistingBuild({
+  repoRoot,
+  outputRoot,
+  checkpointTag,
+  checkpointCommit,
+  signingIdentity,
+}) {
   const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
@@ -140,6 +164,7 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
     manifest.schemaVersion !== 1 ||
     manifest.checkpointTag !== checkpointTag ||
     manifest.lastCodeCommit !== checkpointCommit ||
+    manifest.signingIdentity !== signingIdentity ||
     typeof manifest.buildTag !== "string" ||
     !manifest.buildTag.startsWith(checkpointTag.replace(CHECKPOINT_PREFIX, "lastcode/build/") + ".")
   ) {
@@ -261,6 +286,7 @@ function build(options) {
   ]);
   const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
   const outputRoot = NodePath.join(updateRoot, "artifacts");
+  const signingIdentity = readLocalSigningConfiguration(options.home)?.identityHash;
   let existing;
   let incompleteBuildError;
   try {
@@ -269,6 +295,7 @@ function build(options) {
       outputRoot,
       checkpointTag: options.checkpointTag,
       checkpointCommit,
+      signingIdentity,
     });
   } catch (error) {
     incompleteBuildError = error;
@@ -297,7 +324,7 @@ function build(options) {
     }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
-    const buildEnvironment = resolveLocalBuildEnvironment(worktreePath);
+    const buildEnvironment = resolveLocalBuildEnvironment(worktreePath, options.home);
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
@@ -368,6 +395,7 @@ function build(options) {
     outputRoot,
     checkpointTag: options.checkpointTag,
     checkpointCommit,
+    signingIdentity,
   });
   if (!built)
     throw new Error(`Build completed without a usable artifact for ${options.checkpointTag}.`);

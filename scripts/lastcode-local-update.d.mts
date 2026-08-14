@@ -21,7 +21,31 @@ export interface ExistingBuildOptions {
   readonly outputRoot: string;
   readonly checkpointTag: string;
   readonly checkpointCommit: string;
+  readonly signingIdentity?: string;
 }
+
+export interface LocalSigningConfiguration {
+  readonly schemaVersion: 1;
+  readonly identityHash: string;
+  readonly identityName: string;
+  readonly configuredAt?: string;
+}
+
+export function resolveDeterministicBuildEnvironment(
+  environment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;
+export function readLocalSigningConfiguration(home: string): LocalSigningConfiguration | undefined;
+export function resolveLocalBuildEnvironment(
+  worktreePath: string,
+  home: string,
+  environment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;
+export function isReusableCheckpointCiStamp(
+  stamp: unknown,
+  checkpointTag: string,
+  checkpointCommit: string,
+  upstreamCommit: string,
+): boolean;
 
 export function parseNightlyVersion(value: string): ParsedNightlyVersion | undefined;
 export function compareNightlyVersions(left: string, right: string): number;

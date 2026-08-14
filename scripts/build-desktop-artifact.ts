@@ -759,6 +759,7 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslPrebuild: string | undefined;
+  readonly localMacSigningIdentity: string | undefined;
 }
 
 interface StagePackageJson {
@@ -1234,6 +1235,7 @@ const BuildEnvConfig = Config.all({
   // into the staged node-pty so the WSL backend ships a ready binary and never
   // compiles on the user's machine.
   wslPrebuild: Config.string("T3CODE_DESKTOP_WSL_PREBUILD").pipe(Config.option),
+  localMacSigningIdentity: Config.string("LASTCODE_LOCAL_MAC_SIGNING_IDENTITY").pipe(Config.option),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1327,6 +1329,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
 
   const wslPrebuild =
     Option.getOrUndefined(input.wslPrebuild) ?? Option.getOrUndefined(env.wslPrebuild);
+  const localMacSigningIdentity = Option.getOrUndefined(env.localMacSigningIdentity);
 
   return {
     platform,
@@ -1341,6 +1344,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslPrebuild,
+    localMacSigningIdentity,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -2025,6 +2029,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
+  localMacSigningIdentity?: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: LASTCODE_DESKTOP_DISTRIBUTION.appId,
@@ -2064,7 +2069,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       ...(!signed
         ? {
-            identity: "-",
+            identity: localMacSigningIdentity ?? "-",
             hardenedRuntime: false,
           }
         : {}),
@@ -2922,6 +2927,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
         : undefined,
+      options.localMacSigningIdentity,
     ),
     dependencies: stageDependencies,
     devDependencies: {

@@ -35,6 +35,7 @@ interface BuildManifest {
   readonly checkpointTag: string;
   readonly lastCodeCommit: string;
   readonly platform: "mac";
+  readonly signingIdentity?: string;
   readonly upstreamCommit: string;
   readonly upstreamTag: string;
 }
@@ -208,6 +209,9 @@ function main(argv: ReadonlyArray<string>): void {
     checkpointTag: options.checkpointTag,
     lastCodeCommit: commit,
     platform: "mac",
+    ...(env.LASTCODE_LOCAL_MAC_SIGNING_IDENTITY
+      ? { signingIdentity: env.LASTCODE_LOCAL_MAC_SIGNING_IDENTITY }
+      : {}),
     upstreamCommit,
     upstreamTag: nightlyTag,
   };

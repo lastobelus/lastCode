@@ -29,6 +29,7 @@ export type PromotionMode = "never" | "always" | "if-no-open-prs";
 interface CheckpointOptions {
   readonly dryRun: boolean;
   readonly fetch: boolean;
+  readonly mirrorUpstreamMain: boolean;
   readonly promotion: PromotionMode;
   readonly pushTags: boolean;
   readonly smoke: boolean;
@@ -235,6 +236,32 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
   return remoteCommit !== checkpointCommit;
 }
 
+export function upstreamMainMirrorPushArgs(
+  pushRemote: string,
+  remoteCommit: string,
+  upstreamCommit: string,
+): ReadonlyArray<string> {
+  return [
+    "push",
+    `--force-with-lease=refs/heads/main:${remoteCommit}`,
+    pushRemote,
+    `${upstreamCommit}:refs/heads/main`,
+  ];
+}
+
+export function resolveUpstreamMainMirror(
+  pushRemote: string,
+  remoteCommit: string,
+  upstreamCommit: string,
+  remoteIsAncestor: boolean,
+): ReadonlyArray<string> | undefined {
+  if (remoteCommit === upstreamCommit) return undefined;
+  if (!remoteIsAncestor) {
+    throw new Error(`Refusing to mirror upstream: ${pushRemote}/main has diverged.`);
+  }
+  return upstreamMainMirrorPushArgs(pushRemote, remoteCommit, upstreamCommit);
+}
+
 export function checkpointFailureDisposition(
   pendingCheckpointTag: string | undefined,
   recoveryBranch: string,
@@ -267,6 +294,7 @@ function pruneUnpublishedCheckpointTags(repoRoot: string, pushRemote: string): v
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
+  let mirrorUpstreamMain = false;
   let promotion: PromotionMode = "never";
   let pushTags = false;
   let smoke = true;
@@ -279,6 +307,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     if (arg === "--") continue;
     if (arg === "--dry-run") dryRun = true;
     else if (arg === "--no-fetch") fetch = false;
+    else if (arg === "--mirror-upstream-main") mirrorUpstreamMain = true;
     else if (arg === "--no-smoke") smoke = false;
     else if (arg === "--push-tags") pushTags = true;
     else if (arg === "--promote") promotion = "always";
@@ -295,7 +324,17 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     }
   }
 
-  return { dryRun, fetch, promotion, pushTags, smoke, sourceRef, upstreamRemote, pushRemote };
+  return {
+    dryRun,
+    fetch,
+    mirrorUpstreamMain,
+    promotion,
+    pushTags,
+    smoke,
+    sourceRef,
+    upstreamRemote,
+    pushRemote,
+  };
 }
 
 export function checkpointMessage(input: {
@@ -490,6 +529,31 @@ function promoteCheckpoint(
   console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
 }
 
+function mirrorUpstreamMain(repoRoot: string, options: CheckpointOptions): void {
+  const upstreamRef = `refs/remotes/${options.upstreamRemote}/main`;
+  const remoteRef = `refs/remotes/${options.pushRemote}/main`;
+  const upstreamCommit = git(repoRoot, ["rev-parse", `${upstreamRef}^{commit}`]);
+  const remoteCommit = git(repoRoot, ["rev-parse", `${remoteRef}^{commit}`]);
+  const pushArgs = resolveUpstreamMainMirror(
+    options.pushRemote,
+    remoteCommit,
+    upstreamCommit,
+    isAncestor(repoRoot, remoteCommit, upstreamCommit),
+  );
+  if (!pushArgs) {
+    console.log(`[lastcode:checkpoint] ${options.pushRemote}/main already mirrors ${upstreamRef}.`);
+    return;
+  }
+  if (options.dryRun) {
+    console.log(
+      `[lastcode:checkpoint] Would fast-forward ${options.pushRemote}/main from ${remoteCommit} to ${upstreamCommit}.`,
+    );
+    return;
+  }
+  run(repoRoot, "git", pushArgs);
+  console.log(`[lastcode:checkpoint] Mirrored ${upstreamRef} to ${options.pushRemote}/main.`);
+}
+
 function main(argv: ReadonlyArray<string>): void {
   const options = parseArgs(argv);
   const hostPlatform = Effect.runSync(HostProcessPlatform);
@@ -514,7 +578,16 @@ function main(argv: ReadonlyArray<string>): void {
       options.pushRemote,
       `+refs/heads/lastcode/main:refs/remotes/${options.pushRemote}/lastcode/main`,
     ]);
+    if (options.mirrorUpstreamMain) {
+      run(repoRoot, "git", [
+        "fetch",
+        options.pushRemote,
+        `+refs/heads/main:refs/remotes/${options.pushRemote}/main`,
+      ]);
+    }
   }
+
+  if (options.mirrorUpstreamMain) mirrorUpstreamMain(repoRoot, options);
 
   if (options.pushTags && !options.dryRun) {
     pruneUnpublishedCheckpointTags(repoRoot, options.pushRemote);
