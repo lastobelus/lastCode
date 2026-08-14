@@ -17,6 +17,7 @@ import {
 
 const baseState: DesktopUpdateState = {
   enabled: true,
+  source: "hosted",
   status: "idle",
   channel: "latest",
   currentVersion: "1.0.0",
@@ -242,6 +243,24 @@ describe("desktop update UI helpers", () => {
         downloadedVersion: null,
       }),
     ).toContain("Install update and restart T3 Code?");
+  });
+
+  it("uses build and LastCode language for local nightlies", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      source: "lastcode-local",
+      status: "available",
+      availableVersion: "1.1.0-nightly.20260814.1",
+    };
+
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("ready to build");
+    expect(
+      getDesktopUpdateInstallConfirmationMessage({
+        source: "lastcode-local",
+        availableVersion: state.availableVersion,
+        downloadedVersion: state.availableVersion,
+      }),
+    ).toContain("restart LastCode?");
   });
 
   it("keeps the same install confirmation copy across desktop platforms", () => {
