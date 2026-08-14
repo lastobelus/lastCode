@@ -21,6 +21,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 
 interface UpdatesHarnessOptions {
   readonly checkForUpdates?: Effect.Effect<
@@ -31,6 +32,9 @@ interface UpdatesHarnessOptions {
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly env?: Record<string, string | undefined>;
+  readonly localNightliesEnabled?: boolean;
+  readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
+  readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
 }
 
 const flushCallbacks = Effect.yieldNow;
@@ -39,6 +43,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   let checkCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
+  let localFeedCloseCount = 0;
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -82,7 +87,13 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     checkForUpdates: Effect.sync(() => {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
-    downloadUpdate: Effect.void,
+    downloadUpdate: Effect.sync(() => {
+      if (options.localNightliesEnabled) {
+        for (const listener of listeners.get("update-downloaded") ?? []) {
+          listener({ version: options.localInspection?.availableVersion });
+        }
+      }
+    }),
     quitAndInstall: () => Effect.void,
     on: (eventName, listener) =>
       Effect.acquireRelease(
@@ -162,13 +173,38 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         setServerExposureMode: () => Effect.die("unexpected server exposure update"),
         setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),
         setUpdateChannel: () => Effect.fail(setUpdateChannelError),
+        setShowAndInstallLocalNightlies: () => Effect.die("unexpected local nightly toggle"),
         setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
         setWslDistro: () => Effect.die("unexpected WSL distro change"),
         setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
         applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
         applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
       } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
-    : DesktopAppSettings.layer;
+    : options.localNightliesEnabled
+      ? DesktopAppSettings.layerTest({
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          showAndInstallLocalNightlies: true,
+        })
+      : DesktopAppSettings.layer;
+
+  const localUpdatesLayer = LastCodeLocalUpdates.layerTest({
+    supported: options.localNightliesEnabled ?? false,
+    inspect: () =>
+      options.localInspection
+        ? Effect.succeed(options.localInspection)
+        : Effect.die("unexpected local update inspection"),
+    build: () =>
+      options.localBuild
+        ? Effect.succeed(options.localBuild)
+        : Effect.die("unexpected local update build"),
+    startFeed: () =>
+      Effect.succeed({
+        url: "http://127.0.0.1:4242",
+        close: Effect.sync(() => {
+          localFeedCloseCount += 1;
+        }),
+      }),
+  });
 
   const layer = DesktopUpdates.layer.pipe(
     Layer.provideMerge(updaterLayer),
@@ -185,6 +221,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     ),
     Layer.provideMerge(environmentLayer),
+    Layer.provideMerge(localUpdatesLayer),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -193,6 +230,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     checkCount: () => checkCount,
     feedUrls: () => feedUrls,
     fullChangelog: () => fullChangelog,
+    localFeedCloseCount: () => localFeedCloseCount,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
@@ -290,6 +328,53 @@ describe("DesktopUpdates", () => {
         assert.equal(state.availableVersion, "1.2.4");
         assert.isNotNull(state.checkedAt);
         assert.equal(harness.sentStates.at(-1)?.status, "available");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("builds and stages an opted-in local checkpoint through electron-updater", () => {
+    const checkpointTag = "lastcode/checkpoint/v1.2.4-nightly.20260814.1089";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 1,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089",
+        releaseNotes: ["feat(lastcode): local update"],
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const available = yield* updates.getState;
+        assert.equal(available.source, "lastcode-local");
+        assert.equal(available.status, "available");
+        assert.deepEqual(available.releaseNotes[0]?.items, ["feat(lastcode): local update"]);
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+        yield* flushCallbacks;
+
+        const downloaded = yield* updates.getState;
+        assert.equal(downloaded.status, "downloaded");
+        assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089");
+        assert.deepInclude(harness.feedUrls().at(-1), {
+          provider: "generic",
+          url: "http://127.0.0.1:4242",
+        });
+        assert.equal(harness.localFeedCloseCount(), 1);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
