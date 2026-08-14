@@ -83,6 +83,18 @@ export function resolveNextBuildNumber(
   return Math.max(0, ...used) + 1;
 }
 
+export function resolveBuildEnvironment(
+  cargoPath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    PATH: `${NodePath.dirname(cargoPath)}${NodePath.delimiter}${environment.PATH ?? ""}`,
+    T3CODE_DESKTOP_UPDATE_REPOSITORY:
+      environment.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode",
+  };
+}
+
 function run(
   cwd: string,
   command: string,
@@ -160,10 +172,7 @@ function main(argv: ReadonlyArray<string>): void {
   const cargoPath = run(repoRoot, "rustup", ["which", "cargo", "--toolchain", "stable"], {
     capture: true,
   });
-  const env = {
-    ...process.env,
-    PATH: `${NodePath.dirname(cargoPath)}${NodePath.delimiter}${process.env.PATH ?? ""}`,
-  };
+  const env = resolveBuildEnvironment(cargoPath);
   console.log(`[lastcode:build] Building ${options.checkpointTag} at ${commit}.`);
   run(
     repoRoot,
