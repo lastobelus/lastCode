@@ -125,9 +125,11 @@ such as `~/.codex`, so they do not need to be duplicated.
 Tailscale Serve is machine-global. Do not configure both applications to claim
 the same Serve port simultaneously.
 
-## In-App Update Direction
+## In-App Local Updates
 
-The hosted `electron-updater` path downloads published releases. A future local
-LastCode updater would instead need to invoke the checkpoint, local CI, and build
-workflow and then install the resulting artifact. It should be a separate local
-orchestrator rather than an overload of the hosted updater.
+The default-off local updater is documented in
+[Local Nightly Updates](local-nightly-updates.md). It discovers immutable
+checkpoint tags, builds a selected checkpoint in a separate dedicated worktree,
+and stages the generated updater ZIP through Electron's existing macOS install
+machinery. Checkpoint scheduling remains independent: the daemon never builds
+merely because it found a new nightly.
