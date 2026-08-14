@@ -94,18 +94,21 @@ describe("lastcode-local-update", () => {
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.dmg"), "dmg");
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");
 
-      assert.equal(resolveExistingBuild(repo, root, checkpoint, commit)?.outputDir, output);
+      const buildOptions = {
+        repoRoot: repo,
+        outputRoot: root,
+        checkpointTag: checkpoint,
+        checkpointCommit: commit,
+      };
+      assert.equal(resolveExistingBuild(buildOptions)?.outputDir, output);
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
-      assert.throws(() => resolveExistingBuild(repo, root, checkpoint, commit), /missing \.zip/);
+      assert.throws(() => resolveExistingBuild(buildOptions), /missing \.zip/);
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");
       NodeFS.unlinkSync(NodePath.join(output, "SHA256SUMS"));
-      assert.throws(
-        () => resolveExistingBuild(repo, root, checkpoint, commit),
-        /missing SHA256SUMS/,
-      );
+      assert.throws(() => resolveExistingBuild(buildOptions), /missing SHA256SUMS/);
       NodeFS.writeFileSync(NodePath.join(output, "SHA256SUMS"), "test\n");
       NodeChildProcess.execFileSync("git", ["tag", "--delete", buildTag], { cwd: repo });
-      assert.throws(() => resolveExistingBuild(repo, root, checkpoint, commit));
+      assert.throws(() => resolveExistingBuild(buildOptions));
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

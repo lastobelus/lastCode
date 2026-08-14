@@ -16,16 +16,18 @@ export interface ExistingBuild {
   readonly manifestPath: string;
 }
 
+export interface ExistingBuildOptions {
+  readonly repoRoot: string;
+  readonly outputRoot: string;
+  readonly checkpointTag: string;
+  readonly checkpointCommit: string;
+}
+
 export function parseNightlyVersion(value: string): ParsedNightlyVersion | undefined;
 export function compareNightlyVersions(left: string, right: string): number;
 export function resolveLatestCheckpointTag(tags: ReadonlyArray<string>): string | undefined;
 export function parseOptions(argv: ReadonlyArray<string>): LocalUpdateOptions;
-export function resolveExistingBuild(
-  repoRoot: string,
-  outputRoot: string,
-  checkpointTag: string,
-  checkpointCommit: string,
-): ExistingBuild | undefined;
+export function resolveExistingBuild(options: ExistingBuildOptions): ExistingBuild | undefined;
 export function quarantineIncompleteBuild(
   outputRoot: string,
   checkpointTag: string,

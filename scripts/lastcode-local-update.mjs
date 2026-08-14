@@ -102,7 +102,7 @@ export function parseOptions(argv) {
   return { command, repoRoot, home, currentVersion, checkpointTag };
 }
 
-export function resolveExistingBuild(repoRoot, outputRoot, checkpointTag, checkpointCommit) {
+export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
   const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
@@ -237,12 +237,12 @@ function build(options) {
   let existing;
   let incompleteBuildError;
   try {
-    existing = resolveExistingBuild(
-      options.repoRoot,
+    existing = resolveExistingBuild({
+      repoRoot: options.repoRoot,
       outputRoot,
-      options.checkpointTag,
+      checkpointTag: options.checkpointTag,
       checkpointCommit,
-    );
+    });
   } catch (error) {
     incompleteBuildError = error;
   }
@@ -311,7 +311,12 @@ function build(options) {
     NodeFS.closeSync(logFd);
   }
 
-  const built = resolveExistingBuild(outputRoot, options.checkpointTag, checkpointCommit);
+  const built = resolveExistingBuild({
+    repoRoot: options.repoRoot,
+    outputRoot,
+    checkpointTag: options.checkpointTag,
+    checkpointCommit,
+  });
   if (!built)
     throw new Error(`Build completed without a usable artifact for ${options.checkpointTag}.`);
   return {
