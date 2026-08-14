@@ -187,20 +187,23 @@ function getDesktopBootstrapCredential(): string | null {
 }
 
 export async function fetchSessionState(): Promise<AuthSessionState> {
-  return retryTransientBootstrap(async () => {
-    try {
-      return await runPrimaryHttp(
-        PrimaryEnvironmentHttpClient.pipe(
-          Effect.flatMap((client) => client.auth.session({ headers: {} })),
-        ),
-      );
-    } catch (error) {
-      throw PrimaryEnvironmentRequestError.fromCause({
-        operation: "fetch-session-state",
-        cause: error,
-      });
-    }
-  });
+  return retryTransientBootstrap(
+    async () => {
+      try {
+        return await runPrimaryHttp(
+          PrimaryEnvironmentHttpClient.pipe(
+            Effect.flatMap((client) => client.auth.session({ headers: {} })),
+          ),
+        );
+      } catch (error) {
+        throw PrimaryEnvironmentRequestError.fromCause({
+          operation: "fetch-session-state",
+          cause: error,
+        });
+      }
+    },
+    { retryInternalServerError: window.desktopBridge !== undefined },
+  );
 }
 
 function readHttpApiStatus(error: unknown): number | null {
@@ -280,20 +283,27 @@ const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
 const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
 
-export async function retryTransientBootstrap<T>(operation: () => Promise<T>): Promise<T> {
+export async function retryTransientBootstrap<T>(
+  operation: () => Promise<T>,
+  options: { readonly retryInternalServerError?: boolean } = {},
+): Promise<T> {
   const startedAt = Date.now();
+  let retryCount = 0;
   while (true) {
     try {
       return await operation();
     } catch (error) {
-      if (!isTransientBootstrapError(error)) {
+      if (!isTransientBootstrapError(error, options.retryInternalServerError === true)) {
         throw error;
       }
 
-      if (Date.now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) {
+      // A native credential prompt can block Electron's main process longer
+      // than this deadline. Always allow the first retry after control returns.
+      if (retryCount > 0 && Date.now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) {
         throw error;
       }
 
+      retryCount += 1;
       await waitForBootstrapRetry(BOOTSTRAP_RETRY_STEP_MS);
     }
   }
@@ -305,9 +315,12 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
   });
 }
 
-function isTransientBootstrapError(error: unknown): boolean {
+function isTransientBootstrapError(error: unknown, retryInternalServerError: boolean): boolean {
   if (isPrimaryEnvironmentRequestError(error)) {
-    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+    return (
+      TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status) ||
+      (retryInternalServerError && error.status === 500)
+    );
   }
 
   if (error instanceof TypeError) {

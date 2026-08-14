@@ -269,6 +269,36 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(attempts).toBe(4);
   });
 
+  it("retries desktop session bootstrap after a blocking credential prompt", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const request = HttpClientRequest.get("http://localhost/api/auth/session");
+    const response = HttpClientResponse.fromWeb(
+      request,
+      new Response("Internal Server Error", { status: 500 }),
+    );
+    const runner: PrimaryHttpEffectRunner = async <A>() => {
+      attempts += 1;
+      if (attempts === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20_000));
+        throw new HttpClientError.HttpClientError({
+          reason: new HttpClientError.StatusCodeError({ request, response }),
+        });
+      }
+      return unauthenticatedSession(DESKTOP_AUTH) as A;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState } = await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    await vi.advanceTimersByTimeAsync(20_500);
+
+    await expect(sessionPromise).resolves.toEqual(unauthenticatedSession(DESKTOP_AUTH));
+    expect(attempts).toBe(2);
+  });
+
   it("takes a pairing token from the location hash and strips it immediately", async () => {
     const testWindow = installTestBrowser("http://localhost/#token=pairing-token");
     const { takePairingTokenFromUrl } = await import("./environments/primary");
