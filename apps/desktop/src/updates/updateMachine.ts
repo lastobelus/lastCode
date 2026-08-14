@@ -22,6 +22,7 @@ export function createInitialDesktopUpdateState(
 ): DesktopUpdateState {
   return {
     enabled: false,
+    source: "hosted",
     status: "disabled",
     channel,
     currentVersion,

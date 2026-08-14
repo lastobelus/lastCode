@@ -7,6 +7,7 @@ import { createDesktopUpdateStateAtom, DesktopUpdateStateReadError } from "./des
 
 const baseState: DesktopUpdateState = {
   enabled: true,
+  source: "hosted",
   status: "idle",
   channel: "latest",
   currentVersion: "1.0.0",
