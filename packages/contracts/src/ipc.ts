@@ -290,6 +290,7 @@ export interface LastCodeSettingsImportPreview {
   categories: readonly LastCodeSettingsImportCategory[];
   excluded: readonly string[];
   canImport: boolean;
+  message: string | null;
 }
 
 export const LastCodeSettingsImportPreviewSchema = Schema.Struct({
@@ -298,6 +299,7 @@ export const LastCodeSettingsImportPreviewSchema = Schema.Struct({
   categories: Schema.Array(LastCodeSettingsImportCategorySchema),
   excluded: Schema.Array(Schema.String),
   canImport: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
 });
 
 export interface LastCodeSettingsImportResult {

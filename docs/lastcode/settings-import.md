@@ -9,6 +9,11 @@ The preview reads the standard T3 Code profile at `~/.t3/userdata`. It shows the
 status of each supported source file before enabling the import. Missing and
 invalid files are skipped; at least one valid category is required.
 
+The import is unavailable when the Windows desktop is configured in WSL-only
+mode. In that mode the active server profile lives inside WSL rather than in the
+Windows LastCode profile. Normal Windows mode and parallel WSL mode import the
+Windows primary profile as expected.
+
 ## Imported categories
 
 | Category                        | Source and destination file | Imported data                                                                                                                                    |

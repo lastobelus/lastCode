@@ -139,6 +139,7 @@ export function LastCodeSettingsPanel() {
             ) : importPreview ? (
               <div className="space-y-1.5">
                 <p>Source: {importPreview.sourceDirectory}</p>
+                {importPreview.message ? <p>{importPreview.message}</p> : null}
                 <ul className="space-y-0.5">
                   {importPreview.categories.map((category) => (
                     <li key={category.id}>

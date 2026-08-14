@@ -14,6 +14,7 @@ const fs = NodeFS.promises;
 
 import {
   importT3Settings,
+  isT3SettingsImportSupported,
   previewT3SettingsImport,
   type LastCodeSettingsImportPaths,
 } from "./LastCodeSettingsImport.ts";
@@ -55,6 +56,13 @@ async function expectRejected(effect: () => Promise<unknown>): Promise<void> {
 }
 
 describe("LastCodeSettingsImport", () => {
+  it("disables imports only for the Windows WSL-only profile", () => {
+    assert.isFalse(isT3SettingsImportSupported("win32", true));
+    assert.isTrue(isT3SettingsImportSupported("win32", false));
+    assert.isTrue(isT3SettingsImportSupported("darwin", true));
+    assert.isTrue(isT3SettingsImportSupported("linux", true));
+  });
+
   it("previews missing and invalid categories without exposing file contents", async () => {
     const paths = await makePaths();
     await fs.writeFile(NodePath.join(paths.sourceDirectory, "client-settings.json"), "not-json");

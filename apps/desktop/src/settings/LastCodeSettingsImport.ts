@@ -96,6 +96,10 @@ export interface LastCodeSettingsImportPaths {
   readonly backupRootDirectory: string;
 }
 
+export function isT3SettingsImportSupported(platform: NodeJS.Platform, wslOnly: boolean): boolean {
+  return platform !== "win32" || !wslOnly;
+}
+
 interface PreparedWrite {
   readonly id: LastCodeSettingsImportCategoryId;
   readonly fileName: string;
@@ -206,6 +210,7 @@ export async function previewT3SettingsImport(
     categories,
     excluded: LASTCODE_SETTINGS_IMPORT_EXCLUSIONS,
     canImport: !sameDirectory && categories.some((category) => category.status === "ready"),
+    message: sameDirectory ? "T3 Code and LastCode resolve to the same settings directory." : null,
   };
 }
 
