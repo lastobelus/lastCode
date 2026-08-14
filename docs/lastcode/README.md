@@ -21,6 +21,8 @@ directories.
   evaluation tags.
 - [Local nightly updates](local-nightly-updates.md): the opt-in in-app
   checkpoint build, staging, installation, safety boundaries, and logs.
+- [Settings import](settings-import.md): the one-time, selective migration from
+  T3 Code into an independent LastCode profile, including exclusions and backups.
 
 ## Command Summary
 
