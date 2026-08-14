@@ -17,6 +17,8 @@ export const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 export const LASTCODE_SETTINGS_GET_CHANNEL = "desktop:lastcode-settings-get";
 export const LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL =
   "desktop:lastcode-settings-set-local-nightlies";
+export const LASTCODE_SETTINGS_IMPORT_PREVIEW_CHANNEL = "desktop:lastcode-settings-import-preview";
+export const LASTCODE_SETTINGS_IMPORT_CHANNEL = "desktop:lastcode-settings-import";
 export const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
 export const GET_SYSTEM_LOCALE_CHANNEL = "desktop:get-system-locale";
 export const GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL = "desktop:get-local-environment-bootstraps";
