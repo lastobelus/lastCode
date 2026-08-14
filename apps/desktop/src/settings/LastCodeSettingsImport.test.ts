@@ -114,7 +114,30 @@ describe("LastCodeSettingsImport", () => {
     sourceOpenCode.serverUrl = "http://127.0.0.1:4096";
     sourceOpenCode.serverPassword = "source-secret";
     sourceCodex.launchArgs = "--source-secret token";
+    sourceServer.textGenerationModelSelection = {
+      instanceId: "opencode",
+      model: "source-model",
+      options: [],
+    };
+    sourceServer.sourceControlWriterModelSelection = {
+      instanceId: "opencode",
+      model: "source-writer",
+      options: [],
+    };
     sourceServer.providerInstances = {
+      codex: {
+        driver: "codex",
+        displayName: "T3 Codex",
+        accentColor: "#123456",
+        enabled: false,
+        config: {
+          binaryPath: "/opt/t3/codex",
+          homePath: "/Users/source/.codex",
+          launchArgs: "--source-instance-secret token",
+          customModels: ["source-model"],
+        },
+        environment: [{ name: "TOKEN", value: "source-default-token", sensitive: true }],
+      },
       personal: {
         driver: "codex",
         environment: [{ name: "TOKEN", value: "source-token", sensitive: true }],
@@ -131,7 +154,26 @@ describe("LastCodeSettingsImport", () => {
     destinationOpenCode.serverUrl = "http://127.0.0.1:7777";
     destinationOpenCode.serverPassword = "lastcode-secret";
     destinationCodex.launchArgs = "--lastcode-only";
+    destinationServer.textGenerationModelSelection = {
+      instanceId: "codex",
+      model: "lastcode-model",
+      options: [],
+    };
+    destinationServer.sourceControlWriterModelSelection = {
+      instanceId: "codex",
+      model: "lastcode-writer",
+      options: [],
+    };
     destinationServer.providerInstances = {
+      codex: {
+        driver: "codex",
+        enabled: true,
+        config: {
+          binaryPath: "/opt/lastcode/codex",
+          launchArgs: "--lastcode-instance-only",
+        },
+        environment: [{ name: "TOKEN", value: "lastcode-default-token", sensitive: true }],
+      },
       lastcode: {
         driver: "codex",
         environment: [{ name: "TOKEN", value: "lastcode-token", sensitive: true }],
@@ -166,9 +208,6 @@ describe("LastCodeSettingsImport", () => {
         await fs.readFile(NodePath.join(paths.destinationDirectory, "settings.json"), "utf8"),
       ) as unknown,
     );
-    const importedProviders = record(importedServer.providers);
-    const importedOpenCode = record(importedProviders.opencode);
-    const importedCodex = record(importedProviders.codex);
     assert.equal(importedClient.fontSizeInterface, 17);
     assert.deepEqual(importedClient.favorites, [
       { provider: "lastcode_custom", model: "lastcode-model" },
@@ -179,10 +218,16 @@ describe("LastCodeSettingsImport", () => {
       codex: { hiddenModels: ["hidden-source"], modelOrder: ["gpt-source"] },
     });
     assert.equal(importedServer.addProjectBaseDirectory, "/src/t3-projects");
-    assert.equal(importedOpenCode.serverUrl, "http://127.0.0.1:7777");
-    assert.equal(importedOpenCode.serverPassword, "lastcode-secret");
-    assert.equal(importedCodex.launchArgs, "--lastcode-only");
+    assert.deepEqual(importedServer.providers, destinationServer.providers);
     assert.deepEqual(importedServer.providerInstances, destinationServer.providerInstances);
+    assert.deepEqual(
+      importedServer.textGenerationModelSelection,
+      destinationServer.textGenerationModelSelection,
+    );
+    assert.deepEqual(
+      importedServer.sourceControlWriterModelSelection,
+      destinationServer.sourceControlWriterModelSelection,
+    );
     assert.deepEqual(result.imported, ["client-preferences", "keybindings", "server-preferences"]);
     assert.include(
       await fs.readFile(NodePath.join(result.backupDirectory, "settings.json"), "utf8"),

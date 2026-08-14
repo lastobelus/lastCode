@@ -57,28 +57,27 @@ const CATEGORY_DEFINITIONS: ReadonlyArray<{
   },
   {
     id: "server-preferences",
-    label: "Server and provider preferences",
+    label: "Server behavior",
     sourceFile: "settings.json",
-    detail: "Behavior, source-control writing, model selection, and safe provider preferences.",
+    detail: "Background behavior, Git fetch, thread defaults, and source-control writing.",
   },
 ];
 
 export const LASTCODE_SETTINGS_IMPORT_EXCLUSIONS = [
   "Projects, threads, checkpoints, attachments, and databases",
-  "Authentication tokens, provider secrets, and provider-instance environment variables",
+  "Provider configuration, credentials, instances, and model selections",
   "Saved environments, connections, and machine identity",
   "Desktop window state, network exposure, Tailscale, ports, and WSL runtime selection",
   "Update channels, local-nightly settings, caches, logs, and browser storage",
 ] as const;
 
-const SAFE_PROVIDER_SETTING_KEYS = {
-  codex: ["enabled", "binaryPath", "homePath", "shadowHomePath", "customModels"],
-  claudeAgent: ["enabled", "binaryPath", "homePath", "customModels"],
-  cursor: ["enabled", "binaryPath", "apiEndpoint", "customModels"],
-  grok: ["enabled", "binaryPath", "customModels"],
-  opencode: ["enabled", "binaryPath", "customModels"],
-} as const;
-const SAFE_MODEL_SELECTION_INSTANCE_IDS = new Set(Object.keys(SAFE_PROVIDER_SETTING_KEYS));
+const BUILT_IN_PROVIDER_INSTANCE_IDS = new Set([
+  "codex",
+  "claudeAgent",
+  "cursor",
+  "grok",
+  "opencode",
+]);
 
 const SAFE_SERVER_SETTING_KEYS = [
   "enableLegacyTokenStreaming",
@@ -149,29 +148,6 @@ function safeServerPreferences(raw: string): JsonRecord {
   );
   const selected: JsonRecord = {};
   for (const key of SAFE_SERVER_SETTING_KEYS) selected[key] = encoded[key];
-  for (const key of [
-    "textGenerationModelSelection",
-    "sourceControlWriterModelSelection",
-  ] as const) {
-    const selection = encoded[key];
-    if (selection === null) {
-      selected[key] = null;
-      continue;
-    }
-    const instanceId = asRecord(selection, `${key} setting`).instanceId;
-    if (typeof instanceId === "string" && SAFE_MODEL_SELECTION_INSTANCE_IDS.has(instanceId)) {
-      selected[key] = selection;
-    }
-  }
-
-  const encodedProviders = asRecord(encoded.providers, "Provider settings");
-  const providers = Object.fromEntries(
-    Object.entries(SAFE_PROVIDER_SETTING_KEYS).map(([provider, keys]) => {
-      const encodedProvider = asRecord(encodedProviders[provider], `${provider} settings`);
-      return [provider, Object.fromEntries(keys.map((key) => [key, encodedProvider[key]]))];
-    }),
-  );
-  selected.providers = providers;
   return selected;
 }
 
@@ -244,7 +220,7 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
       ? decodeClientSettingsJson("{}")
       : decodeSourceClientSettings(destinationRaw);
   const isBuiltInProviderPreference = (provider: string) =>
-    SAFE_MODEL_SELECTION_INSTANCE_IDS.has(provider);
+    BUILT_IN_PROVIDER_INSTANCE_IDS.has(provider);
   const favorites = [
     ...destination.favorites.filter(({ provider }) => !isBuiltInProviderPreference(provider)),
     ...source.favorites.filter(({ provider }) => isBuiltInProviderPreference(provider)),
@@ -266,18 +242,7 @@ function mergeServerSettings(sourceRaw: string, destinationRaw: string | null): 
       ? asRecord(encodeServerSettings(decodeServerSettingsJson("{}")), "Server settings")
       : asRecord(encodeServerSettings(decodeServerSettingsJson(destinationRaw)), "Server settings");
   const imported = safeServerPreferences(sourceRaw);
-  const destinationProviders = asRecord(destination.providers, "LastCode provider settings");
-  const importedProviders = asRecord(imported.providers, "Imported provider settings");
-  const providers = Object.fromEntries(
-    Object.entries(importedProviders).map(([provider, preferences]) => [
-      provider,
-      {
-        ...asRecord(destinationProviders[provider], `LastCode ${provider} settings`),
-        ...asRecord(preferences, `Imported ${provider} settings`),
-      },
-    ]),
-  );
-  return stringifyJson({ ...destination, ...imported, providers });
+  return stringifyJson({ ...destination, ...imported });
 }
 
 function buildImportedContent(

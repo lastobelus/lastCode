@@ -16,17 +16,16 @@ Windows primary profile as expected.
 
 ## Imported categories
 
-| Category                        | Source and destination file | Imported data                                                                                                                                    |
-| ------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Appearance and app preferences  | `client-settings.json`      | Theme, fonts, editor behavior, sidebar preferences, confirmations, favorites, and model display preferences                                      |
-| Keyboard shortcuts              | `keybindings.json`          | Valid custom keybinding rules                                                                                                                    |
-| Server and provider preferences | `settings.json`             | Background behavior, Git fetch behavior, thread defaults, source-control writing preferences, model selection, and legacy provider paths/toggles |
+| Category                       | Source and destination file | Imported data                                                                                               |
+| ------------------------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Appearance and app preferences | `client-settings.json`      | Theme, fonts, editor behavior, sidebar preferences, confirmations, favorites, and model display preferences |
+| Keyboard shortcuts             | `keybindings.json`          | Valid custom keybinding rules                                                                               |
+| Server behavior                | `settings.json`             | Background behavior, Git fetch behavior, thread defaults, and source-control writing preferences            |
 
-Only non-secret provider fields are copied. Provider launch arguments and
-provider-instance records are excluded. The OpenCode server URL and password
-are preserved together from LastCode so the import cannot split an endpoint
-from its credential. Existing LastCode values for excluded fields remain
-unchanged.
+Provider configuration is deliberately left alone. LastCode keeps its existing
+provider paths, toggles, instances, credentials, environment variables, and
+server-side model selections. This keeps a one-time convenience import from
+changing whether or how an agent provider runs.
 
 Favorites and model-display preferences for built-in providers are imported.
 Source-only custom-provider references are omitted because their provider
