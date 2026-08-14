@@ -71,20 +71,29 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  const isLocal = state.source === "lastcode-local";
   if (state.status === "available") {
-    return `Update ${state.availableVersion ?? "available"} ready to download`;
+    return isLocal
+      ? `LastCode ${state.availableVersion ?? "checkpoint"} ready to build`
+      : `Update ${state.availableVersion ?? "available"} ready to download`;
   }
   if (state.status === "downloading") {
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Downloading update${progress}`;
+    return isLocal
+      ? `Building and staging local nightly${progress}`
+      : `Downloading update${progress}`;
   }
   if (state.status === "downloaded") {
-    return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
+    return isLocal
+      ? `LastCode ${state.downloadedVersion ?? state.availableVersion ?? "nightly"} built. Click to restart and install.`
+      : `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
   }
   if (state.status === "error") {
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Download failed for ${state.availableVersion}. Click to retry.`;
+      return isLocal
+        ? `Local build failed for ${state.availableVersion}. Click to retry.`
+        : `Download failed for ${state.availableVersion}. Click to retry.`;
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
       return `Install failed for ${state.downloadedVersion}. Click to retry.`;
@@ -95,10 +104,12 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
-  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion"> &
+    Partial<Pick<DesktopUpdateState, "source">>,
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
-  return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
+  const appName = state.source === "lastcode-local" ? "LastCode" : "T3 Code";
+  return `Install update${version ? ` ${version}` : ""} and restart ${appName}?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
