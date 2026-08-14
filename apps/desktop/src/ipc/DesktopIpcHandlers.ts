@@ -13,6 +13,7 @@ import {
   setServerExposureMode,
   setTailscaleServeEnabled,
 } from "./methods/serverExposure.ts";
+import { importT3Settings, previewT3SettingsImport } from "./methods/lastCodeSettings.ts";
 import {
   bootstrapSshBearerSession,
   disconnectSshEnvironment,
@@ -88,6 +89,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(getLastCodeSettings);
   yield* ipc.handle(setShowAndInstallLocalNightlies);
+  yield* ipc.handle(previewT3SettingsImport);
+  yield* ipc.handle(importT3Settings);
   yield* ipc.handle(setUpdateChannel);
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
