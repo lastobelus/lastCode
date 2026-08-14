@@ -44,6 +44,7 @@
     "connect:announce-ga": "node scripts/announce-connect-ga.ts",
     "lastcode:checkpoint": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
     "lastcode:checkpoints": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoints.mjs",
+    "lastcode:build": "mise exec node@24.13.1 -- node scripts/lastcode-build.mjs",
     "lastcode:checkpoint:service": "mise exec node@24.13.1 -- node scripts/lastcode-nightly-service.ts",
     "lastcode:build:mac:arm64": "mise exec node@24.13.1 -- node scripts/lastcode-build-mac-arm64.ts",
     "lastcode:ci": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --full",

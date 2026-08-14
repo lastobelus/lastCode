@@ -18,12 +18,17 @@ Before enabling it, install the checkpoint service and dashboard:
 ```bash
 pnpm lastcode:checkpoint:service install
 pnpm lastcode:checkpoints --install
+pnpm lastcode:build --install
 ```
 
 The dashboard installer records the dedicated automation worktree in
 `~/.lastcode/dashboard.json`. The desktop updater uses that worktree only to
 read checkpoint tags and launch the versioned helper; it never checks out or
 cleans a human development worktree.
+
+The optional `lastcode-build [CHECKPOINT]` command exposes the same builder for
+manual bootstrap builds. It defaults to the newest checkpoint; a final nightly
+number such as `1090` selects the unique checkpoint ending in `.1090`.
 
 ## User flow
 

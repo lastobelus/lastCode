@@ -206,8 +206,32 @@ The launch agent is opt-in. Repository installation and tests never register it.
 
 ## Selecting a Build
 
-Check out the desired checkpoint, run full checkpoint CI, then build that same
-tag:
+For routine use, install the userland build command beside the checkpoint
+dashboard:
+
+```bash
+pnpm lastcode:build --install
+```
+
+The installer places the versioned command under `~/.lastcode/bin` and exposes
+it through the dotfiles-managed `~/.local/bin` PATH. With no selector, it builds
+the newest local checkpoint. The final nightly sequence number is accepted as
+shorthand when selecting an older checkpoint:
+
+```bash
+lastcode-build
+lastcode-build 1090
+lastcode-build --checkpoint 1090
+```
+
+`1090` is a **checkpoint selector**: it resolves to the unique immutable
+`lastcode/checkpoint/*-nightly.*.1090` tag. A full upstream nightly tag or full
+checkpoint tag is also accepted. The command uses the same dedicated worktree,
+full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
+local updater. Completed builds are reused.
+
+For lower-level or diagnostic use, check out the desired checkpoint, run full
+checkpoint CI, then build that same tag:
 
 ```bash
 git switch --detach lastcode/checkpoint/v0.0.34-nightly.20260812.1072
