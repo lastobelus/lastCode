@@ -41,6 +41,7 @@ interface CheckpointRef {
   readonly checkpointTag: string;
   readonly commit: string;
   readonly nightly: NightlyTag;
+  readonly sourceCommit?: string;
 }
 
 export interface CheckpointPlan {
@@ -107,12 +108,16 @@ function listCheckpointRefs(repoRoot: string): ReadonlyArray<CheckpointRef> {
     .flatMap((checkpointTag) => {
       const nightlyTag = nightlyTagFromCheckpointTag(checkpointTag);
       const nightly = nightlyTag ? parseNightlyTag(nightlyTag) : undefined;
+      const sourceCommit = checkpointSourceCommit(
+        git(repoRoot, ["for-each-ref", `refs/tags/${checkpointTag}`, "--format=%(contents)"]),
+      );
       return nightly
         ? [
             {
               checkpointTag,
               commit: git(repoRoot, ["rev-list", "-n", "1", checkpointTag]),
               nightly,
+              ...(sourceCommit ? { sourceCommit } : {}),
             },
           ]
         : [];
@@ -161,11 +166,12 @@ export function resolveCheckpointPlan(input: {
     throw new Error(`${input.sourceRef} is not based on a recognizable upstream nightly tag.`);
   }
 
+  const latestCheckpointMatchesSource = latestCheckpoint?.sourceCommit === input.sourceCommit;
+  const sourceIsPromotedCheckpoint = sourceCheckpoint?.commit === input.sourceCommit;
   const candidateRef =
-    sourceCheckpoint &&
-    sourceCheckpoint.commit === input.sourceCommit &&
     latestCheckpoint &&
-    sourceCheckpoint.nightly.tag !== latestCheckpoint.nightly.tag
+    (latestCheckpointMatchesSource ||
+      (sourceIsPromotedCheckpoint && sourceCheckpoint.nightly.tag !== latestCheckpoint.nightly.tag))
       ? latestCheckpoint.checkpointTag
       : input.sourceRef;
   const candidateBase = candidateRef === input.sourceRef ? sourceBase : latestCheckpoint?.nightly;
@@ -297,6 +303,7 @@ export function checkpointMessage(input: {
   readonly upstreamCommit: string;
   readonly commit: string;
   readonly sourceRef: string;
+  readonly sourceCommit: string;
   readonly timing: {
     readonly commitsRebased: number;
     readonly durationMs: number;
@@ -311,6 +318,7 @@ export function checkpointMessage(input: {
     `Upstream-Commit: ${input.upstreamCommit}`,
     `LastCode-Commit: ${input.commit}`,
     `Source-Ref: ${input.sourceRef}`,
+    `Source-Commit: ${input.sourceCommit}`,
     `Fork-Commits-Rebased: ${input.timing.commitsRebased}`,
     `Started-At: ${input.timing.startedAt}`,
     `Finished-At: ${input.timing.finishedAt}`,
@@ -319,11 +327,16 @@ export function checkpointMessage(input: {
   ].join("\n");
 }
 
+export function checkpointSourceCommit(message: string): string | undefined {
+  return /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1];
+}
+
 function createCheckpointTag(
   repoRoot: string,
   nightly: NightlyTag,
   commit: string,
   sourceRef: string,
+  sourceCommit: string,
   timing: {
     readonly commitsRebased: number;
     readonly durationMs: number;
@@ -343,6 +356,7 @@ function createCheckpointTag(
       upstreamCommit: git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`]),
       commit,
       sourceRef,
+      sourceCommit,
       timing,
     }),
   ]);
@@ -557,6 +571,7 @@ function main(argv: ReadonlyArray<string>): void {
         plan.baseNightly,
         candidateCommit,
         options.sourceRef,
+        sourceCommit,
         timing,
       );
       pendingCheckpointTag = checkpointTag;
@@ -662,6 +677,7 @@ function main(argv: ReadonlyArray<string>): void {
         nightly,
         candidateCommit,
         options.sourceRef,
+        sourceCommit,
         timing,
       );
       pendingCheckpointTag = checkpointTag;
