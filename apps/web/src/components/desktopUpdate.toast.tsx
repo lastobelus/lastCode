@@ -45,10 +45,13 @@ export function showDesktopUpdateDownloadedToast(
   shell: DesktopUpdateShell,
   state: DesktopUpdateState,
 ): void {
-  const releaseUrl = getDesktopUpdateReleaseUrl(getDesktopUpdateDownloadedVersion(state));
+  const releaseUrl =
+    state.source === "lastcode-local"
+      ? null
+      : getDesktopUpdateReleaseUrl(getDesktopUpdateDownloadedVersion(state));
   toastManager.add({
     type: "success",
-    title: "Update downloaded",
+    title: state.source === "lastcode-local" ? "Local nightly built" : "Update downloaded",
     description: (
       <>
         Restart the app from the update button to install it.
