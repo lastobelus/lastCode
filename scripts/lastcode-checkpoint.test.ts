@@ -3,6 +3,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
   promotionNeeded,
@@ -72,22 +73,32 @@ it("refuses fallback publication when the pre-push hook would validate another c
 });
 
 it("records dashboard metadata in annotated checkpoint tags", () => {
-  expect(
-    checkpointMessage({
-      upstreamTag: "v1.2.3-nightly.20260812.8",
-      upstreamCommit: "upstream-sha",
-      commit: "lastcode-sha",
-      sourceRef: "origin/lastcode/main",
-      timing: {
-        commitsRebased: 8,
-        startedAt: "2026-08-12T18:00:00.000Z",
-        finishedAt: "2026-08-12T18:03:08.000Z",
-        durationMs: 188_000,
-      },
-    }),
-  ).toContain(
+  const message = checkpointMessage({
+    upstreamTag: "v1.2.3-nightly.20260812.8",
+    upstreamCommit: "upstream-sha",
+    commit: "lastcode-sha",
+    sourceRef: "origin/lastcode/main",
+    sourceCommit: "source-sha",
+    timing: {
+      commitsRebased: 8,
+      startedAt: "2026-08-12T18:00:00.000Z",
+      finishedAt: "2026-08-12T18:03:08.000Z",
+      durationMs: 188_000,
+    },
+  });
+
+  expect(message).toContain("Source-Commit: source-sha");
+  expect(message).toContain(
     "Fork-Commits-Rebased: 8\nStarted-At: 2026-08-12T18:00:00.000Z\nFinished-At: 2026-08-12T18:03:08.000Z\nDuration-Ms: 188000",
   );
+});
+
+it("reads the source commit from checkpoint metadata", () => {
+  assert.equal(
+    checkpointSourceCommit("LastCode checkpoint\n\nSource-Commit: abc123\nDuration-Ms: 10"),
+    "abc123",
+  );
+  assert.equal(checkpointSourceCommit("LastCode checkpoint without source metadata"), undefined);
 });
 
 it("skips promotion when main already points at the checkpoint", () => {
@@ -162,6 +173,31 @@ it("continues from a newer unpromoted checkpoint when main has not changed", () 
     plan.missingNightlies.map(({ tag }) => tag),
     ["v0.0.2-nightly.20260103.3"],
   );
+});
+
+it("retries promotion of a published checkpoint created from the current main", () => {
+  const old = nightly("v0.0.1-nightly.20260101.1");
+  const newer = nightly("v0.0.1-nightly.20260102.2");
+  const plan = resolveCheckpointPlan({
+    checkpointRefs: [
+      { checkpointTag: `lastcode/checkpoint/${old.tag}`, commit: "old-main", nightly: old },
+      {
+        checkpointTag: `lastcode/checkpoint/${newer.tag}`,
+        commit: "checkpoint",
+        nightly: newer,
+        sourceCommit: "main-with-feature",
+      },
+    ],
+    nightlyTags: [old.tag, newer.tag],
+    sourceCommit: "main-with-feature",
+    sourceCheckpointTag: `lastcode/checkpoint/${old.tag}`,
+    sourceNightlyTags: [old.tag],
+    sourceRef: "origin/lastcode/main",
+  });
+
+  assert.equal(plan.candidateRef, `lastcode/checkpoint/${newer.tag}`);
+  assert.equal(plan.baseNightly.tag, newer.tag);
+  assert.deepStrictEqual(plan.missingNightlies, []);
 });
 
 it("carries new main commits directly to the next missing nightly", () => {
