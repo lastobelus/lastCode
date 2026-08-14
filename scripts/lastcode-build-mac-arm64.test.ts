@@ -1,6 +1,10 @@
 import { expect, it } from "vite-plus/test";
 
-import { parseBuildOptions, resolveNextBuildNumber } from "./lastcode-build-mac-arm64.ts";
+import {
+  parseBuildOptions,
+  resolveBuildEnvironment,
+  resolveNextBuildNumber,
+} from "./lastcode-build-mac-arm64.ts";
 
 const checkpoint = "lastcode/checkpoint/v1.2.3-nightly.20260811.9";
 
@@ -22,4 +26,16 @@ it("allocates monotonically increasing build tags per checkpoint", () => {
       "lastcode/build/v1.2.3-nightly.20260810.8.99",
     ]),
   ).toBe(4);
+});
+
+it("forces updater metadata generation for local LastCode builds", () => {
+  expect(resolveBuildEnvironment("/opt/rust/bin/cargo", { PATH: "/usr/bin" })).toMatchObject({
+    PATH: "/opt/rust/bin:/usr/bin",
+    T3CODE_DESKTOP_UPDATE_REPOSITORY: "lastobelus/lastCode",
+  });
+  expect(
+    resolveBuildEnvironment("/opt/rust/bin/cargo", {
+      LASTCODE_GITHUB_REPOSITORY: "example/fork",
+    }).T3CODE_DESKTOP_UPDATE_REPOSITORY,
+  ).toBe("example/fork");
 });
