@@ -184,7 +184,7 @@ gh api graphql \
 Before merge, take a fresh snapshot and require all of these on the same head:
 
 - terminal-clean Codex result;
-- zero unresolved, non-outdated review threads;
+- zero unresolved review threads, including outdated threads;
 - required checks and local validation are green;
 - mergeability is clean and the expected base SHA has not moved.
 
