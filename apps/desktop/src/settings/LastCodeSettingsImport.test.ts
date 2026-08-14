@@ -58,7 +58,10 @@ describe("LastCodeSettingsImport", () => {
   it("previews missing and invalid categories without exposing file contents", async () => {
     const paths = await makePaths();
     await fs.writeFile(NodePath.join(paths.sourceDirectory, "client-settings.json"), "not-json");
-    await fs.writeFile(NodePath.join(paths.sourceDirectory, "keybindings.json"), "[]\n");
+    await fs.writeFile(
+      NodePath.join(paths.sourceDirectory, "keybindings.json"),
+      "[\n  // T3 Code accepts JSONC here.\n]\n",
+    );
 
     const preview = await previewT3SettingsImport(paths);
 
@@ -109,13 +112,16 @@ describe("LastCodeSettingsImport", () => {
     await Promise.all([
       fs.writeFile(
         NodePath.join(paths.sourceDirectory, "client-settings.json"),
-        json(sourceClient),
+        `// T3 Code accepts JSONC here.\n${json(sourceClient)}`,
       ),
-      fs.writeFile(NodePath.join(paths.sourceDirectory, "keybindings.json"), "[]\n"),
-      fs.writeFile(NodePath.join(paths.sourceDirectory, "settings.json"), json(sourceServer)),
+      fs.writeFile(NodePath.join(paths.sourceDirectory, "keybindings.json"), "[\n  // none\n]\n"),
+      fs.writeFile(
+        NodePath.join(paths.sourceDirectory, "settings.json"),
+        `// T3 Code accepts JSONC here.\n${json(sourceServer)}`,
+      ),
       fs.writeFile(
         NodePath.join(paths.destinationDirectory, "settings.json"),
-        json(destinationServer),
+        `// LastCode accepts JSONC here too.\n${json(destinationServer)}`,
       ),
     ]);
 
@@ -138,17 +144,9 @@ describe("LastCodeSettingsImport", () => {
     assert.equal(importedCodex.launchArgs, "--lastcode-only");
     assert.deepEqual(importedServer.providerInstances, destinationServer.providerInstances);
     assert.deepEqual(result.imported, ["client-preferences", "keybindings", "server-preferences"]);
-    assert.equal(
-      record(
-        record(
-          record(
-            JSON.parse(
-              await fs.readFile(NodePath.join(result.backupDirectory, "settings.json"), "utf8"),
-            ) as unknown,
-          ).providers,
-        ).opencode,
-      ).serverPassword,
-      "lastcode-secret",
+    assert.include(
+      await fs.readFile(NodePath.join(result.backupDirectory, "settings.json"), "utf8"),
+      '"serverPassword": "lastcode-secret"',
     );
     assert.equal(
       JSON.parse(await fs.readFile(NodePath.join(result.backupDirectory, "manifest.json"), "utf8"))

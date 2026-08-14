@@ -8,6 +8,7 @@ import {
   type LastCodeSettingsImportPreview,
   type LastCodeSettingsImportResult,
 } from "@t3tools/contracts";
+import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
@@ -15,12 +16,16 @@ import * as Schema from "effect/Schema";
 const fs = NodeFS.promises;
 const fsConstants = NodeFS.constants;
 
-const ClientSettingsJson = Schema.fromJsonString(ClientSettingsSchema);
-const KeybindingsJson = Schema.fromJsonString(KeybindingsConfig);
-const ServerSettingsJson = Schema.fromJsonString(ServerSettings);
+const ClientSettingsDocumentSchema = Schema.Struct({ settings: ClientSettingsSchema });
+const ClientSettingsJson = fromLenientJson(ClientSettingsSchema);
+const LegacyClientSettingsDocumentJson = fromLenientJson(ClientSettingsDocumentSchema);
+const KeybindingsJson = fromLenientJson(KeybindingsConfig);
+const ServerSettingsJson = fromLenientJson(ServerSettings);
 
 const decodeClientSettingsJson = Schema.decodeUnknownSync(ClientSettingsJson);
-const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
+const decodeLegacyClientSettingsDocumentJson = Schema.decodeUnknownSync(
+  LegacyClientSettingsDocumentJson,
+);
 const encodeClientSettingsJson = Schema.encodeSync(ClientSettingsJson);
 const decodeKeybindingsJson = Schema.decodeUnknownSync(KeybindingsJson);
 const encodeKeybindingsJson = Schema.encodeSync(KeybindingsJson);
@@ -106,17 +111,11 @@ function asRecord(value: unknown, description: string): JsonRecord {
   return value as JsonRecord;
 }
 
-function parseRecord(raw: string, description: string): JsonRecord {
-  return asRecord(JSON.parse(raw) as unknown, description);
-}
-
 function decodeSourceClientSettings(raw: string) {
   try {
+    return decodeLegacyClientSettingsDocumentJson(raw).settings;
+  } catch {
     return decodeClientSettingsJson(raw);
-  } catch (directError) {
-    const legacy = parseRecord(raw, "Client settings");
-    if (!("settings" in legacy)) throw directError;
-    return decodeClientSettings(legacy.settings);
   }
 }
 
