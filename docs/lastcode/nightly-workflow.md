@@ -273,41 +273,7 @@ release-lastcode/
 
 `build-manifest.json` records the checkpoint tag, upstream tag and commit,
 LastCode commit, build tag, build time, platform, architecture, artifact sizes,
-SHA-256 hashes, and the local signing identity when one was used. `SHA256SUMS`
-provides a conventional verification file.
-
-### Stable local signing
-
-Ad-hoc signing works without an Apple account, but each rebuild has a different
-code identity. macOS can therefore ask for Keychain access again after an
-update. For stable personal builds, create a free **Apple Development**
-certificate with Xcode's Personal Team, then configure the userland builder:
-
-```bash
-lastcode-build --setup-signing
-lastcode-build --signing-status
-```
-
-If the Mac has multiple eligible identities, choose the one printed by the
-setup error:
-
-```bash
-lastcode-build --setup-signing --signing-identity <40-character-hash>
-```
-
-The selected identity is recorded by hash and name in
-`~/.lastcode/local-signing.json` with user-only permissions. It is not a
-certificate or private key; those remain in the login Keychain. Later builds
-pass the stable identity to Electron Builder. If no configuration exists,
-LastCode deliberately retains the ad-hoc fallback. A previously completed
-ad-hoc artifact is not reused after persistent signing is enabled; it is
-quarantined and rebuilt so the requested checkpoint actually has the selected
-identity.
-
-Creating an Apple Development certificate through a Personal Team does not
-require the paid Apple Developer Program. It does require signing into Xcode
-once, and Personal Team certificates and provisioning assets may expire and
-need renewal.
+and SHA-256 hashes. `SHA256SUMS` provides a conventional verification file.
 
 The build creates a local annotated `lastcode/build/...` tag. Pass `--push-tag`
 only when that build record should be published to the fork.

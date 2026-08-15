@@ -1042,25 +1042,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
-  it.effect("uses a configured persistent identity for local macOS builds", () =>
-    Effect.gen(function* () {
-      const config = yield* createBuildConfig(
-        "mac",
-        "dmg",
-        "1.2.3",
-        false,
-        false,
-        undefined,
-        undefined,
-        "0123456789ABCDEF0123456789ABCDEF01234567",
-      );
-
-      const mac = config.mac as Record<string, unknown>;
-      assert.equal(mac.identity, "0123456789ABCDEF0123456789ABCDEF01234567");
-      assert.equal(mac.hardenedRuntime, false);
-    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
-  );
-
   it.effect("keeps executable resource editing enabled for unsigned Windows builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(

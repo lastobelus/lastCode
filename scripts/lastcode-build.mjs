@@ -10,7 +10,6 @@ import * as NodeUtil from "node:util";
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const LOG_POLL_INTERVAL_MS = 400;
-const SIGNING_CONFIG_FILE = "local-signing.json";
 
 export const BUILD_PHASES = [
   { marker: "Building lastcode/checkpoint/", start: 0, estimateMs: 10_000 },
@@ -226,37 +225,18 @@ export function parseOptions(argv) {
   let checkpoint;
   let install = false;
   let repoRoot;
-  let setupSigning = false;
-  let signingStatus = false;
-  let signingIdentity;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--install") install = true;
-    else if (arg === "--setup-signing") setupSigning = true;
-    else if (arg === "--signing-status") signingStatus = true;
-    else if (
-      arg === "-c" ||
-      arg === "--checkpoint" ||
-      arg === "--repo" ||
-      arg === "--signing-identity"
-    ) {
+    else if (arg === "-c" || arg === "--checkpoint" || arg === "--repo") {
       const value = argv[index + 1];
       if (!value) throw new Error(`Missing value for ${arg}.`);
       if (arg === "--repo") repoRoot = value;
-      else if (arg === "--signing-identity") signingIdentity = value;
       else checkpoint = value;
       index += 1;
     } else if (arg === "-h" || arg === "--help") {
-      return {
-        help: true,
-        checkpoint,
-        install,
-        repoRoot,
-        setupSigning,
-        signingStatus,
-        signingIdentity,
-      };
+      return { help: true, checkpoint, install, repoRoot };
     } else if (arg.startsWith("-")) {
       throw new Error(`Unknown argument '${arg}'.`);
     } else if (checkpoint) {
@@ -265,134 +245,7 @@ export function parseOptions(argv) {
       checkpoint = arg;
     }
   }
-  if (signingIdentity && !setupSigning) {
-    throw new Error("--signing-identity requires --setup-signing.");
-  }
-  const specialActionCount = [install, setupSigning, signingStatus].filter(Boolean).length;
-  if (specialActionCount > 1 || (specialActionCount > 0 && checkpoint)) {
-    throw new Error("Install, signing setup/status, and checkpoint builds are separate actions.");
-  }
-  return {
-    help: false,
-    checkpoint,
-    install,
-    repoRoot,
-    setupSigning,
-    signingStatus,
-    signingIdentity,
-  };
-}
-
-export function parseCodeSigningIdentities(output) {
-  return splitLines(output).flatMap((line) => {
-    const match = /^\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"$/.exec(line);
-    if (!match) return [];
-    return [{ hash: match[1], name: match[2] }];
-  });
-}
-
-function isPersistentMacSigningIdentity(identity) {
-  return ["Apple Development:", "Mac Developer:", "Developer ID Application:"].some((prefix) =>
-    identity.name.startsWith(prefix),
-  );
-}
-
-export function selectCodeSigningIdentity(identities, selector) {
-  const eligible = identities.filter(isPersistentMacSigningIdentity);
-  if (selector) {
-    const normalized = selector.toUpperCase();
-    const matches = eligible.filter(({ hash, name }) => hash === normalized || name === selector);
-    if (matches.length === 1) return matches[0];
-    if (matches.length === 0) {
-      throw new Error(`No usable macOS code-signing identity matched '${selector}'.`);
-    }
-    throw new Error(`Signing identity selector '${selector}' is ambiguous.`);
-  }
-  if (eligible.length === 1) return eligible[0];
-  if (eligible.length === 0) {
-    throw new Error(
-      "No persistent macOS signing identity was found. In Xcode Settings → Accounts, select your free Personal Team, open Manage Certificates, and create an Apple Development certificate; then rerun lastcode-build --setup-signing.",
-    );
-  }
-  throw new Error(
-    `Multiple usable signing identities were found. Rerun with --setup-signing --signing-identity HASH:\n${eligible.map(({ hash, name }) => `  ${hash}  ${name}`).join("\n")}`,
-  );
-}
-
-function findCodeSigningIdentities() {
-  const result = NodeChildProcess.spawnSync(
-    "security",
-    ["find-identity", "-v", "-p", "codesigning"],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || "Could not inspect macOS code-signing identities.");
-  }
-  return parseCodeSigningIdentities(result.stdout);
-}
-
-function signingConfigPath(home) {
-  return NodePath.join(home, ".lastcode", SIGNING_CONFIG_FILE);
-}
-
-export function readSigningConfiguration(home) {
-  const path = signingConfigPath(home);
-  if (!NodeFS.existsSync(path)) return undefined;
-  const config = JSON.parse(NodeFS.readFileSync(path, "utf8"));
-  if (
-    config?.schemaVersion !== 1 ||
-    typeof config.identityHash !== "string" ||
-    !/^[0-9A-F]{40}$/.test(config.identityHash) ||
-    typeof config.identityName !== "string"
-  ) {
-    throw new Error(`Invalid LastCode signing configuration at ${path}.`);
-  }
-  return config;
-}
-
-function setupSigning(home, selector) {
-  const identity = selectCodeSigningIdentity(findCodeSigningIdentities(), selector);
-  const path = signingConfigPath(home);
-  NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
-  NodeFS.writeFileSync(
-    path,
-    `${JSON.stringify(
-      {
-        schemaVersion: 1,
-        identityHash: identity.hash,
-        identityName: identity.name,
-        configuredAt: new Date().toISOString(),
-      },
-      undefined,
-      2,
-    )}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  );
-  NodeFS.chmodSync(path, 0o600);
-  console.log(style(ansi.green, "Persistent local signing enabled"));
-  console.log(`${identity.name}\n${identity.hash}`);
-  console.log(`Configuration: ${path}`);
-}
-
-function showSigningStatus(home) {
-  const config = readSigningConfiguration(home);
-  if (!config) {
-    console.log("Persistent local signing is not configured; builds use ad-hoc signing.");
-    console.log(
-      "Run lastcode-build --setup-signing after creating an Apple Development certificate in Xcode.",
-    );
-    return;
-  }
-  const installed = findCodeSigningIdentities().some(({ hash }) => hash === config.identityHash);
-  console.log(
-    `Persistent local signing: ${installed ? "ready" : "configured identity is unavailable"}`,
-  );
-  console.log(`${config.identityName}\n${config.identityHash}`);
-  console.log(`Configuration: ${signingConfigPath(home)}`);
+  return { help: false, checkpoint, install, repoRoot };
 }
 
 export function resolveCheckpointTag(tags, selector) {
@@ -580,22 +433,12 @@ async function main(argv) {
   if (options.help) {
     console.log("Usage: lastcode-build [CHECKPOINT]");
     console.log("       lastcode-build --checkpoint CHECKPOINT");
-    console.log("       lastcode-build --setup-signing [--signing-identity HASH]");
-    console.log("       lastcode-build --signing-status");
     console.log("");
     console.log("CHECKPOINT may be 1090, a full nightly tag, or a lastcode/checkpoint tag.");
     console.log("Without CHECKPOINT, the newest local checkpoint is built.");
     return;
   }
   const home = NodeOS.homedir();
-  if (options.setupSigning) {
-    setupSigning(home, options.signingIdentity);
-    return;
-  }
-  if (options.signingStatus) {
-    showSigningStatus(home);
-    return;
-  }
   const repoRoot = resolveConfiguredRepo(home, options.repoRoot);
   if (options.install) {
     installCommand(repoRoot, home);

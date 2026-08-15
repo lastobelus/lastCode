@@ -4,9 +4,7 @@ import {
   BUILD_PHASES,
   estimateBuildProgress,
   parseBuildResult,
-  parseCodeSigningIdentities,
   parseOptions,
-  selectCodeSigningIdentity,
   renderProgressBar,
   renderLauncher,
   resolveBuildPhaseIndex,
@@ -26,35 +24,6 @@ describe("LastCode userland build command", () => {
     expect(parseOptions(["--checkpoint", "1092"]).checkpoint).toBe("1092");
     expect(parseOptions(["-c", "1095"]).checkpoint).toBe("1095");
     expect(() => parseOptions(["1090", "1092"])).toThrow("Unexpected second checkpoint");
-  });
-
-  it("parses signing setup as a separate userland action", () => {
-    expect(
-      parseOptions([
-        "--setup-signing",
-        "--signing-identity",
-        "0123456789ABCDEF0123456789ABCDEF01234567",
-      ]),
-    ).toMatchObject({
-      setupSigning: true,
-      signingIdentity: "0123456789ABCDEF0123456789ABCDEF01234567",
-    });
-    expect(parseOptions(["--signing-status"]).signingStatus).toBe(true);
-    expect(() => parseOptions(["--setup-signing", "1090"])).toThrow("separate actions");
-  });
-
-  it("selects a persistent Apple Development identity", () => {
-    const identities = parseCodeSigningIdentities(`
-      1) 0123456789ABCDEF0123456789ABCDEF01234567 "Apple Development: LastCode Test (TEAM123456)"
-      2) FEDCBA9876543210FEDCBA9876543210FEDCBA98 "Unrelated Certificate"
-         2 valid identities found
-    `);
-
-    expect(selectCodeSigningIdentity(identities)).toEqual({
-      hash: "0123456789ABCDEF0123456789ABCDEF01234567",
-      name: "Apple Development: LastCode Test (TEAM123456)",
-    });
-    expect(() => selectCodeSigningIdentity([])).toThrow("Xcode Settings");
   });
 
   it("selects the newest checkpoint by default", () => {
