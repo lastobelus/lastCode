@@ -19,6 +19,7 @@ Before enabling it, install the checkpoint service and dashboard:
 pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 pnpm run lastcode:build -- --install
+pnpm run lastcode:install -- --install
 ```
 
 The dashboard installer records the dedicated automation worktree in
@@ -29,6 +30,13 @@ cleans a human development worktree.
 The optional `lastcode-build [CHECKPOINT]` command exposes the same builder for
 manual bootstrap builds. It defaults to the newest checkpoint; a final nightly
 number such as `1090` selects the unique checkpoint ending in `.1090`.
+
+The companion `lastcode-install` command uses `fzf` to choose a retained DMG,
+with the most recently built image selected by default. It stages and validates
+the replacement before quitting LastCode, then replaces
+`/Applications/LastCode.app` and relaunches it. Passing a DMG path skips the
+picker. This manual bootstrap path does not require the currently installed app
+to have local nightly updates enabled.
 
 ## User flow
 

@@ -232,6 +232,7 @@ dashboard:
 
 ```bash
 pnpm run lastcode:build -- --install
+pnpm run lastcode:install -- --install
 ```
 
 The installer places the versioned command under `~/.lastcode/bin` and exposes
@@ -252,6 +253,20 @@ full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
 local updater. During a build it shows the latest log line above a stage-weighted
 estimated progress bar; the complete output remains in
 `~/.lastcode/local-updates/build.log`. Completed builds are reused.
+
+Use `lastcode-install` to install one of those retained DMGs. It presents every
+DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with
+the newest build selected. After selection it validates and mounts the image,
+stages the app beside `/Applications/LastCode.app`, asks a running LastCode to
+quit, safely replaces it, detaches the image, and relaunches LastCode. The old
+app remains in place until the replacement has been completely copied and is
+restored if the final swap fails. The normal path does not invoke `sudo` or
+request a password.
+
+```bash
+lastcode-install
+lastcode-install ~/.lastcode/local-updates/artifacts/.../LastCode-...-arm64.dmg
+```
 
 For lower-level or diagnostic use, check out the desired checkpoint, run full
 checkpoint CI, then build that same tag:
