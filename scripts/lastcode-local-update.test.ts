@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 
 import {
+  acquireBuildLock,
   compareNightlyVersions,
   isReusableCheckpointCiStamp,
   parseNightlyVersion,
@@ -19,6 +20,28 @@ import {
 } from "./lastcode-local-update.mjs";
 
 describe("lastcode-local-update", () => {
+  it("serializes manual and in-app builds and recovers a stale lock", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-lock-"));
+    try {
+      const release = acquireBuildLock(root);
+      assert.throws(() => acquireBuildLock(root), /already running/);
+      release();
+
+      const lockPath = NodePath.join(root, "build.lock");
+      NodeFS.mkdirSync(lockPath);
+      NodeFS.writeFileSync(
+        NodePath.join(lockPath, "owner.json"),
+        `${JSON.stringify({ schemaVersion: 1, pid: 12345, startedAt: "earlier" })}\n`,
+      );
+      const releaseRecovered = acquireBuildLock(root, { isAlive: () => false });
+      assert.isTrue(NodeFS.existsSync(NodePath.join(lockPath, "owner.json")));
+      releaseRecovered();
+      assert.isFalse(NodeFS.existsSync(lockPath));
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses a deterministic locale for checkpoint validation and packaging", () => {
     assert.deepInclude(resolveDeterministicBuildEnvironment({ PATH: "/bin" }), {
       PATH: "/bin",

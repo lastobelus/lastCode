@@ -30,6 +30,10 @@ cleans a human development worktree.
 The optional `lastcode-build [CHECKPOINT]` command exposes the same builder for
 manual bootstrap builds. It defaults to the newest checkpoint; a final nightly
 number such as `1090` selects the unique checkpoint ending in `.1090`.
+Manual and in-app builds share one cross-process lock. If either path is already
+building, the other exits with the owning process and start time instead of
+mutating the shared build worktree. A lock left by a terminated process is
+reclaimed automatically on the next attempt.
 
 The companion `lastcode-install` command uses `fzf` to choose a retained DMG,
 with the most recently built image selected by default. It stages and validates
@@ -48,6 +52,8 @@ to have local nightly updates enabled.
 3. The first click creates or reuses
    `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
    runs full checkpoint CI, and builds the checkpoint's DMG plus updater ZIP.
+   One build at a time owns this worktree, from checkout through final artifact
+   validation.
    The build generates updater metadata for `lastobelus/lastCode` by default;
    a fork can set `LASTCODE_GITHUB_REPOSITORY=owner/repo` in its configured
    environment to select its own metadata source.

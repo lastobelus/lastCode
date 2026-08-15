@@ -251,15 +251,73 @@ export function prepareBuildWorktree(repoRoot, worktreePath, checkpointTag, logF
   if (status) throw new Error(`Dedicated local-update worktree is not clean:\n${status}`);
 }
 
-function build(options) {
-  if (!options.checkpointTag.startsWith(CHECKPOINT_PREFIX)) {
-    throw new Error(`Invalid checkpoint tag '${options.checkpointTag}'.`);
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
   }
+}
+
+export function acquireBuildLock(updateRoot, options = {}) {
+  const pid = options.pid ?? process.pid;
+  const isAlive = options.isAlive ?? processIsAlive;
+  const lockPath = NodePath.join(updateRoot, "build.lock");
+  const ownerPath = NodePath.join(lockPath, "owner.json");
+  const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  NodeFS.mkdirSync(updateRoot, { recursive: true });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      NodeFS.mkdirSync(lockPath);
+      NodeFS.writeFileSync(
+        ownerPath,
+        `${JSON.stringify({ schemaVersion: 1, pid, token, startedAt: new Date().toISOString() })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const owner = JSON.parse(NodeFS.readFileSync(ownerPath, "utf8"));
+        if (owner.token !== token) {
+          throw new Error("Refusing to release a local build lock now owned by another process.");
+        }
+        NodeFS.unlinkSync(ownerPath);
+        NodeFS.rmdirSync(lockPath);
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST" || attempt > 0) throw error;
+      let owner;
+      try {
+        owner = JSON.parse(NodeFS.readFileSync(ownerPath, "utf8"));
+      } catch {
+        throw new Error(`Another LastCode build owns ${lockPath}.`);
+      }
+      if (Number.isSafeInteger(owner.pid) && isAlive(owner.pid)) {
+        throw new Error(
+          `Another LastCode build is already running (PID ${owner.pid}, started ${owner.startedAt ?? "at an unknown time"}).`,
+          { cause: error },
+        );
+      }
+      const stalePath = `${lockPath}.stale-${pid}-${Date.now()}`;
+      try {
+        NodeFS.renameSync(lockPath, stalePath);
+      } catch {
+        throw new Error(`Another LastCode build acquired ${lockPath}.`);
+      }
+      NodeFS.rmSync(stalePath, { recursive: true, force: true });
+    }
+  }
+  throw new Error(`Could not acquire the LastCode build lock at ${lockPath}.`);
+}
+
+function buildUnlocked(options, updateRoot) {
   const checkpointCommit = git(options.repoRoot, [
     "rev-parse",
     `${options.checkpointTag}^{commit}`,
   ]);
-  const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
   const outputRoot = NodePath.join(updateRoot, "artifacts");
   let existing;
   let incompleteBuildError;
@@ -377,6 +435,19 @@ function build(options) {
     checkpointTag: options.checkpointTag,
     ...built,
   };
+}
+
+function build(options) {
+  if (!options.checkpointTag.startsWith(CHECKPOINT_PREFIX)) {
+    throw new Error(`Invalid checkpoint tag '${options.checkpointTag}'.`);
+  }
+  const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
+  const releaseLock = acquireBuildLock(updateRoot);
+  try {
+    return buildUnlocked(options, updateRoot);
+  } finally {
+    releaseLock();
+  }
 }
 
 function main(argv) {

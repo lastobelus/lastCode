@@ -257,7 +257,10 @@ checkpoint tag is also accepted. The command uses the same dedicated worktree,
 full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
 local updater. During a build it shows the latest log line above a stage-weighted
 estimated progress bar; the complete output remains in
-`~/.lastcode/local-updates/build.log`. Completed builds are reused.
+`~/.lastcode/local-updates/build.log`. Completed builds are reused. Manual and
+in-app builds share a cross-process lock for the complete checkout, CI,
+packaging, and artifact-validation sequence; an overlapping request exits
+without touching the shared worktree.
 
 Use `lastcode-install` to install one of those retained DMGs. It presents every
 DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with

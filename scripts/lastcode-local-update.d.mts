@@ -23,6 +23,11 @@ export interface ExistingBuildOptions {
   readonly checkpointCommit: string;
 }
 
+export interface LocalBuildLockOptions {
+  readonly pid?: number;
+  readonly isAlive?: (pid: number) => boolean;
+}
+
 export function resolveDeterministicBuildEnvironment(
   environment?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv;
@@ -54,5 +59,6 @@ export function prepareBuildWorktree(
   checkpointTag: string,
   logFd: number | undefined,
 ): void;
+export function acquireBuildLock(updateRoot: string, options?: LocalBuildLockOptions): () => void;
 
 export const RESULT_PREFIX: string;
