@@ -9,6 +9,7 @@ import {
   promotionNeeded,
   resolveCheckpointPlan,
   resolveUpstreamMainMirror,
+  shouldContinueRerereRebase,
   unpublishedCheckpointTags,
   upstreamMainMirrorPushArgs,
   worktreeAddArgs,
@@ -31,6 +32,18 @@ it("uses Git's supported short option when creating the recovery branch", () => 
     "/tmp/sync",
     "checkpoint",
   ]);
+});
+
+it("continues a rebase when rerere staged every remembered conflict", () => {
+  assert.equal(shouldContinueRerereRebase({ rebaseInProgress: true, unmergedPaths: [] }), true);
+  assert.equal(
+    shouldContinueRerereRebase({
+      rebaseInProgress: true,
+      unmergedPaths: ["still-conflicted.ts"],
+    }),
+    false,
+  );
+  assert.equal(shouldContinueRerereRebase({ rebaseInProgress: false, unmergedPaths: [] }), false);
 });
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {

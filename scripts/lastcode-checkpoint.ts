@@ -87,6 +87,51 @@ function git(
   });
 }
 
+export function shouldContinueRerereRebase(input: {
+  readonly rebaseInProgress: boolean;
+  readonly unmergedPaths: ReadonlyArray<string>;
+}): boolean {
+  return input.rebaseInProgress && input.unmergedPaths.length === 0;
+}
+
+function rebaseInProgress(worktree: string): boolean {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  return ["rebase-merge", "rebase-apply"].some((name) =>
+    NodeFS.existsSync(NodePath.join(gitDirectory, name)),
+  );
+}
+
+function unmergedPaths(worktree: string): ReadonlyArray<string> {
+  return splitLines(git(worktree, ["diff", "--name-only", "--diff-filter=U"], { cwd: worktree }));
+}
+
+function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): void {
+  let failure: unknown;
+  try {
+    run(worktree, "git", ["rebase", "--onto", upstreamTag, baseTag]);
+    return;
+  } catch (error) {
+    failure = error;
+  }
+
+  while (
+    shouldContinueRerereRebase({
+      rebaseInProgress: rebaseInProgress(worktree),
+      unmergedPaths: unmergedPaths(worktree),
+    })
+  ) {
+    console.log("[lastcode:checkpoint] Continuing Git's recorded conflict resolution...");
+    try {
+      run(worktree, "git", ["-c", "core.editor=true", "rebase", "--continue"]);
+      return;
+    } catch (error) {
+      failure = error;
+    }
+  }
+
+  throw failure;
+}
+
 function splitLines(value: string): ReadonlyArray<string> {
   return value
     .split(/\r?\n/)
@@ -735,7 +780,7 @@ function main(argv: ReadonlyArray<string>): void {
         startedAtMs: Date.now(),
       };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
-      run(worktree, "git", ["rebase", "--onto", nightly.tag, baseTag]);
+      rebaseOnto(worktree, nightly.tag, baseTag);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
       if (options.smoke) runSmokeGate(repoRoot, worktree);
       const finishedAtMs = Date.now();

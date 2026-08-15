@@ -103,6 +103,10 @@ retains both:
 It also posts a macOS notification. Resolve the rebase or failure in that
 worktree, then decide whether to finish and tag it or abandon the sync attempt.
 The next automated run refuses to replace an existing recovery worktree.
+After an operator resolves and completes a retained rebase, Git records those
+choices through `rerere`. A later checkpoint run automatically continues when
+Git reapplies and stages every remembered resolution; genuinely unmerged paths
+still stop for review.
 
 No later nightly is checkpointed after a failure, because each failure should be
 understood before the sequence continues.
