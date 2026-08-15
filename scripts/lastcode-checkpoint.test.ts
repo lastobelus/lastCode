@@ -3,6 +3,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointSmokeEnvironment,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
@@ -48,6 +49,13 @@ it("continues a rebase when rerere staged every remembered conflict", () => {
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
   assert.equal(worktreeVp("/tmp/sync"), "/tmp/sync/node_modules/.bin/vp");
+});
+
+it("removes the Electron host mode from checkpoint smoke subprocesses", () => {
+  assert.deepStrictEqual(
+    checkpointSmokeEnvironment({ ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" }),
+    { KEEP_ME: "yes" },
+  );
 });
 
 it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {

@@ -56,11 +56,16 @@ function run(
   cwd: string,
   command: string,
   args: ReadonlyArray<string>,
-  options: { readonly capture?: boolean; readonly allowFailure?: boolean } = {},
+  options: {
+    readonly capture?: boolean;
+    readonly allowFailure?: boolean;
+    readonly environment?: NodeJS.ProcessEnv;
+  } = {},
 ): string {
   const result = NodeChildProcess.spawnSync(command, args, {
     cwd,
     encoding: "utf8",
+    ...(options.environment ? { env: options.environment } : {}),
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -74,6 +79,14 @@ function run(
     );
   }
   return options.capture ? result.stdout.trim() : "";
+}
+
+export function checkpointSmokeEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const resolved = { ...environment };
+  delete resolved.ELECTRON_RUN_AS_NODE;
+  return resolved;
 }
 
 function git(
@@ -466,19 +479,27 @@ function assertForkInvariants(worktree: string): void {
 
 function runSmokeGate(repoRoot: string, worktree: string): void {
   const vp = checkpointVpPaths(repoRoot, worktree);
+  const environment = checkpointSmokeEnvironment();
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
-  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"]);
+  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   assertForkInvariants(worktree);
-  run(worktree, vp.isolated, [
-    "test",
-    "run",
-    "scripts/lastcode-nightly.test.ts",
-    "scripts/lastcode-checkpoint.test.ts",
-    "scripts/lastcode-local-ci.test.ts",
-    "scripts/build-desktop-artifact.test.ts",
-    "apps/desktop/src/electron/ElectronProtocol.test.ts",
-  ]);
-  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"]);
+  run(
+    worktree,
+    vp.isolated,
+    [
+      "test",
+      "run",
+      "scripts/lastcode-nightly.test.ts",
+      "scripts/lastcode-checkpoint.test.ts",
+      "scripts/lastcode-local-ci.test.ts",
+      "scripts/build-desktop-artifact.test.ts",
+      "apps/desktop/src/electron/ElectronProtocol.test.ts",
+    ],
+    { environment },
+  );
+  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"], {
+    environment,
+  });
 }
 
 function notify(platform: NodeJS.Platform, title: string, message: string): void {
