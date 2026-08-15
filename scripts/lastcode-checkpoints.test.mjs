@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   checkpointTagsWithoutUnpublishedFailures,
   checkpointFreshness,
+  failureDetailLines,
   failedRunsWithoutPublishedTags,
   formatDuration,
   parseOptions,
@@ -11,12 +12,14 @@ import {
   renderLauncher,
   selectAutomationWorktree,
   selectCheckpointTags,
+  selectNightlySyncWorktree,
 } from "./lastcode-checkpoints.mjs";
 
 describe("LastCode checkpoint dashboard", () => {
   it("shows eight entries by default and accepts a count override", () => {
     expect(parseOptions([]).count).toBe(8);
     expect(parseOptions(["-n", "12"]).count).toBe(12);
+    expect(parseOptions(["--verbose"]).verbose).toBe(true);
     expect(() => parseOptions(["-n", "0"])).toThrow("Invalid checkpoint count");
   });
 
@@ -72,6 +75,15 @@ describe("LastCode checkpoint dashboard", () => {
     expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
   });
 
+  it("finds the retained nightly recovery worktree", () => {
+    expect(
+      selectNightlySyncWorktree(
+        "worktree /Users/lasto/projects/lastCode\n\nworktree /Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync\n",
+      ),
+    ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync");
+    expect(selectNightlySyncWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+  });
+
   it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {
     const publishedTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
     const failedRecord = {
@@ -80,6 +92,21 @@ describe("LastCode checkpoint dashboard", () => {
     };
     expect(failedRunsWithoutPublishedTags([publishedTag], [failedRecord])).toEqual([]);
     expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
+  });
+
+  it("shows full failure details only in verbose mode", () => {
+    const rows = [
+      {
+        status: "failed",
+        upstreamTag: "v0.0.1-nightly.20260812.2",
+        error: "rebase failed",
+        recoveryBranch: "sync/nightly/v0.0.1-nightly.20260812.2",
+      },
+    ];
+    expect(failureDetailLines(rows, false)).toEqual([]);
+    expect(failureDetailLines(rows, true)).toEqual([
+      "Failure v0.0.1-nightly.20260812.2: rebase failed · Recovery: sync/nightly/v0.0.1-nightly.20260812.2",
+    ]);
   });
 
   it("keeps a tag with retained recovery state in the failed state", () => {

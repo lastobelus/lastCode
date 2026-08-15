@@ -40,6 +40,7 @@ pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 lastcode-checkpoints
 lastcode-checkpoints -n 20
+lastcode-checkpoints --verbose
 
 # Validate and build one explicit checkpoint.
 pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>

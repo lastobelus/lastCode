@@ -55,10 +55,12 @@ export function parseOptions(argv) {
   let count = DEFAULT_COUNT;
   let install = false;
   let repoRoot;
+  let verbose = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--install") install = true;
+    else if (arg === "-v" || arg === "--verbose") verbose = true;
     else if (arg === "-n" || arg === "--count" || arg === "--repo") {
       const value = argv[index + 1];
       if (!value) throw new Error(`Missing value for ${arg}.`);
@@ -71,12 +73,12 @@ export function parseOptions(argv) {
       }
       index += 1;
     } else if (arg === "-h" || arg === "--help") {
-      return { help: true, count, install, repoRoot };
+      return { help: true, count, install, repoRoot, verbose };
     } else {
       throw new Error(`Unknown argument '${arg}'.`);
     }
   }
-  return { help: false, count, install, repoRoot };
+  return { help: false, count, install, repoRoot, verbose };
 }
 
 function parseNightly(tag) {
@@ -162,6 +164,16 @@ export function failedRunsWithoutPublishedTags(publishedTags, records) {
   );
 }
 
+export function failureDetailLines(rows, verbose) {
+  if (!verbose) return [];
+  return rows
+    .filter((row) => row.status === "failed")
+    .map((failure) => {
+      const recovery = failure.recoveryBranch ? ` · Recovery: ${failure.recoveryBranch}` : "";
+      return `Failure ${failure.upstreamTag}: ${failure.error ?? "unknown error"}${recovery}`;
+    });
+}
+
 export function checkpointTagsWithoutUnpublishedFailures(tags, publishedTags, records) {
   const published = new Set(publishedTags);
   const latestRuns = latestRunsByUpstreamTag(records);
@@ -229,8 +241,20 @@ export function selectAutomationWorktree(worktreeList) {
   return worktrees.find((path) => NodePath.basename(path) === "lastcode-automation");
 }
 
+export function selectNightlySyncWorktree(worktreeList) {
+  const worktrees = worktreeList
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
+  return worktrees.find((path) => NodePath.basename(path) === "lastcode-nightly-sync");
+}
+
 function findAutomationWorktree(repoRoot) {
   return selectAutomationWorktree(git(repoRoot, ["worktree", "list", "--porcelain"]));
+}
+
+function findNightlySyncWorktree(repoRoot) {
+  return selectNightlySyncWorktree(git(repoRoot, ["worktree", "list", "--porcelain"]));
 }
 
 function shellQuote(value) {
@@ -384,7 +408,7 @@ function daemonSummary() {
   return `Daemon: ${label} · Last exit: ${exit}`;
 }
 
-function printDashboard(repoRoot, home, count) {
+function printDashboard(repoRoot, home, count, verbose) {
   const remoteState = remotePublicationState(repoRoot);
   const rows = checkpointRows(repoRoot, home, count, remoteState).slice(0, count);
   const columns = [
@@ -422,12 +446,26 @@ function printDashboard(repoRoot, home, count) {
   }
 
   const selectedFailures = rows.filter((row) => row.status === "failed");
-  for (const failure of selectedFailures) {
-    const recovery = failure.recoveryBranch ? ` · Recovery: ${failure.recoveryBranch}` : "";
+  for (const detail of failureDetailLines(rows, verbose)) {
+    console.log(style(ansi.error, detail));
+  }
+
+  const recoveryWorktree = findNightlySyncWorktree(repoRoot);
+  if (recoveryWorktree) {
+    const recoveryFailure = selectedFailures.find((failure) => failure.recoveryBranch);
+    const nightly = recoveryFailure ? ` for ${recoveryFailure.upstreamTag}` : "";
+    console.log("");
     console.log(
       style(
-        ansi.error,
-        `Failure ${failure.upstreamTag}: ${failure.error ?? "unknown error"}${recovery}`,
+        ansi.yellow,
+        `Action required: checkpoint recovery${nightly} is blocking the daemon at ${recoveryWorktree}.`,
+      ),
+    );
+    console.log(style(ansi.lavender, `Start with: git -C ${shellQuote(recoveryWorktree)} status`));
+    console.log(
+      style(
+        ansi.lavender,
+        `Resolve and stage the conflicts, then run: git -C ${shellQuote(recoveryWorktree)} rebase --continue`,
       ),
     );
   }
@@ -463,7 +501,7 @@ function printDashboard(repoRoot, home, count) {
 function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
-    console.log("Usage: lastcode-checkpoints [-n COUNT] [--repo PATH] [--install]");
+    console.log("Usage: lastcode-checkpoints [-n COUNT] [--verbose] [--repo PATH] [--install]");
     return;
   }
   const home = NodeOS.homedir();
@@ -472,7 +510,7 @@ function main(argv) {
     installCommand(repoRoot, home);
     return;
   }
-  printDashboard(repoRoot, home, options.count);
+  printDashboard(repoRoot, home, options.count, options.verbose);
 }
 
 if (

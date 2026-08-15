@@ -166,13 +166,17 @@ Show the latest eight checkpoint activities, or choose another count:
 ```bash
 lastcode-checkpoints
 lastcode-checkpoints -n 20
+lastcode-checkpoints --verbose
 ```
 
 The dashboard shows success or failure, upstream nightly, number of downstream
 commits replayed, finish time, duration, checkpoint commit, promotion to
 `lastcode/main`, and whether a local build tag exists. It also summarizes the
 launch agent and whether the local checkpoint set has caught up to the latest
-known upstream tag. Failed rows include the retained recovery branch and error.
+known upstream tag. A retained recovery worktree produces an `Action required`
+message with the path and a command to inspect it. Full failure errors and
+recovery branch names are shown only with `--verbose`; superseded failures are
+not actionable after the same nightly succeeds.
 
 Successful checkpoint metadata is stored in the annotated checkpoint tag, so
 it travels with the Git repository. Failed and successful local attempts are
