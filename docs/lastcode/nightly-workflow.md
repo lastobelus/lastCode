@@ -101,8 +101,13 @@ retains both:
 - the printed `lastcode-nightly-sync` worktree path.
 
 It also posts a macOS notification. Resolve the rebase or failure in that
-worktree, then decide whether to finish and tag it or abandon the sync attempt.
-The next automated run refuses to replace an existing recovery worktree.
+worktree, then release the retained worktree and generated recovery branch so
+the daemon can retry. `lastcode-checkpoints` prints the exact commands for the
+current state: it distinguishes an in-progress rebase, a rebase already
+completed by the operator, and a smoke-gate failure that must first be fixed on
+`lastcode/main`. The final printed command runs the daemon immediately. The next
+automated run refuses to replace an existing recovery worktree until those
+cleanup steps are complete.
 After an operator resolves and completes a retained rebase, Git records those
 choices through `rerere`. A later checkpoint run automatically continues when
 Git reapplies and stages every remembered resolution; genuinely unmerged paths

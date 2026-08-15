@@ -9,6 +9,7 @@ import {
   parseOptions,
   parseRemotePublicationState,
   parseTrailers,
+  recoveryActionLines,
   renderLauncher,
   selectAutomationWorktree,
   selectCheckpointTags,
@@ -82,6 +83,39 @@ describe("LastCode checkpoint dashboard", () => {
       ),
     ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync");
     expect(selectNightlySyncWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+  });
+
+  it("shows the complete recovery lifecycle for a retained rebase", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/Last Code",
+        worktree: "/tmp/Last Code-worktrees/lastcode-nightly-sync",
+        automationWorktree: "/tmp/Last Code-worktrees/lastcode-automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: true,
+        failedDuringRebase: true,
+      }),
+    ).toEqual([
+      "Resolve and stage conflicts, then repeat until the rebase finishes: git -C '/tmp/Last Code-worktrees/lastcode-nightly-sync' rebase --continue",
+      "Release the daemon: git -C '/tmp/Last Code' worktree remove '/tmp/Last Code-worktrees/lastcode-nightly-sync'",
+      "Delete the generated recovery branch: git -C '/tmp/Last Code' branch -D 'sync/nightly/v1'",
+      "Retry now: pnpm --dir '/tmp/Last Code-worktrees/lastcode-automation' lastcode:checkpoint:service run-now",
+    ]);
+  });
+
+  it("distinguishes smoke-gate recovery from an interrupted rebase", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: false,
+        failedDuringRebase: false,
+      })[0],
+    ).toBe(
+      "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
+    );
   });
 
   it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {

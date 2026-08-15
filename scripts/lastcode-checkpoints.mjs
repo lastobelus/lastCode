@@ -257,8 +257,58 @@ function findNightlySyncWorktree(repoRoot) {
   return selectNightlySyncWorktree(git(repoRoot, ["worktree", "list", "--porcelain"]));
 }
 
+function rebaseInProgress(worktree) {
+  return ["rebase-merge", "rebase-apply"].some((stateDirectory) => {
+    const gitPath = git(worktree, ["rev-parse", "--git-path", stateDirectory], {
+      allowFailure: true,
+    });
+    if (!gitPath) return false;
+    return NodeFS.existsSync(
+      NodePath.isAbsolute(gitPath) ? gitPath : NodePath.join(worktree, gitPath),
+    );
+  });
+}
+
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+export function recoveryActionLines({
+  repoRoot,
+  worktree,
+  automationWorktree,
+  recoveryBranch,
+  isRebaseInProgress,
+  failedDuringRebase,
+}) {
+  const lines = [];
+  if (isRebaseInProgress) {
+    lines.push(
+      `Resolve and stage conflicts, then repeat until the rebase finishes: git -C ${shellQuote(worktree)} rebase --continue`,
+    );
+  } else if (failedDuringRebase) {
+    lines.push(
+      "The retained rebase is complete; release it so the daemon can replay the recorded resolution.",
+    );
+  } else {
+    lines.push(
+      "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
+    );
+  }
+  lines.push(
+    `Release the daemon: git -C ${shellQuote(repoRoot)} worktree remove ${shellQuote(worktree)}`,
+  );
+  if (recoveryBranch) {
+    lines.push(
+      `Delete the generated recovery branch: git -C ${shellQuote(repoRoot)} branch -D ${shellQuote(recoveryBranch)}`,
+    );
+  }
+  if (automationWorktree) {
+    lines.push(
+      `Retry now: pnpm --dir ${shellQuote(automationWorktree)} lastcode:checkpoint:service run-now`,
+    );
+  }
+  return lines;
 }
 
 export function renderLauncher(modulePath) {
@@ -410,7 +460,8 @@ function daemonSummary() {
 
 function printDashboard(repoRoot, home, count, verbose) {
   const remoteState = remotePublicationState(repoRoot);
-  const rows = checkpointRows(repoRoot, home, count, remoteState).slice(0, count);
+  const allRows = checkpointRows(repoRoot, home, count, remoteState);
+  const rows = allRows.slice(0, count);
   const columns = [
     { key: "status", label: "STATUS", value: (row) => (row.status === "success" ? "✓" : "✗") },
     { key: "upstreamTag", label: "UPSTREAM NIGHTLY", value: (row) => row.upstreamTag },
@@ -445,7 +496,7 @@ function printDashboard(repoRoot, home, count, verbose) {
     console.log(padded.join("  ").trimEnd());
   }
 
-  const selectedFailures = rows.filter((row) => row.status === "failed");
+  const selectedFailures = allRows.filter((row) => row.status === "failed");
   for (const detail of failureDetailLines(rows, verbose)) {
     console.log(style(ansi.error, detail));
   }
@@ -462,12 +513,17 @@ function printDashboard(repoRoot, home, count, verbose) {
       ),
     );
     console.log(style(ansi.lavender, `Start with: git -C ${shellQuote(recoveryWorktree)} status`));
-    console.log(
-      style(
-        ansi.lavender,
-        `Resolve and stage the conflicts, then run: git -C ${shellQuote(recoveryWorktree)} rebase --continue`,
-      ),
-    );
+    const automationWorktree = findAutomationWorktree(repoRoot);
+    for (const line of recoveryActionLines({
+      repoRoot,
+      worktree: recoveryWorktree,
+      automationWorktree,
+      recoveryBranch: recoveryFailure?.recoveryBranch,
+      isRebaseInProgress: rebaseInProgress(recoveryWorktree),
+      failedDuringRebase: recoveryFailure?.error?.includes("git rebase") ?? false,
+    })) {
+      console.log(style(ansi.lavender, line));
+    }
   }
 
   const upstreamTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"])).sort(
