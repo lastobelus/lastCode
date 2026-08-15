@@ -204,7 +204,12 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
       }
     },
     {
-      retryInternalServerError: isDesktop,
+      ...(isDesktop
+        ? {
+            retryError: (error: unknown, attemptElapsedMs: number) =>
+              isDelayedDesktopCredentialProtocolError(error, attemptElapsedMs),
+          }
+        : {}),
       ...(isDesktop ? { timeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS } : {}),
     },
   );
@@ -286,21 +291,28 @@ async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionS
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
 const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
 const DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS = 60 * 60 * 1_000;
+const DESKTOP_CREDENTIAL_DELAY_THRESHOLD_MS = 10_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
 
 export async function retryTransientBootstrap<T>(
   operation: () => Promise<T>,
   options: {
-    readonly retryInternalServerError?: boolean;
+    readonly retryError?: (error: unknown, attemptElapsedMs: number) => boolean;
     readonly timeoutMs?: number;
   } = {},
 ): Promise<T> {
   let retryStartedAt: number | null = null;
   while (true) {
+    const attemptStartedAt = Date.now();
     try {
       return await operation();
     } catch (error) {
-      if (!isTransientBootstrapError(error, options.retryInternalServerError === true)) {
+      if (
+        !isTransientBootstrapError(
+          error,
+          options.retryError?.(error, Date.now() - attemptStartedAt) ?? false,
+        )
+      ) {
         throw error;
       }
 
@@ -321,12 +333,22 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
   });
 }
 
-function isTransientBootstrapError(error: unknown, retryInternalServerError: boolean): boolean {
+function isDelayedDesktopCredentialProtocolError(
+  error: unknown,
+  attemptElapsedMs: number,
+): boolean {
+  return (
+    attemptElapsedMs >= DESKTOP_CREDENTIAL_DELAY_THRESHOLD_MS &&
+    isPrimaryEnvironmentRequestError(error) &&
+    error.status === 500 &&
+    HttpClientError.isHttpClientError(error.cause) &&
+    error.cause.response?.status === 500
+  );
+}
+
+function isTransientBootstrapError(error: unknown, retryError: boolean): boolean {
   if (isPrimaryEnvironmentRequestError(error)) {
-    return (
-      TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status) ||
-      (retryInternalServerError && error.status === 500)
-    );
+    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status) || retryError;
   }
 
   if (error instanceof TypeError) {

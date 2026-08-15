@@ -1,5 +1,6 @@
 import {
   EnvironmentAuthInvalidError,
+  EnvironmentInternalError,
   type AuthBrowserSessionResult,
   type AuthCreatePairingCredentialInput,
   type AuthSessionState,
@@ -297,6 +298,32 @@ describe("resolveInitialServerAuthGateState", () => {
 
     await expect(sessionPromise).resolves.toEqual(unauthenticatedSession(DESKTOP_AUTH));
     expect(attempts).toBe(3);
+  });
+
+  it("surfaces genuine desktop internal errors without an hour-long retry", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20_000));
+      throw new EnvironmentInternalError({
+        code: "internal_error",
+        reason: "internal_error",
+        traceId: "trace-persistent-internal-error",
+      });
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState, PrimaryEnvironmentRequestError } =
+      await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    const rejection = expect(sessionPromise).rejects.toBeInstanceOf(PrimaryEnvironmentRequestError);
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await rejection;
+    expect(attempts).toBe(1);
   });
 
   it("takes a pairing token from the location hash and strips it immediately", async () => {
