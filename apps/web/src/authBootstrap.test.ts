@@ -269,7 +269,7 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(attempts).toBe(4);
   });
 
-  it("retries desktop session bootstrap after a blocking credential prompt", async () => {
+  it("keeps retrying desktop session bootstrap across delayed credential prompts", async () => {
     vi.useFakeTimers();
     installDesktopBootstrap();
     let attempts = 0;
@@ -280,7 +280,7 @@ describe("resolveInitialServerAuthGateState", () => {
     );
     const runner: PrimaryHttpEffectRunner = async <A>() => {
       attempts += 1;
-      if (attempts === 1) {
+      if (attempts < 3) {
         await new Promise((resolve) => setTimeout(resolve, 20_000));
         throw new HttpClientError.HttpClientError({
           reason: new HttpClientError.StatusCodeError({ request, response }),
@@ -293,10 +293,10 @@ describe("resolveInitialServerAuthGateState", () => {
     const { fetchSessionState } = await import("./environments/primary");
 
     const sessionPromise = fetchSessionState();
-    await vi.advanceTimersByTimeAsync(20_500);
+    await vi.advanceTimersByTimeAsync(41_000);
 
     await expect(sessionPromise).resolves.toEqual(unauthenticatedSession(DESKTOP_AUTH));
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(3);
   });
 
   it("takes a pairing token from the location hash and strips it immediately", async () => {

@@ -187,6 +187,7 @@ function getDesktopBootstrapCredential(): string | null {
 }
 
 export async function fetchSessionState(): Promise<AuthSessionState> {
+  const isDesktop = window.desktopBridge !== undefined;
   return retryTransientBootstrap(
     async () => {
       try {
@@ -202,7 +203,10 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
         });
       }
     },
-    { retryInternalServerError: window.desktopBridge !== undefined },
+    {
+      retryInternalServerError: isDesktop,
+      ...(isDesktop ? { timeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS } : {}),
+    },
   );
 }
 
@@ -281,14 +285,17 @@ async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionS
 
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
 const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
+const DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
 
 export async function retryTransientBootstrap<T>(
   operation: () => Promise<T>,
-  options: { readonly retryInternalServerError?: boolean } = {},
+  options: {
+    readonly retryInternalServerError?: boolean;
+    readonly timeoutMs?: number;
+  } = {},
 ): Promise<T> {
-  const startedAt = Date.now();
-  let retryCount = 0;
+  let retryStartedAt: number | null = null;
   while (true) {
     try {
       return await operation();
@@ -297,13 +304,12 @@ export async function retryTransientBootstrap<T>(
         throw error;
       }
 
-      // A native credential prompt can block Electron's main process longer
-      // than this deadline. Always allow the first retry after control returns.
-      if (retryCount > 0 && Date.now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) {
+      const now = Date.now();
+      retryStartedAt ??= now;
+      if (now - retryStartedAt >= (options.timeoutMs ?? BOOTSTRAP_RETRY_TIMEOUT_MS)) {
         throw error;
       }
 
-      retryCount += 1;
       await waitForBootstrapRetry(BOOTSTRAP_RETRY_STEP_MS);
     }
   }
