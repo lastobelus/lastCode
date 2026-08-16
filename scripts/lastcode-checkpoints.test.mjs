@@ -3,20 +3,25 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   checkpointTagsWithoutUnpublishedFailures,
   checkpointFreshness,
+  failureDetailLines,
+  failureWasDuringRebase,
   failedRunsWithoutPublishedTags,
   formatDuration,
   parseOptions,
   parseRemotePublicationState,
   parseTrailers,
+  recoveryActionLines,
   renderLauncher,
   selectAutomationWorktree,
   selectCheckpointTags,
+  selectNightlySyncWorktree,
 } from "./lastcode-checkpoints.mjs";
 
 describe("LastCode checkpoint dashboard", () => {
   it("shows eight entries by default and accepts a count override", () => {
     expect(parseOptions([]).count).toBe(8);
     expect(parseOptions(["-n", "12"]).count).toBe(12);
+    expect(parseOptions(["--verbose"]).verbose).toBe(true);
     expect(() => parseOptions(["-n", "0"])).toThrow("Invalid checkpoint count");
   });
 
@@ -72,6 +77,60 @@ describe("LastCode checkpoint dashboard", () => {
     expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
   });
 
+  it("finds the retained nightly recovery worktree", () => {
+    expect(
+      selectNightlySyncWorktree(
+        "worktree /Users/lasto/projects/lastCode\n\nworktree /Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync\n",
+      ),
+    ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync");
+    expect(selectNightlySyncWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+  });
+
+  it("shows the complete recovery lifecycle for a retained rebase", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/Last Code",
+        worktree: "/tmp/Last Code-worktrees/lastcode-nightly-sync",
+        automationWorktree: "/tmp/Last Code-worktrees/lastcode-automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: true,
+        failedDuringRebase: true,
+      }),
+    ).toEqual([
+      "Resolve and stage conflicts, then repeat until the rebase finishes: git -C '/tmp/Last Code-worktrees/lastcode-nightly-sync' rebase --continue",
+      "Release the daemon: git -C '/tmp/Last Code' worktree remove '/tmp/Last Code-worktrees/lastcode-nightly-sync'",
+      "Delete the generated recovery branch: git -C '/tmp/Last Code' branch -D 'sync/nightly/v1'",
+      "Retry now: pnpm --dir '/tmp/Last Code-worktrees/lastcode-automation' lastcode:checkpoint:service run-now",
+    ]);
+  });
+
+  it("distinguishes smoke-gate recovery from an interrupted rebase", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: false,
+        failedDuringRebase: false,
+      })[0],
+    ).toBe(
+      "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
+    );
+  });
+
+  it("uses explicit failure phases and recognizes historical rebase commands", () => {
+    expect(failureWasDuringRebase({ failurePhase: "rebase", error: "anything" })).toBe(true);
+    expect(failureWasDuringRebase({ failurePhase: "smoke", error: "git rebase failed" })).toBe(
+      false,
+    );
+    expect(
+      failureWasDuringRebase({
+        error: "git -c core.editor=true rebase --continue failed with exit code 1.",
+      }),
+    ).toBe(true);
+  });
+
   it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {
     const publishedTag = "lastcode/checkpoint/v0.0.1-nightly.20260812.2";
     const failedRecord = {
@@ -80,6 +139,21 @@ describe("LastCode checkpoint dashboard", () => {
     };
     expect(failedRunsWithoutPublishedTags([publishedTag], [failedRecord])).toEqual([]);
     expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
+  });
+
+  it("shows full failure details only in verbose mode", () => {
+    const rows = [
+      {
+        status: "failed",
+        upstreamTag: "v0.0.1-nightly.20260812.2",
+        error: "rebase failed",
+        recoveryBranch: "sync/nightly/v0.0.1-nightly.20260812.2",
+      },
+    ];
+    expect(failureDetailLines(rows, false)).toEqual([]);
+    expect(failureDetailLines(rows, true)).toEqual([
+      "Failure v0.0.1-nightly.20260812.2: rebase failed · Recovery: sync/nightly/v0.0.1-nightly.20260812.2",
+    ]);
   });
 
   it("keeps a tag with retained recovery state in the failed state", () => {
