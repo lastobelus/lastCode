@@ -10,7 +10,9 @@ import {
   promotionNeeded,
   rerereRebaseMadeProgress,
   resolveCheckpointPlan,
+  resolveRevisionPlan,
   resolveUpstreamMainMirror,
+  revisionMessage,
   shouldContinueRerereRebase,
   unpublishedCheckpointTags,
   upstreamMainMirrorPushArgs,
@@ -128,6 +130,128 @@ it("reads the source commit from checkpoint metadata", () => {
     "abc123",
   );
   assert.equal(checkpointSourceCommit("LastCode checkpoint without source metadata"), undefined);
+});
+
+it("records source and upstream provenance in revision tags", () => {
+  const message = revisionMessage({
+    commit: "revision-sha",
+    createdAt: "2026-08-16T03:00:00.000Z",
+    revision: 2,
+    sourceCommit: "main-sha",
+    sourceRef: "origin/lastcode/main",
+    upstreamCommit: "upstream-sha",
+    upstreamTag: "v0.0.34-nightly.20260816.1105",
+  });
+  expect(message).toContain("LastCode revision 2");
+  expect(message).toContain("Source-Commit: main-sha");
+  expect(message).toContain("Revision: 2");
+});
+
+it("creates the next revision by replaying main changes onto the latest checkpoint", () => {
+  const old = nightly("v0.0.34-nightly.20260815.1104");
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const plan = resolveRevisionPlan({
+    installableRefs: [
+      {
+        tag: `lastcode/checkpoint/${old.tag}`,
+        commit: "old-main",
+        nightly: old,
+        revision: 0,
+        sourceCommit: "old-main",
+      },
+      {
+        tag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "latest-checkpoint",
+        nightly: latest,
+        revision: 0,
+        sourceCommit: "old-main",
+      },
+    ],
+    sourceCommit: "main-with-feature",
+    isAncestor: (ancestor, descendant) =>
+      ancestor === "old-main" && descendant === "main-with-feature",
+  });
+  assert.deepStrictEqual(plan, {
+    kind: "create",
+    installableTag: `lastcode/revision/${latest.tag}.1`,
+    nightly: latest,
+    ontoRef: `lastcode/checkpoint/${latest.tag}`,
+    replayBase: "old-main",
+    revision: 1,
+  });
+});
+
+it("increments revisions already based on the latest installable", () => {
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const plan = resolveRevisionPlan({
+    installableRefs: [
+      {
+        tag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "checkpoint",
+        nightly: latest,
+        revision: 0,
+      },
+      {
+        tag: `lastcode/revision/${latest.tag}.1`,
+        commit: "revision-one",
+        nightly: latest,
+        revision: 1,
+        sourceCommit: "pre-rebase-main",
+      },
+    ],
+    sourceCommit: "main-with-another-feature",
+    isAncestor: (ancestor, descendant) =>
+      ancestor === "revision-one" && descendant === "main-with-another-feature",
+  });
+  expect(plan).toMatchObject({
+    kind: "create",
+    installableTag: `lastcode/revision/${latest.tag}.2`,
+    revision: 2,
+  });
+  if (plan.kind === "create") assert.equal(plan.replayBase, undefined);
+});
+
+it("replays the next merge when an open PR kept the previous revision off main", () => {
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const plan = resolveRevisionPlan({
+    installableRefs: [
+      {
+        tag: `lastcode/revision/${latest.tag}.1`,
+        commit: "rebased-revision-one",
+        nightly: latest,
+        revision: 1,
+        sourceCommit: "main-after-first-merge",
+      },
+    ],
+    sourceCommit: "main-after-second-merge",
+    isAncestor: (ancestor, descendant) =>
+      ancestor === "main-after-first-merge" && descendant === "main-after-second-merge",
+  });
+  expect(plan).toMatchObject({
+    kind: "create",
+    installableTag: `lastcode/revision/${latest.tag}.2`,
+    replayBase: "main-after-first-merge",
+    revision: 2,
+  });
+});
+
+it("reuses an existing revision that already represents main", () => {
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const installable = {
+    tag: `lastcode/revision/${latest.tag}.1`,
+    commit: "rebased-revision",
+    nightly: latest,
+    revision: 1,
+    sourceCommit: "main-with-feature",
+  };
+  assert.deepStrictEqual(
+    resolveRevisionPlan({
+      installableRefs: [installable],
+      sourceCommit: "main-with-feature",
+      isAncestor: () => false,
+    }),
+    { kind: "represented", installable },
+  );
 });
 
 it("skips promotion when main already points at the checkpoint", () => {
