@@ -120,6 +120,10 @@ describe("DesktopSettings", () => {
         wslDistro: null,
       } satisfies DesktopAppSettings.DesktopSettings,
     );
+    assert.equal(
+      DesktopAppSettings.resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1.2").updateChannel,
+      "nightly",
+    );
   });
 
   it.effect("loads persisted settings and applies semantic updates", () =>
