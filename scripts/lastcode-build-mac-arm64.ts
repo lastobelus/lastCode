@@ -8,9 +8,9 @@ import * as NodePath from "node:path";
 
 import { assertCheckpointCiStamp, assertCleanWorktree } from "./lastcode-local-ci.ts";
 import {
-  buildTagFromCheckpointTag,
-  nightlyTagFromCheckpointTag,
-  versionFromNightlyTag,
+  buildTagFromInstallableTag,
+  parseLastCodeInstallableTag,
+  versionFromLastCodeInstallableTag,
 } from "./lastcode-nightly.ts";
 
 interface BuildOptions {
@@ -61,11 +61,11 @@ export function parseBuildOptions(argv: ReadonlyArray<string>): BuildOptions {
 
   if (!checkpointTag) {
     throw new Error(
-      "A checkpoint is required. Pass --checkpoint lastcode/checkpoint/vX.Y.Z-nightly.YYYYMMDD.N.",
+      "An installable tag is required. Pass --checkpoint lastcode/checkpoint/vX.Y.Z-nightly.YYYYMMDD.N or lastcode/revision/vX.Y.Z-nightly.YYYYMMDD.N.R.",
     );
   }
-  if (!nightlyTagFromCheckpointTag(checkpointTag)) {
-    throw new Error(`Invalid LastCode checkpoint tag '${checkpointTag}'.`);
+  if (!parseLastCodeInstallableTag(checkpointTag)) {
+    throw new Error(`Invalid LastCode installable tag '${checkpointTag}'.`);
   }
   return { checkpointTag, outputRoot, pushTag, verbose };
 }
@@ -74,7 +74,7 @@ export function resolveNextBuildNumber(
   checkpointTag: string,
   existingBuildTags: ReadonlyArray<string>,
 ): number {
-  const prefix = checkpointTag.replace("lastcode/checkpoint/", "lastcode/build/") + ".";
+  const prefix = `lastcode/build/v${versionFromLastCodeInstallableTag(checkpointTag)}.`;
   const used = existingBuildTags.flatMap((tag) => {
     if (!tag.startsWith(prefix)) return [];
     const value = Number(tag.slice(prefix.length));
@@ -148,12 +148,13 @@ function main(argv: ReadonlyArray<string>): void {
   const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
   assertCleanWorktree(repoRoot);
 
-  const nightlyTag = nightlyTagFromCheckpointTag(options.checkpointTag)!;
+  const installable = parseLastCodeInstallableTag(options.checkpointTag)!;
+  const nightlyTag = installable.nightly.tag;
   const commit = git(repoRoot, ["rev-parse", "HEAD"]);
   const checkpointCommit = git(repoRoot, ["rev-parse", `${options.checkpointTag}^{commit}`]);
   if (commit !== checkpointCommit) {
     throw new Error(
-      `HEAD ${commit} does not match requested checkpoint ${options.checkpointTag} at ${checkpointCommit}.`,
+      `HEAD ${commit} does not match requested installable ${options.checkpointTag} at ${checkpointCommit}.`,
     );
   }
   const upstreamCommit = git(repoRoot, ["rev-parse", `${nightlyTag}^{commit}`]);
@@ -161,7 +162,12 @@ function main(argv: ReadonlyArray<string>): void {
   assertCheckpointCiStamp(commonGitDir, checkpointCommit, options.checkpointTag, upstreamCommit);
 
   const shortCommit = git(repoRoot, ["rev-parse", "--short=10", commit]);
-  const outputDir = NodePath.resolve(repoRoot, options.outputRoot, nightlyTag, shortCommit);
+  const outputDir = NodePath.resolve(
+    repoRoot,
+    options.outputRoot,
+    `v${versionFromLastCodeInstallableTag(options.checkpointTag)}`,
+    shortCommit,
+  );
   if (NodeFS.existsSync(outputDir)) {
     throw new Error(
       `Build output already exists at ${outputDir}; artifacts are never overwritten.`,
@@ -186,7 +192,7 @@ function main(argv: ReadonlyArray<string>): void {
       "--arch",
       "arm64",
       "--build-version",
-      versionFromNightlyTag(nightlyTag),
+      versionFromLastCodeInstallableTag(options.checkpointTag),
       "--output-dir",
       outputDir,
       ...(options.verbose ? ["--verbose"] : []),
@@ -198,7 +204,7 @@ function main(argv: ReadonlyArray<string>): void {
     .split(/\r?\n/)
     .filter(Boolean);
   const buildNumber = resolveNextBuildNumber(options.checkpointTag, existingBuildTags);
-  const buildTag = buildTagFromCheckpointTag(options.checkpointTag, buildNumber);
+  const buildTag = buildTagFromInstallableTag(options.checkpointTag, buildNumber);
   const manifest: BuildManifest = {
     schemaVersion: 1,
     arch: "arm64",
