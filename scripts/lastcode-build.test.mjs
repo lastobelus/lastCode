@@ -22,6 +22,7 @@ const tags = [
   "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
   "lastcode/checkpoint/v0.0.34-nightly.20260814.1092",
   "lastcode/checkpoint/v0.0.34-nightly.20260814.1095",
+  "lastcode/revision/v0.0.34-nightly.20260814.1095.1",
 ];
 
 describe("LastCode userland build command", () => {
@@ -120,8 +121,8 @@ describe("LastCode userland build command", () => {
     }
   });
 
-  it("selects the newest checkpoint by default", () => {
-    expect(resolveCheckpointTag(tags)).toBe("lastcode/checkpoint/v0.0.34-nightly.20260814.1095");
+  it("selects the newest installable revision by default", () => {
+    expect(resolveCheckpointTag(tags)).toBe("lastcode/revision/v0.0.34-nightly.20260814.1095.1");
   });
 
   it("resolves checkpoint number shorthand and full tags", () => {
@@ -133,6 +134,12 @@ describe("LastCode userland build command", () => {
     );
     expect(resolveCheckpointTag(tags, "lastcode/checkpoint/v0.0.34-nightly.20260814.1095")).toBe(
       "lastcode/checkpoint/v0.0.34-nightly.20260814.1095",
+    );
+    expect(resolveCheckpointTag(tags, "1095")).toBe(
+      "lastcode/revision/v0.0.34-nightly.20260814.1095.1",
+    );
+    expect(resolveCheckpointTag(tags, "v0.0.34-nightly.20260814.1095.1")).toBe(
+      "lastcode/revision/v0.0.34-nightly.20260814.1095.1",
     );
   });
 
