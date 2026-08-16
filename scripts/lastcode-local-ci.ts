@@ -89,7 +89,7 @@ const QUICK_STEPS: ReadonlyArray<LocalCiStep> = [
     kind: "command",
     label: "Workspace tests",
     command: "vp",
-    args: ["run", "test"],
+    args: ["run", "--recursive", "--concurrency-limit", "1", "test", "--", "--maxWorkers=1"],
     isolatedGitConfig: true,
     transferBudgetOutput: true,
   },

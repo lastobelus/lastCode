@@ -49,6 +49,11 @@ a Git hook. They do not automatically repair an integrity failure: stop, inspect
 the reported config and worktree state, and preserve evidence before changing
 anything.
 
+Workspace test tasks run one package and one Vitest worker at a time. This takes
+longer than the task-runner defaults but avoids cross-suite state leaks plus
+memory and CPU contention between the web, mobile, desktop, and server suites on
+the single local build machine.
+
 Before merging a LastCode PR, run the full gate from a clean feature branch:
 
 ```bash
