@@ -8,8 +8,8 @@ import {
 
 const checkpoint = "lastcode/checkpoint/v1.2.3-nightly.20260811.9";
 
-it("requires an explicit immutable checkpoint", () => {
-  expect(() => parseBuildOptions([])).toThrow("A checkpoint is required");
+it("requires an explicit immutable installable tag", () => {
+  expect(() => parseBuildOptions([])).toThrow("An installable tag is required");
   expect(parseBuildOptions(["--checkpoint", checkpoint, "--push-tag"])).toEqual({
     checkpointTag: checkpoint,
     outputRoot: "release-lastcode",
@@ -26,6 +26,12 @@ it("allocates monotonically increasing build tags per checkpoint", () => {
       "lastcode/build/v1.2.3-nightly.20260810.8.99",
     ]),
   ).toBe(4);
+  expect(
+    resolveNextBuildNumber("lastcode/revision/v1.2.3-nightly.20260811.9.2", [
+      "lastcode/build/v1.2.3-nightly.20260811.9.2.1",
+      "lastcode/build/v1.2.3-nightly.20260811.9.2.2",
+    ]),
+  ).toBe(3);
 });
 
 it("forces updater metadata generation for local LastCode builds", () => {
