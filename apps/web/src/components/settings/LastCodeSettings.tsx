@@ -105,9 +105,9 @@ export function LastCodeSettingsPanel() {
     ? "Open this page in the LastCode desktop app to configure local builds."
     : (settings?.message ??
       (updateState?.source === "lastcode-local" && updateState.status === "downloading"
-        ? "A checkpoint build is running. Progress and failures are recorded in ~/.lastcode/local-updates/build.log."
+        ? "A local update build is running. Progress and failures are recorded in ~/.lastcode/local-updates/build.log."
         : settings?.showAndInstallLocalNightlies
-          ? "Enabled. LastCode checks your local checkpoint repository and shows new nightlies in the sidebar."
+          ? "Enabled. LastCode checks your local repository and shows new checkpoints and LastCode revisions in the sidebar."
           : "Off by default. No local repositories, builds, or installers are touched while disabled."));
 
   return (
@@ -115,7 +115,7 @@ export function LastCodeSettingsPanel() {
       <SettingsSection title="LastCode" icon={<MoonStarIcon className="size-5" />}>
         <SettingsRow
           {...searchableSetting("local-nightlies")}
-          description="Show local LastCode checkpoints as app updates. The first sidebar click runs full local CI, builds a DMG and updater ZIP, and stages the update; the second restarts and installs it."
+          description="Show local LastCode checkpoints and revisions as app updates. The first sidebar click runs full local CI, builds a DMG and updater ZIP, and stages the update; the second restarts and installs it."
           status={status}
           control={
             <Switch
