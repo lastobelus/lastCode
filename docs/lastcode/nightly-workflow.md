@@ -8,32 +8,41 @@ The workflow has four independent requirements:
 2. Rebase the complete LastCode patch stack rather than merge upstream history.
 3. Preserve an immutable LastCode checkpoint for every upstream nightly,
    including nightlies that are never packaged.
-4. Build only when a checkpoint is intentionally selected and has passed full
-   local CI.
+4. Publish an ordered installable revision when `lastcode/main` changes between
+   upstream nightlies.
+5. Build only when a checkpoint or revision is intentionally selected and has
+   passed full local CI.
 
 Separating checkpointing from building keeps routine upstream tracking cheap and
 makes every artifact traceable to exact source.
 
 ## References
 
-| Reference                           | Purpose                                                  | Mutability                    |
-| ----------------------------------- | -------------------------------------------------------- | ----------------------------- |
-| `upstream/main`                     | Canonical T3 Code development branch                     | Moves upstream                |
-| `main`                              | Clean local mirror used for upstream contributions       | Fast-forward only             |
-| `lastcode/main`                     | Latest promoted LastCode checkpoint and LastCode PR base | Rebased with force-with-lease |
-| `lastcode/checkpoint/<nightly-tag>` | LastCode source rebased onto one upstream nightly        | Immutable                     |
-| `lastcode/build/<nightly-tag>.<n>`  | One local build attempt from a checkpoint                | Immutable                     |
-| `sync/nightly/<nightly-tag>`        | Recovery branch retained after a failed sync             | Temporary                     |
+| Reference                             | Purpose                                                 | Mutability                    |
+| ------------------------------------- | ------------------------------------------------------- | ----------------------------- |
+| `upstream/main`                       | Canonical T3 Code development branch                    | Moves upstream                |
+| `main`                                | Clean local mirror used for upstream contributions      | Fast-forward only             |
+| `lastcode/main`                       | Latest promoted LastCode installable and PR base        | Rebased with force-with-lease |
+| `lastcode/checkpoint/<nightly-tag>`   | LastCode source rebased onto one upstream nightly       | Immutable                     |
+| `lastcode/revision/<nightly-tag>.<n>` | A LastCode merge after that upstream checkpoint         | Immutable                     |
+| `lastcode/build/<version>.<n>`        | One local build attempt from a checkpoint or revision   | Immutable                     |
+| `sync/nightly/<nightly-tag>`          | Recovery branch retained after a failed sync            | Temporary                     |
+| `sync/revision/<version>`             | Recovery branch retained after a failed revision replay | Temporary                     |
 
 Example tags:
 
 ```text
 lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+lastcode/revision/v0.0.34-nightly.20260812.1072.1
 lastcode/build/v0.0.34-nightly.20260812.1072.1
 ```
 
 The upstream nightly tag names remain owned by upstream. The namespaced
 LastCode tags record the rebased downstream state and never move.
+
+A revision number is an additional numeric prerelease component. Revision
+`1072.1` therefore sorts after checkpoint `1072` and before upstream nightly
+`1073`, matching the order the desktop updater must present.
 
 ## Checkpointing
 
@@ -61,7 +70,9 @@ The command:
 5. rebases with Git `rerere` enabled so recurring resolutions can be reused;
 6. installs dependencies and runs the checkpoint smoke gate;
 7. creates and optionally pushes one annotated checkpoint tag per nightly; and
-8. optionally promotes the newest checkpoint to `lastcode/main`.
+8. publishes a revision when `lastcode/main` has new commits but upstream has no
+   uncheckpointed nightly; and
+9. optionally promotes the newest checkpoint or revision to `lastcode/main`.
 
 The smoke gate checks fork identity invariants, `git diff --check`, focused
 LastCode tests, desktop protocol tests, and the scripts workspace typecheck. It
@@ -90,14 +101,22 @@ rebase. If publication succeeds but promotion fails, a later run recognizes the
 published checkpoint as belonging to the unchanged source commit and retries
 promotion instead of treating the older main branch as current.
 
+When a LastCode PR merges after a newer checkpoint was created while PR
+promotion was paused, the daemon replays only the newly merged commits onto that
+checkpoint. It publishes the result as the next immutable
+`lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
+metadata and cannot manufacture duplicate revisions. The guarded merge command
+requests an immediate daemon run without interrupting one already in progress;
+the hourly schedule repairs a missed request.
+
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
 ### Failure recovery
 
-If rebase or smoke validation fails, the command stops at that nightly and
+If a nightly or revision rebase or smoke validation fails, the command stops and
 retains both:
 
-- `sync/nightly/<nightly-tag>`; and
+- the corresponding `sync/nightly/...` or `sync/revision/...` branch; and
 - the printed `lastcode-nightly-sync` worktree path.
 
 It also posts a macOS notification. Resolve the rebase or failure in that
@@ -185,7 +204,8 @@ The dashboard shows success or failure, upstream nightly, number of downstream
 commits replayed, finish time, duration, checkpoint commit, promotion to
 `lastcode/main`, and whether a local build tag exists. It also summarizes the
 launch agent and whether the local checkpoint set has caught up to the latest
-known upstream tag. A retained recovery worktree produces an `Action required`
+known upstream tag. Its footer shows the newest installable checkpoint or
+revision and whether it is on `lastcode/main`. A retained recovery worktree produces an `Action required`
 message with the path and a command to inspect it. Full failure errors and
 recovery branch names are shown only with `--verbose`; superseded failures are
 not actionable after the same nightly succeeds.
@@ -245,8 +265,8 @@ pnpm run lastcode:install -- --install
 
 The installer places the versioned command under `~/.lastcode/bin` and exposes
 it through the dotfiles-managed `~/.local/bin` PATH. With no selector, it builds
-the newest local checkpoint. The final nightly sequence number is accepted as
-shorthand when selecting an older checkpoint:
+the newest local checkpoint or revision. The final nightly sequence number is
+accepted as shorthand and selects the newest revision of that checkpoint:
 
 ```bash
 lastcode-build
@@ -254,9 +274,9 @@ lastcode-build 1090
 lastcode-build --checkpoint 1090
 ```
 
-`1090` is a **checkpoint selector**: it resolves to the unique immutable
-`lastcode/checkpoint/*-nightly.*.1090` tag. A full upstream nightly tag or full
-checkpoint tag is also accepted. The command uses the same dedicated worktree,
+`1090` is a **checkpoint selector**: it resolves to the newest immutable
+checkpoint or revision for nightly sequence `1090`. A full version, checkpoint
+tag, or revision tag is also accepted. The command uses the same dedicated worktree,
 full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
 local updater. During a build it shows the latest log line above a stage-weighted
 estimated progress bar; the complete output remains in
@@ -290,8 +310,9 @@ lastcode-install
 lastcode-install ~/.lastcode/local-updates/artifacts/.../LastCode-...-arm64.dmg
 ```
 
-For lower-level or diagnostic use, check out the desired checkpoint, run full
-checkpoint CI, then build that same tag:
+For lower-level or diagnostic use, check out the desired installable tag, run
+full checkpoint CI, then build that same tag. Replace the checkpoint tag below
+with a `lastcode/revision/...` tag when building a LastCode-only revision:
 
 ```bash
 git switch --detach lastcode/checkpoint/v0.0.34-nightly.20260812.1072
@@ -316,7 +337,7 @@ release-lastcode/
       SHA256SUMS
 ```
 
-`build-manifest.json` records the checkpoint tag, upstream tag and commit,
+`build-manifest.json` records the selected checkpoint or revision tag, upstream tag and commit,
 LastCode commit, build tag, build time, platform, architecture, artifact sizes,
 and SHA-256 hashes. `SHA256SUMS` provides a conventional verification file.
 
@@ -327,7 +348,7 @@ only when that build record should be published to the fork.
 
 Configure the fork so that:
 
-- checkpoint and build tags cannot be modified or deleted;
+- checkpoint, revision, and build tags cannot be modified or deleted;
 - only the owner or automation identity can force-push `lastcode/main`;
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
 - GitHub Actions remain disabled while local CI is authoritative.
