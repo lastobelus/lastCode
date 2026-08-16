@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LastCode managed helper: lastcode-local-update
 
 // The desktop app runs this file with Electron's bundled Node runtime. Keep it
 // dependency-free so an older LastCode build can inspect and build a newer
@@ -10,6 +11,33 @@ import * as NodePath from "node:path";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
+
+export function resolveDeterministicBuildEnvironment(environment = process.env) {
+  return { ...environment, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
+}
+
+export function resolveLocalBuildEnvironment(worktreePath, environment = process.env) {
+  const resolved = resolveDeterministicBuildEnvironment(environment);
+  return {
+    ...resolved,
+    PATH: `${NodePath.join(worktreePath, "node_modules", ".bin")}${NodePath.delimiter}${resolved.PATH ?? ""}`,
+  };
+}
+
+export function isReusableCheckpointCiStamp(
+  stamp,
+  checkpointTag,
+  checkpointCommit,
+  upstreamCommit,
+) {
+  return (
+    stamp?.schemaVersion === 2 &&
+    stamp.commit === checkpointCommit &&
+    stamp.context?.kind === "checkpoint" &&
+    stamp.context.checkpointTag === checkpointTag &&
+    stamp.context.upstreamCommit === upstreamCommit
+  );
+}
 
 function run(cwd, command, args, options = {}) {
   const result = NodeChildProcess.spawnSync(command, args, {
@@ -224,15 +252,78 @@ export function prepareBuildWorktree(repoRoot, worktreePath, checkpointTag, logF
   if (status) throw new Error(`Dedicated local-update worktree is not clean:\n${status}`);
 }
 
-function build(options) {
-  if (!options.checkpointTag.startsWith(CHECKPOINT_PREFIX)) {
-    throw new Error(`Invalid checkpoint tag '${options.checkpointTag}'.`);
+function readLockOwner(path) {
+  try {
+    return JSON.parse(NodeFS.readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
   }
+}
+
+export function acquireBuildLock(updateRoot, options = {}) {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Dependency-free desktop helper has no Effect runtime.
+  if (process.platform !== "darwin") {
+    throw new Error("Local LastCode build locking is only available on macOS.");
+  }
+  const pid = options.pid ?? process.pid;
+  const lockPath = NodePath.join(updateRoot, "build.lock");
+  const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  NodeFS.mkdirSync(updateRoot, { recursive: true });
+
+  const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
+  // macOS lockf's fd form locks inherited child fd 3. The BSD lock remains on
+  // the shared open-file description held by this parent descriptor after
+  // lockf exits, and the kernel releases it if this process dies.
+  const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe", descriptor],
+  });
+  if (result.error || result.status !== 0) {
+    const owner = readLockOwner(lockPath);
+    NodeFS.closeSync(descriptor);
+    if (result.error) throw result.error;
+    if (result.status !== 75) {
+      throw new Error(result.stderr.trim() || `lockf failed with exit code ${result.status}.`);
+    }
+    throw new Error(
+      `Another LastCode build is already running (PID ${owner?.pid ?? "unknown"}, started ${owner?.startedAt ?? "at an unknown time"}).`,
+    );
+  }
+  const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
+  try {
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.writeSync(descriptor, `${JSON.stringify(owner)}\n`);
+    NodeFS.fsyncSync(descriptor);
+  } catch (error) {
+    NodeFS.closeSync(descriptor);
+    throw error;
+  }
+  const lockIdentity = NodeFS.fstatSync(descriptor);
+  let released = false;
+  return () => {
+    if (released) return;
+    const currentIdentity = NodeFS.statSync(lockPath, { throwIfNoEntry: false });
+    const currentOwner = readLockOwner(lockPath);
+    if (
+      currentIdentity?.dev !== lockIdentity.dev ||
+      currentIdentity?.ino !== lockIdentity.ino ||
+      currentOwner?.token !== token
+    ) {
+      NodeFS.closeSync(descriptor);
+      released = true;
+      throw new Error("Refusing to release a local build lock now owned by another process.");
+    }
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.closeSync(descriptor);
+    released = true;
+  };
+}
+
+function buildUnlocked(options, updateRoot) {
   const checkpointCommit = git(options.repoRoot, [
     "rev-parse",
     `${options.checkpointTag}^{commit}`,
   ]);
-  const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
   const outputRoot = NodePath.join(updateRoot, "artifacts");
   let existing;
   let incompleteBuildError;
@@ -270,6 +361,7 @@ function build(options) {
     }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
+    const buildEnvironment = resolveLocalBuildEnvironment(worktreePath);
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
@@ -277,18 +369,42 @@ function build(options) {
     run(worktreePath, installer, ["install", "--frozen-lockfile"], { logFd });
     const mise = resolveMise(options.home);
     const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
-    run(
-      worktreePath,
-      mise,
-      [
-        ...nodeCommand,
-        "scripts/lastcode-local-ci.ts",
-        "--full",
-        "--checkpoint",
-        options.checkpointTag,
-      ],
-      { logFd },
+    const nightlyTag = options.checkpointTag.slice(CHECKPOINT_PREFIX.length);
+    const upstreamCommit = git(options.repoRoot, ["rev-parse", `${nightlyTag}^{commit}`]);
+    const commonGitDirectory = NodePath.resolve(
+      options.repoRoot,
+      git(options.repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     );
+    const stampPath = NodePath.join(commonGitDirectory, "lastcode-ci", `${checkpointCommit}.json`);
+    let reusableCiStamp = false;
+    if (NodeFS.existsSync(stampPath)) {
+      try {
+        reusableCiStamp = isReusableCheckpointCiStamp(
+          JSON.parse(NodeFS.readFileSync(stampPath, "utf8")),
+          options.checkpointTag,
+          checkpointCommit,
+          upstreamCommit,
+        );
+      } catch {
+        reusableCiStamp = false;
+      }
+    }
+    if (reusableCiStamp) {
+      NodeFS.writeSync(logFd, `Reusing full local CI stamp: ${stampPath}\n`);
+    } else {
+      run(
+        worktreePath,
+        mise,
+        [
+          ...nodeCommand,
+          "scripts/lastcode-local-ci.ts",
+          "--full",
+          "--checkpoint",
+          options.checkpointTag,
+        ],
+        { logFd, env: buildEnvironment },
+      );
+    }
     run(
       worktreePath,
       mise,
@@ -300,7 +416,7 @@ function build(options) {
         "--output-root",
         outputRoot,
       ],
-      { logFd },
+      { logFd, env: buildEnvironment },
     );
   } catch (error) {
     throw new Error(
@@ -325,6 +441,19 @@ function build(options) {
     checkpointTag: options.checkpointTag,
     ...built,
   };
+}
+
+function build(options) {
+  if (!options.checkpointTag.startsWith(CHECKPOINT_PREFIX)) {
+    throw new Error(`Invalid checkpoint tag '${options.checkpointTag}'.`);
+  }
+  const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
+  const releaseLock = acquireBuildLock(updateRoot);
+  try {
+    return buildUnlocked(options, updateRoot);
+  } finally {
+    releaseLock();
+  }
 }
 
 function main(argv) {
