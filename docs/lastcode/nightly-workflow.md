@@ -40,13 +40,16 @@ LastCode tags record the rebased downstream state and never move.
 Preview the operation:
 
 ```bash
-pnpm lastcode:checkpoint --dry-run
+pnpm run lastcode:checkpoint -- --dry-run
 ```
 
 Run it and publish checkpoint tags:
 
 ```bash
-pnpm lastcode:checkpoint --push-tags --promote-if-no-open-prs
+pnpm run lastcode:checkpoint -- \
+  --push-tags \
+  --promote-if-no-open-prs \
+  --mirror-upstream-main
 ```
 
 The command:
@@ -98,8 +101,20 @@ retains both:
 - the printed `lastcode-nightly-sync` worktree path.
 
 It also posts a macOS notification. Resolve the rebase or failure in that
-worktree, then decide whether to finish and tag it or abandon the sync attempt.
-The next automated run refuses to replace an existing recovery worktree.
+worktree, then release the retained worktree and generated recovery branch so
+the daemon can retry. `lastcode-checkpoints` prints the exact commands for the
+current state: it distinguishes an in-progress rebase, a rebase already
+completed by the operator, and a smoke-gate failure that must first be fixed on
+`lastcode/main`. The final printed command runs the daemon immediately. The next
+automated run refuses to replace an existing recovery worktree until those
+cleanup steps are complete.
+After an operator resolves and completes a retained rebase, Git records those
+choices through `rerere`. A later checkpoint run automatically continues when
+Git reapplies and stages every remembered resolution; genuinely unmerged paths
+still stop for review. Automatic continuation also stops if Git rejects
+`rebase --continue` without advancing the rebase (for example, because a hook
+or signing key fails), preserving the recovery worktree for operator action
+instead of retrying in a loop.
 
 No later nightly is checkpointed after a failure, because each failure should be
 understood before the sequence continues.
@@ -119,8 +134,18 @@ the local push gate or pushing an unchanged branch.
 The job executes:
 
 ```bash
-pnpm lastcode:checkpoint --push-tags --promote-if-no-open-prs
+pnpm run lastcode:checkpoint -- \
+  --push-tags \
+  --promote-if-no-open-prs \
+  --mirror-upstream-main
 ```
+
+The scheduled job also keeps the fork's clean `main` branch synchronized with
+`upstream/main`. This is a guarded remote mirror, not a checkout operation: it
+never moves or rewrites a human worktree's local `main` branch. The mirror only
+advances when the fork branch is an ancestor of upstream, and pushes with an
+exact force-with-lease value. If the fork's `main` has diverged, checkpointing
+stops and reports the divergence instead of overwriting either history.
 
 Operational commands:
 
@@ -137,7 +162,7 @@ install the checkpoint dashboard as a user command:
 
 ```bash
 pnpm lastcode:checkpoint:service install
-pnpm lastcode:checkpoints --install
+pnpm run lastcode:checkpoints -- --install
 ```
 
 The installer puts the executable at `~/.lastcode/bin/lastcode-checkpoints`
@@ -153,13 +178,17 @@ Show the latest eight checkpoint activities, or choose another count:
 ```bash
 lastcode-checkpoints
 lastcode-checkpoints -n 20
+lastcode-checkpoints --verbose
 ```
 
 The dashboard shows success or failure, upstream nightly, number of downstream
 commits replayed, finish time, duration, checkpoint commit, promotion to
 `lastcode/main`, and whether a local build tag exists. It also summarizes the
 launch agent and whether the local checkpoint set has caught up to the latest
-known upstream tag. Failed rows include the retained recovery branch and error.
+known upstream tag. A retained recovery worktree produces an `Action required`
+message with the path and a command to inspect it. Full failure errors and
+recovery branch names are shown only with `--verbose`; superseded failures are
+not actionable after the same nightly succeeds.
 
 Successful checkpoint metadata is stored in the annotated checkpoint tag, so
 it travels with the Git repository. Failed and successful local attempts are
@@ -206,13 +235,68 @@ The launch agent is opt-in. Repository installation and tests never register it.
 
 ## Selecting a Build
 
-Check out the desired checkpoint, run full checkpoint CI, then build that same
-tag:
+For routine use, install the userland build command beside the checkpoint
+dashboard:
+
+```bash
+pnpm run lastcode:build -- --install
+pnpm run lastcode:install -- --install
+```
+
+The installer places the versioned command under `~/.lastcode/bin` and exposes
+it through the dotfiles-managed `~/.local/bin` PATH. With no selector, it builds
+the newest local checkpoint. The final nightly sequence number is accepted as
+shorthand when selecting an older checkpoint:
+
+```bash
+lastcode-build
+lastcode-build 1090
+lastcode-build --checkpoint 1090
+```
+
+`1090` is a **checkpoint selector**: it resolves to the unique immutable
+`lastcode/checkpoint/*-nightly.*.1090` tag. A full upstream nightly tag or full
+checkpoint tag is also accepted. The command uses the same dedicated worktree,
+full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
+local updater. During a build it shows the latest log line above a stage-weighted
+estimated progress bar; the complete output remains in
+`~/.lastcode/local-updates/build.log`. Completed builds are reused. Manual and
+in-app builds share a cross-process lock for the complete checkout, CI,
+packaging, and artifact-validation sequence; an overlapping request exits
+without touching the shared worktree.
+
+Remove the optional userland commands with their reverse operations:
+
+```bash
+lastcode-build --uninstall
+lastcode-install --uninstall
+```
+
+Uninstall removes only each command's managed launcher, copied module, helper,
+and matching PATH symlink. It preserves shared checkpoint configuration, build
+artifacts, and any foreign file or symlink.
+
+Use `lastcode-install` to install one of those retained DMGs. It presents every
+DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with
+the newest build selected. After selection it validates and mounts the image,
+stages the app beside `/Applications/LastCode.app`, asks a running LastCode to
+quit, safely replaces it, detaches the image, and relaunches LastCode. The old
+app remains in place until the replacement has been completely copied and is
+restored if the final swap fails. The normal path does not invoke `sudo` or
+request a password.
+
+```bash
+lastcode-install
+lastcode-install ~/.lastcode/local-updates/artifacts/.../LastCode-...-arm64.dmg
+```
+
+For lower-level or diagnostic use, check out the desired checkpoint, run full
+checkpoint CI, then build that same tag:
 
 ```bash
 git switch --detach lastcode/checkpoint/v0.0.34-nightly.20260812.1072
-pnpm lastcode:ci --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
-pnpm lastcode:build:mac:arm64 \
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+pnpm run lastcode:build:mac:arm64 -- \
   --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
 ```
 
