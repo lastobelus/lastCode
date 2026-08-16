@@ -56,6 +56,7 @@ export interface LocalCiOptions {
 }
 
 export interface RepositoryIntegritySnapshot {
+  readonly branchConfig: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly commonGitDir: string;
   readonly configPath: string;
   readonly protectedConfig: string;
@@ -324,14 +325,35 @@ function readCoreBare(repoRoot: string, configPath: string): string {
   );
 }
 
-function readProtectedConfig(repoRoot: string, configPath: string): string {
+function readConfigEntries(repoRoot: string, configPath: string): ReadonlyArray<string> {
   return runProcess(repoRoot, "git", ["config", "--file", configPath, "--null", "--list"], {
     capture: true,
   })
     .split("\0")
-    .filter((entry) => entry.length > 0 && !entry.startsWith("branch."))
+    .filter((entry) => entry.length > 0);
+}
+
+function readProtectedConfig(entries: ReadonlyArray<string>): string {
+  return entries
+    .filter((entry) => !entry.startsWith("branch."))
     .sort()
     .join("\0");
+}
+
+function readBranchConfig(
+  entries: ReadonlyArray<string>,
+): Readonly<Record<string, ReadonlyArray<string>>> {
+  const config: Record<string, Array<string>> = {};
+  for (const entry of entries) {
+    if (!entry.startsWith("branch.")) continue;
+    const separator = entry.indexOf("\n");
+    const key = separator < 0 ? entry : entry.slice(0, separator);
+    const value = separator < 0 ? "" : entry.slice(separator + 1);
+    (config[key] ??= []).push(value);
+  }
+  return Object.fromEntries(
+    Object.entries(config).map(([key, values]) => [key, values.toSorted()]),
+  );
 }
 
 export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegritySnapshot {
@@ -343,10 +365,12 @@ export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegrit
       `Refusing local CI because the shared repository config reports core.bare=${coreBare || "unset"}. Inspect ${configPath} before continuing.`,
     );
   }
+  const configEntries = readConfigEntries(repoRoot, configPath);
   return {
+    branchConfig: readBranchConfig(configEntries),
     commonGitDir,
     configPath,
-    protectedConfig: readProtectedConfig(repoRoot, configPath),
+    protectedConfig: readProtectedConfig(configEntries),
   };
 }
 
@@ -367,11 +391,20 @@ export function assertRepositoryIntegrity(
       `Shared repository integrity changed during local CI: core.bare=${coreBare || "unset"}. Stop and inspect ${before.configPath}.`,
     );
   }
-  const protectedConfig = readProtectedConfig(repoRoot, before.configPath);
+  const configEntries = readConfigEntries(repoRoot, before.configPath);
+  const protectedConfig = readProtectedConfig(configEntries);
   if (protectedConfig !== before.protectedConfig) {
     throw new Error(
       `Shared repository integrity changed during local CI: protected settings in ${before.configPath} were modified. Stop and inspect the config before continuing.`,
     );
+  }
+  const branchConfig = readBranchConfig(configEntries);
+  for (const [key, values] of Object.entries(before.branchConfig)) {
+    if (JSON.stringify(branchConfig[key]) !== JSON.stringify(values)) {
+      throw new Error(
+        `Shared repository integrity changed during local CI: existing branch setting ${key} in ${before.configPath} was modified. Stop and inspect the config before continuing.`,
+      );
+    }
   }
   const commonGitDir = resolveCommonGitDir(repoRoot);
   if (commonGitDir !== before.commonGitDir) {

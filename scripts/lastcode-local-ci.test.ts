@@ -136,6 +136,34 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
+  it("rejects changes to branch settings that existed when CI started", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-existing-branch-test-"),
+    );
+    NodeChildProcess.execFileSync(
+      "git",
+      ["init", "--quiet", "--initial-branch", "lastcode/userland-build"],
+      { cwd: repository },
+    );
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.lastcode/userland-build.remote", "origin"],
+      { cwd: repository },
+    );
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.lastcode/userland-build.remote", "upstream"],
+      { cwd: repository },
+    );
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+      "existing branch setting branch.lastcode/userland-build.remote",
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
   it("diagnoses a damaged shared config before resolving the worktree root", () => {
     const repository = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-entry-test-"),

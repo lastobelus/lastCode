@@ -42,6 +42,8 @@ the replacement before quitting LastCode, then replaces
 picker. An install-wide lock prevents overlapping commands from racing the app
 replacement. This manual bootstrap path does not require the currently installed
 app to have local nightly updates enabled.
+Quarantined `.incomplete-*` artifact directories are never offered in the
+picker.
 
 ## User flow
 

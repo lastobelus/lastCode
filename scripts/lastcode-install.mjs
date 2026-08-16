@@ -47,8 +47,10 @@ export function parseOptions(argv) {
 function walkDmgs(directory, results) {
   for (const entry of NodeFS.readdirSync(directory, { withFileTypes: true })) {
     const path = NodePath.join(directory, entry.name);
-    if (entry.isDirectory()) walkDmgs(path, results);
-    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".dmg")) {
+    if (entry.isDirectory()) {
+      if (entry.name.includes(".incomplete-")) continue;
+      walkDmgs(path, results);
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".dmg")) {
       const stat = NodeFS.statSync(path);
       results.push({ modifiedAt: stat.mtime, path, size: stat.size });
     }

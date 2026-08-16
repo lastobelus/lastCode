@@ -50,6 +50,18 @@ describe("LastCode userland install command", () => {
     expect(discoverDmgs(root).map((entry) => entry.path)).toEqual([newer, older]);
   });
 
+  it("excludes quarantined incomplete builds from the DMG picker", () => {
+    const root = temporaryDirectory();
+    const complete = NodePath.join(root, "1104", "complete.dmg");
+    const quarantined = NodePath.join(root, "1105.incomplete-123", "quarantined.dmg");
+    NodeFS.mkdirSync(NodePath.dirname(complete), { recursive: true });
+    NodeFS.mkdirSync(NodePath.dirname(quarantined), { recursive: true });
+    NodeFS.writeFileSync(complete, "complete");
+    NodeFS.writeFileSync(quarantined, "incomplete");
+
+    expect(discoverDmgs(root).map((entry) => entry.path)).toEqual([complete]);
+  });
+
   it("keeps the newest DMG first and round-trips its hidden path through fzf", () => {
     const choices = renderDmgChoices(
       [

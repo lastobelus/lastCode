@@ -38,9 +38,9 @@ Local CI has three independent Git-safety boundaries:
    shared Git config and snapshots its repository-wide settings. It checks the
    value, protected settings, and common Git directory again on every exit,
    including failed CI runs. Any protected change fails the gate with the config
-   path to inspect. Per-branch sections are excluded because T3 and GitHub CLI
-   legitimately add branch/worktree bookkeeping while CI runs in another
-   worktree.
+   path to inspect. Existing per-branch settings are preserved too, while new
+   branch keys are allowed because T3 and GitHub CLI legitimately add
+   branch/worktree bookkeeping while CI runs in another worktree.
 
 These guards protect the primary checkout and every linked worktree, which all
 share the same Git config. They specifically prevent temporary-repository tests
