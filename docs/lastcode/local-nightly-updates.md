@@ -22,6 +22,10 @@ pnpm run lastcode:build -- --install
 pnpm run lastcode:install -- --install
 ```
 
+The two optional userland commands can be removed later with
+`lastcode-build --uninstall` and `lastcode-install --uninstall`. Their shared
+checkpoint configuration and build artifacts are preserved.
+
 The dashboard installer records the dedicated automation worktree in
 `~/.lastcode/dashboard.json`. The desktop updater uses that worktree only to
 read checkpoint tags and launch the versioned helper; it never checks out or

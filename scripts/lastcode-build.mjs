@@ -225,10 +225,12 @@ export function parseOptions(argv) {
   let checkpoint;
   let install = false;
   let repoRoot;
+  let uninstall = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--install") install = true;
+    else if (arg === "--uninstall") uninstall = true;
     else if (arg === "-c" || arg === "--checkpoint" || arg === "--repo") {
       const value = argv[index + 1];
       if (!value) throw new Error(`Missing value for ${arg}.`);
@@ -236,7 +238,7 @@ export function parseOptions(argv) {
       else checkpoint = value;
       index += 1;
     } else if (arg === "-h" || arg === "--help") {
-      return { help: true, checkpoint, install, repoRoot };
+      return { help: true, checkpoint, install, repoRoot, uninstall };
     } else if (arg.startsWith("-")) {
       throw new Error(`Unknown argument '${arg}'.`);
     } else if (checkpoint) {
@@ -245,7 +247,10 @@ export function parseOptions(argv) {
       checkpoint = arg;
     }
   }
-  return { help: false, checkpoint, install, repoRoot };
+  if (uninstall && (install || checkpoint || repoRoot)) {
+    throw new Error("--uninstall cannot be combined with build or install options.");
+  }
+  return { help: false, checkpoint, install, repoRoot, uninstall };
 }
 
 export function resolveCheckpointTag(tags, selector) {
@@ -350,6 +355,35 @@ function installCommand(repoRoot, home) {
   console.log(`Exposed on PATH as ${exposed}`);
 }
 
+function assertManagedFile(path) {
+  const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
+  if (existing && !existing.isFile()) {
+    throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
+  }
+}
+
+export function uninstallCommand(home) {
+  const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
+  const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
+  const target = NodePath.join(binDirectory, "lastcode-build");
+  const exposed = NodePath.join(home, ".local", "bin", "lastcode-build");
+  const exposedEntry = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
+  if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
+    throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
+  }
+  for (const path of [moduleTarget, helperTarget, target]) assertManagedFile(path);
+
+  if (exposedEntry) NodeFS.unlinkSync(exposed);
+  for (const path of [moduleTarget, helperTarget, target]) NodeFS.rmSync(path, { force: true });
+  try {
+    NodeFS.rmdirSync(binDirectory);
+  } catch (error) {
+    if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error;
+  }
+  console.log("Uninstalled lastcode-build");
+}
+
 export function parseBuildResult(stdout) {
   const line = splitLines(stdout).find((entry) => entry.startsWith(RESULT_PREFIX));
   if (!line) throw new Error("The local build helper did not return a build result.");
@@ -433,12 +467,17 @@ async function main(argv) {
   if (options.help) {
     console.log("Usage: lastcode-build [CHECKPOINT]");
     console.log("       lastcode-build --checkpoint CHECKPOINT");
+    console.log("       lastcode-build --uninstall");
     console.log("");
     console.log("CHECKPOINT may be 1090, a full nightly tag, or a lastcode/checkpoint tag.");
     console.log("Without CHECKPOINT, the newest local checkpoint is built.");
     return;
   }
   const home = NodeOS.homedir();
+  if (options.uninstall) {
+    uninstallCommand(home);
+    return;
+  }
   const repoRoot = resolveConfiguredRepo(home, options.repoRoot);
   if (options.install) {
     installCommand(repoRoot, home);

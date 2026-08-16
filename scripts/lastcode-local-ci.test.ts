@@ -173,6 +173,33 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
+  it("rejects reordering protected multivalue settings", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-config-order-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "first.inc"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "second.inc"], {
+      cwd: repository,
+    });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync("git", ["config", "--unset-all", "include.path"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "second.inc"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "first.inc"], {
+      cwd: repository,
+    });
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow("protected settings");
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
   it("diagnoses a damaged shared config before resolving the worktree root", () => {
     const repository = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-entry-test-"),

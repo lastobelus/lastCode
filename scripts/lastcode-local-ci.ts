@@ -343,10 +343,7 @@ function readConfigEntries(repoRoot: string, configPath: string): ReadonlyArray<
 }
 
 function readProtectedConfig(entries: ReadonlyArray<string>): string {
-  return entries
-    .filter((entry) => !entry.startsWith("branch."))
-    .sort()
-    .join("\0");
+  return entries.filter((entry) => !entry.startsWith("branch.")).join("\0");
 }
 
 function readBranchConfig(
@@ -360,9 +357,7 @@ function readBranchConfig(
     const value = separator < 0 ? "" : entry.slice(separator + 1);
     (config[key] ??= []).push(value);
   }
-  return Object.fromEntries(
-    Object.entries(config).map(([key, values]) => [key, values.toSorted()]),
-  );
+  return config;
 }
 
 export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegritySnapshot {

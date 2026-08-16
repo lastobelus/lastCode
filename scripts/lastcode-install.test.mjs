@@ -12,6 +12,7 @@ import {
   renderDmgChoices,
   renderLauncher,
   temporaryAppPaths,
+  uninstallCommand,
 } from "./lastcode-install.mjs";
 
 const temporaryDirectories = [];
@@ -34,6 +35,8 @@ describe("LastCode userland install command", () => {
     expect(parseOptions(["/tmp/LastCode.dmg"]).dmgPath).toBe("/tmp/LastCode.dmg");
     expect(parseOptions(["--artifacts", "/tmp/builds"]).artifactsDirectory).toBe("/tmp/builds");
     expect(() => parseOptions(["one.dmg", "two.dmg"])).toThrow("Unexpected second DMG");
+    expect(parseOptions(["--uninstall"]).uninstall).toBe(true);
+    expect(() => parseOptions(["--uninstall", "one.dmg"])).toThrow("cannot be combined");
   });
 
   it("discovers DMGs recursively with the newest first", () => {
@@ -107,5 +110,25 @@ describe("LastCode userland install command", () => {
     expect(NodeFS.lstatSync(lockPath).isSymbolicLink()).toBe(true);
     releaseRecovered();
     expect(NodeFS.existsSync(lockPath)).toBe(false);
+  });
+
+  it("uninstalls the managed installer and refuses a foreign PATH entry", () => {
+    const home = temporaryDirectory();
+    const binDirectory = NodePath.join(home, ".lastcode", "bin");
+    const exposedDirectory = NodePath.join(home, ".local", "bin");
+    const target = NodePath.join(binDirectory, "lastcode-install");
+    const exposed = NodePath.join(exposedDirectory, "lastcode-install");
+    NodeFS.mkdirSync(binDirectory, { recursive: true });
+    NodeFS.mkdirSync(exposedDirectory, { recursive: true });
+    NodeFS.writeFileSync(target, "managed");
+    NodeFS.writeFileSync(NodePath.join(binDirectory, "lastcode-install.mjs"), "managed");
+    NodeFS.symlinkSync(target, exposed);
+
+    uninstallCommand(home);
+    expect(NodeFS.existsSync(exposed)).toBe(false);
+    expect(NodeFS.existsSync(target)).toBe(false);
+
+    NodeFS.writeFileSync(exposed, "mine");
+    expect(() => uninstallCommand(home)).toThrow("not managed by LastCode");
   });
 });

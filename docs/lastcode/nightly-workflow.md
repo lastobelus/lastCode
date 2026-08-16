@@ -265,6 +265,17 @@ in-app builds share a cross-process lock for the complete checkout, CI,
 packaging, and artifact-validation sequence; an overlapping request exits
 without touching the shared worktree.
 
+Remove the optional userland commands with their reverse operations:
+
+```bash
+lastcode-build --uninstall
+lastcode-install --uninstall
+```
+
+Uninstall removes only each command's managed launcher, copied module, helper,
+and matching PATH symlink. It preserves shared checkpoint configuration, build
+artifacts, and any foreign file or symlink.
+
 Use `lastcode-install` to install one of those retained DMGs. It presents every
 DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with
 the newest build selected. After selection it validates and mounts the image,

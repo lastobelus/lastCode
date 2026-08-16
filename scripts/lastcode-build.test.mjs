@@ -1,3 +1,7 @@
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -10,6 +14,7 @@ import {
   resolveBuildPhaseIndex,
   resolveCheckpointTag,
   sanitizeLogLine,
+  uninstallCommand,
 } from "./lastcode-build.mjs";
 
 const tags = [
@@ -24,6 +29,34 @@ describe("LastCode userland build command", () => {
     expect(parseOptions(["--checkpoint", "1092"]).checkpoint).toBe("1092");
     expect(parseOptions(["-c", "1095"]).checkpoint).toBe("1095");
     expect(() => parseOptions(["1090", "1092"])).toThrow("Unexpected second checkpoint");
+    expect(parseOptions(["--uninstall"]).uninstall).toBe(true);
+    expect(() => parseOptions(["--uninstall", "1090"])).toThrow("cannot be combined");
+  });
+
+  it("uninstalls only the managed build command artifacts", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-uninstall-"));
+    try {
+      const binDirectory = NodePath.join(home, ".lastcode", "bin");
+      const exposedDirectory = NodePath.join(home, ".local", "bin");
+      const target = NodePath.join(binDirectory, "lastcode-build");
+      const exposed = NodePath.join(exposedDirectory, "lastcode-build");
+      const dashboard = NodePath.join(home, ".lastcode", "dashboard.json");
+      NodeFS.mkdirSync(binDirectory, { recursive: true });
+      NodeFS.mkdirSync(exposedDirectory, { recursive: true });
+      for (const name of ["lastcode-build", "lastcode-build.mjs", "lastcode-local-update.mjs"]) {
+        NodeFS.writeFileSync(NodePath.join(binDirectory, name), "managed");
+      }
+      NodeFS.writeFileSync(dashboard, "shared config");
+      NodeFS.symlinkSync(target, exposed);
+
+      uninstallCommand(home);
+
+      expect(NodeFS.existsSync(exposed)).toBe(false);
+      expect(NodeFS.existsSync(target)).toBe(false);
+      expect(NodeFS.existsSync(dashboard)).toBe(true);
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("selects the newest checkpoint by default", () => {

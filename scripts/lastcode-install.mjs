@@ -23,16 +23,18 @@ export function parseOptions(argv) {
   let artifactsDirectory;
   let dmgPath;
   let install = false;
+  let uninstall = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--install") install = true;
+    else if (arg === "--uninstall") uninstall = true;
     else if (arg === "--artifacts") {
       artifactsDirectory = argv[index + 1];
       if (!artifactsDirectory) throw new Error("Missing value for --artifacts.");
       index += 1;
     } else if (arg === "-h" || arg === "--help") {
-      return { artifactsDirectory, dmgPath, help: true, install };
+      return { artifactsDirectory, dmgPath, help: true, install, uninstall };
     } else if (arg.startsWith("-")) {
       throw new Error(`Unknown argument '${arg}'.`);
     } else if (dmgPath) {
@@ -41,7 +43,10 @@ export function parseOptions(argv) {
       dmgPath = arg;
     }
   }
-  return { artifactsDirectory, dmgPath, help: false, install };
+  if (uninstall && (install || artifactsDirectory || dmgPath)) {
+    throw new Error("--uninstall cannot be combined with DMG or install options.");
+  }
+  return { artifactsDirectory, dmgPath, help: false, install, uninstall };
 }
 
 function walkDmgs(directory, results) {
@@ -338,16 +343,47 @@ function installCommand(home) {
   console.log(`Exposed on PATH as ${exposed}`);
 }
 
+export function uninstallCommand(home) {
+  const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
+  const target = NodePath.join(binDirectory, "lastcode-install");
+  const exposed = NodePath.join(home, ".local", "bin", "lastcode-install");
+  const exposedEntry = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
+  if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
+    throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
+  }
+  for (const path of [moduleTarget, target]) {
+    const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
+    if (existing && !existing.isFile()) {
+      throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
+    }
+  }
+
+  if (exposedEntry) NodeFS.unlinkSync(exposed);
+  for (const path of [moduleTarget, target]) NodeFS.rmSync(path, { force: true });
+  try {
+    NodeFS.rmdirSync(binDirectory);
+  } catch (error) {
+    if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error;
+  }
+  console.log("Uninstalled lastcode-install");
+}
+
 async function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log("Usage: lastcode-install [DMG]");
     console.log("       lastcode-install --artifacts PATH");
+    console.log("       lastcode-install --uninstall");
     console.log("");
     console.log("Without DMG, choose from ~/.lastcode/local-updates/artifacts using fzf.");
     return;
   }
   const home = NodeOS.homedir();
+  if (options.uninstall) {
+    uninstallCommand(home);
+    return;
+  }
   if (options.install) {
     installCommand(home);
     return;
