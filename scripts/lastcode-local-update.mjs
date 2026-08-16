@@ -10,6 +10,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
+const REVISION_PREFIX = "lastcode/revision/";
+const BUILD_PREFIX = "lastcode/build/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 
 export function resolveDeterministicBuildEnvironment(environment = process.env) {
@@ -74,9 +76,15 @@ function splitLines(value) {
 
 export function parseNightlyVersion(value) {
   const normalized = value.startsWith("v") ? value : `v${value}`;
-  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(normalized);
+  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)(?:\.(\d+))?$/.exec(normalized);
   if (!match) return undefined;
-  return { tag: normalized, parts: match.slice(1).map(Number) };
+  const revision = Number(match[6] ?? 0);
+  return {
+    tag: normalized,
+    nightlyTag: `v${match[1]}.${match[2]}.${match[3]}-nightly.${match[4]}.${match[5]}`,
+    parts: [...match.slice(1, 6).map(Number), revision],
+    revision,
+  };
 }
 
 export function compareNightlyVersions(left, right) {
@@ -90,15 +98,35 @@ export function compareNightlyVersions(left, right) {
   return 0;
 }
 
-export function resolveLatestCheckpointTag(tags) {
+function parseInstallableTag(tag) {
+  const prefix = tag.startsWith(CHECKPOINT_PREFIX)
+    ? CHECKPOINT_PREFIX
+    : tag.startsWith(REVISION_PREFIX)
+      ? REVISION_PREFIX
+      : undefined;
+  if (!prefix) return undefined;
+  const version = parseNightlyVersion(tag.slice(prefix.length));
+  if (!version) return undefined;
+  if (prefix === CHECKPOINT_PREFIX && version.revision !== 0) return undefined;
+  if (prefix === REVISION_PREFIX && version.revision < 1) return undefined;
+  return { prefix, tag, version };
+}
+
+function versionFromInstallableTag(tag) {
+  const installable = parseInstallableTag(tag);
+  if (!installable) throw new Error(`Invalid LastCode installable tag '${tag}'.`);
+  return installable.version.tag.slice(1);
+}
+
+function buildTagPrefix(installableTag) {
+  return `${BUILD_PREFIX}v${versionFromInstallableTag(installableTag)}.`;
+}
+
+export function resolveLatestInstallableTag(tags) {
   return tags
-    .filter((tag) => tag.startsWith(CHECKPOINT_PREFIX))
-    .filter((tag) => parseNightlyVersion(tag.slice(CHECKPOINT_PREFIX.length)) !== undefined)
+    .flatMap((tag) => (parseInstallableTag(tag) ? [tag] : []))
     .toSorted((left, right) =>
-      compareNightlyVersions(
-        right.slice(CHECKPOINT_PREFIX.length),
-        left.slice(CHECKPOINT_PREFIX.length),
-      ),
+      compareNightlyVersions(versionFromInstallableTag(right), versionFromInstallableTag(left)),
     )[0];
 }
 
@@ -131,7 +159,7 @@ export function parseOptions(argv) {
 }
 
 export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
-  const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
+  const nightlyTag = `v${versionFromInstallableTag(checkpointTag)}`;
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
   const manifestPath = NodePath.join(outputDir, "build-manifest.json");
@@ -142,7 +170,7 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
     manifest.checkpointTag !== checkpointTag ||
     manifest.lastCodeCommit !== checkpointCommit ||
     typeof manifest.buildTag !== "string" ||
-    !manifest.buildTag.startsWith(checkpointTag.replace(CHECKPOINT_PREFIX, "lastcode/build/") + ".")
+    !manifest.buildTag.startsWith(buildTagPrefix(checkpointTag))
   ) {
     throw new Error(`Existing build manifest does not match ${checkpointTag}: ${manifestPath}`);
   }
@@ -172,7 +200,7 @@ export function quarantineIncompleteBuild(
   checkpointCommit,
   suffix = `${new Date().toISOString().replaceAll(":", "").replaceAll(".", "")}-${process.pid}`,
 ) {
-  const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
+  const nightlyTag = `v${versionFromInstallableTag(checkpointTag)}`;
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
   if (!NodeFS.existsSync(outputDir)) return undefined;
@@ -188,21 +216,30 @@ function inspect(options) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
   }
-  const checkpointTags = splitLines(
-    git(options.repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
+  const installableTags = splitLines(
+    git(options.repoRoot, [
+      "tag",
+      "--list",
+      `${CHECKPOINT_PREFIX}v*-nightly.*`,
+      `${REVISION_PREFIX}v*-nightly.*`,
+    ]),
   );
-  const checkpointTag = resolveLatestCheckpointTag(checkpointTags);
-  if (!checkpointTag) throw new Error("No local LastCode checkpoint tags were found.");
-  const nightlyTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
-  const availableVersion = nightlyTag.slice(1);
+  const checkpointTag = resolveLatestInstallableTag(installableTags);
+  if (!checkpointTag) throw new Error("No local LastCode installable tags were found.");
+  const availableVersion = versionFromInstallableTag(checkpointTag);
   if (compareNightlyVersions(availableVersion, options.currentVersion) <= 0) {
     return { schemaVersion: 1, status: "up-to-date", checkpointTag, availableVersion };
   }
 
-  const currentCheckpoint = `${CHECKPOINT_PREFIX}v${options.currentVersion}`;
-  const hasCurrentCheckpoint =
-    git(options.repoRoot, ["tag", "--list", currentCheckpoint]) === currentCheckpoint;
-  const base = hasCurrentCheckpoint ? currentCheckpoint : `v${options.currentVersion}`;
+  const current = parseNightlyVersion(options.currentVersion);
+  if (!current) throw new Error(`Installed version '${options.currentVersion}' is invalid.`);
+  const currentInstallable =
+    current.revision === 0
+      ? `${CHECKPOINT_PREFIX}${current.tag}`
+      : `${REVISION_PREFIX}${current.tag}`;
+  const hasCurrentInstallable =
+    git(options.repoRoot, ["tag", "--list", currentInstallable]) === currentInstallable;
+  const base = hasCurrentInstallable ? currentInstallable : current.nightlyTag;
   const releaseNotes = splitLines(
     git(options.repoRoot, ["log", "--format=%s", "--no-merges", `${base}..${checkpointTag}`]),
   ).slice(0, 40);
@@ -369,8 +406,12 @@ function buildUnlocked(options, updateRoot) {
     run(worktreePath, installer, ["install", "--frozen-lockfile"], { logFd });
     const mise = resolveMise(options.home);
     const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
-    const nightlyTag = options.checkpointTag.slice(CHECKPOINT_PREFIX.length);
-    const upstreamCommit = git(options.repoRoot, ["rev-parse", `${nightlyTag}^{commit}`]);
+    const installable = parseInstallableTag(options.checkpointTag);
+    if (!installable) throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
+    const upstreamCommit = git(options.repoRoot, [
+      "rev-parse",
+      `${installable.version.nightlyTag}^{commit}`,
+    ]);
     const commonGitDirectory = NodePath.resolve(
       options.repoRoot,
       git(options.repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
@@ -444,8 +485,8 @@ function buildUnlocked(options, updateRoot) {
 }
 
 function build(options) {
-  if (!options.checkpointTag.startsWith(CHECKPOINT_PREFIX)) {
-    throw new Error(`Invalid checkpoint tag '${options.checkpointTag}'.`);
+  if (!parseInstallableTag(options.checkpointTag)) {
+    throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
   }
   const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
   const releaseLock = acquireBuildLock(updateRoot);
