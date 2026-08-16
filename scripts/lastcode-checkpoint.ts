@@ -397,6 +397,28 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
   return remoteCommit !== checkpointCommit;
 }
 
+export function checkpointPromotionPushArgs(
+  pushRemote: string,
+  remoteCommit: string,
+  checkpointCommit: string,
+  validation:
+    | { readonly kind: "validated" }
+    | { readonly checkoutHead: string; readonly kind: "pre-push" },
+): ReadonlyArray<string> {
+  if (validation.kind === "pre-push" && validation.checkoutHead !== checkpointCommit) {
+    throw new Error(
+      `Refusing to promote ${checkpointCommit}: the pre-push hook would validate ${validation.checkoutHead}. Run with checkpoint smoke or tag publication enabled.`,
+    );
+  }
+  return [
+    "push",
+    ...(validation.kind === "validated" ? ["--no-verify"] : []),
+    `--force-with-lease=refs/heads/lastcode/main:${remoteCommit}`,
+    pushRemote,
+    `${checkpointCommit}:refs/heads/lastcode/main`,
+  ];
+}
+
 export function upstreamMainMirrorPushArgs(
   pushRemote: string,
   remoteCommit: string,
@@ -404,6 +426,7 @@ export function upstreamMainMirrorPushArgs(
 ): ReadonlyArray<string> {
   return [
     "push",
+    "--no-verify",
     `--force-with-lease=refs/heads/main:${remoteCommit}`,
     pushRemote,
     `${upstreamCommit}:refs/heads/main`,
@@ -702,7 +725,7 @@ function publishRevisionIfNeeded(
   if (plan.kind === "unavailable") return false;
   if (plan.kind === "represented") {
     if (plan.installable.revision === 0) return false;
-    promoteCheckpoint(repoRoot, plan.installable.commit, options, platform);
+    promoteCheckpoint(repoRoot, plan.installable.commit, options, platform, options.pushTags);
     console.log(
       `[lastcode:checkpoint] ${plan.installable.tag} already represents current LastCode main.`,
     );
@@ -770,7 +793,13 @@ function publishRevisionIfNeeded(
     }
   }
 
-  promoteCheckpoint(repoRoot, candidateCommit, options, platform);
+  promoteCheckpoint(
+    repoRoot,
+    candidateCommit,
+    options,
+    platform,
+    options.smoke || options.pushTags,
+  );
   notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
   console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
   return true;
@@ -804,6 +833,7 @@ function promoteCheckpoint(
   commit: string,
   options: CheckpointOptions,
   platform: NodeJS.Platform,
+  validated: boolean,
 ): void {
   if (options.promotion === "never") return;
   git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
@@ -829,12 +859,18 @@ function promoteCheckpoint(
     }
   }
 
-  run(repoRoot, "git", [
-    "push",
-    `--force-with-lease=refs/heads/lastcode/main:${expected}`,
-    options.pushRemote,
-    `${commit}:refs/heads/lastcode/main`,
-  ]);
+  run(
+    repoRoot,
+    "git",
+    checkpointPromotionPushArgs(
+      options.pushRemote,
+      expected,
+      commit,
+      validated
+        ? { kind: "validated" }
+        : { kind: "pre-push", checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]) },
+    ),
+  );
   console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
 }
 
@@ -1037,7 +1073,7 @@ function main(argv: ReadonlyArray<string>): void {
       console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
       return;
     }
-    promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform);
+    promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags);
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
   }
@@ -1184,7 +1220,13 @@ function main(argv: ReadonlyArray<string>): void {
     }
   }
 
-  promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform);
+  promoteCheckpoint(
+    repoRoot,
+    candidateCommit,
+    options,
+    hostPlatform,
+    options.smoke || options.pushTags,
+  );
   notify(hostPlatform, "LastCode nightly checkpoint complete", `${candidateRef} is ready.`);
 }
 
