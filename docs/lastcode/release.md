@@ -74,24 +74,28 @@ pnpm lastcode:merge
 
 The merge wrapper refuses dirty worktrees, unstamped commits, stale bases, draft
 or conflicting PRs, and PRs that do not target `lastcode/main`. It squash-merges
-with an exact-head guard.
+with an exact-head guard, then requests an immediate checkpoint-daemon run. The
+daemon publishes a new installable LastCode revision when no new upstream
+nightly is waiting. Failure to start the service is reported without lying about
+the already-completed GitHub merge; the hourly service run remains the repair
+path. The request never terminates a daemon run already in progress.
 
 ## Checkpoint CI
 
 A release build uses a different full-CI context because rebasing intentionally
-rewrites ancestry. Check out the immutable checkpoint and run:
+rewrites ancestry. Check out the immutable checkpoint or revision and run:
 
 ```bash
 pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-The resulting stamp binds the exact LastCode commit, checkpoint tag, upstream
+The resulting stamp binds the exact LastCode commit, installable tag, upstream
 tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
 checkpoint stamp cannot authorize a PR merge.
 
 ## Apple Silicon Build
 
-Build the selected checkpoint:
+Build the selected checkpoint or revision:
 
 ```bash
 pnpm lastcode:build:mac:arm64 \
@@ -101,7 +105,7 @@ pnpm lastcode:build:mac:arm64 \
 The wrapper requires:
 
 - a clean worktree;
-- `HEAD` equal to the annotated checkpoint target;
+- `HEAD` equal to the annotated checkpoint or revision target;
 - a valid full checkpoint-CI stamp; and
 - a new, non-overwriting output directory.
 
@@ -136,7 +140,7 @@ the same Serve port simultaneously.
 
 The default-off local updater is documented in
 [Local Nightly Updates](local-nightly-updates.md). It discovers immutable
-checkpoint tags, builds a selected checkpoint in a separate dedicated worktree,
-and stages the generated updater ZIP through Electron's existing macOS install
-machinery. Checkpoint scheduling remains independent: the daemon never builds
-merely because it found a new nightly.
+checkpoint and LastCode revision tags, builds a selected tag in a separate
+dedicated worktree, and stages the generated updater ZIP through Electron's
+existing macOS install machinery. Checkpoint scheduling remains independent:
+the daemon never builds merely because it found a new nightly or revision.
