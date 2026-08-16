@@ -1,13 +1,15 @@
 # Local Nightly Updates
 
-LastCode can turn immutable local checkpoint tags into an in-app update without
-publishing a release or using GitHub Actions. This is a personal-machine
-workflow, not a public distribution channel.
+LastCode can turn immutable local checkpoint and LastCode revision tags into an
+in-app update without publishing a release or using GitHub Actions. This is a
+personal-machine workflow, not a public distribution channel.
 
 ## Opt in
 
 The feature is off by default. In the packaged Apple Silicon desktop app, open
 **Settings → LastCode** and enable **Show and install local nightlies**.
+This is separate from the normal **Update track** setting, which controls T3
+Code's hosted stable/nightly release channel and does not enable local builds.
 
 Nothing is inspected, built, downloaded, or installed while the setting is
 off. The setting is stored in LastCode's desktop settings, separate from T3
@@ -32,8 +34,9 @@ read checkpoint tags and launch the versioned helper; it never checks out or
 cleans a human development worktree.
 
 The optional `lastcode-build [CHECKPOINT]` command exposes the same builder for
-manual bootstrap builds. It defaults to the newest checkpoint; a final nightly
-number such as `1090` selects the unique checkpoint ending in `.1090`.
+manual bootstrap builds. It defaults to the newest installable checkpoint or
+revision; a final nightly number such as `1090` selects the newest installable
+for that upstream nightly.
 Manual and in-app builds share one cross-process lock. If either path is already
 building, the other exits with the owning process and start time instead of
 mutating the shared build worktree. A lock left by a terminated process is
@@ -53,12 +56,12 @@ picker.
 
 1. The desktop checks the local repository at startup, every four minutes, and
    when the sidebar update button is clicked.
-2. If a checkpoint is newer than the installed LastCode nightly, the sidebar
+2. If a checkpoint or revision is newer than the installed LastCode version, the sidebar
    button changes state. Its hover card lists commit subjects between the
-   installed build and the checkpoint.
+   installed build and the selected installable tag.
 3. The first click creates or reuses
    `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
-   runs full checkpoint CI, and builds the checkpoint's DMG plus updater ZIP.
+   runs full checkpoint CI, and builds the selected tag's DMG plus updater ZIP.
    One build at a time owns this worktree, from checkout through final artifact
    validation.
    The build generates updater metadata for `lastobelus/lastCode` by default;
@@ -86,6 +89,25 @@ immediately, and ordinary 502/503/504 gateway failures retain the normal
 15-second retry deadline. You can leave the build or install unattended, return
 to handle a prompt, and continue without rebuilding, reinstalling, or relaunching
 LastCode.
+
+## LastCode-only revisions
+
+One upstream checkpoint remains the immutable record for each T3 Code nightly.
+When `lastcode/main` advances before another upstream nightly exists, the
+checkpoint daemon publishes an ordered tag such as:
+
+```text
+lastcode/revision/v0.0.34-nightly.20260816.1105.1
+```
+
+The guarded PR merge command requests an immediate daemon run. If that request
+is missed because the service is unavailable, the normal hourly run repairs it.
+The daemon replays only the newly merged LastCode commits onto the newest
+checkpoint, smoke-tests the result, publishes the revision, and promotes it when
+the PR queue permits. The running app then discovers version
+`0.0.34-nightly.20260816.1105.1` through the same button and builds it only after
+the first click. A later upstream `1106` still sorts after every `1105.N`
+revision.
 
 ## Failure handling and logs
 
@@ -119,7 +141,8 @@ restoring hosted updater state, so a late poll cannot turn the feature back on.
 ## Current scope
 
 - packaged LastCode desktop builds on Apple Silicon macOS;
-- local `lastcode/checkpoint/*` tags already fetched by the checkpoint daemon;
+- local `lastcode/checkpoint/*` and `lastcode/revision/*` tags already fetched
+  by the checkpoint daemon;
 - ad-hoc-signed, non-notarized personal builds; and
 - one build at a time, initiated interactively from the sidebar.
 
