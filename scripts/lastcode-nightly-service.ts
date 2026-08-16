@@ -33,6 +33,7 @@ export function renderLaunchAgentPlist(input: {
     "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
     "--push-tags",
     "--promote-if-no-open-prs",
+    "--mirror-upstream-main",
   ].join(" ");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
