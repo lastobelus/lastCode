@@ -301,11 +301,15 @@ git switch -c lastcode/markover/review-handoff origin/lastcode/main
 Target `lastcode/main`. Pushing runs the quick local gate. Before merge, require
 a clean current-head Codex review, no unresolved threads, and a full local-CI
 stamp for the exact head and current base. Use the guarded LastCode merge command
-rather than merging directly in the GitHub UI.
+rather than merging directly in the GitHub UI. After the squash merge succeeds,
+the guard requests an immediate checkpoint-daemon run so the merged change can
+become an installable `lastcode/revision/...` without waiting for another
+upstream nightly.
 
 An open PR targeting `lastcode/main` pauses nightly promotion, but the automation
 continues creating immutable checkpoint tags. Promotion catches up after the PR
-queue is empty.
+queue is empty. The daemon also publishes immutable LastCode revisions for
+merged downstream work and uses the hourly run to repair a missed merge trigger.
 
 ### Inspect a specific pull request
 
