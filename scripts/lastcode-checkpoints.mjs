@@ -8,6 +8,7 @@ import * as NodeURL from "node:url";
 
 const DEFAULT_COUNT = 8;
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
+const REVISION_PREFIX = "lastcode/revision/";
 const BUILD_PREFIX = "lastcode/build/";
 const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 const REMOTE_PROBE_TIMEOUT_MS = 3_000;
@@ -82,8 +83,8 @@ export function parseOptions(argv) {
 }
 
 function parseNightly(tag) {
-  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(tag);
-  return match ? match.slice(1).map(Number) : undefined;
+  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)(?:\.(\d+))?$/.exec(tag);
+  return match ? [...match.slice(1, 6).map(Number), Number(match[6] ?? 0)] : undefined;
 }
 
 function compareNightlies(left, right) {
@@ -214,6 +215,7 @@ function remotePublicationState(repoRoot) {
       "origin",
       "refs/heads/lastcode/main",
       `refs/tags/${CHECKPOINT_PREFIX}v*-nightly.*`,
+      `refs/tags/${REVISION_PREFIX}v*-nightly.*`,
     ],
     {
       cwd: repoRoot,
@@ -368,7 +370,7 @@ export function selectCheckpointTags(tags, count) {
 function latestBuildNumbers(tags) {
   const latestByUpstreamTag = new Map();
   for (const tag of tags) {
-    const match = /^(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)\.(\d+)$/.exec(
+    const match = /^(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+(?:\.\d+)?)\.(\d+)$/.exec(
       tag.slice(BUILD_PREFIX.length),
     );
     if (!match) continue;
@@ -512,12 +514,15 @@ function printDashboard(repoRoot, home, count, verbose) {
   const recoveryWorktree = findNightlySyncWorktree(repoRoot);
   if (recoveryWorktree) {
     const recoveryFailure = selectedFailures.find((failure) => failure.recoveryBranch);
+    const recoveryBranch =
+      recoveryFailure?.recoveryBranch ??
+      git(recoveryWorktree, ["branch", "--show-current"], { allowFailure: true });
     const nightly = recoveryFailure ? ` for ${recoveryFailure.upstreamTag}` : "";
     console.log("");
     console.log(
       style(
         ansi.yellow,
-        `Action required: checkpoint recovery${nightly} is blocking the daemon at ${recoveryWorktree}.`,
+        `Action required: automation recovery${nightly} is blocking the daemon at ${recoveryWorktree}.`,
       ),
     );
     console.log(style(ansi.lavender, `Start with: git -C ${shellQuote(recoveryWorktree)} status`));
@@ -526,7 +531,7 @@ function printDashboard(repoRoot, home, count, verbose) {
       repoRoot,
       worktree: recoveryWorktree,
       automationWorktree,
-      recoveryBranch: recoveryFailure?.recoveryBranch,
+      recoveryBranch,
       isRebaseInProgress: rebaseInProgress(recoveryWorktree),
       failedDuringRebase: failureWasDuringRebase(recoveryFailure),
     })) {
@@ -548,6 +553,30 @@ function printDashboard(repoRoot, home, count, verbose) {
     .at(0);
   const latestUpstream = upstreamTags.at(0);
   const freshness = checkpointFreshness(latestUpstream, latestCheckpoint);
+  const latestInstallableTag = splitLines(
+    git(repoRoot, [
+      "tag",
+      "--list",
+      `${CHECKPOINT_PREFIX}v*-nightly.*`,
+      `${REVISION_PREFIX}v*-nightly.*`,
+    ]),
+  )
+    .map((tag) => ({
+      tag,
+      version: tag.slice(
+        tag.startsWith(REVISION_PREFIX) ? REVISION_PREFIX.length : CHECKPOINT_PREFIX.length,
+      ),
+    }))
+    .sort((left, right) => compareNightlies(right.version, left.version))
+    .at(0);
+  const latestInstallableCommit = latestInstallableTag
+    ? git(repoRoot, ["rev-list", "-n", "1", latestInstallableTag.tag])
+    : undefined;
+  const latestInstallableBuild = latestInstallableTag
+    ? latestBuildNumbers(splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`]))).get(
+        latestInstallableTag.version,
+      )
+    : undefined;
   console.log("");
   console.log(style(ansi.lavender, daemonSummary()));
   console.log(
@@ -558,6 +587,12 @@ function printDashboard(repoRoot, home, count, verbose) {
           ? ansi.yellow
           : ansi.pacific,
       `Latest upstream: ${latestUpstream ?? "—"} · Latest checkpoint: ${latestCheckpoint ?? latestVisibleCheckpoint?.upstreamTag ?? "—"} · ${freshness}`,
+    ),
+  );
+  console.log(
+    style(
+      ansi.lavender,
+      `Latest installable: ${latestInstallableTag?.version ?? "—"}${latestInstallableCommit === remoteState.remoteMain ? " · on main" : ""}${latestInstallableBuild ? ` · build #${latestInstallableBuild}` : ""}`,
     ),
   );
 }
