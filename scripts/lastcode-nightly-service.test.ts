@@ -9,7 +9,7 @@ it("renders an hourly checkpoint-only launch agent with escaped durable paths", 
   });
 
   expect(plist).toContain("<integer>3600</integer>");
-  expect(plist).toContain("--push-tags --promote-if-no-open-prs");
+  expect(plist).toContain("--push-tags --promote-if-no-open-prs --mirror-upstream-main");
   expect(plist).toContain("git checkout --detach --force refs/remotes/origin/lastcode/main");
   expect(plist).toContain("./node_modules/.bin/vp install --frozen-lockfile");
   expect(plist).not.toContain("lastcode-build");

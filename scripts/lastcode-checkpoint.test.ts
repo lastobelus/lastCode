@@ -3,12 +3,17 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointSmokeEnvironment,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
   promotionNeeded,
+  rerereRebaseMadeProgress,
   resolveCheckpointPlan,
+  resolveUpstreamMainMirror,
+  shouldContinueRerereRebase,
   unpublishedCheckpointTags,
+  upstreamMainMirrorPushArgs,
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
@@ -31,8 +36,32 @@ it("uses Git's supported short option when creating the recovery branch", () => 
   ]);
 });
 
+it("continues a rebase when rerere staged every remembered conflict", () => {
+  assert.equal(shouldContinueRerereRebase({ rebaseInProgress: true, unmergedPaths: [] }), true);
+  assert.equal(
+    shouldContinueRerereRebase({
+      rebaseInProgress: true,
+      unmergedPaths: ["still-conflicted.ts"],
+    }),
+    false,
+  );
+  assert.equal(shouldContinueRerereRebase({ rebaseInProgress: false, unmergedPaths: [] }), false);
+});
+
+it("stops automatic rebase continuation when Git makes no progress", () => {
+  assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-b\0step:2"), true);
+  assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-a\0step:1"), false);
+});
+
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
   assert.equal(worktreeVp("/tmp/sync"), "/tmp/sync/node_modules/.bin/vp");
+});
+
+it("removes the Electron host mode from checkpoint smoke subprocesses", () => {
+  assert.deepStrictEqual(
+    checkpointSmokeEnvironment({ ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" }),
+    { KEEP_ME: "yes" },
+  );
 });
 
 it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {
@@ -104,6 +133,27 @@ it("reads the source commit from checkpoint metadata", () => {
 it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("same", "same"), false);
   assert.equal(promotionNeeded("main", "checkpoint"), true);
+});
+
+it("mirrors upstream main with an exact lease on the fork branch", () => {
+  const pushArgs = [
+    "push",
+    "--force-with-lease=refs/heads/main:old-main",
+    "origin",
+    "upstream-main:refs/heads/main",
+  ];
+  assert.deepStrictEqual(
+    upstreamMainMirrorPushArgs("origin", "old-main", "upstream-main"),
+    pushArgs,
+  );
+  assert.deepStrictEqual(
+    resolveUpstreamMainMirror("origin", "old-main", "upstream-main", true),
+    pushArgs,
+  );
+  assert.equal(resolveUpstreamMainMirror("origin", "same", "same", true), undefined);
+  expect(() => resolveUpstreamMainMirror("origin", "fork-main", "upstream-main", false)).toThrow(
+    /origin\/main has diverged/,
+  );
 });
 
 it("cleans up publication failures but retains recovery state for earlier failures", () => {
