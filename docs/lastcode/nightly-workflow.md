@@ -81,10 +81,17 @@ is intentionally smaller than the full build gate.
 Checkpoint-tag publication uses `git push --no-verify` after that dedicated
 smoke gate passes. This avoids rerunning the generic repository-wide pre-push
 gate for every immutable tag while catching up across multiple nightlies.
-Ordinary branch pushes and promotion of `lastcode/main` still run the pre-push
-quick gate. If checkpoint smoke is disabled, tag publication is allowed only
-when the invoking checkout is already at the checkpoint commit, so that fallback
-gate cannot validate the wrong revision.
+Ordinary human branch pushes still run the pre-push quick gate. Automation-controlled
+tag publication, `lastcode/main` promotion, and the exact upstream `main` mirror
+push with `--no-verify`: the checkpoint or revision candidate has already passed
+its dedicated smoke gate, while the upstream mirror is an unchanged upstream
+commit. This also prevents GitHub from closing an idle SSH connection while a
+long pre-push hook runs and avoids validating the automation checkout instead of
+the commit being promoted. A manual run that disables both smoke and tag
+publication retains the generic pre-push gate, and promotion is refused unless
+the invoking checkout is the candidate commit. If checkpoint smoke is disabled,
+tag publication has the same checkout invariant, so its fallback gate cannot
+validate the wrong revision.
 
 ### Promotion and open PRs
 
