@@ -3,7 +3,8 @@
 LastCode is a personal downstream of T3 Code that rebases its complete fork-only
 patch stack onto upstream nightly releases. Tracking an upstream nightly and
 building an application are deliberately separate operations: every nightly can
-be checkpointed, while only selected checkpoints need full local CI and a build.
+be checkpointed, merged LastCode work can become an ordered revision, and only
+selected installable tags need full local CI and a build.
 
 This directory is the deliberate namespace for LastCode-only contributor and
 operations documentation. Product documentation and material intended for an
@@ -42,11 +43,11 @@ lastcode-checkpoints
 lastcode-checkpoints -n 20
 lastcode-checkpoints --verbose
 
-# Validate and build one explicit checkpoint.
+# Validate and build one explicit checkpoint or LastCode revision.
 pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 pnpm run lastcode:build:mac:arm64 -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
 None of the checkpoint commands builds an application. An opted-in packaged
-desktop app can build a selected checkpoint locally from its sidebar update
-button; no build is uploaded or published.
+desktop app can build a selected checkpoint or LastCode revision locally from
+its sidebar update button; no build is uploaded or published.
