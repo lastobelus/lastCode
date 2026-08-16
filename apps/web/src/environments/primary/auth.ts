@@ -188,31 +188,27 @@ function getDesktopBootstrapCredential(): string | null {
 
 export async function fetchSessionState(): Promise<AuthSessionState> {
   const isDesktop = window.desktopBridge !== undefined;
-  return retryTransientBootstrap(
-    async () => {
-      try {
-        return await runPrimaryHttp(
-          PrimaryEnvironmentHttpClient.pipe(
-            Effect.flatMap((client) => client.auth.session({ headers: {} })),
-          ),
-        );
-      } catch (error) {
-        throw PrimaryEnvironmentRequestError.fromCause({
-          operation: "fetch-session-state",
-          cause: error,
-        });
+  const retryOptions = isDesktop
+    ? {
+        retryError: (error: unknown, attemptElapsedMs: number) =>
+          isDelayedDesktopCredentialProtocolError(error, attemptElapsedMs),
+        retryErrorTimeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS,
       }
-    },
-    {
-      ...(isDesktop
-        ? {
-            retryError: (error: unknown, attemptElapsedMs: number) =>
-              isDelayedDesktopCredentialProtocolError(error, attemptElapsedMs),
-            retryErrorTimeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS,
-          }
-        : {}),
-    },
-  );
+    : {};
+  return retryTransientBootstrap(async () => {
+    try {
+      return await runPrimaryHttp(
+        PrimaryEnvironmentHttpClient.pipe(
+          Effect.flatMap((client) => client.auth.session({ headers: {} })),
+        ),
+      );
+    } catch (error) {
+      throw PrimaryEnvironmentRequestError.fromCause({
+        operation: "fetch-session-state",
+        cause: error,
+      });
+    }
+  }, retryOptions);
 }
 
 function readHttpApiStatus(error: unknown): number | null {

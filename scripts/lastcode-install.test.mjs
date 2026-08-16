@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  acquireInstallLock,
   discoverDmgs,
   parseDmgChoice,
   parseOptions,
@@ -80,5 +81,19 @@ describe("LastCode userland install command", () => {
     expect(renderLauncher("/tmp/Last Code/lastcode-install.mjs")).toContain(
       "mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-install.mjs' \"$@\"",
     );
+  });
+
+  it("serializes installers and recovers an abandoned lock", () => {
+    const root = temporaryDirectory();
+    const release = acquireInstallLock(root);
+    expect(() => acquireInstallLock(root)).toThrow("already running");
+    release();
+
+    const lockPath = NodePath.join(root, "install.lock");
+    NodeFS.symlinkSync(JSON.stringify({ schemaVersion: 1, pid: 12345 }), lockPath);
+    const releaseRecovered = acquireInstallLock(root, { isAlive: () => false });
+    expect(NodeFS.lstatSync(lockPath).isSymbolicLink()).toBe(true);
+    releaseRecovered();
+    expect(NodeFS.existsSync(lockPath)).toBe(false);
   });
 });

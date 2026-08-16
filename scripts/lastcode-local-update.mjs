@@ -260,6 +260,8 @@ function processIsAlive(pid) {
   }
 }
 
+const BUILD_LOCK_INITIALIZATION_GRACE_MS = 5_000;
+
 export function acquireBuildLock(updateRoot, options = {}) {
   const pid = options.pid ?? process.pid;
   const isAlive = options.isAlive ?? processIsAlive;
@@ -293,9 +295,14 @@ export function acquireBuildLock(updateRoot, options = {}) {
       try {
         owner = JSON.parse(NodeFS.readFileSync(ownerPath, "utf8"));
       } catch {
-        throw new Error(`Another LastCode build owns ${lockPath}.`);
+        const lockAgeMs = Date.now() - NodeFS.statSync(lockPath).mtimeMs;
+        if (lockAgeMs < BUILD_LOCK_INITIALIZATION_GRACE_MS) {
+          throw new Error(
+            `Another LastCode build is initializing ${lockPath}. Retry in a few seconds.`,
+          );
+        }
       }
-      if (Number.isSafeInteger(owner.pid) && isAlive(owner.pid)) {
+      if (Number.isSafeInteger(owner?.pid) && isAlive(owner.pid)) {
         throw new Error(
           `Another LastCode build is already running (PID ${owner.pid}, started ${owner.startedAt ?? "at an unknown time"}).`,
           { cause: error },

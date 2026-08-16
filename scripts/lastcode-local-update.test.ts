@@ -37,6 +37,14 @@ describe("lastcode-local-update", () => {
       assert.isTrue(NodeFS.existsSync(NodePath.join(lockPath, "owner.json")));
       releaseRecovered();
       assert.isFalse(NodeFS.existsSync(lockPath));
+
+      NodeFS.mkdirSync(lockPath);
+      assert.throws(() => acquireBuildLock(root, { isAlive: () => false }), /initializing/);
+      NodeFS.utimesSync(lockPath, 0, 0);
+      const releaseOwnerless = acquireBuildLock(root, { isAlive: () => false });
+      assert.isTrue(NodeFS.existsSync(NodePath.join(lockPath, "owner.json")));
+      releaseOwnerless();
+      assert.isFalse(NodeFS.existsSync(lockPath));
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

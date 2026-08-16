@@ -39,8 +39,9 @@ The companion `lastcode-install` command uses `fzf` to choose a retained DMG,
 with the most recently built image selected by default. It stages and validates
 the replacement before quitting LastCode, then replaces
 `/Applications/LastCode.app` and relaunches it. Passing a DMG path skips the
-picker. This manual bootstrap path does not require the currently installed app
-to have local nightly updates enabled.
+picker. An install-wide lock prevents overlapping commands from racing the app
+replacement. This manual bootstrap path does not require the currently installed
+app to have local nightly updates enabled.
 
 ## User flow
 
@@ -100,6 +101,9 @@ also requires the checksum file and the manifest's annotated
 interrupted finalization is retried instead of treated as complete.
 Interrupting or quitting during a build terminates the helper's entire process
 group so CI and packaging cannot continue orphaned against that worktree.
+The next build also reclaims an ownerless or partial lock left behind during the
+lock's initialization, after a short grace period that avoids stealing it from a
+still-starting process.
 
 Turning the setting off hides the local updater and stops future checks. It
 does not delete build artifacts, CI stamps, Git tags, or worktrees.

@@ -9,6 +9,7 @@ import * as NodeURL from "node:url";
 
 const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
+const INSTALL_LOCK_NAME = "install.lock";
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -181,6 +182,66 @@ export function temporaryAppPaths(targetPath, processId = process.pid) {
   };
 }
 
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+export function acquireInstallLock(lockDirectory, options = {}) {
+  const pid = options.pid ?? process.pid;
+  const isAlive = options.isAlive ?? processIsAlive;
+  const lockPath = NodePath.join(lockDirectory, INSTALL_LOCK_NAME);
+  const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  NodeFS.mkdirSync(lockDirectory, { recursive: true });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
+    try {
+      // A symlink publishes the complete owner record atomically, so another
+      // installer can never observe a lock without its owner metadata.
+      NodeFS.symlinkSync(JSON.stringify(owner), lockPath);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const currentOwner = JSON.parse(NodeFS.readlinkSync(lockPath));
+        if (currentOwner.token !== token) {
+          throw new Error(
+            "Refusing to release a LastCode install lock now owned by another process.",
+          );
+        }
+        NodeFS.unlinkSync(lockPath);
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST" || attempt > 0) throw error;
+      let currentOwner;
+      try {
+        currentOwner = JSON.parse(NodeFS.readlinkSync(lockPath));
+      } catch {
+        currentOwner = undefined;
+      }
+      if (Number.isSafeInteger(currentOwner?.pid) && isAlive(currentOwner.pid)) {
+        throw new Error(
+          `Another LastCode install is already running (PID ${currentOwner.pid}, started ${currentOwner.startedAt ?? "at an unknown time"}).`,
+          { cause: error },
+        );
+      }
+      const stalePath = `${lockPath}.stale-${pid}-${Date.now()}`;
+      try {
+        NodeFS.renameSync(lockPath, stalePath);
+      } catch {
+        throw new Error(`Another LastCode install acquired ${lockPath}.`);
+      }
+      NodeFS.rmSync(stalePath, { force: true, recursive: true });
+    }
+  }
+  throw new Error(`Could not acquire the LastCode install lock at ${lockPath}.`);
+}
+
 async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
   if (process.platform !== "darwin") throw new Error("lastcode-install only supports macOS.");
@@ -189,55 +250,62 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
     throw new Error(`DMG not found: ${resolvedDmg}`);
   }
 
-  const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
-  const { backup, staging } = temporaryAppPaths(targetPath);
-  let attached = false;
-  let oldAppMoved = false;
+  const releaseInstallLock = acquireInstallLock(
+    NodePath.join(NodeOS.homedir(), ".lastcode", "local-updates"),
+  );
   try {
-    console.log(`Mounting ${NodePath.basename(resolvedDmg)}…`);
-    run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
-    attached = true;
-    const sourceApp = NodePath.join(mountPoint, "LastCode.app");
-    const version = validateApp(sourceApp);
-
-    NodeFS.rmSync(staging, { force: true, recursive: true });
-    NodeFS.rmSync(backup, { force: true, recursive: true });
-    console.log(`Preparing LastCode ${version}…`);
-    run("ditto", [sourceApp, staging]);
-    validateApp(staging);
-    await quitApp();
-
-    if (NodeFS.existsSync(targetPath)) {
-      NodeFS.renameSync(targetPath, backup);
-      oldAppMoved = true;
-    }
+    const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
+    const { backup, staging } = temporaryAppPaths(targetPath);
+    let attached = false;
+    let oldAppMoved = false;
     try {
-      NodeFS.renameSync(staging, targetPath);
-      run("open", [targetPath]);
-    } catch (error) {
-      NodeFS.rmSync(targetPath, { force: true, recursive: true });
-      if (oldAppMoved) {
-        NodeFS.renameSync(backup, targetPath);
-        oldAppMoved = false;
+      console.log(`Mounting ${NodePath.basename(resolvedDmg)}…`);
+      run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
+      attached = true;
+      const sourceApp = NodePath.join(mountPoint, "LastCode.app");
+      const version = validateApp(sourceApp);
+
+      NodeFS.rmSync(staging, { force: true, recursive: true });
+      NodeFS.rmSync(backup, { force: true, recursive: true });
+      console.log(`Preparing LastCode ${version}…`);
+      run("ditto", [sourceApp, staging]);
+      validateApp(staging);
+      await quitApp();
+
+      if (NodeFS.existsSync(targetPath)) {
+        NodeFS.renameSync(targetPath, backup);
+        oldAppMoved = true;
       }
-      throw error;
-    }
-    NodeFS.rmSync(backup, { force: true, recursive: true });
-    oldAppMoved = false;
-    console.log(`Installed and launched LastCode ${version}`);
-  } finally {
-    NodeFS.rmSync(staging, { force: true, recursive: true });
-    if (oldAppMoved && !NodeFS.existsSync(targetPath) && NodeFS.existsSync(backup)) {
-      NodeFS.renameSync(backup, targetPath);
-    }
-    if (attached) {
       try {
-        run("hdiutil", ["detach", mountPoint]);
+        NodeFS.renameSync(staging, targetPath);
+        run("open", [targetPath]);
       } catch (error) {
-        console.error(`Warning: could not detach ${mountPoint}: ${error.message}`);
+        NodeFS.rmSync(targetPath, { force: true, recursive: true });
+        if (oldAppMoved) {
+          NodeFS.renameSync(backup, targetPath);
+          oldAppMoved = false;
+        }
+        throw error;
       }
+      NodeFS.rmSync(backup, { force: true, recursive: true });
+      oldAppMoved = false;
+      console.log(`Installed and launched LastCode ${version}`);
+    } finally {
+      NodeFS.rmSync(staging, { force: true, recursive: true });
+      if (oldAppMoved && !NodeFS.existsSync(targetPath) && NodeFS.existsSync(backup)) {
+        NodeFS.renameSync(backup, targetPath);
+      }
+      if (attached) {
+        try {
+          run("hdiutil", ["detach", mountPoint]);
+        } catch (error) {
+          console.error(`Warning: could not detach ${mountPoint}: ${error.message}`);
+        }
+      }
+      NodeFS.rmSync(mountPoint, { force: true, recursive: true });
     }
-    NodeFS.rmSync(mountPoint, { force: true, recursive: true });
+  } finally {
+    releaseInstallLock();
   }
 }
 
