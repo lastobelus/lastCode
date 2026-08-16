@@ -29,6 +29,7 @@ export type PromotionMode = "never" | "always" | "if-no-open-prs";
 interface CheckpointOptions {
   readonly dryRun: boolean;
   readonly fetch: boolean;
+  readonly mirrorUpstreamMain: boolean;
   readonly promotion: PromotionMode;
   readonly pushTags: boolean;
   readonly smoke: boolean;
@@ -55,11 +56,16 @@ function run(
   cwd: string,
   command: string,
   args: ReadonlyArray<string>,
-  options: { readonly capture?: boolean; readonly allowFailure?: boolean } = {},
+  options: {
+    readonly capture?: boolean;
+    readonly allowFailure?: boolean;
+    readonly environment?: NodeJS.ProcessEnv;
+  } = {},
 ): string {
   const result = NodeChildProcess.spawnSync(command, args, {
     cwd,
     encoding: "utf8",
+    ...(options.environment ? { env: options.environment } : {}),
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -75,6 +81,14 @@ function run(
   return options.capture ? result.stdout.trim() : "";
 }
 
+export function checkpointSmokeEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const resolved = { ...environment };
+  delete resolved.ELECTRON_RUN_AS_NODE;
+  return resolved;
+}
+
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -84,6 +98,71 @@ function git(
     capture: true,
     ...(options.allowFailure ? { allowFailure: true } : {}),
   });
+}
+
+export function shouldContinueRerereRebase(input: {
+  readonly rebaseInProgress: boolean;
+  readonly unmergedPaths: ReadonlyArray<string>;
+}): boolean {
+  return input.rebaseInProgress && input.unmergedPaths.length === 0;
+}
+
+export function rerereRebaseMadeProgress(previous: string, current: string): boolean {
+  return previous !== current;
+}
+
+function rebaseInProgress(worktree: string): boolean {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  return ["rebase-merge", "rebase-apply"].some((name) =>
+    NodeFS.existsSync(NodePath.join(gitDirectory, name)),
+  );
+}
+
+function unmergedPaths(worktree: string): ReadonlyArray<string> {
+  return splitLines(git(worktree, ["diff", "--name-only", "--diff-filter=U"], { cwd: worktree }));
+}
+
+function rebaseProgress(worktree: string): string {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  const state = [git(worktree, ["rev-parse", "HEAD"], { cwd: worktree })];
+  for (const directory of ["rebase-merge", "rebase-apply"]) {
+    for (const name of ["msgnum", "next", "stopped-sha", "git-rebase-todo", "done"]) {
+      const path = NodePath.join(gitDirectory, directory, name);
+      if (NodeFS.existsSync(path)) {
+        state.push(`${directory}/${name}:${NodeFS.readFileSync(path, "utf8")}`);
+      }
+    }
+  }
+  return state.join("\0");
+}
+
+function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): void {
+  let failure: unknown;
+  try {
+    run(worktree, "git", ["rebase", "--onto", upstreamTag, baseTag]);
+    return;
+  } catch (error) {
+    failure = error;
+  }
+
+  while (
+    shouldContinueRerereRebase({
+      rebaseInProgress: rebaseInProgress(worktree),
+      unmergedPaths: unmergedPaths(worktree),
+    })
+  ) {
+    const previousProgress = rebaseProgress(worktree);
+    console.log("[lastcode:checkpoint] Continuing Git's recorded conflict resolution...");
+    try {
+      run(worktree, "git", ["-c", "core.editor=true", "rebase", "--continue"]);
+      return;
+    } catch (error) {
+      failure = error;
+      if (!rerereRebaseMadeProgress(previousProgress, rebaseProgress(worktree))) break;
+    }
+  }
+
+  throw failure;
 }
 
 function splitLines(value: string): ReadonlyArray<string> {
@@ -235,6 +314,32 @@ export function promotionNeeded(remoteCommit: string, checkpointCommit: string):
   return remoteCommit !== checkpointCommit;
 }
 
+export function upstreamMainMirrorPushArgs(
+  pushRemote: string,
+  remoteCommit: string,
+  upstreamCommit: string,
+): ReadonlyArray<string> {
+  return [
+    "push",
+    `--force-with-lease=refs/heads/main:${remoteCommit}`,
+    pushRemote,
+    `${upstreamCommit}:refs/heads/main`,
+  ];
+}
+
+export function resolveUpstreamMainMirror(
+  pushRemote: string,
+  remoteCommit: string,
+  upstreamCommit: string,
+  remoteIsAncestor: boolean,
+): ReadonlyArray<string> | undefined {
+  if (remoteCommit === upstreamCommit) return undefined;
+  if (!remoteIsAncestor) {
+    throw new Error(`Refusing to mirror upstream: ${pushRemote}/main has diverged.`);
+  }
+  return upstreamMainMirrorPushArgs(pushRemote, remoteCommit, upstreamCommit);
+}
+
 export function checkpointFailureDisposition(
   pendingCheckpointTag: string | undefined,
   recoveryBranch: string,
@@ -267,6 +372,7 @@ function pruneUnpublishedCheckpointTags(repoRoot: string, pushRemote: string): v
 function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let dryRun = false;
   let fetch = true;
+  let mirrorUpstreamMain = false;
   let promotion: PromotionMode = "never";
   let pushTags = false;
   let smoke = true;
@@ -279,6 +385,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     if (arg === "--") continue;
     if (arg === "--dry-run") dryRun = true;
     else if (arg === "--no-fetch") fetch = false;
+    else if (arg === "--mirror-upstream-main") mirrorUpstreamMain = true;
     else if (arg === "--no-smoke") smoke = false;
     else if (arg === "--push-tags") pushTags = true;
     else if (arg === "--promote") promotion = "always";
@@ -295,7 +402,17 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     }
   }
 
-  return { dryRun, fetch, promotion, pushTags, smoke, sourceRef, upstreamRemote, pushRemote };
+  return {
+    dryRun,
+    fetch,
+    mirrorUpstreamMain,
+    promotion,
+    pushTags,
+    smoke,
+    sourceRef,
+    upstreamRemote,
+    pushRemote,
+  };
 }
 
 export function checkpointMessage(input: {
@@ -382,19 +499,27 @@ function assertForkInvariants(worktree: string): void {
 
 function runSmokeGate(repoRoot: string, worktree: string): void {
   const vp = checkpointVpPaths(repoRoot, worktree);
+  const environment = checkpointSmokeEnvironment();
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
-  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"]);
+  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   assertForkInvariants(worktree);
-  run(worktree, vp.isolated, [
-    "test",
-    "run",
-    "scripts/lastcode-nightly.test.ts",
-    "scripts/lastcode-checkpoint.test.ts",
-    "scripts/lastcode-local-ci.test.ts",
-    "scripts/build-desktop-artifact.test.ts",
-    "apps/desktop/src/electron/ElectronProtocol.test.ts",
-  ]);
-  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"]);
+  run(
+    worktree,
+    vp.isolated,
+    [
+      "test",
+      "run",
+      "scripts/lastcode-nightly.test.ts",
+      "scripts/lastcode-checkpoint.test.ts",
+      "scripts/lastcode-local-ci.test.ts",
+      "scripts/build-desktop-artifact.test.ts",
+      "apps/desktop/src/electron/ElectronProtocol.test.ts",
+    ],
+    { environment },
+  );
+  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"], {
+    environment,
+  });
 }
 
 function notify(platform: NodeJS.Platform, title: string, message: string): void {
@@ -490,6 +615,31 @@ function promoteCheckpoint(
   console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
 }
 
+function mirrorUpstreamMain(repoRoot: string, options: CheckpointOptions): void {
+  const upstreamRef = `refs/remotes/${options.upstreamRemote}/main`;
+  const remoteRef = `refs/remotes/${options.pushRemote}/main`;
+  const upstreamCommit = git(repoRoot, ["rev-parse", `${upstreamRef}^{commit}`]);
+  const remoteCommit = git(repoRoot, ["rev-parse", `${remoteRef}^{commit}`]);
+  const pushArgs = resolveUpstreamMainMirror(
+    options.pushRemote,
+    remoteCommit,
+    upstreamCommit,
+    isAncestor(repoRoot, remoteCommit, upstreamCommit),
+  );
+  if (!pushArgs) {
+    console.log(`[lastcode:checkpoint] ${options.pushRemote}/main already mirrors ${upstreamRef}.`);
+    return;
+  }
+  if (options.dryRun) {
+    console.log(
+      `[lastcode:checkpoint] Would fast-forward ${options.pushRemote}/main from ${remoteCommit} to ${upstreamCommit}.`,
+    );
+    return;
+  }
+  run(repoRoot, "git", pushArgs);
+  console.log(`[lastcode:checkpoint] Mirrored ${upstreamRef} to ${options.pushRemote}/main.`);
+}
+
 function main(argv: ReadonlyArray<string>): void {
   const options = parseArgs(argv);
   const hostPlatform = Effect.runSync(HostProcessPlatform);
@@ -514,7 +664,16 @@ function main(argv: ReadonlyArray<string>): void {
       options.pushRemote,
       `+refs/heads/lastcode/main:refs/remotes/${options.pushRemote}/lastcode/main`,
     ]);
+    if (options.mirrorUpstreamMain) {
+      run(repoRoot, "git", [
+        "fetch",
+        options.pushRemote,
+        `+refs/heads/main:refs/remotes/${options.pushRemote}/main`,
+      ]);
+    }
   }
+
+  if (options.mirrorUpstreamMain) mirrorUpstreamMain(repoRoot, options);
 
   if (options.pushTags && !options.dryRun) {
     pruneUnpublishedCheckpointTags(repoRoot, options.pushRemote);
@@ -605,6 +764,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased,
             error,
+            failurePhase: "publication",
             ...(localTagRetained ? { localTagRetained: true } : {}),
             startedAtMs,
             upstreamTag: plan.baseNightly.tag,
@@ -646,6 +806,7 @@ function main(argv: ReadonlyArray<string>): void {
         readonly startedAtMs: number;
       }
     | undefined;
+  let failurePhase: "publication" | "rebase" | "smoke" | undefined;
   try {
     let baseTag = plan.baseNightly.tag;
     for (const nightly of plan.missingNightlies) {
@@ -662,9 +823,12 @@ function main(argv: ReadonlyArray<string>): void {
         startedAtMs: Date.now(),
       };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
-      run(worktree, "git", ["rebase", "--onto", nightly.tag, baseTag]);
+      failurePhase = "rebase";
+      rebaseOnto(worktree, nightly.tag, baseTag);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+      failurePhase = "smoke";
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      failurePhase = "publication";
       const finishedAtMs = Date.now();
       const timing = {
         commitsRebased: attempt.commitsRebased,
@@ -710,6 +874,7 @@ function main(argv: ReadonlyArray<string>): void {
       baseTag = nightly.tag;
       candidateRef = checkpointTag;
       attempt = undefined;
+      failurePhase = undefined;
       console.log(`[lastcode:checkpoint] Created ${checkpointTag} at ${candidateCommit}.`);
     }
     completed = true;
@@ -726,6 +891,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased: attempt.commitsRebased,
             error,
+            ...(failurePhase ? { failurePhase } : {}),
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
             startedAtMs: attempt.startedAtMs,
