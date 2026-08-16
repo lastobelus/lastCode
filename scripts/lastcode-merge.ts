@@ -143,6 +143,14 @@ function main(argv: ReadonlyArray<string>): void {
     "--match-head-commit",
     commit,
   ]);
+  try {
+    runCommand(repoRoot, process.execPath, ["scripts/lastcode-nightly-service.ts", "run-now"]);
+    console.log("[lastcode:merge] Requested an immediate installable-revision check.");
+  } catch (error) {
+    console.warn(
+      `[lastcode:merge] Merge succeeded, but the checkpoint service could not be started: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 if (import.meta.main) {

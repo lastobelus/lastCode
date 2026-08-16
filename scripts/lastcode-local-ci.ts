@@ -6,7 +6,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { cleanGitEnvironment, nightlyTagFromCheckpointTag } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -261,7 +261,7 @@ export function assertCheckpointCiStamp(
   const stamp = readFullCiStamp(commonGitDir, commit);
   if (!stamp) {
     throw new Error(
-      `Checkpoint ${checkpointTag} at ${commit} has not passed full local CI. Run: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
+      `Installable ${checkpointTag} at ${commit} has not passed full local CI. Run: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
     );
   }
   if (
@@ -270,7 +270,7 @@ export function assertCheckpointCiStamp(
     stamp.context.upstreamCommit !== upstreamCommit
   ) {
     throw new Error(
-      `Full local CI stamp for ${commit} does not match checkpoint ${checkpointTag}. Rerun: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
+      `Full local CI stamp for ${commit} does not match installable ${checkpointTag}. Rerun: pnpm lastcode:ci --checkpoint ${checkpointTag}`,
     );
   }
   return stamp;
@@ -469,9 +469,10 @@ function executeLocalCi(
     assertCleanWorktree(repoRoot);
     commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
     if (options.checkpointTag) {
-      const upstreamTag = nightlyTagFromCheckpointTag(options.checkpointTag);
-      if (!upstreamTag)
-        throw new Error(`Invalid LastCode checkpoint tag '${options.checkpointTag}'.`);
+      const installable = parseLastCodeInstallableTag(options.checkpointTag);
+      if (!installable)
+        throw new Error(`Invalid LastCode installable tag '${options.checkpointTag}'.`);
+      const upstreamTag = installable.nightly.tag;
       const checkpointCommit = runGit(repoRoot, ["rev-parse", `${options.checkpointTag}^{commit}`]);
       if (checkpointCommit !== commitBefore) {
         throw new Error(
