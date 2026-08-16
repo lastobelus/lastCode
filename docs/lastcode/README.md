@@ -28,22 +28,23 @@ directories.
 
 ```bash
 # Inspect what the checkpoint job would do.
-pnpm lastcode:checkpoint --dry-run
+pnpm run lastcode:checkpoint -- --dry-run
 
 # Checkpoint every missing nightly and push immutable tags.
-pnpm lastcode:checkpoint --push-tags --promote-if-no-open-prs
+pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
 
 # Enable the same operation at login and hourly.
 pnpm lastcode:checkpoint:service install
 
 # Install and inspect the checkpoint dashboard (eight rows by default).
-pnpm lastcode:checkpoints --install
+pnpm run lastcode:checkpoints -- --install
 lastcode-checkpoints
 lastcode-checkpoints -n 20
+lastcode-checkpoints --verbose
 
 # Validate and build one explicit checkpoint.
-pnpm lastcode:ci --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
-pnpm lastcode:build:mac:arm64 --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+pnpm run lastcode:build:mac:arm64 -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
 None of the checkpoint commands builds an application. An opted-in packaged
