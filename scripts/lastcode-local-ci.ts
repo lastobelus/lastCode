@@ -57,8 +57,8 @@ export interface LocalCiOptions {
 
 export interface RepositoryIntegritySnapshot {
   readonly commonGitDir: string;
-  readonly configContents: Buffer;
   readonly configPath: string;
+  readonly protectedConfig: string;
 }
 
 export interface PreparedLocalCiRepository {
@@ -324,6 +324,16 @@ function readCoreBare(repoRoot: string, configPath: string): string {
   );
 }
 
+function readProtectedConfig(repoRoot: string, configPath: string): string {
+  return runProcess(repoRoot, "git", ["config", "--file", configPath, "--null", "--list"], {
+    capture: true,
+  })
+    .split("\0")
+    .filter((entry) => entry.length > 0 && !entry.startsWith("branch."))
+    .sort()
+    .join("\0");
+}
+
 export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegritySnapshot {
   const commonGitDir = resolveCommonGitDir(repoRoot);
   const configPath = NodePath.join(commonGitDir, "config");
@@ -335,8 +345,8 @@ export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegrit
   }
   return {
     commonGitDir,
-    configContents: NodeFS.readFileSync(configPath),
     configPath,
+    protectedConfig: readProtectedConfig(repoRoot, configPath),
   };
 }
 
@@ -357,10 +367,10 @@ export function assertRepositoryIntegrity(
       `Shared repository integrity changed during local CI: core.bare=${coreBare || "unset"}. Stop and inspect ${before.configPath}.`,
     );
   }
-  const configContents = NodeFS.readFileSync(before.configPath);
-  if (!configContents.equals(before.configContents)) {
+  const protectedConfig = readProtectedConfig(repoRoot, before.configPath);
+  if (protectedConfig !== before.protectedConfig) {
     throw new Error(
-      `Shared repository integrity changed during local CI: ${before.configPath} was modified. Stop and inspect its diff before continuing.`,
+      `Shared repository integrity changed during local CI: protected settings in ${before.configPath} were modified. Stop and inspect the config before continuing.`,
     );
   }
   const commonGitDir = resolveCommonGitDir(repoRoot);

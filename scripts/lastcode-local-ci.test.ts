@@ -91,7 +91,7 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("rejects bare repositories and shared config changes during CI", () => {
+  it("rejects bare repositories and protected shared config changes during CI", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-test-"));
     const repository = NodePath.join(root, "repository");
     const bareRepository = NodePath.join(root, "bare.git");
@@ -112,6 +112,23 @@ describe("lastcode-local-ci", () => {
     );
     expect(() => captureRepositoryIntegrity(bareRepository)).toThrow("core.bare=true");
     NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("allows concurrent branch bookkeeping in the shared config", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-branch-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.concurrent-worktree.gh-merge-base", "lastcode/main"],
+      { cwd: repository },
+    );
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
   it("diagnoses a damaged shared config before resolving the worktree root", () => {

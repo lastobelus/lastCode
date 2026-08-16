@@ -35,10 +35,12 @@ Local CI has three independent Git-safety boundaries:
    disposable global Git config, so fixture identities and defaults cannot be
    written into the shared repository config.
 3. Before quick or full CI starts, the runner requires `core.bare=false` in the
-   shared Git config and snapshots that config byte-for-byte. It checks the
-   value, config contents, and common Git directory again on every exit,
-   including failed CI runs. Any change fails the gate with the config path to
-   inspect.
+   shared Git config and snapshots its repository-wide settings. It checks the
+   value, protected settings, and common Git directory again on every exit,
+   including failed CI runs. Any protected change fails the gate with the config
+   path to inspect. Per-branch sections are excluded because T3 and GitHub CLI
+   legitimately add branch/worktree bookkeeping while CI runs in another
+   worktree.
 
 These guards protect the primary checkout and every linked worktree, which all
 share the same Git config. They specifically prevent temporary-repository tests
