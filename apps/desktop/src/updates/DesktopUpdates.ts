@@ -25,6 +25,7 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
@@ -257,6 +258,7 @@ export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
+  const electronApp = yield* ElectronApp.ElectronApp;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -271,6 +273,12 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const localCheckpointTagRef = yield* Ref.make<Option.Option<string>>(Option.none());
+  const localBuildRef = yield* Ref.make<
+    Option.Option<{
+      readonly build: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+      readonly version: string;
+    }>
+  >(Option.none());
   const checkTransitionMutex = yield* Semaphore.make(1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
@@ -510,6 +518,7 @@ export const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
       if (state.source === "lastcode-local") {
+        yield* Ref.set(localBuildRef, Option.none());
         const checkpointTag = yield* Ref.get(localCheckpointTagRef).pipe(
           Effect.flatMap(
             Option.match({
@@ -526,14 +535,15 @@ export const make = Effect.gen(function* () {
         );
         yield* logUpdaterInfo("building local LastCode nightly", { checkpointTag });
         const build = yield* localUpdates.build(checkpointTag);
-        const feed = yield* localUpdates.startFeed(build.outputDir);
-        yield* Effect.gen(function* () {
-          yield* electronUpdater.setFeedURL({ provider: "generic", url: feed.url });
-          yield* applyAutoUpdaterChannel("nightly");
-          yield* electronUpdater.setDisableDifferentialDownload(true);
-          yield* electronUpdater.checkForUpdates;
-          yield* electronUpdater.downloadUpdate;
-        }).pipe(Effect.ensuring(feed.close));
+        const version = state.availableVersion;
+        if (!version) {
+          return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "build",
+            message: "The built LastCode update no longer has a selected version. Check again.",
+          });
+        }
+        yield* Ref.set(localBuildRef, Option.some({ build, version }));
+        yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, version));
         return { accepted: true, completed: true };
       }
       yield* electronUpdater.setDisableDifferentialDownload(
@@ -568,18 +578,6 @@ export const make = Effect.gen(function* () {
             return { accepted: true, completed: false };
           },
         ),
-        ElectronUpdaterCheckForUpdatesError: Effect.fn(
-          "desktop.updates.handleLocalFeedCheckFailure",
-        )(function* (error) {
-          yield* updateState((current) =>
-            reduceDesktopUpdateStateOnDownloadFailure(current, error.message),
-          );
-          yield* logUpdaterError(error.message, {
-            errorTag: error._tag,
-            channel: error.channel,
-          });
-          return { accepted: true, completed: false };
-        }),
       }),
       Effect.onInterrupt(() =>
         updateState((current) => (current.status === "downloading" ? state : current)).pipe(
@@ -615,16 +613,61 @@ export const make = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     if (
       (yield* Ref.get(desktopState.quitting)) ||
+      (yield* Ref.get(updateInstallInFlightRef)) ||
       !(yield* Ref.get(updaterConfiguredRef)) ||
       state.status !== "downloaded"
     ) {
       return { accepted: false, completed: false };
     }
 
-    yield* Ref.set(desktopState.quitting, true);
     yield* Ref.set(updateInstallInFlightRef, true);
 
     return yield* Effect.gen(function* () {
+      if (state.source === "lastcode-local") {
+        const selected = yield* Ref.get(localBuildRef).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () =>
+                Effect.fail(
+                  new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                    operation: "install",
+                    message: "The built LastCode DMG is no longer selected. Build it again.",
+                  }),
+                ),
+              onSome: Effect.succeed,
+            }),
+          ),
+        );
+        if (selected.version !== state.downloadedVersion) {
+          return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "install",
+            message: "The selected LastCode DMG does not match the downloaded version.",
+          });
+        }
+        return yield* Effect.acquireUseRelease(
+          localUpdates.prepareInstall({
+            dmgPath: selected.build.dmgPath,
+            dmgSha256: selected.build.dmgSha256,
+            expectedVersion: selected.version,
+          }),
+          (acceptedHandoff) =>
+            Effect.gen(function* () {
+              yield* Ref.set(desktopState.quitting, true);
+              const instances = yield* pool.list;
+              yield* Effect.forEach(
+                instances,
+                (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+                { concurrency: "unbounded" },
+              );
+              yield* acceptedHandoff.commit;
+              yield* electronApp.quit;
+              return { accepted: true, completed: false };
+            }),
+          (acceptedHandoff) => acceptedHandoff.cancel,
+        );
+      }
+
+      yield* Ref.set(desktopState.quitting, true);
       // Stop every backend in the pool, not just the primary. With
       // parallel WSL + Windows backends, leaving the WSL instance up
       // means quitAndInstall's app.quit() exits before the pool's
@@ -646,6 +689,19 @@ export const make = Effect.gen(function* () {
       return { accepted: true, completed: false };
     }).pipe(
       Effect.catchTags({
+        LastCodeLocalUpdateError: Effect.fn("desktop.updates.handleLocalInstallFailure")(
+          function* (error) {
+            yield* resetInstallAction;
+            yield* updateState((current) =>
+              reduceDesktopUpdateStateOnInstallFailure(current, error.message),
+            );
+            yield* logUpdaterError(error.message, {
+              errorTag: error._tag,
+              operation: error.operation,
+            });
+            return { accepted: true, completed: false };
+          },
+        ),
         ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
           function* (error) {
             yield* resetInstallAction;

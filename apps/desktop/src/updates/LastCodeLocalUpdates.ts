@@ -1,8 +1,8 @@
-// @effect-diagnostics nodeBuiltinImport:off -- This desktop-only service launches local build tooling and serves its updater artifacts.
+// @effect-diagnostics nodeBuiltinImport:off -- This desktop-only service launches local build and install helpers.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
-import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
+const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
 const InspectionResult = Schema.Union([
   Schema.Struct({
@@ -36,8 +37,17 @@ const BuildResult = Schema.Struct({
   checkpointTag: Schema.String,
   outputDir: Schema.String,
   manifestPath: Schema.String,
+  dmgPath: Schema.String,
+  dmgSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
 });
 export type LastCodeLocalUpdateBuild = typeof BuildResult.Type;
+
+const InstallReadyResult = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  artifactPath: Schema.String,
+  version: Schema.String,
+});
+const decodeInstallReadyResult = Schema.decodeUnknownSync(InstallReadyResult);
 
 const DashboardConfig = Schema.Struct({ repoRoot: Schema.String });
 const decodeDashboardConfig = Schema.decodeUnknownSync(Schema.fromJsonString(DashboardConfig));
@@ -47,15 +57,15 @@ const decodeBuildResult = Schema.decodeUnknownSync(BuildResult);
 export class LastCodeLocalUpdateError extends Schema.TaggedErrorClass<LastCodeLocalUpdateError>()(
   "LastCodeLocalUpdateError",
   {
-    operation: Schema.Literals(["configuration", "inspect", "build", "serve"]),
+    operation: Schema.Literals(["configuration", "inspect", "build", "install"]),
     message: Schema.String,
     cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
 
-export interface LastCodeLocalUpdateFeed {
-  readonly url: string;
-  readonly close: Effect.Effect<void>;
+export interface LastCodeLocalInstallHandoff {
+  readonly commit: Effect.Effect<void, LastCodeLocalUpdateError>;
+  readonly cancel: Effect.Effect<void>;
 }
 
 export class LastCodeLocalUpdates extends Context.Service<
@@ -68,9 +78,11 @@ export class LastCodeLocalUpdates extends Context.Service<
     readonly build: (
       checkpointTag: string,
     ) => Effect.Effect<LastCodeLocalUpdateBuild, LastCodeLocalUpdateError>;
-    readonly startFeed: (
-      outputDir: string,
-    ) => Effect.Effect<LastCodeLocalUpdateFeed, LastCodeLocalUpdateError>;
+    readonly prepareInstall: (args: {
+      readonly dmgPath: string;
+      readonly dmgSha256: string;
+      readonly expectedVersion: string;
+    }) => Effect.Effect<LastCodeLocalInstallHandoff, LastCodeLocalUpdateError>;
   }
 >()("@t3tools/desktop/updates/LastCodeLocalUpdates") {}
 
@@ -83,23 +95,6 @@ export function parseHelperResult(raw: string): unknown {
     .find((candidate) => candidate.startsWith(RESULT_PREFIX));
   if (!line) throw new Error("Local updater helper did not return a result.");
   return JSON.parse(line.slice(RESULT_PREFIX.length));
-}
-
-function contentType(path: string): string {
-  if (path.endsWith(".yml")) return "text/yaml; charset=utf-8";
-  if (path.endsWith(".zip")) return "application/zip";
-  return "application/octet-stream";
-}
-
-export function isSafeFeedArtifactName(name: string): boolean {
-  return (
-    NodePath.basename(name) === name &&
-    (name === "nightly-mac.yml" ||
-      name.endsWith(".zip") ||
-      name.endsWith(".zip.blockmap") ||
-      name.endsWith(".dmg") ||
-      name.endsWith(".dmg.blockmap"))
-  );
 }
 
 export function usesDetachedHelperProcessGroup(platform: NodeJS.Platform): boolean {
@@ -124,14 +119,22 @@ export function terminateHelperProcess(
 function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"]) {
   const dashboardPath = NodePath.join(environment.homeDirectory, ".lastcode", "dashboard.json");
 
-  const readRepository = (): { readonly repoRoot: string; readonly helperPath: string } => {
+  const readRepository = (): {
+    readonly repoRoot: string;
+    readonly helperPath: string;
+    readonly installerPath: string;
+  } => {
     try {
       const { repoRoot } = decodeDashboardConfig(NodeFS.readFileSync(dashboardPath, "utf8"));
       const helperPath = NodePath.join(repoRoot, "scripts", "lastcode-local-update.mjs");
+      const installerPath = NodePath.join(repoRoot, "scripts", "lastcode-install.mjs");
       if (!NodeFS.existsSync(helperPath)) {
         throw new Error(`Local update helper is missing at ${helperPath}.`);
       }
-      return { repoRoot, helperPath };
+      if (!NodeFS.existsSync(installerPath)) {
+        throw new Error(`Local install helper is missing at ${installerPath}.`);
+      }
+      return { repoRoot, helperPath, installerPath };
     } catch (cause) {
       throw new LastCodeLocalUpdateError({
         operation: "configuration",
@@ -211,6 +214,175 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
       ),
     );
 
+  const prepareInstall = (args: {
+    readonly dmgPath: string;
+    readonly dmgSha256: string;
+    readonly expectedVersion: string;
+  }): Effect.Effect<LastCodeLocalInstallHandoff, LastCodeLocalUpdateError> => {
+    const installLogPath = NodePath.join(
+      environment.homeDirectory,
+      ".lastcode",
+      "local-updates",
+      "install.log",
+    );
+    return Effect.tryPromise({
+      try: (signal) => {
+        const { repoRoot, installerPath } = readRepository();
+        NodeFS.mkdirSync(NodePath.dirname(installLogPath), { recursive: true });
+        const logFd = NodeFS.openSync(installLogPath, "a", 0o600);
+        let child: NodeChildProcess.ChildProcess;
+        try {
+          child = NodeChildProcess.spawn(
+            process.execPath,
+            [
+              installerPath,
+              "handoff",
+              "--dmg",
+              args.dmgPath,
+              "--expected-sha256",
+              args.dmgSha256,
+              "--expected-version",
+              args.expectedVersion,
+              "--parent-pid",
+              String(process.pid),
+              "--ready-fd",
+              "3",
+            ],
+            {
+              cwd: repoRoot,
+              detached: usesDetachedHelperProcessGroup(environment.platform),
+              env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+              stdio: ["pipe", "ignore", logFd, "pipe"],
+            },
+          );
+        } finally {
+          NodeFS.closeSync(logFd);
+        }
+        const abort = () => terminateHelperProcess(child, environment.platform);
+        signal.addEventListener("abort", abort, { once: true });
+
+        return new Promise<LastCodeLocalInstallHandoff>((resolve, reject) => {
+          const readyStream = child.stdio[3];
+          const control = child.stdin;
+          let ready = false;
+          let buffer = "";
+          let commandSent = false;
+          const failBeforeReady = (cause: unknown) => {
+            if (ready) return;
+            signal.removeEventListener("abort", abort);
+            reject(cause);
+          };
+          child.once("error", failBeforeReady);
+          child.once("close", (exitCode) => {
+            failBeforeReady(
+              new Error(
+                `Local install helper exited before readiness with code ${exitCode}. See ${installLogPath}.`,
+              ),
+            );
+          });
+          if (!(readyStream instanceof NodeStream.Readable) || !control) {
+            terminateHelperProcess(child, environment.platform);
+            failBeforeReady(new Error("Local install helper pipes were not created."));
+            return;
+          }
+          readyStream.setEncoding("utf8");
+          readyStream.on("data", (chunk: string) => {
+            if (ready) return;
+            buffer += chunk;
+            if (buffer.length > 8_192) {
+              terminateHelperProcess(child, environment.platform);
+              failBeforeReady(new Error("Local install readiness result was too large."));
+              return;
+            }
+            const newline = buffer.indexOf("\n");
+            if (newline < 0) return;
+            try {
+              const line = buffer.slice(0, newline);
+              if (!line.startsWith(INSTALL_READY_PREFIX)) {
+                throw new Error("Local install helper returned an invalid readiness result.");
+              }
+              const result = decodeInstallReadyResult(
+                JSON.parse(line.slice(INSTALL_READY_PREFIX.length)),
+              );
+              if (
+                NodePath.resolve(result.artifactPath) !== NodePath.resolve(args.dmgPath) ||
+                result.version !== args.expectedVersion
+              ) {
+                throw new Error("Local install helper accepted a different artifact or version.");
+              }
+              ready = true;
+              signal.removeEventListener("abort", abort);
+              readyStream.destroy();
+
+              const sendCommand = (
+                command: "COMMIT" | "CANCEL",
+              ): Effect.Effect<void, LastCodeLocalUpdateError> =>
+                Effect.tryPromise({
+                  try: () =>
+                    new Promise<void>((done, fail) => {
+                      if (commandSent) {
+                        done();
+                        return;
+                      }
+                      commandSent = true;
+                      control.once("error", fail);
+                      control.end(`${command}\n`, () => {
+                        child.unref();
+                        done();
+                      });
+                    }),
+                  catch: (cause) =>
+                    new LastCodeLocalUpdateError({
+                      operation: "install",
+                      message: `Could not transfer local install ownership. See ${installLogPath}.`,
+                      cause,
+                    }),
+                });
+
+              resolve({
+                commit: sendCommand("COMMIT"),
+                cancel: sendCommand("CANCEL").pipe(Effect.ignore),
+              });
+            } catch (cause) {
+              control.end("CANCEL\n");
+              failBeforeReady(cause);
+            }
+          });
+          readyStream.once("error", failBeforeReady);
+          readyStream.once("close", () => {
+            if (!ready) {
+              failBeforeReady(
+                new Error(`Local install helper closed its readiness pipe. See ${installLogPath}.`),
+              );
+            }
+          });
+        });
+      },
+      catch: (cause) =>
+        isLastCodeLocalUpdateError(cause)
+          ? cause
+          : new LastCodeLocalUpdateError({
+              operation: "install",
+              message:
+                cause instanceof Error
+                  ? cause.message
+                  : "Could not prepare the local LastCode install.",
+              cause,
+            }),
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: "2 minutes",
+        orElse: () =>
+          Effect.fail(
+            new LastCodeLocalUpdateError({
+              operation: "install",
+              message: `Local install preflight did not finish within 2 minutes. See ${installLogPath}.`,
+            }),
+          ),
+      }),
+    );
+  };
+
   return LastCodeLocalUpdates.of({
     supported:
       environment.isPackaged &&
@@ -244,68 +416,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
           }),
         ),
       ),
-    startFeed: (outputDir) =>
-      Effect.tryPromise({
-        try: () =>
-          new Promise<LastCodeLocalUpdateFeed>((resolve, reject) => {
-            const server = NodeHttp.createServer((request, response) => {
-              if (request.method !== "GET" && request.method !== "HEAD") {
-                response.writeHead(405).end();
-                return;
-              }
-              let name: string;
-              try {
-                name = decodeURIComponent(
-                  new URL(request.url ?? "/", "http://localhost").pathname.slice(1),
-                );
-              } catch {
-                response.writeHead(400).end();
-                return;
-              }
-              if (!isSafeFeedArtifactName(name)) {
-                response.writeHead(404).end();
-                return;
-              }
-              const artifactPath = NodePath.join(outputDir, name);
-              let stat: NodeFS.Stats;
-              try {
-                stat = NodeFS.lstatSync(artifactPath);
-                if (!stat.isFile()) throw new Error("not a file");
-              } catch {
-                response.writeHead(404).end();
-                return;
-              }
-              response.writeHead(200, {
-                "Content-Type": contentType(name),
-                "Content-Length": stat.size,
-                "Cache-Control": "no-store",
-              });
-              if (request.method === "HEAD") response.end();
-              else NodeFS.createReadStream(artifactPath).pipe(response);
-            });
-            server.once("error", reject);
-            server.listen(0, "127.0.0.1", () => {
-              const address = server.address();
-              if (!address || typeof address === "string") {
-                server.close();
-                reject(new Error("Local update server did not bind a TCP port."));
-                return;
-              }
-              resolve({
-                url: `http://127.0.0.1:${address.port}`,
-                close: Effect.promise(
-                  () => new Promise<void>((done) => server.close(() => done())),
-                ),
-              });
-            });
-          }),
-        catch: (cause) =>
-          new LastCodeLocalUpdateError({
-            operation: "serve",
-            message: "Could not stage the locally built LastCode update.",
-            cause,
-          }),
-      }),
+    prepareInstall,
   });
 }
 
