@@ -74,7 +74,7 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
   const isLocal = state.source === "lastcode-local";
   if (state.status === "available") {
     return isLocal
-      ? `LastCode ${state.availableVersion ?? "checkpoint"} ready to build`
+      ? `LastCode ${state.availableVersion ?? "update"} ready to build`
       : `Update ${state.availableVersion ?? "available"} ready to download`;
   }
   if (state.status === "downloading") {
