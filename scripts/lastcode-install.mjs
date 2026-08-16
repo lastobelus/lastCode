@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LastCode managed command: lastcode-install
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -10,13 +11,14 @@ import * as NodeURL from "node:url";
 const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const INSTALL_LOCK_NAME = "install.lock";
+const INSTALL_MANAGED_MARKER = "LastCode managed command: lastcode-install";
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\n# ${INSTALL_MANAGED_MARKER}\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 export function parseOptions(argv) {
@@ -189,64 +191,64 @@ export function temporaryAppPaths(targetPath, processId = process.pid) {
   };
 }
 
-function processIsAlive(pid) {
+function readLockOwner(path) {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+    return JSON.parse(NodeFS.readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
   }
 }
 
 export function acquireInstallLock(lockDirectory, options = {}) {
   const pid = options.pid ?? process.pid;
-  const isAlive = options.isAlive ?? processIsAlive;
   const lockPath = NodePath.join(lockDirectory, INSTALL_LOCK_NAME);
   const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   NodeFS.mkdirSync(lockDirectory, { recursive: true });
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
-    try {
-      // A symlink publishes the complete owner record atomically, so another
-      // installer can never observe a lock without its owner metadata.
-      NodeFS.symlinkSync(JSON.stringify(owner), lockPath);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const currentOwner = JSON.parse(NodeFS.readlinkSync(lockPath));
-        if (currentOwner.token !== token) {
-          throw new Error(
-            "Refusing to release a LastCode install lock now owned by another process.",
-          );
-        }
-        NodeFS.unlinkSync(lockPath);
-      };
-    } catch (error) {
-      if (error?.code !== "EEXIST" || attempt > 0) throw error;
-      let currentOwner;
-      try {
-        currentOwner = JSON.parse(NodeFS.readlinkSync(lockPath));
-      } catch {
-        currentOwner = undefined;
-      }
-      if (Number.isSafeInteger(currentOwner?.pid) && isAlive(currentOwner.pid)) {
-        throw new Error(
-          `Another LastCode install is already running (PID ${currentOwner.pid}, started ${currentOwner.startedAt ?? "at an unknown time"}).`,
-          { cause: error },
-        );
-      }
-      const stalePath = `${lockPath}.stale-${pid}-${Date.now()}`;
-      try {
-        NodeFS.renameSync(lockPath, stalePath);
-      } catch {
-        throw new Error(`Another LastCode install acquired ${lockPath}.`);
-      }
-      NodeFS.rmSync(stalePath, { force: true, recursive: true });
+  const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
+  const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe", descriptor],
+  });
+  if (result.error || result.status !== 0) {
+    const owner = readLockOwner(lockPath);
+    NodeFS.closeSync(descriptor);
+    if (result.error) throw result.error;
+    if (result.status !== 75) {
+      throw new Error(result.stderr.trim() || `lockf failed with exit code ${result.status}.`);
     }
+    throw new Error(
+      `Another LastCode install is already running (PID ${owner?.pid ?? "unknown"}, started ${owner?.startedAt ?? "at an unknown time"}).`,
+    );
   }
-  throw new Error(`Could not acquire the LastCode install lock at ${lockPath}.`);
+  const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
+  try {
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.writeSync(descriptor, `${JSON.stringify(owner)}\n`);
+    NodeFS.fsyncSync(descriptor);
+  } catch (error) {
+    NodeFS.closeSync(descriptor);
+    throw error;
+  }
+  const lockIdentity = NodeFS.fstatSync(descriptor);
+  let released = false;
+  return () => {
+    if (released) return;
+    const currentIdentity = NodeFS.statSync(lockPath, { throwIfNoEntry: false });
+    const currentOwner = readLockOwner(lockPath);
+    if (
+      currentIdentity?.dev !== lockIdentity.dev ||
+      currentIdentity?.ino !== lockIdentity.ino ||
+      currentOwner?.token !== token
+    ) {
+      NodeFS.closeSync(descriptor);
+      released = true;
+      throw new Error("Refusing to release a LastCode install lock now owned by another process.");
+    }
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.closeSync(descriptor);
+    released = true;
+  };
 }
 
 async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
@@ -354,7 +356,10 @@ export function uninstallCommand(home) {
   }
   for (const path of [moduleTarget, target]) {
     const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
-    if (existing && !existing.isFile()) {
+    if (
+      existing &&
+      (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(INSTALL_MANAGED_MARKER))
+    ) {
       throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
     }
   }

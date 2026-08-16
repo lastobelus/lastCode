@@ -43,9 +43,18 @@ describe("LastCode userland build command", () => {
       const dashboard = NodePath.join(home, ".lastcode", "dashboard.json");
       NodeFS.mkdirSync(binDirectory, { recursive: true });
       NodeFS.mkdirSync(exposedDirectory, { recursive: true });
-      for (const name of ["lastcode-build", "lastcode-build.mjs", "lastcode-local-update.mjs"]) {
-        NodeFS.writeFileSync(NodePath.join(binDirectory, name), "managed");
-      }
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "lastcode-build"),
+        "# LastCode managed command: lastcode-build\n",
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "lastcode-build.mjs"),
+        "// LastCode managed command: lastcode-build\n",
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "lastcode-local-update.mjs"),
+        "// LastCode managed helper: lastcode-local-update\n",
+      );
       NodeFS.writeFileSync(dashboard, "shared config");
       NodeFS.symlinkSync(target, exposed);
 
@@ -54,6 +63,26 @@ describe("LastCode userland build command", () => {
       expect(NodeFS.existsSync(exposed)).toBe(false);
       expect(NodeFS.existsSync(target)).toBe(false);
       expect(NodeFS.existsSync(dashboard)).toBe(true);
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to uninstall a foreign file at a managed build path", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-foreign-"));
+    try {
+      const binDirectory = NodePath.join(home, ".lastcode", "bin");
+      const exposedDirectory = NodePath.join(home, ".local", "bin");
+      const target = NodePath.join(binDirectory, "lastcode-build");
+      const exposed = NodePath.join(exposedDirectory, "lastcode-build");
+      NodeFS.mkdirSync(binDirectory, { recursive: true });
+      NodeFS.mkdirSync(exposedDirectory, { recursive: true });
+      NodeFS.writeFileSync(target, "mine\n");
+      NodeFS.symlinkSync(target, exposed);
+
+      expect(() => uninstallCommand(home)).toThrow("not a LastCode-managed file");
+      expect(NodeFS.existsSync(target)).toBe(true);
+      expect(NodeFS.existsSync(exposed)).toBe(true);
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
     }

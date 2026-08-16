@@ -25,7 +25,6 @@ export interface ExistingBuildOptions {
 
 export interface LocalBuildLockOptions {
   readonly pid?: number;
-  readonly isAlive?: (pid: number) => boolean;
 }
 
 export function resolveDeterministicBuildEnvironment(

@@ -20,7 +20,7 @@ import {
 } from "./lastcode-local-update.mjs";
 
 describe("lastcode-local-update", () => {
-  it("serializes manual and in-app builds and recovers a stale lock", () => {
+  it("serializes manual and in-app builds and releases the kernel lock", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-lock-"));
     try {
       const release = acquireBuildLock(root);
@@ -28,23 +28,9 @@ describe("lastcode-local-update", () => {
       release();
 
       const lockPath = NodePath.join(root, "build.lock");
-      NodeFS.mkdirSync(lockPath);
-      NodeFS.writeFileSync(
-        NodePath.join(lockPath, "owner.json"),
-        `${JSON.stringify({ schemaVersion: 1, pid: 12345, startedAt: "earlier" })}\n`,
-      );
-      const releaseRecovered = acquireBuildLock(root, { isAlive: () => false });
-      assert.isTrue(NodeFS.existsSync(NodePath.join(lockPath, "owner.json")));
-      releaseRecovered();
-      assert.isFalse(NodeFS.existsSync(lockPath));
-
-      NodeFS.mkdirSync(lockPath);
-      assert.throws(() => acquireBuildLock(root, { isAlive: () => false }), /initializing/);
-      NodeFS.utimesSync(lockPath, 0, 0);
-      const releaseOwnerless = acquireBuildLock(root, { isAlive: () => false });
-      assert.isTrue(NodeFS.existsSync(NodePath.join(lockPath, "owner.json")));
-      releaseOwnerless();
-      assert.isFalse(NodeFS.existsSync(lockPath));
+      assert.strictEqual(NodeFS.readFileSync(lockPath, "utf8"), "");
+      const releaseAgain = acquireBuildLock(root);
+      releaseAgain();
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

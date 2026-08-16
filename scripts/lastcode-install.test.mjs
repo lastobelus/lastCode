@@ -98,21 +98,19 @@ describe("LastCode userland install command", () => {
     );
   });
 
-  it("serializes installers and recovers an abandoned lock", () => {
+  it("serializes installers and releases the kernel lock", () => {
     const root = temporaryDirectory();
     const release = acquireInstallLock(root);
     expect(() => acquireInstallLock(root)).toThrow("already running");
     release();
 
     const lockPath = NodePath.join(root, "install.lock");
-    NodeFS.symlinkSync(JSON.stringify({ schemaVersion: 1, pid: 12345 }), lockPath);
-    const releaseRecovered = acquireInstallLock(root, { isAlive: () => false });
-    expect(NodeFS.lstatSync(lockPath).isSymbolicLink()).toBe(true);
-    releaseRecovered();
-    expect(NodeFS.existsSync(lockPath)).toBe(false);
+    expect(NodeFS.readFileSync(lockPath, "utf8")).toBe("");
+    const releaseAgain = acquireInstallLock(root);
+    releaseAgain();
   });
 
-  it("uninstalls the managed installer and refuses a foreign PATH entry", () => {
+  it("uninstalls the managed installer and refuses foreign files", () => {
     const home = temporaryDirectory();
     const binDirectory = NodePath.join(home, ".lastcode", "bin");
     const exposedDirectory = NodePath.join(home, ".local", "bin");
@@ -120,8 +118,11 @@ describe("LastCode userland install command", () => {
     const exposed = NodePath.join(exposedDirectory, "lastcode-install");
     NodeFS.mkdirSync(binDirectory, { recursive: true });
     NodeFS.mkdirSync(exposedDirectory, { recursive: true });
-    NodeFS.writeFileSync(target, "managed");
-    NodeFS.writeFileSync(NodePath.join(binDirectory, "lastcode-install.mjs"), "managed");
+    NodeFS.writeFileSync(target, "# LastCode managed command: lastcode-install\n");
+    NodeFS.writeFileSync(
+      NodePath.join(binDirectory, "lastcode-install.mjs"),
+      "// LastCode managed command: lastcode-install\n",
+    );
     NodeFS.symlinkSync(target, exposed);
 
     uninstallCommand(home);
@@ -130,5 +131,13 @@ describe("LastCode userland install command", () => {
 
     NodeFS.writeFileSync(exposed, "mine");
     expect(() => uninstallCommand(home)).toThrow("not managed by LastCode");
+
+    NodeFS.rmSync(exposed);
+    NodeFS.mkdirSync(binDirectory, { recursive: true });
+    NodeFS.writeFileSync(target, "mine");
+    NodeFS.symlinkSync(target, exposed);
+    expect(() => uninstallCommand(home)).toThrow("not a LastCode-managed file");
+    expect(NodeFS.existsSync(target)).toBe(true);
+    expect(NodeFS.existsSync(exposed)).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LastCode managed helper: lastcode-local-update
 
 // The desktop app runs this file with Electron's bundled Node runtime. Keep it
 // dependency-free so an older LastCode build can inspect and build a newer
@@ -251,73 +252,64 @@ export function prepareBuildWorktree(repoRoot, worktreePath, checkpointTag, logF
   if (status) throw new Error(`Dedicated local-update worktree is not clean:\n${status}`);
 }
 
-function processIsAlive(pid) {
+function readLockOwner(path) {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+    return JSON.parse(NodeFS.readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
   }
 }
 
-const BUILD_LOCK_INITIALIZATION_GRACE_MS = 5_000;
-
 export function acquireBuildLock(updateRoot, options = {}) {
   const pid = options.pid ?? process.pid;
-  const isAlive = options.isAlive ?? processIsAlive;
   const lockPath = NodePath.join(updateRoot, "build.lock");
-  const ownerPath = NodePath.join(lockPath, "owner.json");
   const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   NodeFS.mkdirSync(updateRoot, { recursive: true });
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      NodeFS.mkdirSync(lockPath);
-      NodeFS.writeFileSync(
-        ownerPath,
-        `${JSON.stringify({ schemaVersion: 1, pid, token, startedAt: new Date().toISOString() })}\n`,
-        { encoding: "utf8", mode: 0o600 },
-      );
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const owner = JSON.parse(NodeFS.readFileSync(ownerPath, "utf8"));
-        if (owner.token !== token) {
-          throw new Error("Refusing to release a local build lock now owned by another process.");
-        }
-        NodeFS.unlinkSync(ownerPath);
-        NodeFS.rmdirSync(lockPath);
-      };
-    } catch (error) {
-      if (error?.code !== "EEXIST" || attempt > 0) throw error;
-      let owner;
-      try {
-        owner = JSON.parse(NodeFS.readFileSync(ownerPath, "utf8"));
-      } catch {
-        const lockAgeMs = Date.now() - NodeFS.statSync(lockPath).mtimeMs;
-        if (lockAgeMs < BUILD_LOCK_INITIALIZATION_GRACE_MS) {
-          throw new Error(
-            `Another LastCode build is initializing ${lockPath}. Retry in a few seconds.`,
-          );
-        }
-      }
-      if (Number.isSafeInteger(owner?.pid) && isAlive(owner.pid)) {
-        throw new Error(
-          `Another LastCode build is already running (PID ${owner.pid}, started ${owner.startedAt ?? "at an unknown time"}).`,
-          { cause: error },
-        );
-      }
-      const stalePath = `${lockPath}.stale-${pid}-${Date.now()}`;
-      try {
-        NodeFS.renameSync(lockPath, stalePath);
-      } catch {
-        throw new Error(`Another LastCode build acquired ${lockPath}.`);
-      }
-      NodeFS.rmSync(stalePath, { recursive: true, force: true });
+  const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
+  const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe", descriptor],
+  });
+  if (result.error || result.status !== 0) {
+    const owner = readLockOwner(lockPath);
+    NodeFS.closeSync(descriptor);
+    if (result.error) throw result.error;
+    if (result.status !== 75) {
+      throw new Error(result.stderr.trim() || `lockf failed with exit code ${result.status}.`);
     }
+    throw new Error(
+      `Another LastCode build is already running (PID ${owner?.pid ?? "unknown"}, started ${owner?.startedAt ?? "at an unknown time"}).`,
+    );
   }
-  throw new Error(`Could not acquire the LastCode build lock at ${lockPath}.`);
+  const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
+  try {
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.writeSync(descriptor, `${JSON.stringify(owner)}\n`);
+    NodeFS.fsyncSync(descriptor);
+  } catch (error) {
+    NodeFS.closeSync(descriptor);
+    throw error;
+  }
+  const lockIdentity = NodeFS.fstatSync(descriptor);
+  let released = false;
+  return () => {
+    if (released) return;
+    const currentIdentity = NodeFS.statSync(lockPath, { throwIfNoEntry: false });
+    const currentOwner = readLockOwner(lockPath);
+    if (
+      currentIdentity?.dev !== lockIdentity.dev ||
+      currentIdentity?.ino !== lockIdentity.ino ||
+      currentOwner?.token !== token
+    ) {
+      NodeFS.closeSync(descriptor);
+      released = true;
+      throw new Error("Refusing to release a local build lock now owned by another process.");
+    }
+    NodeFS.ftruncateSync(descriptor, 0);
+    NodeFS.closeSync(descriptor);
+    released = true;
+  };
 }
 
 function buildUnlocked(options, updateRoot) {

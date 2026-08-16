@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LastCode managed command: lastcode-build
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -10,6 +11,8 @@ import * as NodeUtil from "node:util";
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const LOG_POLL_INTERVAL_MS = 400;
+const BUILD_MANAGED_MARKER = "LastCode managed command: lastcode-build";
+const UPDATE_HELPER_MANAGED_MARKER = "LastCode managed helper: lastcode-local-update";
 
 export const BUILD_PHASES = [
   { marker: "Building lastcode/checkpoint/", start: 0, estimateMs: 10_000 },
@@ -182,7 +185,7 @@ function shellQuote(value) {
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\n# ${BUILD_MANAGED_MARKER}\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 function runGit(repoRoot, args) {
@@ -355,9 +358,9 @@ function installCommand(repoRoot, home) {
   console.log(`Exposed on PATH as ${exposed}`);
 }
 
-function assertManagedFile(path) {
+function assertManagedFile(path, marker) {
   const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
-  if (existing && !existing.isFile()) {
+  if (existing && (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(marker))) {
     throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
   }
 }
@@ -372,7 +375,9 @@ export function uninstallCommand(home) {
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
-  for (const path of [moduleTarget, helperTarget, target]) assertManagedFile(path);
+  assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
+  assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
+  assertManagedFile(target, BUILD_MANAGED_MARKER);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
   for (const path of [moduleTarget, helperTarget, target]) NodeFS.rmSync(path, { force: true });
