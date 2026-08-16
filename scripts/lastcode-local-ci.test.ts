@@ -55,7 +55,8 @@ describe("lastcode-local-ci", () => {
   });
 
   it("keeps release, native, Rust, and preload checks in the full gate", () => {
-    const quickLabels = resolveLocalCiSteps("quick").map(({ label }) => label);
+    const quickSteps = resolveLocalCiSteps("quick");
+    const quickLabels = quickSteps.map(({ label }) => label);
     const fullLabels = resolveLocalCiSteps("full").map(({ label }) => label);
 
     expect(quickLabels).toEqual([
@@ -74,6 +75,19 @@ describe("lastcode-local-ci", () => {
         "Release smoke",
       ]),
     );
+    expect(quickSteps.find(({ label }) => label === "Workspace tests")).toMatchObject({
+      kind: "command",
+      args: [
+        "run",
+        "--recursive",
+        "--concurrency-limit",
+        "1",
+        "test",
+        "--",
+        "--maxWorkers=1",
+        "--maxConcurrency=1",
+      ],
+    });
   });
 
   it("checks the built preload bridge contract", () => {
@@ -91,7 +105,7 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("rejects bare repositories and shared config changes during CI", () => {
+  it("rejects bare repositories and protected shared config changes during CI", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-test-"));
     const repository = NodePath.join(root, "repository");
     const bareRepository = NodePath.join(root, "bare.git");
@@ -112,6 +126,78 @@ describe("lastcode-local-ci", () => {
     );
     expect(() => captureRepositoryIntegrity(bareRepository)).toThrow("core.bare=true");
     NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("allows concurrent branch bookkeeping in the shared config", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-branch-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.concurrent-worktree.gh-merge-base", "lastcode/main"],
+      { cwd: repository },
+    );
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
+  it("rejects changes to branch settings that existed when CI started", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-existing-branch-test-"),
+    );
+    NodeChildProcess.execFileSync(
+      "git",
+      ["init", "--quiet", "--initial-branch", "lastcode/userland-build"],
+      { cwd: repository },
+    );
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.lastcode/userland-build.remote", "origin"],
+      { cwd: repository },
+    );
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync(
+      "git",
+      ["config", "branch.lastcode/userland-build.remote", "upstream"],
+      { cwd: repository },
+    );
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+      "existing branch setting branch.lastcode/userland-build.remote",
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
+  it("rejects reordering protected multivalue settings", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-config-order-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "first.inc"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "second.inc"], {
+      cwd: repository,
+    });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync("git", ["config", "--unset-all", "include.path"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "second.inc"], {
+      cwd: repository,
+    });
+    NodeChildProcess.execFileSync("git", ["config", "--add", "include.path", "first.inc"], {
+      cwd: repository,
+    });
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow("protected settings");
+    NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
   it("diagnoses a damaged shared config before resolving the worktree root", () => {
