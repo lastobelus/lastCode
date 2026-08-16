@@ -420,7 +420,7 @@ export const make = Effect.gen(function* () {
             items:
               inspection.releaseNotes.length > 0
                 ? inspection.releaseNotes
-                : ["Checkpoint contains no additional commit summaries."],
+                : ["Local update contains no additional commit summaries."],
           },
         ];
         return Ref.set(localCheckpointTagRef, Option.some(inspection.checkpointTag)).pipe(
@@ -529,8 +529,7 @@ export const make = Effect.gen(function* () {
                 Effect.fail(
                   new LastCodeLocalUpdates.LastCodeLocalUpdateError({
                     operation: "build",
-                    message:
-                      "The available LastCode checkpoint is no longer selected. Check again.",
+                    message: "The available LastCode update is no longer selected. Check again.",
                   }),
                 ),
               onSome: Effect.succeed,
