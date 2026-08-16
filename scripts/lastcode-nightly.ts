@@ -14,7 +14,14 @@ export interface NightlyTag {
   readonly runNumber: number;
 }
 
+export interface LastCodeInstallableTag {
+  readonly tag: string;
+  readonly nightly: NightlyTag;
+  readonly revision: number;
+}
+
 export const LASTCODE_CHECKPOINT_TAG_PREFIX = "lastcode/checkpoint/";
+export const LASTCODE_REVISION_TAG_PREFIX = "lastcode/revision/";
 export const LASTCODE_BUILD_TAG_PREFIX = "lastcode/build/";
 
 export class LastCodeNightlyError extends Data.TaggedError("LastCodeNightlyError")<{
@@ -100,15 +107,56 @@ export function nightlyTagFromCheckpointTag(tag: string): string | undefined {
   return parseNightlyTag(nightlyTag) ? nightlyTag : undefined;
 }
 
-export function buildTagFromCheckpointTag(checkpointTag: string, buildNumber: number): string {
-  const nightlyTag = nightlyTagFromCheckpointTag(checkpointTag);
-  if (!nightlyTag) {
-    throw new Error(`Invalid LastCode checkpoint tag '${checkpointTag}'.`);
+export function revisionTagFromNightlyTag(tag: string, revision: number): string {
+  if (!parseNightlyTag(tag)) {
+    throw new Error(`Invalid upstream nightly tag '${tag}'.`);
+  }
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error(`Invalid LastCode revision '${revision}'.`);
+  }
+  return `${LASTCODE_REVISION_TAG_PREFIX}${tag}.${revision}`;
+}
+
+export function parseLastCodeInstallableTag(tag: string): LastCodeInstallableTag | undefined {
+  const checkpointNightly = nightlyTagFromCheckpointTag(tag);
+  if (checkpointNightly) {
+    return { tag, nightly: parseNightlyTag(checkpointNightly)!, revision: 0 };
+  }
+  if (!tag.startsWith(LASTCODE_REVISION_TAG_PREFIX)) return undefined;
+  const value = tag.slice(LASTCODE_REVISION_TAG_PREFIX.length);
+  const match = /^(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)\.(\d+)$/.exec(value);
+  if (!match) return undefined;
+  const [, nightlyValue, revisionValue] = match;
+  const nightly = nightlyValue ? parseNightlyTag(nightlyValue) : undefined;
+  const revision = Number(revisionValue);
+  if (!nightly || !Number.isSafeInteger(revision) || revision < 1) return undefined;
+  return { tag, nightly, revision };
+}
+
+export function compareLastCodeInstallableTags(
+  left: LastCodeInstallableTag,
+  right: LastCodeInstallableTag,
+): number {
+  const nightlyOrder = compareNightlyTags(left.nightly, right.nightly);
+  return nightlyOrder === 0 ? left.revision - right.revision : nightlyOrder;
+}
+
+export function versionFromLastCodeInstallableTag(tag: string): string {
+  const installable = parseLastCodeInstallableTag(tag);
+  if (!installable) throw new Error(`Invalid LastCode installable tag '${tag}'.`);
+  const nightlyVersion = versionFromNightlyTag(installable.nightly.tag);
+  return installable.revision === 0 ? nightlyVersion : `${nightlyVersion}.${installable.revision}`;
+}
+
+export function buildTagFromInstallableTag(installableTag: string, buildNumber: number): string {
+  const installable = parseLastCodeInstallableTag(installableTag);
+  if (!installable) {
+    throw new Error(`Invalid LastCode installable tag '${installableTag}'.`);
   }
   if (!Number.isSafeInteger(buildNumber) || buildNumber < 1) {
     throw new Error(`Invalid LastCode build number '${buildNumber}'.`);
   }
-  return `${LASTCODE_BUILD_TAG_PREFIX}${nightlyTag}.${buildNumber}`;
+  return `${LASTCODE_BUILD_TAG_PREFIX}v${versionFromLastCodeInstallableTag(installableTag)}.${buildNumber}`;
 }
 
 export function resolveUncheckpointedNightlies(
