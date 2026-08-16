@@ -200,12 +200,19 @@ function readLockOwner(path) {
 }
 
 export function acquireInstallLock(lockDirectory, options = {}) {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
+  if (process.platform !== "darwin") {
+    throw new Error("LastCode install locking is only available on macOS.");
+  }
   const pid = options.pid ?? process.pid;
   const lockPath = NodePath.join(lockDirectory, INSTALL_LOCK_NAME);
   const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   NodeFS.mkdirSync(lockDirectory, { recursive: true });
 
   const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
+  // macOS lockf's fd form locks inherited child fd 3. The BSD lock remains on
+  // the shared open-file description held by this parent descriptor after
+  // lockf exits, and the kernel releases it if this process dies.
   const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe", descriptor],

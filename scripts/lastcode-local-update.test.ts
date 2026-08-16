@@ -19,8 +19,11 @@ import {
   resolveLocalBuildEnvironment,
 } from "./lastcode-local-update.mjs";
 
+// oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
+const itMacOnly = process.platform === "darwin" ? it : it.skip;
+
 describe("lastcode-local-update", () => {
-  it("serializes manual and in-app builds and releases the kernel lock", () => {
+  itMacOnly("serializes manual and in-app builds and releases the kernel lock", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-lock-"));
     try {
       const release = acquireBuildLock(root);

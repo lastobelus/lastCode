@@ -30,6 +30,9 @@ function temporaryDirectory() {
   return directory;
 }
 
+// oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
+const itMacOnly = process.platform === "darwin" ? it : it.skip;
+
 describe("LastCode userland install command", () => {
   it("parses an optional DMG or artifacts directory", () => {
     expect(parseOptions([])).toMatchObject({ dmgPath: undefined, install: false });
@@ -99,7 +102,7 @@ describe("LastCode userland install command", () => {
     );
   });
 
-  it("serializes installers and releases the kernel lock", () => {
+  itMacOnly("serializes installers and releases the kernel lock", () => {
     const root = temporaryDirectory();
     const release = acquireInstallLock(root);
     expect(() => acquireInstallLock(root)).toThrow("already running");
