@@ -285,7 +285,7 @@ describe("lastcode-local-ci", () => {
     ).toEqual({ schemaVersion: 2, ...stamp });
     expect(() =>
       assertCheckpointCiStamp(commonGitDir, stamp.commit, checkpointTag, "new-upstream-sha"),
-    ).toThrow("does not match checkpoint");
+    ).toThrow("does not match installable");
     NodeFS.rmSync(commonGitDir, { recursive: true, force: true });
   });
 });
