@@ -6,16 +6,79 @@ import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 
 import {
+  acquireBuildLock,
   compareNightlyVersions,
+  isReusableCheckpointCiStamp,
   parseNightlyVersion,
   parseOptions,
   prepareBuildWorktree,
   quarantineIncompleteBuild,
+  resolveDeterministicBuildEnvironment,
   resolveExistingBuild,
   resolveLatestCheckpointTag,
+  resolveLocalBuildEnvironment,
 } from "./lastcode-local-update.mjs";
 
+// oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
+const itMacOnly = process.platform === "darwin" ? it : it.skip;
+
 describe("lastcode-local-update", () => {
+  itMacOnly("serializes manual and in-app builds and releases the kernel lock", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-lock-"));
+    try {
+      const release = acquireBuildLock(root);
+      assert.throws(() => acquireBuildLock(root), /already running/);
+      release();
+
+      const lockPath = NodePath.join(root, "build.lock");
+      assert.strictEqual(NodeFS.readFileSync(lockPath, "utf8"), "");
+      const releaseAgain = acquireBuildLock(root);
+      releaseAgain();
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a deterministic locale for checkpoint validation and packaging", () => {
+    assert.deepInclude(resolveDeterministicBuildEnvironment({ PATH: "/bin" }), {
+      PATH: "/bin",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+    });
+    assert.match(
+      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }).PATH ?? "",
+      /^\/tmp\/build tree\/node_modules\/\.bin:/,
+    );
+  });
+
+  it("only reuses a full CI stamp for the exact checkpoint context", () => {
+    const stamp = {
+      schemaVersion: 2,
+      commit: "checkpoint-commit",
+      context: {
+        kind: "checkpoint",
+        checkpointTag: "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
+        upstreamCommit: "upstream-commit",
+      },
+    };
+    assert.isTrue(
+      isReusableCheckpointCiStamp(
+        stamp,
+        "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
+        "checkpoint-commit",
+        "upstream-commit",
+      ),
+    );
+    assert.isFalse(
+      isReusableCheckpointCiStamp(
+        stamp,
+        "lastcode/checkpoint/v0.0.34-nightly.20260814.1091",
+        "checkpoint-commit",
+        "upstream-commit",
+      ),
+    );
+  });
+
   it("orders and selects immutable checkpoint tags", () => {
     assert.deepEqual(
       parseNightlyVersion("0.0.34-nightly.20260814.1089")?.parts,
