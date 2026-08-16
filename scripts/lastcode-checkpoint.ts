@@ -11,10 +11,14 @@ import * as Effect from "effect/Effect";
 import { appendCheckpointRun, checkpointFailureRecord } from "./lastcode-checkpoint-history.ts";
 import {
   checkpointTagFromNightlyTag,
+  compareLastCodeInstallableTags,
   compareNightlyTags,
+  type LastCodeInstallableTag,
   type NightlyTag,
   nightlyTagFromCheckpointTag,
+  parseLastCodeInstallableTag,
   parseNightlyTag,
+  revisionTagFromNightlyTag,
   resolveLatestNightlyTag,
   resolveUncheckpointedNightlies,
 } from "./lastcode-nightly.ts";
@@ -23,6 +27,7 @@ const DEFAULT_SOURCE_REF = "refs/remotes/origin/lastcode/main";
 const DEFAULT_UPSTREAM_REMOTE = "upstream";
 const DEFAULT_PUSH_REMOTE = "origin";
 const CHECKPOINT_TAG_GLOB = "lastcode/checkpoint/v*-nightly.*";
+const REVISION_TAG_GLOB = "lastcode/revision/v*-nightly.*";
 
 export type PromotionMode = "never" | "always" | "if-no-open-prs";
 
@@ -44,6 +49,23 @@ interface CheckpointRef {
   readonly nightly: NightlyTag;
   readonly sourceCommit?: string;
 }
+
+export interface InstallableRef extends LastCodeInstallableTag {
+  readonly commit: string;
+  readonly sourceCommit?: string;
+}
+
+export type RevisionPlan =
+  | { readonly kind: "represented"; readonly installable: InstallableRef }
+  | {
+      readonly kind: "create";
+      readonly installableTag: string;
+      readonly nightly: NightlyTag;
+      readonly ontoRef: string;
+      readonly replayBase?: string;
+      readonly revision: number;
+    }
+  | { readonly kind: "unavailable" };
 
 export interface CheckpointPlan {
   readonly baseNightly: NightlyTag;
@@ -204,6 +226,67 @@ function listCheckpointRefs(repoRoot: string): ReadonlyArray<CheckpointRef> {
     .toSorted((left, right) => compareNightlyTags(left.nightly, right.nightly));
 }
 
+function listInstallableRefs(repoRoot: string): ReadonlyArray<InstallableRef> {
+  return splitLines(git(repoRoot, ["tag", "--list", CHECKPOINT_TAG_GLOB, REVISION_TAG_GLOB]))
+    .flatMap((tag) => {
+      const installable = parseLastCodeInstallableTag(tag);
+      if (!installable) return [];
+      const sourceCommit = checkpointSourceCommit(
+        git(repoRoot, ["for-each-ref", `refs/tags/${tag}`, "--format=%(contents)"]),
+      );
+      return [
+        {
+          ...installable,
+          commit: git(repoRoot, ["rev-list", "-n", "1", tag]),
+          ...(sourceCommit ? { sourceCommit } : {}),
+        },
+      ];
+    })
+    .toSorted(compareLastCodeInstallableTags);
+}
+
+export function resolveRevisionPlan(input: {
+  readonly installableRefs: ReadonlyArray<InstallableRef>;
+  readonly sourceCommit: string;
+  readonly isAncestor: (ancestor: string, descendant: string) => boolean;
+}): RevisionPlan {
+  const installables = input.installableRefs.toSorted(compareLastCodeInstallableTags);
+  const represented = installables.findLast(
+    (installable) =>
+      installable.commit === input.sourceCommit || installable.sourceCommit === input.sourceCommit,
+  );
+  if (represented) return { kind: "represented", installable: represented };
+
+  const latest = installables.at(-1);
+  if (!latest) return { kind: "unavailable" };
+
+  let replayBase: string | undefined;
+  if (!input.isAncestor(latest.commit, input.sourceCommit)) {
+    if (!latest.sourceCommit || !input.isAncestor(latest.sourceCommit, input.sourceCommit)) {
+      throw new Error(
+        `Latest installable ${latest.tag} cannot be related to LastCode main ${input.sourceCommit}.`,
+      );
+    }
+    replayBase = latest.sourceCommit;
+  }
+
+  const revision =
+    Math.max(
+      0,
+      ...installables
+        .filter((installable) => installable.nightly.tag === latest.nightly.tag)
+        .map((installable) => installable.revision),
+    ) + 1;
+  return {
+    kind: "create",
+    installableTag: revisionTagFromNightlyTag(latest.nightly.tag, revision),
+    nightly: latest.nightly,
+    ontoRef: latest.tag,
+    ...(replayBase ? { replayBase } : {}),
+    revision,
+  };
+}
+
 export function unpublishedCheckpointTags(
   localTags: ReadonlyArray<string>,
   remoteOutput: string,
@@ -359,12 +442,14 @@ function deleteCheckpointTag(repoRoot: string, checkpointTag: string): boolean {
   return result.status === 0;
 }
 
-function pruneUnpublishedCheckpointTags(repoRoot: string, pushRemote: string): void {
-  const localTags = splitLines(git(repoRoot, ["tag", "--list", CHECKPOINT_TAG_GLOB]));
-  const remoteOutput = git(repoRoot, ["ls-remote", pushRemote, `refs/tags/${CHECKPOINT_TAG_GLOB}`]);
-  for (const checkpointTag of unpublishedCheckpointTags(localTags, remoteOutput)) {
-    if (!deleteCheckpointTag(repoRoot, checkpointTag)) {
-      throw new Error(`Could not remove unpublished local checkpoint tag ${checkpointTag}.`);
+function pruneUnpublishedInstallableTags(repoRoot: string, pushRemote: string): void {
+  for (const tagGlob of [CHECKPOINT_TAG_GLOB, REVISION_TAG_GLOB]) {
+    const localTags = splitLines(git(repoRoot, ["tag", "--list", tagGlob]));
+    const remoteOutput = git(repoRoot, ["ls-remote", pushRemote, `refs/tags/${tagGlob}`]);
+    for (const tag of unpublishedCheckpointTags(localTags, remoteOutput)) {
+      if (!deleteCheckpointTag(repoRoot, tag)) {
+        throw new Error(`Could not remove unpublished local installable tag ${tag}.`);
+      }
     }
   }
 }
@@ -448,6 +533,28 @@ export function checkpointSourceCommit(message: string): string | undefined {
   return /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1];
 }
 
+export function revisionMessage(input: {
+  readonly commit: string;
+  readonly createdAt: string;
+  readonly revision: number;
+  readonly sourceCommit: string;
+  readonly sourceRef: string;
+  readonly upstreamCommit: string;
+  readonly upstreamTag: string;
+}): string {
+  return [
+    `LastCode revision ${input.revision} for ${input.upstreamTag}`,
+    "",
+    `Upstream-Tag: ${input.upstreamTag}`,
+    `Upstream-Commit: ${input.upstreamCommit}`,
+    `LastCode-Commit: ${input.commit}`,
+    `Source-Ref: ${input.sourceRef}`,
+    `Source-Commit: ${input.sourceCommit}`,
+    `Revision: ${input.revision}`,
+    `Created-At: ${input.createdAt}`,
+  ].join("\n");
+}
+
 function createCheckpointTag(
   repoRoot: string,
   nightly: NightlyTag,
@@ -478,6 +585,32 @@ function createCheckpointTag(
     }),
   ]);
   return checkpointTag;
+}
+
+function createRevisionTag(
+  repoRoot: string,
+  plan: Extract<RevisionPlan, { kind: "create" }>,
+  commit: string,
+  sourceRef: string,
+  sourceCommit: string,
+): string {
+  git(repoRoot, [
+    "tag",
+    "--annotate",
+    plan.installableTag,
+    commit,
+    "--message",
+    revisionMessage({
+      commit,
+      createdAt: new Date().toISOString(),
+      revision: plan.revision,
+      sourceCommit,
+      sourceRef,
+      upstreamCommit: git(repoRoot, ["rev-parse", `${plan.nightly.tag}^{commit}`]),
+      upstreamTag: plan.nightly.tag,
+    }),
+  ]);
+  return plan.installableTag;
 }
 
 function assertForkInvariants(worktree: string): void {
@@ -551,6 +684,96 @@ function resolveAutomationWorktree(repoRoot: string): string {
     `${NodePath.basename(primaryWorktree)}-worktrees`,
     "lastcode-nightly-sync",
   );
+}
+
+function publishRevisionIfNeeded(
+  repoRoot: string,
+  sourceRef: string,
+  sourceCommit: string,
+  installables: ReadonlyArray<InstallableRef>,
+  options: CheckpointOptions,
+  platform: NodeJS.Platform,
+): boolean {
+  const plan = resolveRevisionPlan({
+    installableRefs: installables,
+    sourceCommit,
+    isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+  });
+  if (plan.kind === "unavailable") return false;
+  if (plan.kind === "represented") {
+    if (plan.installable.revision === 0) return false;
+    promoteCheckpoint(repoRoot, plan.installable.commit, options, platform);
+    console.log(
+      `[lastcode:checkpoint] ${plan.installable.tag} already represents current LastCode main.`,
+    );
+    return true;
+  }
+
+  const worktree = resolveAutomationWorktree(repoRoot);
+  if (NodeFS.existsSync(worktree)) {
+    throw new Error(
+      `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
+    );
+  }
+  NodeFS.mkdirSync(NodePath.dirname(worktree), { recursive: true });
+  const branch = `sync/revision/${plan.nightly.tag}.${plan.revision}`;
+  if (git(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`], { allowFailure: true })) {
+    throw new Error(`Recovery branch ${branch} already exists.`);
+  }
+
+  run(repoRoot, "git", worktreeAddArgs(branch, worktree, sourceRef));
+  let completed = false;
+  let pendingTag: string | undefined;
+  let candidateCommit = sourceCommit;
+  try {
+    if (plan.replayBase) {
+      console.log(`[lastcode:checkpoint] Replaying new LastCode commits onto ${plan.ontoRef}...`);
+      rebaseOnto(worktree, plan.ontoRef, plan.replayBase);
+      candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+    }
+    if (options.smoke) runSmokeGate(repoRoot, worktree);
+    pendingTag = createRevisionTag(repoRoot, plan, candidateCommit, sourceRef, sourceCommit);
+    if (options.pushTags) {
+      run(
+        repoRoot,
+        "git",
+        checkpointTagPushArgs(
+          options.pushRemote,
+          pendingTag,
+          options.smoke
+            ? { kind: "smoke" }
+            : {
+                kind: "pre-push",
+                candidateCommit,
+                checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]),
+              },
+        ),
+      );
+    }
+    pendingTag = undefined;
+    completed = true;
+  } catch (error) {
+    if (pendingTag) completed = deleteCheckpointTag(repoRoot, pendingTag);
+    if (!completed) {
+      notify(
+        platform,
+        "LastCode revision needs attention",
+        `${branch} is retained at ${worktree}.`,
+      );
+      console.error(`[lastcode:checkpoint] Recovery branch ${branch} is retained at ${worktree}.`);
+    }
+    throw error;
+  } finally {
+    if (completed) {
+      run(repoRoot, "git", ["worktree", "remove", worktree]);
+      git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`]);
+    }
+  }
+
+  promoteCheckpoint(repoRoot, candidateCommit, options, platform);
+  notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
+  console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
+  return true;
 }
 
 function openPullRequestCount(repoRoot: string): number {
@@ -659,6 +882,12 @@ function main(argv: ReadonlyArray<string>): void {
       ],
       { allowFailure: true },
     );
+    run(
+      repoRoot,
+      "git",
+      ["fetch", options.pushRemote, "+refs/tags/lastcode/revision/*:refs/tags/lastcode/revision/*"],
+      { allowFailure: true },
+    );
     run(repoRoot, "git", [
       "fetch",
       options.pushRemote,
@@ -676,11 +905,12 @@ function main(argv: ReadonlyArray<string>): void {
   if (options.mirrorUpstreamMain) mirrorUpstreamMain(repoRoot, options);
 
   if (options.pushTags && !options.dryRun) {
-    pruneUnpublishedCheckpointTags(repoRoot, options.pushRemote);
+    pruneUnpublishedInstallableTags(repoRoot, options.pushRemote);
   }
 
   const sourceCommit = git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]);
   const checkpoints = listCheckpointRefs(repoRoot);
+  const installables = listInstallableRefs(repoRoot);
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, options.sourceRef);
   const sourceNightlyTags = splitLines(
     git(repoRoot, ["tag", "--merged", options.sourceRef, "--list", "v*-nightly.*"]),
@@ -706,6 +936,22 @@ function main(argv: ReadonlyArray<string>): void {
     console.log(
       `[lastcode:checkpoint] ${options.dryRun ? "Would checkpoint" : "Checkpointing"} ${nightly.tag}.`,
     );
+  }
+  if (!plan.bootstrapCheckpoint && plan.missingNightlies.length === 0) {
+    const revisionPlan = resolveRevisionPlan({
+      installableRefs: installables,
+      sourceCommit,
+      isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+    });
+    if (revisionPlan.kind === "create") {
+      console.log(
+        `[lastcode:checkpoint] ${options.dryRun ? "Would publish" : "Publishing"} ${revisionPlan.installableTag}.`,
+      );
+    } else if (revisionPlan.kind === "represented" && revisionPlan.installable.revision > 0) {
+      console.log(
+        `[lastcode:checkpoint] ${revisionPlan.installable.tag} already represents current LastCode main.`,
+      );
+    }
   }
   if (options.dryRun) return;
 
@@ -777,6 +1023,20 @@ function main(argv: ReadonlyArray<string>): void {
   }
 
   if (plan.missingNightlies.length === 0) {
+    if (
+      !plan.bootstrapCheckpoint &&
+      publishRevisionIfNeeded(
+        repoRoot,
+        options.sourceRef,
+        sourceCommit,
+        installables,
+        options,
+        hostPlatform,
+      )
+    ) {
+      console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
+      return;
+    }
     promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform);
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
