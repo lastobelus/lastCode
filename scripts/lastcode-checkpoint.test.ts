@@ -3,6 +3,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   checkpointFailureDisposition,
   checkpointMessage,
+  checkpointPromotionPushArgs,
   checkpointSmokeEnvironment,
   checkpointSourceCommit,
   checkpointTagPushArgs,
@@ -259,9 +260,44 @@ it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("main", "checkpoint"), true);
 });
 
+it("promotes a validated checkpoint without rerunning CI in the automation checkout", () => {
+  assert.deepStrictEqual(
+    checkpointPromotionPushArgs("origin", "old-main", "checkpoint", { kind: "validated" }),
+    [
+      "push",
+      "--no-verify",
+      "--force-with-lease=refs/heads/lastcode/main:old-main",
+      "origin",
+      "checkpoint:refs/heads/lastcode/main",
+    ],
+  );
+});
+
+it("retains pre-push validation when promotion has no smoke or published tag", () => {
+  assert.deepStrictEqual(
+    checkpointPromotionPushArgs("origin", "old-main", "checkpoint", {
+      kind: "pre-push",
+      checkoutHead: "checkpoint",
+    }),
+    [
+      "push",
+      "--force-with-lease=refs/heads/lastcode/main:old-main",
+      "origin",
+      "checkpoint:refs/heads/lastcode/main",
+    ],
+  );
+  expect(() =>
+    checkpointPromotionPushArgs("origin", "old-main", "checkpoint", {
+      kind: "pre-push",
+      checkoutHead: "automation-checkout",
+    }),
+  ).toThrow(/pre-push hook would validate automation-checkout/);
+});
+
 it("mirrors upstream main with an exact lease on the fork branch", () => {
   const pushArgs = [
     "push",
+    "--no-verify",
     "--force-with-lease=refs/heads/main:old-main",
     "origin",
     "upstream-main:refs/heads/main",
