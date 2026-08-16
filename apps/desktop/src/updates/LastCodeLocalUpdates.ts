@@ -135,7 +135,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
     } catch (cause) {
       throw new LastCodeLocalUpdateError({
         operation: "configuration",
-        message: `LastCode checkpoint automation is not ready. Run the documented service and dashboard installers. (${dashboardPath})`,
+        message: `LastCode local update automation is not ready. Run the documented service and dashboard installers. (${dashboardPath})`,
         cause,
       });
     }
@@ -224,7 +224,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
             catch: (cause) =>
               new LastCodeLocalUpdateError({
                 operation: "inspect",
-                message: "The LastCode checkpoint inspection result was invalid.",
+                message: "The LastCode local update inspection result was invalid.",
                 cause,
               }),
           }),
