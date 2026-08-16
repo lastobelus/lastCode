@@ -764,6 +764,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased,
             error,
+            failurePhase: "publication",
             ...(localTagRetained ? { localTagRetained: true } : {}),
             startedAtMs,
             upstreamTag: plan.baseNightly.tag,
@@ -805,6 +806,7 @@ function main(argv: ReadonlyArray<string>): void {
         readonly startedAtMs: number;
       }
     | undefined;
+  let failurePhase: "publication" | "rebase" | "smoke" | undefined;
   try {
     let baseTag = plan.baseNightly.tag;
     for (const nightly of plan.missingNightlies) {
@@ -821,9 +823,12 @@ function main(argv: ReadonlyArray<string>): void {
         startedAtMs: Date.now(),
       };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
+      failurePhase = "rebase";
       rebaseOnto(worktree, nightly.tag, baseTag);
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+      failurePhase = "smoke";
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      failurePhase = "publication";
       const finishedAtMs = Date.now();
       const timing = {
         commitsRebased: attempt.commitsRebased,
@@ -869,6 +874,7 @@ function main(argv: ReadonlyArray<string>): void {
       baseTag = nightly.tag;
       candidateRef = checkpointTag;
       attempt = undefined;
+      failurePhase = undefined;
       console.log(`[lastcode:checkpoint] Created ${checkpointTag} at ${candidateCommit}.`);
     }
     completed = true;
@@ -885,6 +891,7 @@ function main(argv: ReadonlyArray<string>): void {
           {
             commitsRebased: attempt.commitsRebased,
             error,
+            ...(failurePhase ? { failurePhase } : {}),
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
             startedAtMs: attempt.startedAtMs,

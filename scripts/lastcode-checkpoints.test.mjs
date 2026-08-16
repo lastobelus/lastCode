@@ -4,6 +4,7 @@ import {
   checkpointTagsWithoutUnpublishedFailures,
   checkpointFreshness,
   failureDetailLines,
+  failureWasDuringRebase,
   failedRunsWithoutPublishedTags,
   formatDuration,
   parseOptions,
@@ -116,6 +117,18 @@ describe("LastCode checkpoint dashboard", () => {
     ).toBe(
       "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
     );
+  });
+
+  it("uses explicit failure phases and recognizes historical rebase commands", () => {
+    expect(failureWasDuringRebase({ failurePhase: "rebase", error: "anything" })).toBe(true);
+    expect(failureWasDuringRebase({ failurePhase: "smoke", error: "git rebase failed" })).toBe(
+      false,
+    );
+    expect(
+      failureWasDuringRebase({
+        error: "git -c core.editor=true rebase --continue failed with exit code 1.",
+      }),
+    ).toBe(true);
   });
 
   it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {

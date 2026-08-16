@@ -174,6 +174,13 @@ export function failureDetailLines(rows, verbose) {
     });
 }
 
+export function failureWasDuringRebase(record) {
+  if (record?.failurePhase !== undefined) return record.failurePhase === "rebase";
+  return (
+    typeof record?.error === "string" && /^git(?:\s+-c\s+\S+)*\s+rebase(?:\s|$)/.test(record.error)
+  );
+}
+
 export function checkpointTagsWithoutUnpublishedFailures(tags, publishedTags, records) {
   const published = new Set(publishedTags);
   const latestRuns = latestRunsByUpstreamTag(records);
@@ -430,6 +437,7 @@ function checkpointRows(repoRoot, home, count, remoteState) {
       main: "—",
       build: "—",
       error: record.error,
+      failurePhase: record.failurePhase,
       recoveryBranch: record.recoveryBranch,
     }),
   );
@@ -520,7 +528,7 @@ function printDashboard(repoRoot, home, count, verbose) {
       automationWorktree,
       recoveryBranch: recoveryFailure?.recoveryBranch,
       isRebaseInProgress: rebaseInProgress(recoveryWorktree),
-      failedDuringRebase: recoveryFailure?.error?.includes("git rebase") ?? false,
+      failedDuringRebase: failureWasDuringRebase(recoveryFailure),
     })) {
       console.log(style(ansi.lavender, line));
     }
