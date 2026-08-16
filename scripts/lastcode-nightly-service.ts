@@ -69,6 +69,10 @@ export function renderLaunchAgentPlist(input: {
 `;
 }
 
+export function runNowArguments(service: string): ReadonlyArray<string> {
+  return ["kickstart", service];
+}
+
 function run(
   command: string,
   args: ReadonlyArray<string>,
@@ -127,7 +131,7 @@ function main(argv: ReadonlyArray<string>): void {
     return;
   }
   if (command === "run-now") {
-    run("launchctl", ["kickstart", "-k", service]);
+    run("launchctl", runNowArguments(service));
     return;
   }
   if (command === "uninstall") {
