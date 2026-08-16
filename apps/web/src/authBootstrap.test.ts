@@ -326,6 +326,34 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(attempts).toBe(1);
   });
 
+  it("keeps ordinary desktop gateway retries on the short bootstrap deadline", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const request = HttpClientRequest.get("http://localhost/api/auth/session");
+    const response = HttpClientResponse.fromWeb(
+      request,
+      new Response("Bad Gateway", { status: 502 }),
+    );
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw new HttpClientError.HttpClientError({
+        reason: new HttpClientError.StatusCodeError({ request, response }),
+      });
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState, PrimaryEnvironmentRequestError } =
+      await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    const rejection = expect(sessionPromise).rejects.toBeInstanceOf(PrimaryEnvironmentRequestError);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await rejection;
+    expect(attempts).toBe(31);
+  });
+
   it("takes a pairing token from the location hash and strips it immediately", async () => {
     const testWindow = installTestBrowser("http://localhost/#token=pairing-token");
     const { takePairingTokenFromUrl } = await import("./environments/primary");

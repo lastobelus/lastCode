@@ -75,8 +75,10 @@ Electron's macOS credential storage can synchronously block its main process
 while the Keychain prompt is open. If a long-running request returns Electron's
 generic protocol-level HTTP 500 after that delay, the desktop client keeps
 retrying for one hour. Structured server HTTP 500 responses still surface
-immediately. You can leave the build or install unattended, return to handle a
-prompt, and continue without rebuilding, reinstalling, or relaunching LastCode.
+immediately, and ordinary 502/503/504 gateway failures retain the normal
+15-second retry deadline. You can leave the build or install unattended, return
+to handle a prompt, and continue without rebuilding, reinstalling, or relaunching
+LastCode.
 
 ## Failure handling and logs
 

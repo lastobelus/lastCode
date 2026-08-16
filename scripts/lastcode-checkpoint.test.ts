@@ -8,6 +8,7 @@ import {
   checkpointTagPushArgs,
   checkpointVpPaths,
   promotionNeeded,
+  rerereRebaseMadeProgress,
   resolveCheckpointPlan,
   resolveUpstreamMainMirror,
   shouldContinueRerereRebase,
@@ -45,6 +46,11 @@ it("continues a rebase when rerere staged every remembered conflict", () => {
     false,
   );
   assert.equal(shouldContinueRerereRebase({ rebaseInProgress: false, unmergedPaths: [] }), false);
+});
+
+it("stops automatic rebase continuation when Git makes no progress", () => {
+  assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-b\0step:2"), true);
+  assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-a\0step:1"), false);
 });
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {

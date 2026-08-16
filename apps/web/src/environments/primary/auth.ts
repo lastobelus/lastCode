@@ -208,9 +208,9 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
         ? {
             retryError: (error: unknown, attemptElapsedMs: number) =>
               isDelayedDesktopCredentialProtocolError(error, attemptElapsedMs),
+            retryErrorTimeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS,
           }
         : {}),
-      ...(isDesktop ? { timeoutMs: DESKTOP_BOOTSTRAP_RETRY_TIMEOUT_MS } : {}),
     },
   );
 }
@@ -298,6 +298,7 @@ export async function retryTransientBootstrap<T>(
   operation: () => Promise<T>,
   options: {
     readonly retryError?: (error: unknown, attemptElapsedMs: number) => boolean;
+    readonly retryErrorTimeoutMs?: number;
     readonly timeoutMs?: number;
   } = {},
 ): Promise<T> {
@@ -307,18 +308,18 @@ export async function retryTransientBootstrap<T>(
     try {
       return await operation();
     } catch (error) {
-      if (
-        !isTransientBootstrapError(
-          error,
-          options.retryError?.(error, Date.now() - attemptStartedAt) ?? false,
-        )
-      ) {
+      const matchesAdditionalRetry =
+        options.retryError?.(error, Date.now() - attemptStartedAt) ?? false;
+      if (!isTransientBootstrapError(error, matchesAdditionalRetry)) {
         throw error;
       }
 
       const now = Date.now();
       retryStartedAt ??= now;
-      if (now - retryStartedAt >= (options.timeoutMs ?? BOOTSTRAP_RETRY_TIMEOUT_MS)) {
+      const timeoutMs = matchesAdditionalRetry
+        ? (options.retryErrorTimeoutMs ?? options.timeoutMs ?? BOOTSTRAP_RETRY_TIMEOUT_MS)
+        : (options.timeoutMs ?? BOOTSTRAP_RETRY_TIMEOUT_MS);
+      if (now - retryStartedAt >= timeoutMs) {
         throw error;
       }
 

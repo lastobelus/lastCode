@@ -107,6 +107,10 @@ export function shouldContinueRerereRebase(input: {
   return input.rebaseInProgress && input.unmergedPaths.length === 0;
 }
 
+export function rerereRebaseMadeProgress(previous: string, current: string): boolean {
+  return previous !== current;
+}
+
 function rebaseInProgress(worktree: string): boolean {
   const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
   return ["rebase-merge", "rebase-apply"].some((name) =>
@@ -116,6 +120,20 @@ function rebaseInProgress(worktree: string): boolean {
 
 function unmergedPaths(worktree: string): ReadonlyArray<string> {
   return splitLines(git(worktree, ["diff", "--name-only", "--diff-filter=U"], { cwd: worktree }));
+}
+
+function rebaseProgress(worktree: string): string {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  const state = [git(worktree, ["rev-parse", "HEAD"], { cwd: worktree })];
+  for (const directory of ["rebase-merge", "rebase-apply"]) {
+    for (const name of ["msgnum", "next", "stopped-sha", "git-rebase-todo", "done"]) {
+      const path = NodePath.join(gitDirectory, directory, name);
+      if (NodeFS.existsSync(path)) {
+        state.push(`${directory}/${name}:${NodeFS.readFileSync(path, "utf8")}`);
+      }
+    }
+  }
+  return state.join("\0");
 }
 
 function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): void {
@@ -133,12 +151,14 @@ function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): voi
       unmergedPaths: unmergedPaths(worktree),
     })
   ) {
+    const previousProgress = rebaseProgress(worktree);
     console.log("[lastcode:checkpoint] Continuing Git's recorded conflict resolution...");
     try {
       run(worktree, "git", ["-c", "core.editor=true", "rebase", "--continue"]);
       return;
     } catch (error) {
       failure = error;
+      if (!rerereRebaseMadeProgress(previousProgress, rebaseProgress(worktree))) break;
     }
   }
 

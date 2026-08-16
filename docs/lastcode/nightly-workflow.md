@@ -111,7 +111,10 @@ cleanup steps are complete.
 After an operator resolves and completes a retained rebase, Git records those
 choices through `rerere`. A later checkpoint run automatically continues when
 Git reapplies and stages every remembered resolution; genuinely unmerged paths
-still stop for review.
+still stop for review. Automatic continuation also stops if Git rejects
+`rebase --continue` without advancing the rebase (for example, because a hook
+or signing key fails), preserving the recovery worktree for operator action
+instead of retrying in a loop.
 
 No later nightly is checkpointed after a failure, because each failure should be
 understood before the sequence continues.
