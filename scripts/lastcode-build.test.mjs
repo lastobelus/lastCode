@@ -7,6 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   BUILD_PHASES,
   estimateBuildProgress,
+  installCommandAssets,
   parseBuildResult,
   parseOptions,
   renderProgressBar,
@@ -85,6 +86,37 @@ describe("LastCode userland build command", () => {
       expect(NodeFS.existsSync(exposed)).toBe(true);
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("preflights every build-command destination before installing", () => {
+    for (const relativePath of [
+      ".lastcode/bin/lastcode-build.mjs",
+      ".lastcode/bin/lastcode-local-update.mjs",
+      ".lastcode/bin/lastcode-build",
+      ".local/bin/lastcode-build",
+    ]) {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-install-"));
+      try {
+        const foreignPath = NodePath.join(home, relativePath);
+        NodeFS.mkdirSync(NodePath.dirname(foreignPath), { recursive: true });
+        NodeFS.writeFileSync(foreignPath, "foreign content\n");
+
+        expect(() => installCommandAssets("/tmp/lastcode-automation", home)).toThrow(
+          /not (?:a LastCode-managed file|managed by LastCode)/,
+        );
+        expect(NodeFS.readFileSync(foreignPath, "utf8")).toBe("foreign content\n");
+        for (const candidate of [
+          ".lastcode/bin/lastcode-build.mjs",
+          ".lastcode/bin/lastcode-local-update.mjs",
+          ".lastcode/bin/lastcode-build",
+        ]) {
+          const candidatePath = NodePath.join(home, candidate);
+          if (candidatePath !== foreignPath) expect(NodeFS.existsSync(candidatePath)).toBe(false);
+        }
+      } finally {
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
     }
   });
 

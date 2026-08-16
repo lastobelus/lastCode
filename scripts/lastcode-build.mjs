@@ -310,23 +310,22 @@ function selectAutomationWorktree(repoRoot) {
 }
 
 function replaceManagedSymlink(exposed, target) {
+  assertManagedSymlink(exposed, target);
   const existing = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
   if (existing) {
-    if (!existing.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target) {
-      throw new Error(`${exposed} already exists and is not managed by LastCode.`);
-    }
     NodeFS.unlinkSync(exposed);
   }
   NodeFS.symlinkSync(target, exposed);
 }
 
-function installCommand(repoRoot, home) {
-  const automationWorktree = selectAutomationWorktree(repoRoot);
-  if (!automationWorktree) {
-    throw new Error(
-      "LastCode automation worktree is not installed. Run pnpm lastcode:checkpoint:service install first.",
-    );
+function assertManagedSymlink(exposed, target) {
+  const existing = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
+  if (existing && (!existing.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
+    throw new Error(`${exposed} already exists and is not managed by LastCode.`);
   }
+}
+
+export function installCommandAssets(automationWorktree, home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
   const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
@@ -334,6 +333,11 @@ function installCommand(repoRoot, home) {
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-build");
   const configPath = NodePath.join(home, ".lastcode", "dashboard.json");
+
+  assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
+  assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
+  assertManagedFile(target, BUILD_MANAGED_MARKER);
+  assertManagedSymlink(exposed, target);
 
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
@@ -358,10 +362,20 @@ function installCommand(repoRoot, home) {
   console.log(`Exposed on PATH as ${exposed}`);
 }
 
+function installCommand(repoRoot, home) {
+  const automationWorktree = selectAutomationWorktree(repoRoot);
+  if (!automationWorktree) {
+    throw new Error(
+      "LastCode automation worktree is not installed. Run pnpm lastcode:checkpoint:service install first.",
+    );
+  }
+  installCommandAssets(automationWorktree, home);
+}
+
 function assertManagedFile(path, marker) {
   const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
   if (existing && (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(marker))) {
-    throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
+    throw new Error(`Refusing to modify ${path} because it is not a LastCode-managed file.`);
   }
 }
 

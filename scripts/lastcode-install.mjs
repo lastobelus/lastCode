@@ -319,22 +319,42 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
 }
 
 function replaceManagedSymlink(exposed, target) {
+  assertManagedSymlink(exposed, target);
   const existing = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
   if (existing) {
-    if (!existing.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target) {
-      throw new Error(`${exposed} already exists and is not managed by LastCode.`);
-    }
     NodeFS.unlinkSync(exposed);
   }
   NodeFS.symlinkSync(target, exposed);
 }
 
-function installCommand(home) {
+function assertManagedSymlink(exposed, target) {
+  const existing = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
+  if (existing && (!existing.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
+    throw new Error(`${exposed} already exists and is not managed by LastCode.`);
+  }
+}
+
+function assertManagedInstallerFile(path) {
+  const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
+  if (
+    existing &&
+    (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(INSTALL_MANAGED_MARKER))
+  ) {
+    throw new Error(`Refusing to modify ${path} because it is not a LastCode-managed file.`);
+  }
+}
+
+export function installCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-install");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-install");
+
+  assertManagedInstallerFile(moduleTarget);
+  assertManagedInstallerFile(target);
+  assertManagedSymlink(exposed, target);
+
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
   NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
@@ -354,15 +374,7 @@ export function uninstallCommand(home) {
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
-  for (const path of [moduleTarget, target]) {
-    const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
-    if (
-      existing &&
-      (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(INSTALL_MANAGED_MARKER))
-    ) {
-      throw new Error(`Refusing to remove ${path} because it is not a LastCode-managed file.`);
-    }
-  }
+  for (const path of [moduleTarget, target]) assertManagedInstallerFile(path);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
   for (const path of [moduleTarget, target]) NodeFS.rmSync(path, { force: true });

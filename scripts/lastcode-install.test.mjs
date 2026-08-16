@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   acquireInstallLock,
   discoverDmgs,
+  installCommand,
   parseDmgChoice,
   parseOptions,
   renderDmgChoices,
@@ -139,5 +140,30 @@ describe("LastCode userland install command", () => {
     expect(() => uninstallCommand(home)).toThrow("not a LastCode-managed file");
     expect(NodeFS.existsSync(target)).toBe(true);
     expect(NodeFS.existsSync(exposed)).toBe(true);
+  });
+
+  it("preflights every installer-command destination before installing", () => {
+    for (const relativePath of [
+      ".lastcode/bin/lastcode-install.mjs",
+      ".lastcode/bin/lastcode-install",
+      ".local/bin/lastcode-install",
+    ]) {
+      const home = temporaryDirectory();
+      const foreignPath = NodePath.join(home, relativePath);
+      NodeFS.mkdirSync(NodePath.dirname(foreignPath), { recursive: true });
+      NodeFS.writeFileSync(foreignPath, "foreign content\n");
+
+      expect(() => installCommand(home)).toThrow(
+        /not (?:a LastCode-managed file|managed by LastCode)/,
+      );
+      expect(NodeFS.readFileSync(foreignPath, "utf8")).toBe("foreign content\n");
+      for (const candidate of [
+        ".lastcode/bin/lastcode-install.mjs",
+        ".lastcode/bin/lastcode-install",
+      ]) {
+        const candidatePath = NodePath.join(home, candidate);
+        if (candidatePath !== foreignPath) expect(NodeFS.existsSync(candidatePath)).toBe(false);
+      }
+    }
   });
 });
