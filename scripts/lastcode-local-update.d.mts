@@ -23,6 +23,24 @@ export interface ExistingBuildOptions {
   readonly checkpointCommit: string;
 }
 
+export interface LocalBuildLockOptions {
+  readonly pid?: number;
+}
+
+export function resolveDeterministicBuildEnvironment(
+  environment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;
+export function resolveLocalBuildEnvironment(
+  worktreePath: string,
+  environment?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;
+export function isReusableCheckpointCiStamp(
+  stamp: unknown,
+  checkpointTag: string,
+  checkpointCommit: string,
+  upstreamCommit: string,
+): boolean;
+
 export function parseNightlyVersion(value: string): ParsedNightlyVersion | undefined;
 export function compareNightlyVersions(left: string, right: string): number;
 export function resolveLatestCheckpointTag(tags: ReadonlyArray<string>): string | undefined;
@@ -40,5 +58,6 @@ export function prepareBuildWorktree(
   checkpointTag: string,
   logFd: number | undefined,
 ): void;
+export function acquireBuildLock(updateRoot: string, options?: LocalBuildLockOptions): () => void;
 
 export const RESULT_PREFIX: string;
