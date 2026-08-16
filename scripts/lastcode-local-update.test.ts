@@ -15,7 +15,7 @@ import {
   quarantineIncompleteBuild,
   resolveDeterministicBuildEnvironment,
   resolveExistingBuild,
-  resolveLatestCheckpointTag,
+  resolveLatestInstallableTag,
   resolveLocalBuildEnvironment,
 } from "./lastcode-local-update.mjs";
 
@@ -79,23 +79,87 @@ describe("lastcode-local-update", () => {
     );
   });
 
-  it("orders and selects immutable checkpoint tags", () => {
+  it("orders checkpoints and LastCode revisions", () => {
     assert.deepEqual(
       parseNightlyVersion("0.0.34-nightly.20260814.1089")?.parts,
-      [0, 0, 34, 20260814, 1089],
+      [0, 0, 34, 20260814, 1089, 0],
     );
     assert.isAbove(
       compareNightlyVersions("0.0.34-nightly.20260814.1089", "0.0.34-nightly.20260813.1088"),
       0,
     );
     assert.equal(
-      resolveLatestCheckpointTag([
+      resolveLatestInstallableTag([
         "unrelated",
         "lastcode/checkpoint/v0.0.34-nightly.20260813.1088",
         "lastcode/checkpoint/v0.0.34-nightly.20260814.1089",
+        "lastcode/revision/v0.0.34-nightly.20260814.1089.2",
       ]),
-      "lastcode/checkpoint/v0.0.34-nightly.20260814.1089",
+      "lastcode/revision/v0.0.34-nightly.20260814.1089.2",
     );
+    assert.isAbove(
+      compareNightlyVersions("0.0.34-nightly.20260814.1089.2", "0.0.34-nightly.20260814.1089"),
+      0,
+    );
+    assert.isAbove(
+      compareNightlyVersions("0.0.34-nightly.20260814.1090", "0.0.34-nightly.20260814.1089.99"),
+      0,
+    );
+  });
+
+  it("reports a revision after the installed checkpoint as available", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-inspect-revision-"));
+    try {
+      const repo = NodePath.join(root, "repo");
+      NodeFS.mkdirSync(repo);
+      NodeChildProcess.execFileSync("git", ["init"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["config", "user.name", "LastCode Test"], {
+        cwd: repo,
+      });
+      NodeChildProcess.execFileSync("git", ["config", "user.email", "test@lastcode.invalid"], {
+        cwd: repo,
+      });
+      NodeFS.writeFileSync(NodePath.join(repo, "tracked.txt"), "checkpoint\n");
+      NodeChildProcess.execFileSync("git", ["add", "tracked.txt"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["commit", "-m", "checkpoint"], { cwd: repo });
+      const nightly = "v0.0.34-nightly.20260816.1105";
+      NodeChildProcess.execFileSync("git", ["tag", nightly], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["tag", `lastcode/checkpoint/${nightly}`], {
+        cwd: repo,
+      });
+      NodeFS.writeFileSync(NodePath.join(repo, "tracked.txt"), "revision\n");
+      NodeChildProcess.execFileSync("git", ["commit", "-am", "ship local revision"], { cwd: repo });
+      NodeChildProcess.execFileSync("git", ["tag", `lastcode/revision/${nightly}.1`], {
+        cwd: repo,
+      });
+
+      const output = NodeChildProcess.execFileSync(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "lastcode-local-update.mjs"),
+          "inspect",
+          "--repo",
+          repo,
+          "--home",
+          root,
+          "--current-version",
+          nightly.slice(1),
+        ],
+        { encoding: "utf8" },
+      );
+      const resultLine = output
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("LASTCODE_LOCAL_UPDATE_RESULT="));
+      assert.ok(resultLine);
+      assert.deepInclude(JSON.parse(resultLine.slice("LASTCODE_LOCAL_UPDATE_RESULT=".length)), {
+        status: "available",
+        checkpointTag: `lastcode/revision/${nightly}.1`,
+        availableVersion: `${nightly.slice(1)}.1`,
+        releaseNotes: ["ship local revision"],
+      });
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("parses explicit inspect and build inputs", () => {
