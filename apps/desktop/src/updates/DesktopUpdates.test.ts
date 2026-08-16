@@ -342,15 +342,15 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
-  it.effect("builds and stages an opted-in local checkpoint through electron-updater", () => {
-    const checkpointTag = "lastcode/checkpoint/v1.2.4-nightly.20260814.1089";
+  it.effect("builds and stages an opted-in local revision through electron-updater", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 1,
         status: "available",
         checkpointTag,
-        availableVersion: "1.2.4-nightly.20260814.1089",
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
         releaseNotes: ["feat(lastcode): local update"],
       },
       localBuild: {
@@ -379,7 +379,7 @@ describe("DesktopUpdates", () => {
 
         const downloaded = yield* updates.getState;
         assert.equal(downloaded.status, "downloaded");
-        assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089");
+        assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089.1");
         assert.deepInclude(harness.feedUrls().at(-1), {
           provider: "generic",
           url: "http://127.0.0.1:4242",
