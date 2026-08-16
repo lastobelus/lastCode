@@ -9,13 +9,14 @@ import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
+const REVISION_PREFIX = "lastcode/revision/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const LOG_POLL_INTERVAL_MS = 400;
 const BUILD_MANAGED_MARKER = "LastCode managed command: lastcode-build";
 const UPDATE_HELPER_MANAGED_MARKER = "LastCode managed helper: lastcode-local-update";
 
 export const BUILD_PHASES = [
-  { marker: "Building lastcode/checkpoint/", start: 0, estimateMs: 10_000 },
+  { marker: "Building lastcode/", start: 0, estimateMs: 10_000 },
   { marker: "Preparing worktree", start: 0.01, estimateMs: 20_000 },
   { marker: "Scope: all", start: 0.03, estimateMs: 45_000 },
   { marker: "Done in", start: 0.08, estimateMs: 5_000 },
@@ -209,8 +210,25 @@ function splitLines(value) {
 }
 
 function parseNightly(tag) {
-  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(tag);
-  return match?.slice(1).map(Number);
+  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)(?:\.(\d+))?$/.exec(tag);
+  if (!match) return undefined;
+  return [...match.slice(1, 6).map(Number), Number(match[6] ?? 0)];
+}
+
+function installableVersion(tag) {
+  const prefix = tag.startsWith(CHECKPOINT_PREFIX)
+    ? CHECKPOINT_PREFIX
+    : tag.startsWith(REVISION_PREFIX)
+      ? REVISION_PREFIX
+      : undefined;
+  if (!prefix) return undefined;
+  const version = tag.slice(prefix.length);
+  const parts = parseNightly(version);
+  if (!parts) return undefined;
+  const revision = parts.at(-1);
+  if (prefix === CHECKPOINT_PREFIX && revision !== 0) return undefined;
+  if (prefix === REVISION_PREFIX && revision === 0) return undefined;
+  return { parts, prefix, version };
 }
 
 function compareNightlies(left, right) {
@@ -257,22 +275,20 @@ export function parseOptions(argv) {
 }
 
 export function resolveCheckpointTag(tags, selector) {
-  const validTags = tags.filter((tag) => {
-    if (!tag.startsWith(CHECKPOINT_PREFIX)) return false;
-    return parseNightly(tag.slice(CHECKPOINT_PREFIX.length)) !== undefined;
-  });
-  if (validTags.length === 0) throw new Error("No local LastCode checkpoint tags were found.");
+  const validTags = tags.filter((tag) => installableVersion(tag) !== undefined);
+  if (validTags.length === 0) throw new Error("No local LastCode installable tags were found.");
   if (!selector) {
     return validTags.toSorted((left, right) =>
-      compareNightlies(right.slice(CHECKPOINT_PREFIX.length), left.slice(CHECKPOINT_PREFIX.length)),
+      compareNightlies(installableVersion(right).version, installableVersion(left).version),
     )[0];
   }
 
-  const normalized = selector.startsWith(CHECKPOINT_PREFIX)
-    ? selector
-    : selector.startsWith("v")
-      ? `${CHECKPOINT_PREFIX}${selector}`
-      : undefined;
+  const normalized =
+    selector.startsWith(CHECKPOINT_PREFIX) || selector.startsWith(REVISION_PREFIX)
+      ? selector
+      : selector.startsWith("v")
+        ? `${parseNightly(selector)?.at(-1) === 0 ? CHECKPOINT_PREFIX : REVISION_PREFIX}${selector}`
+        : undefined;
   if (normalized) {
     if (validTags.includes(normalized)) return normalized;
     throw new Error(`Checkpoint '${selector}' was not found.`);
@@ -282,12 +298,21 @@ export function resolveCheckpointTag(tags, selector) {
       `Invalid checkpoint selector '${selector}'. Use a number such as 1090 or a full nightly tag.`,
     );
   }
-  const matches = validTags.filter((tag) => tag.endsWith(`.${selector}`));
-  if (matches.length === 1) return matches[0];
+  const matches = validTags.filter((tag) => installableVersion(tag).parts[4] === Number(selector));
+  if (matches.length > 0) {
+    const nightlyIdentities = new Set(
+      matches.map((tag) => installableVersion(tag).parts.slice(0, 5).join(".")),
+    );
+    if (nightlyIdentities.size > 1) {
+      throw new Error(
+        `Checkpoint selector '${selector}' is ambiguous:\n${matches.map((tag) => `  ${tag}`).join("\n")}`,
+      );
+    }
+    return matches.toSorted((left, right) =>
+      compareNightlies(installableVersion(right).version, installableVersion(left).version),
+    )[0];
+  }
   if (matches.length === 0) throw new Error(`Checkpoint ending in .${selector} was not found.`);
-  throw new Error(
-    `Checkpoint selector '${selector}' is ambiguous:\n${matches.map((tag) => `  ${tag}`).join("\n")}`,
-  );
 }
 
 function resolveConfiguredRepo(home, override) {
@@ -488,8 +513,8 @@ async function main(argv) {
     console.log("       lastcode-build --checkpoint CHECKPOINT");
     console.log("       lastcode-build --uninstall");
     console.log("");
-    console.log("CHECKPOINT may be 1090, a full nightly tag, or a lastcode/checkpoint tag.");
-    console.log("Without CHECKPOINT, the newest local checkpoint is built.");
+    console.log("CHECKPOINT may be 1090, a full version, or a checkpoint/revision tag.");
+    console.log("Without CHECKPOINT, the newest local installable revision is built.");
     return;
   }
   const home = NodeOS.homedir();
@@ -502,7 +527,14 @@ async function main(argv) {
     installCommand(repoRoot, home);
     return;
   }
-  const tags = splitLines(runGit(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]));
+  const tags = splitLines(
+    runGit(repoRoot, [
+      "tag",
+      "--list",
+      `${CHECKPOINT_PREFIX}v*-nightly.*`,
+      `${REVISION_PREFIX}v*-nightly.*`,
+    ]),
+  );
   await buildCheckpoint(repoRoot, home, resolveCheckpointTag(tags, options.checkpoint));
 }
 
