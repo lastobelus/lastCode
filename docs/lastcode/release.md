@@ -35,10 +35,12 @@ Local CI has three independent Git-safety boundaries:
    disposable global Git config, so fixture identities and defaults cannot be
    written into the shared repository config.
 3. Before quick or full CI starts, the runner requires `core.bare=false` in the
-   shared Git config and snapshots that config byte-for-byte. It checks the
-   value, config contents, and common Git directory again on every exit,
-   including failed CI runs. Any change fails the gate with the config path to
-   inspect.
+   shared Git config and snapshots its repository-wide settings. It checks the
+   value, protected settings, and common Git directory again on every exit,
+   including failed CI runs. Any protected change fails the gate with the config
+   path to inspect. Existing per-branch settings are preserved too, while new
+   branch keys are allowed because T3 and GitHub CLI legitimately add
+   branch/worktree bookkeeping while CI runs in another worktree.
 
 These guards protect the primary checkout and every linked worktree, which all
 share the same Git config. They specifically prevent temporary-repository tests
@@ -46,6 +48,11 @@ from reinitializing or reconfiguring the real repository when CI is launched by
 a Git hook. They do not automatically repair an integrity failure: stop, inspect
 the reported config and worktree state, and preserve evidence before changing
 anything.
+
+Workspace test tasks run one package, one Vitest worker, and one concurrent test
+case at a time. This takes longer than the task-runner defaults but avoids
+cross-suite state leaks plus memory and CPU contention between the web, mobile,
+desktop, and server suites on the single local build machine.
 
 Before merging a LastCode PR, run the full gate from a clean feature branch:
 
@@ -75,7 +82,7 @@ A release build uses a different full-CI context because rebasing intentionally
 rewrites ancestry. Check out the immutable checkpoint and run:
 
 ```bash
-pnpm lastcode:ci --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
 The resulting stamp binds the exact LastCode commit, checkpoint tag, upstream
