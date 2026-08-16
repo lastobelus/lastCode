@@ -1,6 +1,8 @@
 export interface ParsedNightlyVersion {
   readonly tag: string;
+  readonly nightlyTag: string;
   readonly parts: ReadonlyArray<number>;
+  readonly revision: number;
 }
 
 export interface LocalUpdateOptions {
@@ -43,7 +45,7 @@ export function isReusableCheckpointCiStamp(
 
 export function parseNightlyVersion(value: string): ParsedNightlyVersion | undefined;
 export function compareNightlyVersions(left: string, right: string): number;
-export function resolveLatestCheckpointTag(tags: ReadonlyArray<string>): string | undefined;
+export function resolveLatestInstallableTag(tags: ReadonlyArray<string>): string | undefined;
 export function parseOptions(argv: ReadonlyArray<string>): LocalUpdateOptions;
 export function resolveExistingBuild(options: ExistingBuildOptions): ExistingBuild | undefined;
 export function quarantineIncompleteBuild(
