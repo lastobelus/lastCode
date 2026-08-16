@@ -77,7 +77,16 @@ describe("lastcode-local-ci", () => {
     );
     expect(quickSteps.find(({ label }) => label === "Workspace tests")).toMatchObject({
       kind: "command",
-      args: ["run", "--recursive", "--concurrency-limit", "1", "test", "--", "--maxWorkers=1"],
+      args: [
+        "run",
+        "--recursive",
+        "--concurrency-limit",
+        "1",
+        "test",
+        "--",
+        "--maxWorkers=1",
+        "--maxConcurrency=1",
+      ],
     });
   });
 
