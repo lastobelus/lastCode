@@ -6,6 +6,7 @@ import { OrchestrationEngineLive } from "./Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "./ThreadBackgroundLiveness.ts";
+import * as ThreadActionResume from "./ThreadActionResume.ts";
 import * as ThreadPlanProgress from "./ThreadPlanProgress.ts";
 
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -27,6 +28,7 @@ export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
   // ingestion.
 ).pipe(
   Layer.provideMerge(ThreadBackgroundLiveness.layer),
+  Layer.provideMerge(ThreadActionResume.layer),
   Layer.provideMerge(ThreadPlanProgress.layer),
 );
 
