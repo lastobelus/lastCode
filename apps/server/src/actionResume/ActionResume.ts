@@ -57,6 +57,7 @@ interface FinishActionInput {
   readonly outcome: Exclude<ActionResumeState["outcome"], "running">;
   readonly exitCode?: number | null;
   readonly exitSignal?: number | null;
+  readonly deliver?: boolean;
 }
 
 export class ActionResume extends Context.Service<
@@ -298,9 +299,10 @@ const make = Effect.gen(function* () {
     if (current === null || current.outcome !== "running") return;
     const finishedAt = yield* nowIso;
     const shouldDeliver =
-      input.outcome === "succeeded" ||
-      input.outcome === "failed" ||
-      input.outcome === "cancelled_by_user";
+      input.deliver !== false &&
+      (input.outcome === "succeeded" ||
+        input.outcome === "failed" ||
+        input.outcome === "cancelled_by_user");
     const next: ActionResumeState = {
       ...current,
       outcome: input.outcome,
@@ -439,8 +441,6 @@ const make = Effect.gen(function* () {
       exitCode: null,
       exitSignal: null,
     };
-    yield* persistState(state);
-
     const cwd = thread.worktreePath ?? project.workspaceRoot;
     const env = projectScriptRuntimeEnv({
       project: { cwd: project.workspaceRoot },
@@ -456,6 +456,7 @@ const make = Effect.gen(function* () {
         cols: 120,
         rows: 30,
       });
+      yield* persistState(state);
       yield* terminals.write({
         threadId: invocation.threadId,
         terminalId,
@@ -464,6 +465,9 @@ const make = Effect.gen(function* () {
     });
     const launched = yield* Effect.exit(launch);
     if (launched._tag === "Failure") {
+      yield* terminals
+        .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
+        .pipe(Effect.ignoreCause({ log: true }));
       yield* finishUnlocked({ threadId: invocation.threadId, outcome: "failed" });
       return yield* new ActionResumeError({
         reason: "launch_failed",
@@ -554,7 +558,11 @@ const make = Effect.gen(function* () {
       });
     }
     if (event.type === "closed") {
-      return finish({ threadId: state.threadId, outcome: "cancelled_by_user" });
+      return finish({
+        threadId: state.threadId,
+        outcome: "cancelled_by_user",
+        deliver: !event.deleteHistory,
+      });
     }
     if (event.type === "error") {
       return finish({ threadId: state.threadId, outcome: "failed" });

@@ -106,12 +106,14 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   const dispatched: OrchestrationCommand[] = [];
   const opened: TerminalOpenInput[] = [];
   const written: TerminalWriteInput[] = [];
+  const timeline: string[] = [];
   let terminalListener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
 
   const dependencies = Layer.mergeAll(
     Layer.mock(OrchestrationEngineService)({
       dispatch: (command) =>
         Effect.sync(() => {
+          timeline.push(`dispatch:${command.type}`);
           dispatched.push(command);
           return { sequence: dispatched.length };
         }),
@@ -127,6 +129,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     Layer.mock(TerminalManager.TerminalManager)({
       open: (input) =>
         Effect.sync(() => {
+          timeline.push("terminal:open");
           opened.push(input);
           return { shellFamily: "posix" } as TerminalManager.OpenTerminalSessionSnapshot;
         }),
@@ -169,6 +172,10 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(running.outcome, "running");
     assert.equal(opened.length, 1);
     assert.equal(written.length, 1);
+    assert.isBelow(
+      timeline.indexOf("terminal:open"),
+      timeline.indexOf("dispatch:thread.activity.append"),
+    );
     assert.match(written[0]?.data ?? "", /vp test run/);
     assert.match(written[0]?.data ?? "", /exit \$__t3_action_status/);
 
@@ -209,6 +216,23 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.deepInclude(registry.getLatest(threadId), {
       outcome: "succeeded",
       delivery: "delivered",
+    });
+
+    const deleting = yield* service.runProjectActionAndResume(
+      { threadId, providerInstanceId },
+      "qa",
+    );
+    yield* terminalListener!({
+      type: "closed",
+      threadId,
+      terminalId: deleting.terminalId,
+      deleteHistory: true,
+    });
+
+    assert.equal(dispatched.filter((command) => command.type === "thread.turn.start").length, 1);
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "cancelled_by_user",
+      delivery: "disposed",
     });
   }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
 });

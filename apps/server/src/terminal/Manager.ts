@@ -2038,6 +2038,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         threadId,
         terminalId,
         sequence: closedEventSequence,
+        deleteHistory: deleteHistoryOnClose,
       });
     }
 

@@ -1329,12 +1329,23 @@ it.layer(
       yield* manager.open(openInput({ terminalId: "default" }));
       yield* manager.open(openInput({ terminalId: "sidecar" }));
 
+      yield* manager.close({
+        threadId: "thread-1",
+        terminalId: "default",
+        deleteHistory: true,
+      });
       yield* manager.close({ threadId: "thread-1" });
 
       const closedEvents = (yield* getEvents).filter(
         (event): event is Extract<TerminalEvent, { type: "closed" }> => event.type === "closed",
       );
       expect(closedEvents.map((event) => event.terminalId).sort()).toEqual(["default", "sidecar"]);
+      expect(closedEvents.find((event) => event.terminalId === "default")?.deleteHistory).toBe(
+        true,
+      );
+      expect(closedEvents.find((event) => event.terminalId === "sidecar")?.deleteHistory).toBe(
+        false,
+      );
     }),
   );
 
