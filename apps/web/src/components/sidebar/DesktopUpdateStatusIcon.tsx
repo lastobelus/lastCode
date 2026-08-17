@@ -53,6 +53,7 @@ function DesktopUpdateAvailableIcon() {
 }
 
 function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | null }) {
+  const hasDeterminateProgress = percent !== null && Number.isFinite(percent);
   const normalizedPercent = normalizeDesktopUpdateDownloadPercent(percent);
   const progressOffset = DOWNLOAD_PROGRESS_CIRCUMFERENCE * (1 - normalizedPercent / 100);
 
@@ -60,7 +61,10 @@ function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | 
     <span className="relative grid size-8 place-items-center">
       <svg
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 size-full -rotate-90"
+        className={cn(
+          "pointer-events-none absolute inset-0 size-full -rotate-90",
+          !hasDeterminateProgress && "animate-[spin_700ms_ease-out_1] motion-reduce:animate-none",
+        )}
         viewBox="0 0 32 32"
       >
         <circle
@@ -77,11 +81,19 @@ function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | 
           r={DOWNLOAD_PROGRESS_RADIUS}
           fill="none"
           stroke="currentColor"
-          strokeDasharray={DOWNLOAD_PROGRESS_CIRCUMFERENCE}
-          strokeDashoffset={progressOffset}
+          strokeDasharray={
+            hasDeterminateProgress
+              ? DOWNLOAD_PROGRESS_CIRCUMFERENCE
+              : `${DOWNLOAD_PROGRESS_CIRCUMFERENCE * 0.24} ${DOWNLOAD_PROGRESS_CIRCUMFERENCE * 0.76}`
+          }
+          strokeDashoffset={hasDeterminateProgress ? progressOffset : 0}
           strokeLinecap="round"
           strokeWidth="1.5"
-          className="transition-[stroke-dashoffset] duration-300 ease-out motion-reduce:transition-none"
+          className={
+            hasDeterminateProgress
+              ? "transition-[stroke-dashoffset] duration-300 ease-out motion-reduce:transition-none"
+              : undefined
+          }
         />
       </svg>
       <DownloadIcon className="size-4" />
