@@ -2489,18 +2489,18 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
                   ? "Loading archived threads"
                   : archiveError
                     ? "Could not load archived threads"
-                    : selectedProject
-                      ? `No archived threads for ${selectedProject.displayName}`
-                      : "No archived threads"}
+                    : projectKey === null
+                      ? "No archived threads"
+                      : `No archived threads for ${selectedProject?.displayName ?? "the selected project"}`}
               </span>
             }
             description={
               isLoadingArchive
                 ? "Checking connected environments."
                 : (archiveError ??
-                  (selectedProject
-                    ? "Choose another project or All."
-                    : "Archived threads will appear here."))
+                  (projectKey === null
+                    ? "Archived threads will appear here."
+                    : "Choose another project or All."))
             }
           />
         </SettingsSection>
