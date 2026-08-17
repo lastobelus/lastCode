@@ -17,6 +17,7 @@ export type ThreadActionMenuId =
   | "unsnooze"
   | "rename"
   | "regenerate-title"
+  | "cancel-action"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -34,6 +35,7 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
+  readonly hasRunningAction: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly snooze: boolean;
@@ -104,6 +106,9 @@ export function buildThreadActionMenuItems(
             disabled: state.isRegeneratingTitle,
           },
         ]
+      : []),
+    ...(state.hasRunningAction
+      ? [{ id: "cancel-action" as const, label: "Cancel running Action", destructive: true }]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     {
