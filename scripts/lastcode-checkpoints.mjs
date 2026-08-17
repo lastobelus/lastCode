@@ -384,6 +384,23 @@ function latestBuildNumbers(tags) {
   return latestByUpstreamTag;
 }
 
+export function selectRevisionBuilds(checkpointTag, buildTags) {
+  const checkpointVersion = checkpointTag.slice(CHECKPOINT_PREFIX.length);
+  const builds = latestBuildNumbers(buildTags);
+  return [...builds.entries()]
+    .filter(([version]) => {
+      const parsed = parseNightly(version);
+      return version.startsWith(`${checkpointVersion}.`) && parsed?.[5] > 0;
+    })
+    .map(([version, build]) => ({
+      build,
+      buildTag: `${BUILD_PREFIX}${version}.${build}`,
+      revisionTag: `${REVISION_PREFIX}${version}`,
+      version,
+    }))
+    .toSorted((left, right) => compareNightlies(left.version, right.version));
+}
+
 function checkpointRows(repoRoot, home, count, remoteState) {
   const runs = readRuns(home);
   const allCheckpointTags = splitLines(
@@ -395,9 +412,8 @@ function checkpointRows(repoRoot, home, count, remoteState) {
     runs,
   );
   const selectedCheckpointTags = selectCheckpointTags(checkpointTags, count);
-  const buildNumbers = latestBuildNumbers(
-    splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`])),
-  );
+  const buildTags = splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`]));
+  const buildNumbers = latestBuildNumbers(buildTags);
   const successes = selectedCheckpointTags.map((checkpointTag) => {
     const upstreamTag = checkpointTag.slice(CHECKPOINT_PREFIX.length);
     const contents = git(repoRoot, [
@@ -417,7 +433,7 @@ function checkpointRows(repoRoot, home, count, remoteState) {
       allowFailure: true,
     });
     const build = buildNumbers.get(upstreamTag);
-    return {
+    const row = {
       status: "success",
       upstreamTag,
       commitsRebased: Number(trailers["Fork-Commits-Rebased"] ?? inferredCommits),
@@ -427,30 +443,59 @@ function checkpointRows(repoRoot, home, count, remoteState) {
       main: commit === remoteState.remoteMain ? "yes" : "—",
       build: build === undefined ? "—" : `#${build}`,
     };
+    const revisionBuildRows = selectRevisionBuilds(checkpointTag, buildTags).map(
+      ({ build: revisionBuild, buildTag, revisionTag, version }) => {
+        const revisionCommit = git(repoRoot, ["rev-list", "-n", "1", revisionTag]);
+        return {
+          status: "build",
+          upstreamTag: `  ${version}`,
+          commitsRebased: "—",
+          finishedAt: git(repoRoot, [
+            "for-each-ref",
+            "--format=%(taggerdate:iso8601-strict)",
+            `refs/tags/${buildTag}`,
+          ]),
+          durationMs: Number.NaN,
+          checkpoint: revisionCommit.slice(0, 9),
+          main: revisionCommit === remoteState.remoteMain ? "yes" : "—",
+          build: `#${revisionBuild}`,
+        };
+      },
+    );
+    return { finishedAt: row.finishedAt, rows: [row, ...revisionBuildRows] };
   });
   const failures = failedRunsWithoutPublishedTags(remoteState.publishedTags, runs).map(
     (record) => ({
-      status: "failed",
-      upstreamTag: record.upstreamTag,
-      commitsRebased: Number(record.commitsRebased),
       finishedAt: record.finishedAt,
-      durationMs: Number(record.durationMs),
-      checkpoint: "—",
-      main: "—",
-      build: "—",
-      error: record.error,
-      failurePhase: record.failurePhase,
-      recoveryBranch: record.recoveryBranch,
+      rows: [
+        {
+          status: "failed",
+          upstreamTag: record.upstreamTag,
+          commitsRebased: Number(record.commitsRebased),
+          finishedAt: record.finishedAt,
+          durationMs: Number(record.durationMs),
+          checkpoint: "—",
+          main: "—",
+          build: "—",
+          error: record.error,
+          failurePhase: record.failurePhase,
+          recoveryBranch: record.recoveryBranch,
+        },
+      ],
     }),
   );
-  return [...successes, ...failures].sort(
-    (left, right) => new Date(right.finishedAt).getTime() - new Date(left.finishedAt).getTime(),
-  );
+  return [...successes, ...failures]
+    .sort(
+      (left, right) => new Date(right.finishedAt).getTime() - new Date(left.finishedAt).getTime(),
+    )
+    .slice(0, count)
+    .flatMap(({ rows }) => rows);
 }
 
 function styledStatus(status) {
   if (status === "success") return style(ansi.green, "✓");
   if (status === "failed") return style(ansi.error, "✗");
+  if (status === "build") return style(ansi.pacific, "↳");
   return style(ansi.pacific, "●");
 }
 
@@ -470,10 +515,13 @@ function daemonSummary() {
 
 function printDashboard(repoRoot, home, count, verbose) {
   const remoteState = remotePublicationState(repoRoot);
-  const allRows = checkpointRows(repoRoot, home, count, remoteState);
-  const rows = allRows.slice(0, count);
+  const rows = checkpointRows(repoRoot, home, count, remoteState);
   const columns = [
-    { key: "status", label: "STATUS", value: (row) => (row.status === "success" ? "✓" : "✗") },
+    {
+      key: "status",
+      label: "STATUS",
+      value: (row) => (row.status === "success" ? "✓" : row.status === "failed" ? "✗" : "↳"),
+    },
     { key: "upstreamTag", label: "UPSTREAM NIGHTLY", value: (row) => row.upstreamTag },
     { key: "commitsRebased", label: "REBASED", value: (row) => String(row.commitsRebased) },
     { key: "finishedAt", label: "FINISHED", value: (row) => formatFinished(row.finishedAt) },
@@ -492,7 +540,7 @@ function printDashboard(repoRoot, home, count, verbose) {
       .trimEnd();
 
   console.log(
-    `${style(ansi.projectName, "LastCode")} ${style(ansi.pacific, "nightly checkpoints")} ${style(ansi.lavender, `Showing ${rows.length}`)}`,
+    `${style(ansi.projectName, "LastCode")} ${style(ansi.pacific, "nightly checkpoints")} ${style(ansi.lavender, `Showing ${rows.filter((row) => row.status !== "build").length}`)}`,
   );
   console.log("");
   console.log(style(ansi.iceBold, line(columns.map((column) => column.label))));
@@ -500,13 +548,23 @@ function printDashboard(repoRoot, home, count, verbose) {
     const raw = columns.map((column) => column.value(row));
     const padded = raw.map((value, index) => value.padEnd(columns[index].width));
     padded[0] = `${styledStatus(row.status)}${" ".repeat(columns[0].width - raw[0].length)}`;
+    if (row.status === "build") {
+      for (let index = 1; index < padded.length; index += 1) {
+        padded[index] = style(ansi.pacific, padded[index]);
+      }
+      console.log(padded.join("  ").trimEnd());
+      continue;
+    }
     padded[1] = style(ansi.amber, padded[1]);
     for (const index of [3, 4, 5]) padded[index] = style(ansi.lavender, padded[index]);
     if (row.main === "yes") padded[6] = style(ansi.green, padded[6]);
     console.log(padded.join("  ").trimEnd());
   }
 
-  const selectedFailures = allRows.filter((row) => row.status === "failed");
+  const selectedFailures = failedRunsWithoutPublishedTags(
+    remoteState.publishedTags,
+    readRuns(home),
+  );
   for (const detail of failureDetailLines(rows, verbose)) {
     console.log(style(ansi.error, detail));
   }
