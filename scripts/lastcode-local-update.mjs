@@ -183,6 +183,19 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
       throw new Error(`Existing build is incomplete at ${outputDir}; missing ${suffix}.`);
     }
   }
+  const dmgNames = artifacts.filter((name) => name.endsWith(".dmg"));
+  if (dmgNames.length !== 1) {
+    throw new Error(
+      `Existing build must contain exactly one DMG at ${outputDir}; found ${dmgNames.length}.`,
+    );
+  }
+  const dmgName = dmgNames[0];
+  const manifestArtifact = Array.isArray(manifest.artifacts)
+    ? manifest.artifacts.find((artifact) => artifact?.path === dmgName)
+    : undefined;
+  if (!manifestArtifact || !/^[a-f0-9]{64}$/.test(manifestArtifact.sha256)) {
+    throw new Error(`Existing build manifest is missing the DMG checksum: ${manifestPath}`);
+  }
   if (
     git(repoRoot, ["cat-file", "-t", manifest.buildTag]) !== "tag" ||
     git(repoRoot, ["rev-parse", `${manifest.buildTag}^{commit}`]) !== checkpointCommit
@@ -191,7 +204,12 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
       `Existing build is incomplete at ${outputDir}; annotated tag ${manifest.buildTag} is missing or mismatched.`,
     );
   }
-  return { outputDir, manifestPath };
+  return {
+    outputDir,
+    manifestPath,
+    dmgPath: NodePath.join(outputDir, dmgName),
+    dmgSha256: manifestArtifact.sha256,
+  };
 }
 
 export function quarantineIncompleteBuild(
