@@ -34,25 +34,6 @@ it("does not expose an archived snapshot failure message", () => {
     snapshots: [],
     error: "Failed to load archived threads.",
     isLoading: false,
-    isReady: true,
-  });
-
-  registry.dispose();
-});
-
-it("does not mark an initial archived snapshot as ready", () => {
-  const environmentId = EnvironmentId.make("env-initial");
-  const snapshotsAtom = createArchivedThreadSnapshotsAtomFamily<Error>({
-    getSnapshotAtom: () => Atom.make(AsyncResult.initial<OrchestrationShellSnapshot, Error>(false)),
-    labelPrefix: "test:archived-thread-snapshots",
-  });
-  const registry = AtomRegistry.make();
-
-  expect(registry.get(snapshotsAtom(makeArchivedThreadsEnvironmentKey([environmentId])))).toEqual({
-    snapshots: [],
-    error: null,
-    isLoading: false,
-    isReady: false,
   });
 
   registry.dispose();

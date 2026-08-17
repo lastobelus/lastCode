@@ -10,7 +10,7 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "./WorkspaceBreadcrumb";
 
-const ALL_PROJECTS_MENU_ID = "__all_projects__";
+const ALL_PROJECTS_MENU_ID = "all";
 
 export interface ProjectScopeBreadcrumbItem {
   readonly id: string;
@@ -36,17 +36,27 @@ export function ProjectScopeBreadcrumb(props: {
     if (!api) return;
 
     const rect = event.currentTarget.getBoundingClientRect();
+    const projectKeyByMenuId = new Map<string, string>(
+      props.items.map((item, index) => [`project:${index}`, item.id] as const),
+    );
     const items: ContextMenuItem<string>[] = [
       ...(props.allLabel
         ? [{ id: ALL_PROJECTS_MENU_ID, label: props.allLabel } satisfies ContextMenuItem<string>]
         : []),
-      ...props.items,
+      ...props.items.map((item, index) => ({ id: `project:${index}`, label: item.label })),
     ];
     void settlePromise(() =>
       api.contextMenu.show(items, { x: rect.left, y: rect.bottom + 4 }),
     ).then((clicked) => {
       if (clicked._tag === "Failure" || clicked.value === null) return;
-      props.onSelect(clicked.value === ALL_PROJECTS_MENU_ID ? null : clicked.value);
+      if (clicked.value === ALL_PROJECTS_MENU_ID) {
+        props.onSelect(null);
+        return;
+      }
+      const projectKey = projectKeyByMenuId.get(clicked.value);
+      if (projectKey !== undefined) {
+        props.onSelect(projectKey);
+      }
     });
   };
 

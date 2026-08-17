@@ -79,10 +79,7 @@ import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../../state/server";
 import { useArchivedProjectModel } from "../../lib/archivedThreadsState";
-import {
-  filterArchivedProjectGroups,
-  resolveArchivedProjectSelection,
-} from "../../archiveProjectFiltering";
+import { filterArchivedProjectGroups } from "../../archiveProjectFiltering";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -2411,24 +2408,18 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {
     archivedGroups,
-    canValidateProjectKey,
     error: archiveError,
     isLoading: isLoadingArchive,
     projectGroups,
     refresh: refreshArchivedThreads,
   } = useArchivedProjectModel();
-  const selection = resolveArchivedProjectSelection({
-    canValidateProjectKey,
-    projectGroups,
-    requestedProjectKey: projectKey,
-  });
   const selectedProject =
-    selection.selectedProjectKey === null
+    projectKey === null
       ? null
-      : (projectGroups.find((group) => group.projectKey === selection.selectedProjectKey) ?? null);
+      : (projectGroups.find((group) => group.projectKey === projectKey) ?? null);
   const visibleArchivedGroups = useMemo(
-    () => filterArchivedProjectGroups(archivedGroups, selection.selectedProjectKey),
-    [archivedGroups, selection.selectedProjectKey],
+    () => filterArchivedProjectGroups(archivedGroups, projectKey),
+    [archivedGroups, projectKey],
   );
 
   const handleArchivedThreadContextMenu = useCallback(

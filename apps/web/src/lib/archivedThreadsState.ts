@@ -7,10 +7,7 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useMemo } from "react";
 
-import {
-  buildArchivedProjectModel,
-  canValidateArchivedProjectKey,
-} from "../archiveProjectFiltering";
+import { buildArchivedProjectModel } from "../archiveProjectFiltering";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import { orchestrationEnvironment } from "../state/orchestration";
@@ -39,7 +36,6 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
   readonly snapshots: ReadonlyArray<ArchivedSnapshotEntry>;
   readonly error: string | null;
   readonly isLoading: boolean;
-  readonly isReady: boolean;
   readonly refresh: () => void;
 } {
   const environmentKey = useMemo(
@@ -100,24 +96,11 @@ export function useArchivedProjectModel() {
   }, [archiveState.snapshots, environmentLabelById, primaryEnvironmentId, projectGroupingSettings]);
   const environmentTopologyReady = isHostedStaticApp() || primaryEnvironmentId !== null;
   const isLoading =
-    archiveState.isLoading ||
-    !archiveState.isReady ||
-    !environmentsReady ||
-    !environmentTopologyReady ||
-    !settingsHydrated;
-  const canValidateProjectKey = canValidateArchivedProjectKey({
-    archiveError: archiveState.error,
-    archivesReady: archiveState.isReady,
-    environmentsReady,
-    environmentTopologyReady,
-    isLoadingArchive: archiveState.isLoading,
-    settingsHydrated,
-  });
+    archiveState.isLoading || !environmentsReady || !environmentTopologyReady || !settingsHydrated;
 
   return {
     ...archiveState,
     ...model,
-    canValidateProjectKey,
     isLoading,
   };
 }
