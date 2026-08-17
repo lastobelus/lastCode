@@ -69,6 +69,10 @@ shortcut is `mod+shift+s`, and it does not run while the terminal has focus.
 already pinned. Its default shortcut is `mod+shift+p`, and it does not run while the terminal has
 focus. See [Organizing threads](./thread-sidebar.md) for how pinned threads are ordered.
 
+`sidebar.mode.toggle` switches between the inbox and legacy sidebars by updating the same persisted
+preference as **Settings** → **General** → **Legacy features** → **Sidebar (legacy)**. It has no
+default shortcut, so add one in **Settings** → **Keybindings** if you want to use it.
+
 The command palette searches settings, active thread titles, projects, branches, user messages, and
 final agent responses across connected environments. A setting result opens its exact control or
 section. Message matches show one labeled excerpt while keeping the thread's project, branch, and
