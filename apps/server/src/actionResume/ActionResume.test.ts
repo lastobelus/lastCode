@@ -12,7 +12,6 @@ import {
   type OrchestrationThreadShell,
   type TerminalEvent,
   type TerminalOpenInput,
-  type TerminalSessionSnapshot,
   type TerminalWriteInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -39,8 +38,8 @@ const thread = {
   projectId,
   title: "Action resume thread",
   modelSelection: { provider: "codex", instanceId: providerInstanceId, model: "gpt-5" },
-  runtimeMode: "full-access",
-  interactionMode: "default",
+  runtimeMode: "approval-required",
+  interactionMode: "plan",
   branch: null,
   worktreePath: null,
   latestTurn: null,
@@ -82,6 +81,17 @@ const project = {
   updatedAt: now,
 } as OrchestrationProjectShell;
 
+it("writes shell-specific status propagation for Action terminals", () => {
+  assert.equal(
+    ActionResume.actionCommandForShell("vp test run", "powershell"),
+    "vp test run\nif ($?) { exit 0 }\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nexit 1\n",
+  );
+  assert.equal(
+    ActionResume.actionCommandForShell("vp test run", "cmd"),
+    "vp test run\nexit /b %errorlevel%\n",
+  );
+});
+
 it.effect("runs one opted-in Action and delivers exactly one automated follow-up", () => {
   const dispatched: OrchestrationCommand[] = [];
   const opened: TerminalOpenInput[] = [];
@@ -108,7 +118,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       open: (input) =>
         Effect.sync(() => {
           opened.push(input);
-          return {} as TerminalSessionSnapshot;
+          return { shellFamily: "posix" } as TerminalManager.OpenTerminalSessionSnapshot;
         }),
       write: (input) =>
         Effect.sync(() => {
@@ -175,6 +185,8 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts.length, 1);
     assert.equal(turnStarts[0]?.message.role, "system");
     assert.match(turnStarts[0]?.message.text ?? "", /Automated Project Action follow-up/);
+    assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
+    assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
 
     const registry = yield* ThreadActionResume.ThreadActionResumeService;
     assert.deepInclude(registry.getLatest(threadId), {

@@ -73,7 +73,7 @@ export interface ProjectionThreadActivityRepositoryShape {
     input: ListProjectionThreadActivitiesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
-  /** List all rows of one activity kind in durable creation order. */
+  /** List all rows of one activity kind in ascending runtime sequence order. */
   readonly listByKind: (
     input: ListProjectionThreadActivitiesByKindInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;

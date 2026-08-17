@@ -120,6 +120,20 @@ const followUpText = (state: ActionResumeState): string => {
   ].join("\n");
 };
 
+export function actionCommandForShell(
+  command: string,
+  shellFamily: TerminalManager.TerminalShellFamily | undefined,
+): string {
+  switch (shellFamily) {
+    case "powershell":
+      return `${command}\nif ($?) { exit 0 }\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nexit 1\n`;
+    case "cmd":
+      return `${command}\nexit /b %errorlevel%\n`;
+    default:
+      return `${command}\n__t3_action_status=$?\nexit $__t3_action_status\n`;
+  }
+}
+
 const mapActionResumeError =
   (operation: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, ActionResumeError, R> =>
@@ -194,22 +208,22 @@ const make = Effect.gen(function* () {
       );
   });
 
-  const threadEligibleForFollowUp = Effect.fn("ActionResume.threadEligibleForFollowUp")(function* (
+  const eligibleThreadForFollowUp = Effect.fn("ActionResume.eligibleThreadForFollowUp")(function* (
     threadId: ThreadId,
   ) {
     const thread = yield* snapshots.getThreadShellById(threadId);
-    if (Option.isNone(thread) || thread.value.archivedAt !== null) return false;
+    if (Option.isNone(thread) || thread.value.archivedAt !== null) return null;
     const latestTurn = thread.value.latestTurn;
     const turnIdle = latestTurn === null || latestTurn.state !== "running";
     const sessionIdle =
       thread.value.session === null ||
       (thread.value.session.status !== "starting" && thread.value.session.status !== "running");
-    return (
+    const eligible =
       turnIdle &&
       sessionIdle &&
       !thread.value.hasPendingApprovals &&
-      !thread.value.hasPendingUserInput
-    );
+      !thread.value.hasPendingUserInput;
+    return eligible ? thread.value : null;
   });
 
   const deliverPendingUnlocked = Effect.fn("ActionResume.deliverPendingUnlocked")(function* (
@@ -217,7 +231,8 @@ const make = Effect.gen(function* () {
   ) {
     const state = registry.getLatest(threadId);
     if (state === null || state.delivery !== "pending") return;
-    if (!(yield* threadEligibleForFollowUp(threadId))) return;
+    const thread = yield* eligibleThreadForFollowUp(threadId);
+    if (thread === null) return;
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
@@ -231,8 +246,8 @@ const make = Effect.gen(function* () {
         text: followUpText(state),
         attachments: [],
       },
-      runtimeMode: "full-access",
-      interactionMode: "default",
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
       createdAt: state.finishedAt ?? (yield* nowIso),
     });
     yield* persistState({ ...state, delivery: "delivered" });
@@ -379,7 +394,7 @@ const make = Effect.gen(function* () {
       worktreePath: thread.worktreePath,
     });
     const launch = Effect.gen(function* () {
-      yield* terminals.open({
+      const terminal = yield* terminals.open({
         threadId: invocation.threadId,
         terminalId,
         cwd,
@@ -391,7 +406,7 @@ const make = Effect.gen(function* () {
       yield* terminals.write({
         threadId: invocation.threadId,
         terminalId,
-        data: `${script.command}\n__t3_action_status=$?\nexit $__t3_action_status\n`,
+        data: actionCommandForShell(script.command, terminal.shellFamily),
       });
     });
     const launched = yield* Effect.exit(launch);
