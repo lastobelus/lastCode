@@ -12,14 +12,16 @@ const HOLD_HINT_LINGER_MS = 1200;
  */
 export function QuitHoldOverlay() {
   const [visibleMode, setVisibleMode] = useState<"hold" | "double-click" | null>(null);
+  const [runningActionCount, setRunningActionCount] = useState(0);
 
   useEffect(() => {
     const subscribe = window.desktopBridge?.onQuitShortcut;
     if (!subscribe) return;
     let hideTimer: number | undefined;
     let pressedMode: "hold" | "double-click" = "hold";
-    const unsubscribe = subscribe((hint) => {
+    const unsubscribe = subscribe((hint, nextRunningActionCount) => {
       window.clearTimeout(hideTimer);
+      setRunningActionCount(nextRunningActionCount);
       if (hint.state === "down") {
         pressedMode = hint.mode;
         setVisibleMode(hint.mode);
@@ -50,6 +52,9 @@ export function QuitHoldOverlay() {
     >
       <div className="rounded-full bg-neutral-700/95 px-8 py-4 text-2xl font-bold text-white shadow-xl">
         {message}
+        {runningActionCount > 0
+          ? ` and cancel ${runningActionCount} running ${runningActionCount === 1 ? "Action" : "Actions"}`
+          : ""}
       </div>
     </div>
   );
