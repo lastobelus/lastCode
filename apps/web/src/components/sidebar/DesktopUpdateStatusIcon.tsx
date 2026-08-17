@@ -63,7 +63,7 @@ function DesktopUpdateDownloadingIcon({ percent }: { readonly percent: number | 
         aria-hidden="true"
         className={cn(
           "pointer-events-none absolute inset-0 size-full -rotate-90",
-          !hasDeterminateProgress && "animate-spin motion-reduce:animate-none",
+          !hasDeterminateProgress && "animate-[spin_700ms_ease-out_1] motion-reduce:animate-none",
         )}
         viewBox="0 0 32 32"
       >
