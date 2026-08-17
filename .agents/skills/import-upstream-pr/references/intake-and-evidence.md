@@ -107,7 +107,8 @@ Tie every result to the exact port head and destination base. Record:
 - toolchain activation command plus Node and package-manager versions;
 - dependency install command and terminal success;
 - focused commands and test counts;
-- `git diff --check` result;
+- `git diff --check <destination-base> <port-head>` result for the committed
+  port range;
 - affected-surface matrix with explicit non-applicable entries;
 - integrated client, disposable-state boundary, viewport, route/state/rendered
   assertions, and before/after artifact paths or published URLs;

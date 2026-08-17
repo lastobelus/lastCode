@@ -92,8 +92,9 @@ Treat every conflict resolution and downstream adaptation as first-party code.
    completed install is not evidence; require its zero exit and terminal
    completion.
 4. Run focused behavior tests, targeted lint, the affected package typecheck,
-   and `git diff --check` under the repository's canonical toolchain. Record the
-   toolchain command and versions with the receipt.
+   and `git diff --check <destination-base> <port-head>` under the repository's
+   canonical toolchain. A bare `git diff --check` does not inspect an already
+   committed port. Record the toolchain command and versions with the receipt.
 5. Add focused regression tests for backend or automation behavior. Do not run
    repo-wide checks merely for intake.
 6. For user-visible behavior, obtain browser/computer-use approval and use the
