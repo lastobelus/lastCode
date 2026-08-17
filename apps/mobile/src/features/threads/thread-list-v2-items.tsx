@@ -9,6 +9,7 @@ import {
   type ChangeRequestSettleSource,
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
+import * as Cause from "effect/Cause";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Alert, Platform, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
@@ -22,6 +23,8 @@ import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/time";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { terminalEnvironment } from "../../state/terminal";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -57,6 +60,7 @@ const STATUS_LABEL_BY_STATUS: Partial<
   approval: { label: "Approval", className: "text-amber-700 dark:text-amber-300" },
   input: { label: "Input", className: "text-indigo-600 dark:text-indigo-300" },
   working: { label: "Working", className: "text-sky-600 dark:text-sky-400" },
+  waiting: { label: "Waiting", className: "text-yellow-700 dark:text-yellow-300" },
   failed: { label: "Failed", className: "text-red-700 dark:text-red-300" },
 };
 
@@ -405,6 +409,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   } = props;
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
+  const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
 
   const pr = useThreadPr(thread, props.projectCwd ?? props.project?.workspaceRoot ?? null);
   const prState = pr?.state ?? null;
@@ -452,6 +458,20 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     [onMovePinnedThread, thread],
   );
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleCancelAction = useCallback(async () => {
+    if (runningAction === null) return;
+    const result = await closeTerminal({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id, terminalId: runningAction.terminalId },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not cancel Action",
+        error instanceof Error ? error.message : "The Project Action could not be cancelled.",
+      );
+    }
+  }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
   // row can un-settle — explicit settles clear the override, auto-settled
@@ -532,6 +552,20 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       }),
     [props.titleRegenerationSupported, thread.titleRegeneration],
   );
+  const actionMenuItems = useMemo<MenuAction[]>(
+    () =>
+      runningAction === null
+        ? []
+        : [
+            {
+              id: "cancel-action",
+              title: `Cancel ${runningAction.actionName}`,
+              image: "stop.fill",
+              attributes: { destructive: true },
+            },
+          ],
+    [runningAction],
+  );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
       { id: "settle", title: "Settle", image: "checkmark" },
@@ -543,35 +577,48 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       },
       ...pinMenuItem,
       ...titleRegenerationMenuItems,
+      ...actionMenuItems,
       { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
     ],
-    [pinMenuItem, snoozePresetActions, titleRegenerationMenuItems],
+    [actionMenuItems, pinMenuItem, snoozePresetActions, titleRegenerationMenuItems],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
     () => [
       CARD_MENU_ACTIONS[0]!,
       ...pinMenuItem,
       ...titleRegenerationMenuItems,
+      ...actionMenuItems,
       ...CARD_MENU_ACTIONS.slice(1),
     ],
-    [pinMenuItem, titleRegenerationMenuItems],
+    [actionMenuItems, pinMenuItem, titleRegenerationMenuItems],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
     () => [
       SLIM_MENU_ACTIONS[0]!,
       ...(thread.pinnedAt != null ? pinMenuItem : []),
       ...titleRegenerationMenuItems,
+      ...actionMenuItems,
       SLIM_MENU_ACTIONS[1]!,
     ],
-    [pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems],
+    [actionMenuItems, pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
-    () => [SNOOZED_MENU_ACTIONS[0]!, ...titleRegenerationMenuItems, SNOOZED_MENU_ACTIONS[1]!],
-    [titleRegenerationMenuItems],
+    () => [
+      SNOOZED_MENU_ACTIONS[0]!,
+      ...titleRegenerationMenuItems,
+      ...actionMenuItems,
+      SNOOZED_MENU_ACTIONS[1]!,
+    ],
+    [actionMenuItems, titleRegenerationMenuItems],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
-    () => [LEGACY_MENU_ACTIONS[0]!, ...titleRegenerationMenuItems, LEGACY_MENU_ACTIONS[1]!],
-    [titleRegenerationMenuItems],
+    () => [
+      LEGACY_MENU_ACTIONS[0]!,
+      ...titleRegenerationMenuItems,
+      ...actionMenuItems,
+      LEGACY_MENU_ACTIONS[1]!,
+    ],
+    [actionMenuItems, titleRegenerationMenuItems],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -584,6 +631,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-pin-down") handleMovePinnedDown();
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
+      if (nativeEvent.event === "cancel-action") void handleCancelAction();
       if (nativeEvent.event === "delete") handleDelete();
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
@@ -598,6 +646,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     },
     [
       handleArchive,
+      handleCancelAction,
       handleDelete,
       handleRegenerateTitle,
       handleMovePinnedDown,
