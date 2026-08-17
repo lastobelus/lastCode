@@ -55,6 +55,7 @@ const makeTerminalManagerLayer = (
     attachStream: () => Effect.die(new Error("unused")),
     resize: () => Effect.void,
     clear: () => Effect.void,
+    history: () => Effect.succeed(""),
     restart: () => Effect.die(new Error("unused")),
     close: () => Effect.void,
     subscribe: () => Effect.succeed(() => undefined),
