@@ -3,10 +3,35 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
-import { describe, expect, it } from "vite-plus/test";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { mergeEnvironmentSettings, resolveEnvironmentIdentificationMode } from "./useSettings";
+const localApiMocks = vi.hoisted(() => ({
+  setClientSettings: vi.fn(async (_settings: ClientSettings) => {}),
+}));
+
+vi.mock("../localApi", () => ({
+  ensureLocalApi: () => ({
+    persistence: {
+      setClientSettings: localApiMocks.setClientSettings,
+    },
+  }),
+}));
+
+import {
+  __resetClientSettingsPersistenceForTests,
+  __setClientSettingsForTests,
+  getClientSettings,
+  mergeEnvironmentSettings,
+  resolveEnvironmentIdentificationMode,
+  updateClientSettings,
+} from "./useSettings";
+
+afterEach(() => {
+  localApiMocks.setClientSettings.mockReset();
+  localApiMocks.setClientSettings.mockResolvedValue(undefined);
+  __resetClientSettingsPersistenceForTests();
+});
 
 describe("resolveEnvironmentIdentificationMode", () => {
   it("keeps identification hidden until client settings hydrate", () => {
@@ -75,5 +100,39 @@ describe("mergeEnvironmentSettings", () => {
 
     expect(settings.providerInstances).toBe(serverSettings.providerInstances);
     expect(settings.favorites).toBe(clientSettings.favorites);
+  });
+});
+
+describe("updateClientSettings", () => {
+  it("applies repeated functional updates and persists them in invocation order", async () => {
+    const writes: Array<{
+      readonly settings: ClientSettings;
+      readonly resolve: () => void;
+    }> = [];
+    localApiMocks.setClientSettings.mockImplementation(
+      (settings) =>
+        new Promise<void>((resolve) => {
+          writes.push({ settings, resolve });
+        }),
+    );
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+
+    updateClientSettings((settings) => ({
+      legacySidebarEnabled: !settings.legacySidebarEnabled,
+    }));
+    expect(getClientSettings().legacySidebarEnabled).toBe(true);
+
+    updateClientSettings((settings) => ({
+      legacySidebarEnabled: !settings.legacySidebarEnabled,
+    }));
+    expect(getClientSettings().legacySidebarEnabled).toBe(false);
+
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]?.settings.legacySidebarEnabled).toBe(true);
+
+    writes[0]?.resolve();
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]?.settings.legacySidebarEnabled).toBe(false);
+    writes[1]?.resolve();
   });
 });
