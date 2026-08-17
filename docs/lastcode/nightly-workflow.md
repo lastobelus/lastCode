@@ -209,10 +209,13 @@ lastcode-checkpoints --verbose
 
 The dashboard shows success or failure, upstream nightly, number of downstream
 commits replayed, finish time, duration, checkpoint commit, promotion to
-`lastcode/main`, and whether a local build tag exists. It also summarizes the
-launch agent and whether the local checkpoint set has caught up to the latest
-known upstream tag. Its footer shows the newest installable checkpoint or
-revision and whether it is on `lastcode/main`. A retained recovery worktree produces an `Action required`
+`lastcode/main`, and whether a local build tag exists. Built LastCode revisions
+appear as distinct indented rows beneath their upstream checkpoint, including
+the revision commit, build number, and whether that revision is on
+`lastcode/main`. It also summarizes the launch agent and whether the local
+checkpoint set has caught up to the latest known upstream tag. Its footer shows
+the newest installable checkpoint or revision and whether it is on
+`lastcode/main`. A retained recovery worktree produces an `Action required`
 message with the path and a command to inspect it. Full failure errors and
 recovery branch names are shown only with `--verbose`; superseded failures are
 not actionable after the same nightly succeeds.
