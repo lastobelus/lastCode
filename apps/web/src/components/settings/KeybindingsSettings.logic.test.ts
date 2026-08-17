@@ -122,6 +122,7 @@ describe("KeybindingsSettings.logic", () => {
 
   it("formats static and project script command labels", () => {
     expect(commandLabel("commandPalette.toggle")).toBe("Command Palette: Toggle");
+    expect(commandLabel("sidebar.mode.toggle")).toBe("Switch Between Inbox and Legacy Sidebars");
     expect(commandLabel("themeEditor.toggle")).toBe("Theme Editor: Toggle");
     expect(commandLabel("script.setup-db.run")).toBe("Run Script: Setup Db");
   });
@@ -151,7 +152,12 @@ describe("KeybindingsSettings.logic", () => {
     ] satisfies ResolvedKeybindingsConfig);
 
     expect(options).toEqual(
-      expect.arrayContaining(["chat.new", "rightPanel.toggleMaximized", "script.setup-db.run"]),
+      expect.arrayContaining([
+        "chat.new",
+        "rightPanel.toggleMaximized",
+        "script.setup-db.run",
+        "sidebar.mode.toggle",
+      ]),
     );
   });
 
