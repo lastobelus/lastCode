@@ -44,6 +44,12 @@ export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
 export type DeleteProjectionThreadActivitiesInput =
   typeof DeleteProjectionThreadActivitiesInput.Type;
 
+export const ListProjectionThreadActivitiesByKindInput = Schema.Struct({
+  kind: Schema.String,
+});
+export type ListProjectionThreadActivitiesByKindInput =
+  typeof ListProjectionThreadActivitiesByKindInput.Type;
+
 /**
  * ProjectionThreadActivityRepositoryShape - Service API for projected thread activity.
  */
@@ -65,6 +71,11 @@ export interface ProjectionThreadActivityRepositoryShape {
    */
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /** List all rows of one activity kind in ascending runtime sequence order. */
+  readonly listByKind: (
+    input: ListProjectionThreadActivitiesByKindInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
