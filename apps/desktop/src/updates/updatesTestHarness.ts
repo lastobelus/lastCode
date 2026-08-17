@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -32,6 +33,10 @@ export interface UpdatesHarnessOptions {
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
+  readonly backends?: ReadonlyArray<{
+    readonly desiredRunning: boolean;
+    readonly stop?: Effect.Effect<void>;
+  }>;
   readonly env?: Record<string, string | undefined>;
   readonly localNightliesEnabled?: boolean;
   readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
@@ -39,6 +44,12 @@ export interface UpdatesHarnessOptions {
     currentVersion: string,
   ) => Effect.Effect<LastCodeLocalUpdates.LastCodeLocalUpdateInspection>;
   readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+  readonly localPrepareInstall?: (
+    args: Parameters<LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["prepareInstall"]>[0],
+  ) => Effect.Effect<
+    LastCodeLocalUpdates.LastCodeLocalInstallHandoff,
+    LastCodeLocalUpdates.LastCodeLocalUpdateError
+  >;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -47,7 +58,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let downloadCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
-  let localFeedCloseCount = 0;
+  const installEvents: string[] = [];
+  const localInstallArgs: Array<{
+    readonly dmgPath: string;
+    readonly dmgSha256: string;
+    readonly expectedVersion: string;
+  }> = [];
   const differentialDownloadValues: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
@@ -108,6 +124,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         quitAndInstallCount += 1;
         installSteps.push("quitAndInstall");
+        installEvents.push("squirrel-install");
       }).pipe(Effect.andThen(options.quitAndInstall ?? Effect.void)),
     on: (eventName, listener) =>
       Effect.acquireRelease(
@@ -135,28 +152,47 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     destroyAll: Effect.sync(() => {
       installSteps.push("destroyAll");
+      installEvents.push("destroy-windows");
     }),
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
-  const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
-    id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
-    label: Effect.succeed("Windows"),
-    start: Effect.sync(() => {
-      installSteps.push("startBackend");
-    }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),
-    stop: () => options.stopBackend ?? Effect.void,
-    currentConfig: Effect.succeed(Option.none()),
-    snapshot: Effect.succeed({
+  const backendOptions = options.backends ?? [
+    {
       desiredRunning: false,
-      ready: false,
-      activePid: Option.none(),
-      restartAttempt: 0,
-      restartScheduled: false,
-    }),
-    waitForReady: () => Effect.succeed(true),
-  };
-  const backendLayer = DesktopBackendPool.layerTest([stubBackendInstance]);
+      stop: options.stopBackend,
+    },
+  ];
+  const stubBackendInstances = backendOptions.map(
+    ({ desiredRunning, stop }, index): DesktopBackendPool.DesktopBackendInstance => {
+      const suffix = index === 0 ? "" : `-${index + 1}`;
+      return {
+        id:
+          index === 0
+            ? DesktopBackendPool.PRIMARY_INSTANCE_ID
+            : DesktopBackendPool.BackendInstanceId(`test-backend-${index + 1}`),
+        label: Effect.succeed(index === 0 ? "Windows" : `Backend ${index + 1}`),
+        start: Effect.sync(() => {
+          installSteps.push("startBackend");
+          installEvents.push(`start-backend${suffix}`);
+        }).pipe(Effect.andThen(index === 0 ? (options.startBackend ?? Effect.void) : Effect.void)),
+        stop: () =>
+          Effect.sync(() => {
+            installEvents.push(`stop-backend${suffix}`);
+          }).pipe(Effect.andThen(stop ?? Effect.void)),
+        currentConfig: Effect.succeed(Option.none()),
+        snapshot: Effect.succeed({
+          desiredRunning,
+          ready: desiredRunning,
+          activePid: Option.none(),
+          restartAttempt: 0,
+          restartScheduled: false,
+        }),
+        waitForReady: () => Effect.succeed(true),
+      };
+    },
+  );
+  const backendLayer = DesktopBackendPool.layerTest(stubBackendInstances);
 
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
@@ -237,13 +273,30 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       options.localBuild
         ? Effect.succeed(options.localBuild)
         : Effect.die("unexpected local update build"),
-    startFeed: () =>
-      Effect.succeed({
-        url: "http://127.0.0.1:4242",
-        close: Effect.sync(() => {
-          localFeedCloseCount += 1;
+    prepareInstall: (args) => {
+      localInstallArgs.push(args);
+      installEvents.push("prepare-install");
+      if (options.localPrepareInstall) return options.localPrepareInstall(args);
+      let commanded = false;
+      return Effect.succeed({
+        commit: Effect.sync(() => {
+          if (commanded) return;
+          commanded = true;
+          installEvents.push("commit-handoff");
         }),
-      }),
+        cancel: Effect.sync(() => {
+          if (commanded) return;
+          commanded = true;
+          installEvents.push("cancel-handoff");
+        }),
+      });
+    },
+  });
+
+  const electronAppLayer = Layer.mock(ElectronApp.ElectronApp)({
+    quit: Effect.sync(() => {
+      installEvents.push("quit-app");
+    }),
   });
 
   const layer = DesktopUpdates.layer.pipe(
@@ -262,6 +315,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     ),
     Layer.provideMerge(environmentLayer),
     Layer.provideMerge(localUpdatesLayer),
+    Layer.provideMerge(electronAppLayer),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -274,7 +328,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     feedUrls: () => feedUrls,
     differentialDownloadValues: () => differentialDownloadValues,
     fullChangelog: () => fullChangelog,
-    localFeedCloseCount: () => localFeedCloseCount,
+    installEvents: () => installEvents,
+    localInstallArgs: () => localInstallArgs,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
