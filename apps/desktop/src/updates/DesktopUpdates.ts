@@ -664,11 +664,14 @@ export const make = Effect.gen(function* () {
                 .map(({ instance }) => instance);
 
               yield* Ref.set(desktopState.quitting, true);
-              yield* Effect.forEach(
-                instances,
-                (instance) => instance.stop({ timeout: Duration.seconds(5) }),
-                { concurrency: "unbounded" },
-              ).pipe(
+              yield* Effect.gen(function* () {
+                yield* Effect.forEach(
+                  instances,
+                  (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+                  { concurrency: "unbounded" },
+                );
+                yield* acceptedHandoff.commit;
+              }).pipe(
                 Effect.catchCause((cause) =>
                   acceptedHandoff.cancel.pipe(
                     Effect.andThen(
@@ -681,7 +684,6 @@ export const make = Effect.gen(function* () {
                   ),
                 ),
               );
-              yield* acceptedHandoff.commit;
               yield* electronApp.quit;
               return { accepted: true, completed: false };
             }),

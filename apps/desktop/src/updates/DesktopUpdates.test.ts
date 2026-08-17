@@ -593,6 +593,57 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("restores running backends when committing the handoff fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 1,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: [],
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+        dmgSha256: "e".repeat(64),
+      },
+      backends: [{ desiredRunning: true }, { desiredRunning: true }],
+      localPrepareInstall: () =>
+        Effect.succeed({
+          commit: Effect.fail(
+            new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+              operation: "install",
+              message: "Could not transfer local install ownership.",
+            }),
+          ),
+          cancel: Effect.void,
+        }),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.download;
+        yield* updates.install;
+
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.include(harness.installEvents(), "start-backend");
+        assert.include(harness.installEvents(), "start-backend-2");
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "downloaded");
+        assert.equal(failed.errorContext, "install");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("keeps hosted installs on electron-updater", () => {
     const harness = makeHarness();
 

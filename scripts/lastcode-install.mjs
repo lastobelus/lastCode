@@ -415,6 +415,13 @@ export function replacePreparedApp(prepared, options = {}) {
     if (prepared.oldAppMoved) {
       NodeFS.renameSync(prepared.backup, prepared.targetPath);
       prepared.oldAppMoved = false;
+      try {
+        runCommand("open", [prepared.targetPath]);
+      } catch (relaunchError) {
+        console.error(
+          `Warning: restored the previous LastCode app but could not relaunch it: ${relaunchError.message}`,
+        );
+      }
     }
     throw error;
   }

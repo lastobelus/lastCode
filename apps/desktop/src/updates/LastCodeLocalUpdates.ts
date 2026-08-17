@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- This desktop-only service launches local build and install helpers.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- This desktop-only service launches helpers and owns a Node pipe timeout inside a Promise callback.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -258,7 +258,13 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
         } finally {
           NodeFS.closeSync(logFd);
         }
-        const abort = () => terminateHelperProcess(child, environment.platform);
+        const abort = () => {
+          if (child.stdin?.writable) {
+            child.stdin.end("CANCEL\n");
+            return;
+          }
+          terminateHelperProcess(child, environment.platform);
+        };
         signal.addEventListener("abort", abort, { once: true });
 
         return new Promise<LastCodeLocalInstallHandoff>((resolve, reject) => {
@@ -267,17 +273,30 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
           let ready = false;
           let buffer = "";
           let commandSent = false;
+          let preflightTimedOut = false;
+          const preflightTimeoutError = () =>
+            new Error(
+              `Local install preflight did not finish within 2 minutes. Cleanup completed before returning. See ${installLogPath}.`,
+            );
+          const preflightTimeout = setTimeout(() => {
+            if (ready) return;
+            preflightTimedOut = true;
+            control?.end("CANCEL\n");
+          }, 120_000);
           const failBeforeReady = (cause: unknown) => {
             if (ready) return;
+            clearTimeout(preflightTimeout);
             signal.removeEventListener("abort", abort);
             reject(cause);
           };
           child.once("error", failBeforeReady);
           child.once("close", (exitCode) => {
             failBeforeReady(
-              new Error(
-                `Local install helper exited before readiness with code ${exitCode}. See ${installLogPath}.`,
-              ),
+              preflightTimedOut
+                ? preflightTimeoutError()
+                : new Error(
+                    `Local install helper exited before readiness with code ${exitCode}. See ${installLogPath}.`,
+                  ),
             );
           });
           if (!(readyStream instanceof NodeStream.Readable) || !control) {
@@ -296,6 +315,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
             }
             const newline = buffer.indexOf("\n");
             if (newline < 0) return;
+            if (preflightTimedOut) return;
             try {
               const line = buffer.slice(0, newline);
               if (!line.startsWith(INSTALL_READY_PREFIX)) {
@@ -311,6 +331,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
                 throw new Error("Local install helper accepted a different artifact or version.");
               }
               ready = true;
+              clearTimeout(preflightTimeout);
               signal.removeEventListener("abort", abort);
               readyStream.destroy();
 
@@ -348,9 +369,14 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
               failBeforeReady(cause);
             }
           });
-          readyStream.once("error", failBeforeReady);
+          readyStream.once("error", (cause) => {
+            if (!preflightTimedOut) failBeforeReady(cause);
+          });
+          control.once("error", (cause) => {
+            if (!preflightTimedOut) failBeforeReady(cause);
+          });
           readyStream.once("close", () => {
-            if (!ready) {
+            if (!ready && !preflightTimedOut) {
               failBeforeReady(
                 new Error(`Local install helper closed its readiness pipe. See ${installLogPath}.`),
               );
@@ -369,18 +395,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
                   : "Could not prepare the local LastCode install.",
               cause,
             }),
-    }).pipe(
-      Effect.timeoutOrElse({
-        duration: "2 minutes",
-        orElse: () =>
-          Effect.fail(
-            new LastCodeLocalUpdateError({
-              operation: "install",
-              message: `Local install preflight did not finish within 2 minutes. See ${installLogPath}.`,
-            }),
-          ),
-      }),
-    );
+    });
   };
 
   return LastCodeLocalUpdates.of({

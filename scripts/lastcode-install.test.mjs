@@ -145,15 +145,21 @@ describe("LastCode userland install command", () => {
     NodeFS.writeFileSync(NodePath.join(staging, "version"), "new");
     const prepared = { targetPath, staging, backup, oldAppMoved: false };
 
+    const launchAttempts = [];
     expect(() =>
       replacePreparedApp(prepared, {
-        runCommand: () => {
+        runCommand: (command, args) => {
+          launchAttempts.push([command, args]);
           throw new Error("launch failed");
         },
       }),
     ).toThrow("launch failed");
     expect(NodeFS.readFileSync(NodePath.join(targetPath, "version"), "utf8")).toBe("old");
     expect(NodeFS.existsSync(backup)).toBe(false);
+    expect(launchAttempts).toEqual([
+      ["open", [targetPath]],
+      ["open", [targetPath]],
+    ]);
   });
 
   it("launches with the repository's pinned Node runtime", () => {
