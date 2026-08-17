@@ -316,6 +316,7 @@ const make = Effect.gen(function* () {
       exitSignal: input.exitSignal ?? null,
     };
     yield* persistState(next);
+    if (next.delivery === "disposed") outputTailByRunId.delete(next.runId);
   });
 
   const finish = (input: FinishActionInput) =>
@@ -355,6 +356,7 @@ const make = Effect.gen(function* () {
               (latest.delivery === "pending" || latest.delivery === "available")
             ) {
               yield* persistState({ ...latest, delivery: "disposed" });
+              outputTailByRunId.delete(latest.runId);
             }
           }),
         );
@@ -534,6 +536,7 @@ const make = Effect.gen(function* () {
           });
         }
         yield* persistState({ ...current, delivery: "disposed" });
+        outputTailByRunId.delete(current.runId);
       }),
     );
   });
