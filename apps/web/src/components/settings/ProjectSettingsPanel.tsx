@@ -634,6 +634,8 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
         keybinding: null,
         previewUrl: fileScript.previewUrl ?? null,
         autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
+        // Import never grants an agent permission to execute a checked-in command.
+        allowAgentResume: false,
       };
       const result = await submitScript(null, payload);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
