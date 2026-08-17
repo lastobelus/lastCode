@@ -214,6 +214,7 @@ describe("lastcode-local-update", () => {
           checkpointTag: checkpoint,
           lastCodeCommit: commit,
           buildTag,
+          artifacts: [{ path: "LastCode.dmg", sha256: "a".repeat(64) }],
         }),
       );
       NodeFS.writeFileSync(NodePath.join(output, "nightly-mac.yml"), "version: test\n");
@@ -227,7 +228,11 @@ describe("lastcode-local-update", () => {
         checkpointTag: checkpoint,
         checkpointCommit: commit,
       };
-      assert.equal(resolveExistingBuild(buildOptions)?.outputDir, output);
+      assert.deepInclude(resolveExistingBuild(buildOptions), {
+        outputDir: output,
+        dmgPath: NodePath.join(output, "LastCode.dmg"),
+        dmgSha256: "a".repeat(64),
+      });
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
       assert.throws(() => resolveExistingBuild(buildOptions), /missing \.zip/);
       NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip");
