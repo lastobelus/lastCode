@@ -22,6 +22,14 @@ export interface ArchivedProjectModel {
   readonly projectGroups: ReadonlyArray<SidebarProjectSnapshot>;
 }
 
+export interface ArchivedThreadsSearch {
+  readonly project?: string;
+}
+
+export function validateArchivedThreadsSearch(raw: Record<string, unknown>): ArchivedThreadsSearch {
+  return typeof raw.project === "string" && raw.project ? { project: raw.project } : {};
+}
+
 function scopedProjectId(project: Pick<EnvironmentProject, "environmentId" | "id">): string {
   return `${project.environmentId}:${project.id}`;
 }

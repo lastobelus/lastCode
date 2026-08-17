@@ -1,14 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 
+import { validateArchivedThreadsSearch } from "../archiveProjectFiltering";
 import { ArchivedThreadsPanel } from "../components/settings/SettingsPanels";
 
-export interface ArchivedThreadsSearch {
-  readonly project?: string;
-}
-
 export const Route = createFileRoute("/settings/archived")({
-  validateSearch: (raw: Record<string, unknown>): ArchivedThreadsSearch =>
-    typeof raw.project === "string" && raw.project ? { project: raw.project.slice(0, 500) } : {},
+  validateSearch: validateArchivedThreadsSearch,
   component: ArchivedThreadsRouteView,
 });
 

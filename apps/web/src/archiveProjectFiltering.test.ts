@@ -9,6 +9,7 @@ import {
   buildArchivedProjectModel,
   filterArchivedProjectGroups,
   resolveArchivedProjectKey,
+  validateArchivedThreadsSearch,
 } from "./archiveProjectFiltering";
 
 const primaryEnvironmentId = EnvironmentId.make("env-primary");
@@ -155,5 +156,12 @@ describe("archive project filtering", () => {
     expect(resolveArchivedProjectKey(model.projectGroups, model.projectGroups[0]!.projectKey)).toBe(
       model.projectGroups[0]!.projectKey,
     );
+  });
+
+  it("preserves a project key longer than 500 characters during route validation", () => {
+    const projectKey = `environment:${"nested-worktree/".repeat(40)}`;
+
+    expect(projectKey.length).toBeGreaterThan(500);
+    expect(validateArchivedThreadsSearch({ project: projectKey })).toEqual({ project: projectKey });
   });
 });
