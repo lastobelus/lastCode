@@ -212,16 +212,30 @@ function appIsRunning() {
   return run("osascript", ["-e", `application id "${APP_BUNDLE_ID}" is running`]) === "true";
 }
 
-async function quitApp() {
-  if (!appIsRunning()) return;
+export async function quitApp(options = {}) {
+  const isRunning = options.isRunning ?? appIsRunning;
+  const runCommand = options.runCommand ?? run;
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  if (!isRunning()) return;
   console.log("Quitting LastCode…");
-  run("osascript", ["-e", `tell application id "${APP_BUNDLE_ID}" to quit`]);
-  const deadline = Date.now() + 30_000;
-  while (appIsRunning()) {
-    if (Date.now() >= deadline) {
-      throw new Error("LastCode did not quit within 30 seconds. Quit it manually and try again.");
+  runCommand("osascript", [
+    "-e",
+    "ignoring application responses",
+    "-e",
+    `tell application id "${APP_BUNDLE_ID}" to quit`,
+    "-e",
+    "end ignoring",
+  ]);
+  const deadline = now() + timeoutMs;
+  while (isRunning()) {
+    if (now() >= deadline) {
+      throw new Error(
+        `LastCode did not quit within ${timeoutMs / 1_000} seconds. Quit it manually and try again.`,
+      );
     }
-    await NodeTimersPromises.setTimeout(250);
+    await wait(250);
   }
 }
 
