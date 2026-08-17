@@ -252,7 +252,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
               cwd: repoRoot,
               detached: usesDetachedHelperProcessGroup(environment.platform),
               env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-              stdio: ["pipe", "ignore", logFd, "pipe"],
+              stdio: ["pipe", logFd, logFd, "pipe"],
             },
           );
         } finally {
