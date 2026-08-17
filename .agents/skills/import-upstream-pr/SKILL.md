@@ -110,15 +110,19 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 1. Immediately before delivery, fetch `origin/lastcode/main` again. If the port
    parent moved, rebase the imported commits and rerun affected validation.
-2. Push in a clean environment so the pre-push `pnpm lastcode:ci:quick` gate
-   sees ordinary Git/SSH variables. Do not export `GIT_SSH_COMMAND` or inject an
-   SSH command through Git configuration around the push; those settings flow
-   into tests that intentionally control `GIT_SSH`.
-3. If Quick CI prints an exact-head success receipt but the idle SSH transport
-   subsequently dies, fetch and require the local head, remote topic head, and
-   destination base to be unchanged. Only then retry the transport with
-   `--no-verify` and the exact force-with-lease when needed. Otherwise rerun the
-   guarded push.
+2. Before the guarded push, require a clean worktree and record the local head,
+   destination base, and existing remote topic SHA (or its absence). Then push
+   in a clean environment so the pre-push `pnpm lastcode:ci:quick` gate sees
+   ordinary Git/SSH variables. Do not export `GIT_SSH_COMMAND` or inject an SSH
+   command through Git configuration around the push; those settings flow into
+   tests that intentionally control `GIT_SSH`.
+3. If Quick CI passes but the idle SSH transport subsequently dies, do not
+   treat its generic success line as an exact-head receipt. Require the local
+   head to equal the recorded head, the worktree to remain clean, the fetched
+   destination base to equal the recorded base, and the remote topic SHA (or
+   absence) to remain unchanged. Only then retry that recorded head with
+   `--no-verify` and an exact `--force-with-lease` tied to the recorded remote
+   topic state. Otherwise rerun the guarded push and its hook.
 4. Open a PR targeting `lastcode/main` only when explicitly requested. Include
    the upstream PR and pinned head, observed state/date, import method,
    adaptations, rationale, validation, closure/review context, and published
