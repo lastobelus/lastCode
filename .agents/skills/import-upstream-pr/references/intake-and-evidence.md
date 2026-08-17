@@ -8,6 +8,8 @@ PR code and to keep delivery claims tied to exact commits.
 Capture PR metadata before fetching or executing the candidate:
 
 ```bash
+set -e
+
 repo=pingdotgg/t3code
 pr=<number>
 
@@ -27,15 +29,28 @@ git fetch upstream \
 
 fetched_base=$(git rev-parse "refs/remotes/upstream/$base_ref")
 fetched_head=$(git rev-parse "refs/remotes/upstream/pr/$pr")
-git cat-file -e "$base_sha^{commit}"
-test "$fetched_head" = "$head_sha"
+git cat-file -e "$base_sha^{commit}" || {
+  printf 'missing pinned base commit: %s\n' "$base_sha" >&2
+  exit 1
+}
+test "$fetched_head" = "$head_sha" || {
+  printf 'PR head changed while pinning: expected %s, fetched %s\n' \
+    "$head_sha" "$fetched_head" >&2
+  exit 1
+}
 
 commit_count=$(git rev-list --count "$base_sha..$head_sha")
 final_sha=$(
   git rev-list --reverse --topo-order "$base_sha..$head_sha" | tail -n 1
 )
-test "$commit_count" -gt 0
-test "$final_sha" = "$head_sha"
+test "$commit_count" -gt 0 || {
+  printf 'pinned PR range is empty\n' >&2
+  exit 1
+}
+test "$final_sha" = "$head_sha" || {
+  printf 'commit walk did not end at pinned head: %s\n' "$head_sha" >&2
+  exit 1
+}
 printf '{"count":%s,"final_sha":"%s","current_base_sha":"%s"}\n' \
   "$commit_count" "$final_sha" "$fetched_base"
 git rev-list --reverse --topo-order "$base_sha..$head_sha"
