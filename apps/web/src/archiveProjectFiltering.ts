@@ -2,6 +2,7 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 
 import { derivePhysicalProjectKey, type ProjectGroupingSettings } from "./logicalProject";
@@ -24,6 +25,18 @@ export interface ArchivedProjectModel {
 
 export interface ArchivedThreadsSearch {
   readonly project?: string;
+}
+
+export function connectedArchiveEnvironmentIds(
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly connection: { readonly phase: EnvironmentConnectionPhase };
+  }>,
+): ReadonlyArray<EnvironmentId> {
+  return environments
+    .filter((environment) => environment.connection.phase === "connected")
+    .map((environment) => environment.environmentId)
+    .toSorted();
 }
 
 export function validateArchivedThreadsSearch(raw: Record<string, unknown>): ArchivedThreadsSearch {

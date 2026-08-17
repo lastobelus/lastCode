@@ -7,6 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildArchivedProjectModel,
+  connectedArchiveEnvironmentIds,
   filterArchivedProjectGroups,
   validateArchivedThreadsSearch,
 } from "./archiveProjectFiltering";
@@ -88,6 +89,21 @@ function buildModel(
 }
 
 describe("archive project filtering", () => {
+  it("requests archives only from connected environments", () => {
+    expect(
+      connectedArchiveEnvironmentIds([
+        {
+          environmentId: remoteEnvironmentId,
+          connection: { phase: "offline" },
+        },
+        {
+          environmentId: primaryEnvironmentId,
+          connection: { phase: "connected" },
+        },
+      ]),
+    ).toEqual([primaryEnvironmentId]);
+  });
+
   it("shows every archived project for All and narrows to one selected project", () => {
     const alpha = makeProject({ title: "Alpha", workspaceRoot: "/tmp/alpha" });
     const beta = makeProject({

@@ -7,12 +7,14 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useMemo } from "react";
 
-import { buildArchivedProjectModel } from "../archiveProjectFiltering";
+import {
+  buildArchivedProjectModel,
+  connectedArchiveEnvironmentIds,
+} from "../archiveProjectFiltering";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { isHostedStaticApp } from "../hostedPairing";
 
@@ -56,20 +58,13 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
 }
 
 export function useArchivedProjectModel() {
-  const liveProjects = useProjects();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const settingsHydrated = useClientSettingsHydrated();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments, isReady: environmentsReady } = useEnvironments();
   const environmentIds = useMemo(
-    () =>
-      [
-        ...new Set([
-          ...environments.map((environment) => environment.environmentId),
-          ...liveProjects.map((project) => project.environmentId),
-        ]),
-      ].sort(),
-    [environments, liveProjects],
+    () => connectedArchiveEnvironmentIds(environments),
+    [environments],
   );
   const environmentLabelById = useMemo(
     () =>
