@@ -24,13 +24,15 @@ for LastCode review, validation, or merge authority.
 1. Capture the upstream PR URL, state, observed date, title, author, base, exact
    `headRefOid`, ordered commits, changed files, checks, reviews, review threads,
    linked issues, and closure reason when closed.
-2. Fetch `pull/<number>/head` into a remote-tracking ref and require its SHA to
+2. Fetch every page of the PR commit list. Require the recorded count to match
+   the complete API result and its final commit SHA to equal `headRefOid`.
+3. Fetch `pull/<number>/head` into a remote-tracking ref and require its SHA to
    equal the captured `headRefOid`. Never import a moving branch name.
-3. Inspect metadata and the full diff before installing dependencies or running
+4. Inspect metadata and the full diff before installing dependencies or running
    any code controlled by the PR.
-4. Check current `upstream/main` and `origin/lastcode/main` for the same behavior,
+5. Check current `upstream/main` and `origin/lastcode/main` for the same behavior,
    a replacement, or an incompatible design.
-5. Treat a force-pushed upstream head as a new candidate. Range-diff it against
+6. Treat a force-pushed upstream head as a new candidate. Range-diff it against
    the prior pinned head and repeat the applicable review and validation.
 
 If `origin/lastcode/main` already contains the exact behavior or an accepted

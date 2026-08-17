@@ -13,14 +13,30 @@ pr=<number>
 
 gh pr view "$pr" --repo "$repo" --json \
   number,title,url,state,isDraft,author,baseRefName,baseRefOid,headRefOid,\
-  mergeable,mergeStateStatus,commits,changedFiles,statusCheckRollup,\
+  mergeable,mergeStateStatus,changedFiles,statusCheckRollup,\
   reviewDecision,labels,body,closedAt,mergedAt,updatedAt
+
+head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)
+commit_receipt=$(
+  gh api --paginate --slurp \
+    "repos/$repo/pulls/$pr/commits?per_page=100" |
+    jq -c 'flatten | {
+      count: length,
+      shas: map(.sha),
+      final_sha: (last.sha // null)
+    }'
+)
+test "$(printf '%s' "$commit_receipt" | jq -r .final_sha)" = "$head_sha"
+printf '%s\n' "$commit_receipt"
 
 git fetch upstream "pull/$pr/head:refs/remotes/upstream/pr/$pr"
 git rev-parse "refs/remotes/upstream/pr/$pr"
 ```
 
-Require the fetched SHA to equal `headRefOid`. Also record:
+The REST request must use both `--paginate` and `--slurp`; `gh pr view --json
+commits` exposes only the first 100 commits. Require the receipt's `count` to
+equal the complete flattened result and both `final_sha` and the fetched PR ref
+to equal `headRefOid`. Also record:
 
 - observed date and timezone;
 - ordered commit SHAs and authors;
