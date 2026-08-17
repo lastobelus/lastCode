@@ -51,6 +51,7 @@ import { OrchestrationEngineLive } from "../src/orchestration/Layers/Orchestrati
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "../src/orchestration/Layers/ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
+import * as ThreadActionResume from "../src/orchestration/ThreadActionResume.ts";
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
@@ -313,6 +314,7 @@ export const makeOrchestrationIntegrationHarness = (
       RuntimeReceiptBusTest,
     ).pipe(
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
+      Layer.provideMerge(ThreadActionResume.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
     );
     const serverSettingsLayer = ServerSettingsService.layerTest();
