@@ -263,6 +263,7 @@ describe("TerminalEvent", () => {
         type: "closed",
         threadId: "thread-1",
         terminalId: DEFAULT_TERMINAL_ID,
+        deleteHistory: false,
       }),
     ).toBe(true);
   });
