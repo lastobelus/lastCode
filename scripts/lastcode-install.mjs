@@ -2,6 +2,7 @@
 // LastCode managed command: lastcode-install
 
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -12,6 +13,7 @@ const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const INSTALL_LOCK_NAME = "install.lock";
 const INSTALL_MANAGED_MARKER = "LastCode managed command: lastcode-install";
+export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -49,6 +51,46 @@ export function parseOptions(argv) {
     throw new Error("--uninstall cannot be combined with DMG or install options.");
   }
   return { artifactsDirectory, dmgPath, help: false, install, uninstall };
+}
+
+export function parseHandoffOptions(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (
+      ![
+        "--dmg",
+        "--expected-sha256",
+        "--expected-version",
+        "--parent-pid",
+        "--ready-fd",
+        "--target",
+      ].includes(arg)
+    ) {
+      throw new Error(`Unknown handoff argument '${arg}'.`);
+    }
+    const value = argv[index + 1];
+    if (!value) throw new Error(`Missing value for ${arg}.`);
+    if (arg === "--dmg") options.dmgPath = NodePath.resolve(value);
+    else if (arg === "--expected-sha256") options.expectedSha256 = value;
+    else if (arg === "--expected-version") options.expectedVersion = value;
+    else if (arg === "--parent-pid") options.parentPid = Number.parseInt(value, 10);
+    else if (arg === "--ready-fd") options.readyFd = Number.parseInt(value, 10);
+    else options.targetPath = NodePath.resolve(value);
+    index += 1;
+  }
+  if (!options.dmgPath) throw new Error("Missing --dmg.");
+  if (!/^[a-f0-9]{64}$/.test(options.expectedSha256 ?? "")) {
+    throw new Error("Missing or invalid --expected-sha256.");
+  }
+  if (!options.expectedVersion) throw new Error("Missing --expected-version.");
+  if (!Number.isSafeInteger(options.parentPid) || options.parentPid <= 0) {
+    throw new Error("Missing or invalid --parent-pid.");
+  }
+  if (!Number.isSafeInteger(options.readyFd) || options.readyFd < 3) {
+    throw new Error("Missing or invalid --ready-fd.");
+  }
+  return { ...options, targetPath: options.targetPath ?? DEFAULT_APP_PATH };
 }
 
 function walkDmgs(directory, results) {
@@ -258,70 +300,189 @@ export function acquireInstallLock(lockDirectory, options = {}) {
   };
 }
 
-async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
+async function hashFile(path) {
+  const hash = NodeCrypto.createHash("sha256");
+  for await (const chunk of NodeFS.createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function waitForProcessExit(pid, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`LastCode process ${pid} did not quit within 30 seconds.`);
+    }
+    await NodeTimersPromises.setTimeout(100);
+  }
+}
+
+async function readHandoffCommand(stream = process.stdin) {
+  let raw = "";
+  for await (const chunk of stream) {
+    raw += chunk.toString("utf8");
+    const newline = raw.indexOf("\n");
+    if (newline >= 0) {
+      const command = raw.slice(0, newline).trim();
+      if (command === "COMMIT" || command === "CANCEL") return command;
+      throw new Error(`Invalid install handoff command '${command}'.`);
+    }
+    if (raw.length > 32) throw new Error("Install handoff command is too large.");
+  }
+  throw new Error("Install handoff closed before COMMIT or CANCEL.");
+}
+
+async function prepareDmgInstall(dmgPath, options = {}) {
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
   if (process.platform !== "darwin") throw new Error("lastcode-install only supports macOS.");
   const resolvedDmg = NodePath.resolve(dmgPath);
   if (!NodeFS.statSync(resolvedDmg, { throwIfNoEntry: false })?.isFile()) {
     throw new Error(`DMG not found: ${resolvedDmg}`);
   }
-
+  const targetPath = options.targetPath ?? DEFAULT_APP_PATH;
   const releaseInstallLock = acquireInstallLock(
-    NodePath.join(NodeOS.homedir(), ".lastcode", "local-updates"),
+    options.lockDirectory ?? NodePath.join(NodeOS.homedir(), ".lastcode", "local-updates"),
   );
+  let prepared;
   try {
     const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
     const { backup, staging } = temporaryAppPaths(targetPath);
-    let attached = false;
-    let oldAppMoved = false;
-    try {
-      console.log(`Mounting ${NodePath.basename(resolvedDmg)}…`);
-      run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
-      attached = true;
-      const sourceApp = NodePath.join(mountPoint, "LastCode.app");
-      const version = validateApp(sourceApp);
-
-      NodeFS.rmSync(staging, { force: true, recursive: true });
-      NodeFS.rmSync(backup, { force: true, recursive: true });
-      console.log(`Preparing LastCode ${version}…`);
-      run("ditto", [sourceApp, staging]);
-      validateApp(staging);
-      await quitApp();
-
-      if (NodeFS.existsSync(targetPath)) {
-        NodeFS.renameSync(targetPath, backup);
-        oldAppMoved = true;
+    prepared = {
+      artifactPath: resolvedDmg,
+      backup,
+      staging,
+      targetPath,
+      version: undefined,
+      attached: false,
+      oldAppMoved: false,
+      releaseInstallLock,
+      released: false,
+      mountPoint,
+    };
+    if (options.expectedSha256) {
+      const actualSha256 = await hashFile(resolvedDmg);
+      if (actualSha256 !== options.expectedSha256) {
+        throw new Error(
+          `DMG checksum mismatch: expected ${options.expectedSha256}, found ${actualSha256}.`,
+        );
       }
-      try {
-        NodeFS.renameSync(staging, targetPath);
-        run("open", [targetPath]);
-      } catch (error) {
-        NodeFS.rmSync(targetPath, { force: true, recursive: true });
-        if (oldAppMoved) {
-          NodeFS.renameSync(backup, targetPath);
-          oldAppMoved = false;
-        }
-        throw error;
-      }
-      NodeFS.rmSync(backup, { force: true, recursive: true });
-      oldAppMoved = false;
-      console.log(`Installed and launched LastCode ${version}`);
-    } finally {
-      NodeFS.rmSync(staging, { force: true, recursive: true });
-      if (oldAppMoved && !NodeFS.existsSync(targetPath) && NodeFS.existsSync(backup)) {
-        NodeFS.renameSync(backup, targetPath);
-      }
-      if (attached) {
-        try {
-          run("hdiutil", ["detach", mountPoint]);
-        } catch (error) {
-          console.error(`Warning: could not detach ${mountPoint}: ${error.message}`);
-        }
-      }
-      NodeFS.rmSync(mountPoint, { force: true, recursive: true });
     }
+    console.log(`Mounting ${NodePath.basename(resolvedDmg)}…`);
+    run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
+    prepared.attached = true;
+    const sourceApp = NodePath.join(mountPoint, "LastCode.app");
+    const version = validateApp(sourceApp);
+    if (options.expectedVersion && version !== options.expectedVersion) {
+      throw new Error(`Expected LastCode ${options.expectedVersion}, found ${version} in the DMG.`);
+    }
+    prepared.version = version;
+
+    NodeFS.rmSync(staging, { force: true, recursive: true });
+    NodeFS.rmSync(backup, { force: true, recursive: true });
+    console.log(`Preparing LastCode ${version}…`);
+    run("ditto", [sourceApp, staging]);
+    const stagedVersion = validateApp(staging);
+    if (stagedVersion !== version) {
+      throw new Error(`Staged LastCode version changed from ${version} to ${stagedVersion}.`);
+    }
+    run("hdiutil", ["detach", mountPoint]);
+    prepared.attached = false;
+    NodeFS.rmSync(mountPoint, { force: true, recursive: true });
+    return prepared;
+  } catch (error) {
+    if (prepared) cleanupPreparedInstall(prepared);
+    else releaseInstallLock();
+    throw error;
+  }
+}
+
+export function replacePreparedApp(prepared, options = {}) {
+  const runCommand = options.runCommand ?? run;
+  if (NodeFS.existsSync(prepared.targetPath)) {
+    NodeFS.renameSync(prepared.targetPath, prepared.backup);
+    prepared.oldAppMoved = true;
+  }
+  try {
+    NodeFS.renameSync(prepared.staging, prepared.targetPath);
+    runCommand("open", [prepared.targetPath]);
+  } catch (error) {
+    NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
+    if (prepared.oldAppMoved) {
+      NodeFS.renameSync(prepared.backup, prepared.targetPath);
+      prepared.oldAppMoved = false;
+      try {
+        runCommand("open", [prepared.targetPath]);
+      } catch (relaunchError) {
+        console.error(
+          `Warning: restored the previous LastCode app but could not relaunch it: ${relaunchError.message}`,
+        );
+      }
+    }
+    throw error;
+  }
+  NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
+  prepared.oldAppMoved = false;
+}
+
+function cleanupPreparedInstall(prepared) {
+  NodeFS.rmSync(prepared.staging, { force: true, recursive: true });
+  if (
+    prepared.oldAppMoved &&
+    !NodeFS.existsSync(prepared.targetPath) &&
+    NodeFS.existsSync(prepared.backup)
+  ) {
+    NodeFS.renameSync(prepared.backup, prepared.targetPath);
+    prepared.oldAppMoved = false;
+  }
+  if (prepared.attached) {
+    try {
+      run("hdiutil", ["detach", prepared.mountPoint]);
+    } catch (error) {
+      console.error(`Warning: could not detach ${prepared.mountPoint}: ${error.message}`);
+    }
+  }
+  NodeFS.rmSync(prepared.mountPoint, { force: true, recursive: true });
+  if (!prepared.released) {
+    prepared.releaseInstallLock();
+    prepared.released = true;
+  }
+}
+
+async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
+  const prepared = await prepareDmgInstall(dmgPath, { targetPath });
+  try {
+    await quitApp();
+    replacePreparedApp(prepared);
+    console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
-    releaseInstallLock();
+    cleanupPreparedInstall(prepared);
+  }
+}
+
+async function handoffInstall(options) {
+  const prepared = await prepareDmgInstall(options.dmgPath, options);
+  try {
+    NodeFS.writeSync(
+      options.readyFd,
+      `${INSTALL_READY_PREFIX}${JSON.stringify({
+        schemaVersion: 1,
+        artifactPath: prepared.artifactPath,
+        version: prepared.version,
+      })}\n`,
+    );
+    NodeFS.closeSync(options.readyFd);
+    const command = await readHandoffCommand();
+    if (command === "CANCEL") return;
+    await waitForProcessExit(options.parentPid);
+    replacePreparedApp(prepared);
+    console.log(`Installed and launched LastCode ${prepared.version}`);
+  } finally {
+    cleanupPreparedInstall(prepared);
   }
 }
 
@@ -394,6 +555,10 @@ export function uninstallCommand(home) {
 }
 
 async function main(argv) {
+  if (argv[0] === "handoff") {
+    await handoffInstall(parseHandoffOptions(argv.slice(1)));
+    return;
+  }
   const options = parseOptions(argv);
   if (options.help) {
     console.log("Usage: lastcode-install [DMG]");
