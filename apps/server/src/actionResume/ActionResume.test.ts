@@ -270,6 +270,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
 it.effect("requires an explicit resume after a running Action is found on startup", () =>
   Effect.gen(function* () {
     const reconciled = yield* Deferred.make<ActionResumeState>();
+    const subscribed = yield* Deferred.make<void>();
     const dispatched: OrchestrationCommand[] = [];
     let failTurnStart = false;
     const running: ActionResumeState = {
@@ -317,11 +318,14 @@ it.effect("requires an explicit resume after a running Action is found on startu
               "runId" in command.activity.payload &&
               command.activity.payload.runId === "interrupted-run"
             ) {
+              yield* Deferred.await(subscribed);
               yield* Deferred.succeed(reconciled, command.activity.payload as ActionResumeState);
             }
             return { sequence: dispatched.length };
           }),
-        streamDomainEvents: Stream.never,
+        streamDomainEvents: Stream.unwrap(
+          Deferred.succeed(subscribed, undefined).pipe(Effect.as(Stream.never)),
+        ),
       }),
       Layer.mock(ProjectionSnapshotQuery)({
         getThreadShellById: () => Effect.succeed(Option.some(thread)),

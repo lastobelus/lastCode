@@ -625,20 +625,22 @@ const make = Effect.gen(function* () {
 
   yield* hydrate();
   yield* forkParked(
-    reconcile().pipe(
-      Effect.andThen(
-        Stream.runForEach(engine.streamDomainEvents, (event) => {
-          if (event.aggregateKind !== "thread") return Effect.void;
-          const threadId = event.aggregateId as ThreadId;
-          if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
-          if (event.type === "thread.deleted") {
-            registry.clear(threadId);
-            return Effect.void;
-          }
-          return deliverPending(threadId);
-        }),
-      ),
-    ),
+    Effect.gen(function* () {
+      const domainEvents = yield* Stream.toQueue(engine.streamDomainEvents, {
+        capacity: "unbounded",
+      });
+      yield* reconcile();
+      yield* Stream.runForEach(Stream.fromQueue(domainEvents), (event) => {
+        if (event.aggregateKind !== "thread") return Effect.void;
+        const threadId = event.aggregateId as ThreadId;
+        if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
+        if (event.type === "thread.deleted") {
+          registry.clear(threadId);
+          return Effect.void;
+        }
+        return deliverPending(threadId);
+      });
+    }),
   );
 
   yield* Effect.addFinalizer(() =>
