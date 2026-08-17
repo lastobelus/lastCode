@@ -24,6 +24,7 @@ import {
   resolveThreadListV2SwipeActions,
   sortThreadsForListV2,
 } from "./threadListV2";
+import { resolveThreadStatus } from "./threadPresentation";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -186,6 +187,22 @@ describe("resolveThreadListV2Status", () => {
       },
     });
     expect(resolveThreadListV2Status(thread)).toBe("approval");
+  });
+
+  it("reports Waiting for a running Action once higher-priority work is idle", () => {
+    const actionResume = { outcome: "running" } as NonNullable<
+      EnvironmentThreadShell["actionResume"]
+    >;
+    const waiting = makeThread({ id: ThreadId.make("waiting"), title: "Waiting", actionResume });
+    expect(resolveThreadListV2Status(waiting)).toBe("waiting");
+    expect(resolveThreadStatus(waiting)?.kind).toBe("waiting");
+
+    expect(
+      resolveThreadListV2Status({
+        ...waiting,
+        hasPendingApprovals: true,
+      }),
+    ).toBe("approval");
   });
 
   it("resolves ready for quiescent threads", () => {

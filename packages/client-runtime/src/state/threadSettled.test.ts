@@ -128,6 +128,7 @@ function makeShell(input: {
   readonly activityAt: string | null;
   readonly sessionStatus?: "starting" | "running";
   readonly pending?: "approval" | "user-input";
+  readonly runningAction?: boolean;
 }): OrchestrationThreadShell {
   const threadId = ThreadId.make("thread-1");
   return {
@@ -171,6 +172,9 @@ function makeShell(input: {
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
     hasActionableProposedPlan: false,
+    actionResume: input.runningAction
+      ? ({ outcome: "running" } as NonNullable<OrchestrationThreadShell["actionResume"]>)
+      : null,
   };
 }
 
@@ -547,6 +551,15 @@ describe("canSettle", () => {
     expect(canSettle(makeShell({ activityAt: FRESH, pending: "user-input" }), { now: NOW })).toBe(
       false,
     );
+    expect(canSettle(makeShell({ activityAt: FRESH, runningAction: true }), { now: NOW })).toBe(
+      false,
+    );
+    expect(
+      effectiveSettled(makeShell({ activityAt: STALE, runningAction: true }), {
+        now: NOW,
+        autoSettleAfterDays: 3,
+      }),
+    ).toBe(false);
   });
 
   it("blocks settling a queued turn start, only within the grace window", () => {
