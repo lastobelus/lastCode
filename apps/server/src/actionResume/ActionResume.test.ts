@@ -21,6 +21,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { ProjectionThreadActivityRepository } from "../persistence/Services/ProjectionThreadActivities.ts";
+import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ThreadActionResume from "../orchestration/ThreadActionResume.ts";
@@ -270,6 +271,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
   Effect.gen(function* () {
     const reconciled = yield* Deferred.make<ActionResumeState>();
     const dispatched: OrchestrationCommand[] = [];
+    let failTurnStart = false;
     const running: ActionResumeState = {
       runId: "interrupted-run",
       threadId,
@@ -299,6 +301,12 @@ it.effect("requires an explicit resume after a running Action is found on startu
       Layer.mock(OrchestrationEngineService)({
         dispatch: (command) =>
           Effect.gen(function* () {
+            if (command.type === "thread.turn.start" && failTurnStart) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "turn start failed",
+              });
+            }
             dispatched.push(command);
             if (
               command.type === "thread.activity.append" &&
@@ -374,6 +382,11 @@ it.effect("requires an explicit resume after a running Action is found on startu
         yield* service.discardInterrupted(recoveredThreadId);
         assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
         registry.record(available);
+        failTurnStart = true;
+        const resumeError = yield* service.resumeInterrupted(recoveredThreadId).pipe(Effect.flip);
+        assert.equal(resumeError.reason, "internal_error");
+        assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "available" });
+        failTurnStart = false;
         yield* service.cancelByArchive(recoveredThreadId);
         assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
 

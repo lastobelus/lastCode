@@ -262,6 +262,7 @@ const make = Effect.gen(function* () {
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+    const deliveredAt = yield* nowIso;
     yield* engine.dispatch({
       type: "thread.turn.start",
       commandId,
@@ -274,23 +275,24 @@ const make = Effect.gen(function* () {
       },
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
-      createdAt: state.finishedAt ?? (yield* nowIso),
+      createdAt: deliveredAt,
     });
     yield* persistState({ ...state, delivery: "delivered" });
     outputTailByRunId.delete(state.runId);
   });
 
+  const attemptDeliverPending = (threadId: ThreadId) =>
+    mutex.withPermits(1)(deliverPendingUnlocked(threadId));
+
   const deliverPending = (threadId: ThreadId) =>
-    mutex
-      .withPermits(1)(deliverPendingUnlocked(threadId))
-      .pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Action follow-up delivery failed; it remains pending", {
-            threadId,
-            cause: Cause.pretty(cause),
-          }),
-        ),
-      );
+    attemptDeliverPending(threadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Action follow-up delivery failed; it remains pending", {
+          threadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
 
   const finishUnlocked = Effect.fn("ActionResume.finishUnlocked")(function* (
     input: FinishActionInput,
@@ -527,7 +529,23 @@ const make = Effect.gen(function* () {
         yield* persistState({ ...current, delivery: "pending" });
       }),
     );
-    yield* deliverPending(threadId);
+    const delivered = yield* Effect.exit(attemptDeliverPending(threadId));
+    const current = registry.getLatest(threadId);
+    if (delivered._tag === "Failure" || current?.delivery === "pending") {
+      yield* mutex.withPermits(1)(
+        Effect.gen(function* () {
+          const latest = registry.getLatest(threadId);
+          if (latest?.delivery === "pending") {
+            yield* persistState({ ...latest, delivery: "available" });
+          }
+        }),
+      );
+      if (delivered._tag === "Failure") return yield* Effect.failCause(delivered.cause);
+      return yield* new ActionResumeError({
+        reason: "internal_error",
+        message: "The interrupted Action follow-up cannot resume while this thread is busy.",
+      });
+    }
   });
 
   const discardInterruptedImpl = Effect.fn("ActionResume.discardInterrupted")(function* (
