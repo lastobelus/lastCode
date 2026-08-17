@@ -10,6 +10,7 @@ import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 
 import {
   DeleteProjectionThreadActivitiesInput,
+  ListProjectionThreadActivitiesByKindInput,
   ListProjectionThreadActivitiesInput,
   ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
@@ -151,6 +152,31 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
+  const listProjectionThreadActivityRowsByKind = SqlSchema.findAll({
+    Request: ListProjectionThreadActivitiesByKindInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ kind }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE kind = ${kind}
+        ORDER BY
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+          sequence ASC,
+          created_at ASC,
+          activity_id ASC
+      `,
+  });
+
   const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadActivityRow(row).pipe(
       Effect.mapError(
@@ -167,6 +193,17 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
         toPersistenceSqlOrDecodeError(
           "ProjectionThreadActivityRepository.listByThreadId:query",
           "ProjectionThreadActivityRepository.listByThreadId:decodeRows",
+        ),
+      ),
+      Effect.map(mapActivityRows),
+    );
+
+  const listByKind: ProjectionThreadActivityRepositoryShape["listByKind"] = (input) =>
+    listProjectionThreadActivityRowsByKind(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionThreadActivityRepository.listByKind:query",
+          "ProjectionThreadActivityRepository.listByKind:decodeRows",
         ),
       ),
       Effect.map(mapActivityRows),
@@ -195,6 +232,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
     upsert,
     listByThreadId,
     listUserInputLifecycleByThreadId,
+    listByKind,
     deleteByThreadId,
   } satisfies ProjectionThreadActivityRepositoryShape;
 });
