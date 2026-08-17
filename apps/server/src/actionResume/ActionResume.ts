@@ -134,6 +134,13 @@ export function actionCommandForShell(
   }
 }
 
+export function actionBlocksNewLaunch(state: ActionResumeState | null): boolean {
+  return (
+    state !== null &&
+    (state.delivery === "armed" || state.delivery === "pending" || state.delivery === "available")
+  );
+}
+
 const mapActionResumeError =
   (operation: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, ActionResumeError, R> =>
@@ -339,14 +346,14 @@ const make = Effect.gen(function* () {
   ) {
     const codex = yield* providerIsCodex(invocation.providerInstanceId);
     const { project } = yield* resolveProjectContext(invocation.threadId);
-    const alreadyRunning = registry.getLatest(invocation.threadId)?.outcome === "running";
+    const launchBlocked = actionBlocksNewLaunch(registry.getLatest(invocation.threadId));
     return project.scripts.map((script) => {
       const disabledReason = !codex
         ? "Resume-capable Actions are available to Codex providers in this first slice."
         : script.allowAgentResume !== true
           ? "This Action has not been opted in for agent-triggered resume."
-          : alreadyRunning
-            ? "This thread is already waiting for a resume-capable Action."
+          : launchBlocked
+            ? "This thread must finish its current Action continuation first."
             : null;
       return {
         id: script.id,
@@ -362,10 +369,10 @@ const make = Effect.gen(function* () {
     script: ProjectScript,
   ) {
     const existing = registry.getLatest(invocation.threadId);
-    if (existing?.outcome === "running") {
+    if (actionBlocksNewLaunch(existing)) {
       return yield* new ActionResumeError({
         reason: "action_already_running",
-        message: `This thread is already waiting for ${existing.actionName}.`,
+        message: `This thread must finish the continuation for ${existing?.actionName ?? "the current Action"} first.`,
       });
     }
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);

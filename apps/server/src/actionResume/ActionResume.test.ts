@@ -92,6 +92,16 @@ it("writes shell-specific status propagation for Action terminals", () => {
   );
 });
 
+it("blocks a replacement until the current Action continuation is settled", () => {
+  for (const delivery of ["armed", "pending", "available"] as const) {
+    assert.isTrue(ActionResume.actionBlocksNewLaunch({ delivery } as ActionResumeState), delivery);
+  }
+  for (const delivery of ["delivered", "disposed"] as const) {
+    assert.isFalse(ActionResume.actionBlocksNewLaunch({ delivery } as ActionResumeState), delivery);
+  }
+  assert.isFalse(ActionResume.actionBlocksNewLaunch(null));
+});
+
 it.effect("runs one opted-in Action and delivers exactly one automated follow-up", () => {
   const dispatched: OrchestrationCommand[] = [];
   const opened: TerminalOpenInput[] = [];
