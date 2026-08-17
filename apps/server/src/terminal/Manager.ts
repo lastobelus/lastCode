@@ -74,6 +74,12 @@ export {
   TerminalWriteError,
 };
 
+export type TerminalShellFamily = "posix" | "powershell" | "cmd";
+
+export type OpenTerminalSessionSnapshot = TerminalSessionSnapshot & {
+  readonly shellFamily?: TerminalShellFamily;
+};
+
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
@@ -134,7 +140,7 @@ export class TerminalManager extends Context.Service<
      */
     readonly open: (
       input: TerminalOpenInput,
-    ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
+    ) => Effect.Effect<OpenTerminalSessionSnapshot, TerminalError>;
 
     /**
      * Attach to a terminal and stream its initial snapshot followed by live events.
@@ -160,6 +166,9 @@ export class TerminalManager extends Context.Service<
      * Clear terminal output history.
      */
     readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
+
+    /** Read the persisted transcript without opening or restarting the terminal. */
+    readonly history: (input: TerminalClearInput) => Effect.Effect<string, TerminalHistoryError>;
 
     /**
      * Restart a terminal session in place.
@@ -262,6 +271,7 @@ interface TerminalSessionState {
   hasRunningSubprocess: boolean;
   /** Normalized child command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
+  shellFamily: TerminalShellFamily | null;
   runtimeEnv: Record<string, string> | null;
 }
 
@@ -347,6 +357,18 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     updatedAt: session.updatedAt,
     sequence: session.eventSequence,
   };
+}
+
+function openSnapshot(session: TerminalSessionState): OpenTerminalSessionSnapshot {
+  return {
+    ...snapshot(session),
+    ...(session.shellFamily === null ? {} : { shellFamily: session.shellFamily }),
+  };
+}
+
+function publicSnapshot(snapshot: OpenTerminalSessionSnapshot): TerminalSessionSnapshot {
+  const { shellFamily: _shellFamily, ...terminalSnapshot } = snapshot;
+  return terminalSnapshot;
 }
 
 function summary(session: TerminalSessionState): TerminalSummary {
@@ -476,6 +498,20 @@ function basenameForPlatform(command: string, platform: NodeJS.Platform): string
     .split(platform === "win32" ? /\\+/ : /\/+/)
     .filter((part) => part.length > 0);
   return parts.at(-1) ?? normalized;
+}
+
+function shellFamilyForCommand(command: string, platform: NodeJS.Platform): TerminalShellFamily {
+  const shellName = basenameForPlatform(command, platform).toLowerCase();
+  if (
+    shellName === "pwsh" ||
+    shellName === "pwsh.exe" ||
+    shellName === "powershell" ||
+    shellName === "powershell.exe"
+  ) {
+    return "powershell";
+  }
+  if (shellName === "cmd" || shellName === "cmd.exe") return "cmd";
+  return "posix";
 }
 
 function joinWindowsPath(...parts: ReadonlyArray<string>): string {
@@ -1840,7 +1876,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     index = 0,
     lastError: PtyAdapter.PtySpawnError | null = null,
   ): Effect.fn.Return<
-    { process: PtyAdapter.PtyProcess; shellLabel: string },
+    {
+      process: PtyAdapter.PtyProcess;
+      shellLabel: string;
+      shellFamily: TerminalShellFamily;
+    },
     PtyAdapter.PtySpawnError
   > {
     if (index >= shellCandidates.length) {
@@ -1877,6 +1917,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return {
         process: attempt.success,
         shellLabel: formatShellCandidate(candidate),
+        shellFamily: shellFamilyForCommand(candidate.shell, platform),
       };
     }
 
@@ -1912,6 +1953,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.exitSignal = null;
       session.hasRunningSubprocess = false;
       session.childCommandLabel = null;
+      session.shellFamily = null;
       session.pendingProcessEvents = [];
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
@@ -1921,6 +1963,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     let ptyProcess: PtyAdapter.PtyProcess | null = null;
     let startedShell: string | null = null;
+    let startedShellFamily: TerminalShellFamily | null = null;
 
     const startResult = yield* Effect.result(
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
@@ -1931,6 +1974,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
+            startedShellFamily = spawnResult.shellFamily;
 
             const processPid = ptyProcess.pid;
             const unsubscribeData = ptyProcess.onData((data) => {
@@ -1956,6 +2000,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.status = "running";
               session.unsubscribeData = unsubscribeData;
               session.unsubscribeExit = unsubscribeExit;
+              session.shellFamily = startedShellFamily;
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;
             });
@@ -1989,6 +2034,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.process = null;
         session.hasRunningSubprocess = false;
         session.childCommandLabel = null;
+        session.shellFamily = null;
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
@@ -2051,6 +2097,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         threadId,
         terminalId,
         sequence: closedEventSequence,
+        deleteHistory: deleteHistoryOnClose,
       });
     }
 
@@ -2235,6 +2282,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         unsubscribeExit: null,
         hasRunningSubprocess: false,
         childCommandLabel: null,
+        shellFamily: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
       };
 
@@ -2259,7 +2307,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         },
         "started",
       );
-      return snapshot(session);
+      return openSnapshot(session);
     }
 
     const liveSession = existing.value;
@@ -2311,7 +2359,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         },
         "started",
       );
-      return snapshot(liveSession);
+      return openSnapshot(liveSession);
     }
 
     if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
@@ -2321,7 +2369,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.updatedAt = yield* nowIso;
     }
 
-    return snapshot(liveSession);
+    return openSnapshot(liveSession);
   });
 
   const open: TerminalManager["Service"]["open"] = (input) =>
@@ -2346,7 +2394,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             ...input,
             terminalId,
             cwd: input.cwd,
-          });
+          }).pipe(Effect.map(publicSnapshot));
         }
 
         const session = existing.value;
@@ -2358,7 +2406,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             ...input,
             terminalId,
             cwd: input.cwd,
-          });
+          }).pipe(Effect.map(publicSnapshot));
         }
 
         if (
@@ -2647,6 +2695,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             unsubscribeExit: null,
             hasRunningSubprocess: false,
             childCommandLabel: null,
+            shellFamily: null,
             runtimeEnv: normalizedRuntimeEnv(input.env),
           };
           const createdSession = session;
@@ -2712,12 +2761,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
+  const history: TerminalManager["Service"]["history"] = (input) =>
+    readHistory(input.threadId, input.terminalId);
+
   return TerminalManager.of({
     open,
     attachStream,
     write,
     resize,
     clear,
+    history,
     restart,
     close,
     subscribe,
