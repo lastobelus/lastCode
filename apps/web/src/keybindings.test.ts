@@ -427,6 +427,32 @@ describe("sidebar mode shortcut", () => {
       "sidebar.mode.toggle",
     );
   });
+
+  it("respects shortcut context for a conditional sidebar mode binding", () => {
+    const keybindings = compile([
+      {
+        shortcut: modShortcut("b", { shiftKey: true }),
+        command: "sidebar.mode.toggle",
+        whenAst: whenIdentifier("terminalFocus"),
+      },
+    ]);
+    const shortcutEvent = event({ key: "b", metaKey: true, shiftKey: true });
+
+    assert.strictEqual(
+      resolveShortcutCommand(shortcutEvent, keybindings, {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+      null,
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(shortcutEvent, keybindings, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "sidebar.mode.toggle",
+    );
+  });
 });
 
 describe("thread navigation helpers", () => {
