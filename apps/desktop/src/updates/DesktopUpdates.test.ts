@@ -31,7 +31,10 @@ interface UpdatesHarnessOptions {
   >;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
-  readonly stopBackend?: Effect.Effect<void>;
+  readonly backends?: ReadonlyArray<{
+    readonly desiredRunning: boolean;
+    readonly stop?: Effect.Effect<void>;
+  }>;
   readonly env?: Record<string, string | undefined>;
   readonly localNightliesEnabled?: boolean;
   readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
@@ -147,25 +150,36 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
-  const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
-    id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
-    label: Effect.succeed("Windows"),
-    start: Effect.void,
-    stop: () =>
-      Effect.sync(() => {
-        installEvents.push("stop-backend");
-      }).pipe(Effect.andThen(options.stopBackend ?? Effect.void)),
-    currentConfig: Effect.succeed(Option.none()),
-    snapshot: Effect.succeed({
-      desiredRunning: false,
-      ready: false,
-      activePid: Option.none(),
-      restartAttempt: 0,
-      restartScheduled: false,
-    }),
-    waitForReady: () => Effect.succeed(true),
-  };
-  const backendLayer = DesktopBackendPool.layerTest([stubBackendInstance]);
+  const backendOptions = options.backends ?? [{ desiredRunning: true }];
+  const stubBackendInstances = backendOptions.map(
+    ({ desiredRunning, stop }, index): DesktopBackendPool.DesktopBackendInstance => {
+      const suffix = index === 0 ? "" : `-${index + 1}`;
+      return {
+        id:
+          index === 0
+            ? DesktopBackendPool.PRIMARY_INSTANCE_ID
+            : DesktopBackendPool.BackendInstanceId(`test-backend-${index + 1}`),
+        label: Effect.succeed(index === 0 ? "Windows" : `Backend ${index + 1}`),
+        start: Effect.sync(() => {
+          installEvents.push(`start-backend${suffix}`);
+        }),
+        stop: () =>
+          Effect.sync(() => {
+            installEvents.push(`stop-backend${suffix}`);
+          }).pipe(Effect.andThen(stop ?? Effect.void)),
+        currentConfig: Effect.succeed(Option.none()),
+        snapshot: Effect.succeed({
+          desiredRunning,
+          ready: desiredRunning,
+          activePid: Option.none(),
+          restartAttempt: 0,
+          restartScheduled: false,
+        }),
+        waitForReady: () => Effect.succeed(true),
+      };
+    },
+  );
+  const backendLayer = DesktopBackendPool.layerTest(stubBackendInstances);
 
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
@@ -527,7 +541,7 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
-  it.effect("cancels an accepted local handoff when graceful backend shutdown fails", () => {
+  it.effect("cancels the handoff and restores running backends when shutdown fails", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const harness = makeHarness({
       localNightliesEnabled: true,
@@ -547,7 +561,11 @@ describe("DesktopUpdates", () => {
         dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
         dmgSha256: "d".repeat(64),
       },
-      stopBackend: Effect.die(new Error("backend stop failed")),
+      backends: [
+        { desiredRunning: true },
+        { desiredRunning: true, stop: Effect.die(new Error("backend stop failed")) },
+        { desiredRunning: false },
+      ],
     });
 
     return Effect.scoped(
@@ -559,11 +577,18 @@ describe("DesktopUpdates", () => {
         yield* updates.install;
 
         assert.isFalse(yield* Ref.get(desktopState.quitting));
-        assert.deepEqual(harness.installEvents(), [
-          "prepare-install",
-          "stop-backend",
-          "cancel-handoff",
-        ]);
+        const installEvents = harness.installEvents();
+        assert.equal(installEvents[0], "prepare-install");
+        assert.include(installEvents, "stop-backend");
+        assert.include(installEvents, "stop-backend-2");
+        assert.include(installEvents, "cancel-handoff");
+        assert.include(installEvents, "start-backend");
+        assert.include(installEvents, "start-backend-2");
+        assert.notInclude(installEvents, "start-backend-3");
+        assert.isBelow(
+          installEvents.indexOf("cancel-handoff"),
+          installEvents.indexOf("start-backend"),
+        );
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
@@ -861,7 +886,7 @@ describe("DesktopUpdates", () => {
 
   it.effect("clears quitting state after an unexpected install setup failure", () => {
     const harness = makeHarness({
-      stopBackend: Effect.die(new Error("backend stop failed")),
+      backends: [{ desiredRunning: true, stop: Effect.die(new Error("backend stop failed")) }],
     });
 
     return Effect.scoped(

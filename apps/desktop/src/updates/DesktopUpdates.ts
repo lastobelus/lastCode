@@ -652,12 +652,34 @@ export const make = Effect.gen(function* () {
           }),
           (acceptedHandoff) =>
             Effect.gen(function* () {
-              yield* Ref.set(desktopState.quitting, true);
               const instances = yield* pool.list;
+              const instanceSnapshots = yield* Effect.forEach(
+                instances,
+                (instance) =>
+                  instance.snapshot.pipe(Effect.map((snapshot) => ({ instance, snapshot }))),
+                { concurrency: "unbounded" },
+              );
+              const previouslyRunningInstances = instanceSnapshots
+                .filter(({ snapshot }) => snapshot.desiredRunning)
+                .map(({ instance }) => instance);
+
+              yield* Ref.set(desktopState.quitting, true);
               yield* Effect.forEach(
                 instances,
                 (instance) => instance.stop({ timeout: Duration.seconds(5) }),
                 { concurrency: "unbounded" },
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  acceptedHandoff.cancel.pipe(
+                    Effect.andThen(
+                      Effect.forEach(previouslyRunningInstances, (instance) => instance.start, {
+                        concurrency: "unbounded",
+                        discard: true,
+                      }),
+                    ),
+                    Effect.andThen(Effect.failCause(cause)),
+                  ),
+                ),
               );
               yield* acceptedHandoff.commit;
               yield* electronApp.quit;
