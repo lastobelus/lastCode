@@ -127,6 +127,7 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Waiting"
     | "Monitoring"
     | "Connecting"
     | "Completed"
@@ -146,6 +147,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Awaiting Input": 5,
   Working: 4,
   Connecting: 4,
+  Waiting: 3,
   "Plan Ready": 3,
   Monitoring: 2,
   Completed: 1,
@@ -160,6 +162,7 @@ type ThreadStatusInput = Pick<
   | "latestTurn"
   | "session"
   | "backgroundLiveness"
+  | "actionResume"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -470,13 +473,14 @@ export type SidebarThreadStatus =
   | "approval"
   | "input"
   | "working"
+  | "waiting"
   | "monitoring"
   | "failed"
   | "ready";
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
+  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness" | "actionResume"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
@@ -501,6 +505,9 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.backgroundLiveness === "monitoring") {
     return "monitoring";
+  }
+  if (thread.actionResume?.outcome === "running") {
+    return "waiting";
   }
   return "ready";
 }
@@ -717,6 +724,15 @@ export function resolveThreadStatusPill(input: {
       label: "Monitoring",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: false,
+    };
+  }
+
+  if (thread.actionResume?.outcome === "running") {
+    return {
+      label: "Waiting",
+      colorClass: "text-yellow-700 dark:text-yellow-300/90",
+      dotClass: "bg-yellow-500 dark:bg-yellow-300/90",
       pulse: false,
     };
   }
