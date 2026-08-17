@@ -7,8 +7,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildArchivedProjectModel,
+  canValidateArchivedProjectKey,
   filterArchivedProjectGroups,
-  resolveArchivedProjectKey,
+  resolveArchivedProjectSelection,
   validateArchivedThreadsSearch,
 } from "./archiveProjectFiltering";
 
@@ -148,14 +149,61 @@ describe("archive project filtering", () => {
     expect(model.projectGroups.map((group) => group.displayName)).toEqual(["Removed project"]);
   });
 
-  it("falls back to All for a stale project key", () => {
+  it("only falls back to All for a stale project key after sources are ready", () => {
+    const project = makeProject();
+    const model = buildModel([project], [makeThread(project)]);
+    const projectKey = model.projectGroups[0]!.projectKey;
+
+    expect(
+      resolveArchivedProjectSelection({
+        canValidateProjectKey: false,
+        projectGroups: model.projectGroups,
+        requestedProjectKey: "missing-project",
+      }),
+    ).toEqual({
+      selectedProjectKey: "missing-project",
+      shouldClearRequestedProjectKey: false,
+    });
+    expect(
+      resolveArchivedProjectSelection({
+        canValidateProjectKey: true,
+        projectGroups: model.projectGroups,
+        requestedProjectKey: "missing-project",
+      }),
+    ).toEqual({ selectedProjectKey: null, shouldClearRequestedProjectKey: true });
+    expect(
+      resolveArchivedProjectSelection({
+        canValidateProjectKey: true,
+        projectGroups: model.projectGroups,
+        requestedProjectKey: projectKey,
+      }),
+    ).toEqual({ selectedProjectKey: projectKey, shouldClearRequestedProjectKey: false });
+  });
+
+  it("waits for every archive project-key source before validating", () => {
+    const ready = {
+      archiveError: null,
+      archivesReady: true,
+      environmentsReady: true,
+      primaryEnvironmentReady: true,
+      isLoadingArchive: false,
+      settingsHydrated: true,
+    };
+
+    expect(canValidateArchivedProjectKey(ready)).toBe(true);
+    expect(canValidateArchivedProjectKey({ ...ready, archivesReady: false })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, environmentsReady: false })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, primaryEnvironmentReady: false })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, settingsHydrated: false })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, isLoadingArchive: true })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, archiveError: "Failed" })).toBe(false);
+  });
+
+  it("does not widen an unresolved project filter to All", () => {
     const project = makeProject();
     const model = buildModel([project], [makeThread(project)]);
 
-    expect(resolveArchivedProjectKey(model.projectGroups, "missing-project")).toBeNull();
-    expect(resolveArchivedProjectKey(model.projectGroups, model.projectGroups[0]!.projectKey)).toBe(
-      model.projectGroups[0]!.projectKey,
-    );
+    expect(filterArchivedProjectGroups(model.archivedGroups, "pending-project")).toEqual([]);
   });
 
   it("preserves a project key longer than 500 characters during route validation", () => {

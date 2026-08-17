@@ -1,7 +1,7 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect } from "react";
 
-import { resolveArchivedProjectKey } from "../../archiveProjectFiltering";
+import { resolveArchivedProjectSelection } from "../../archiveProjectFiltering";
 import { useArchivedProjectModel } from "../../lib/archivedThreadsState";
 import { ProjectScopeBreadcrumb } from "../ProjectScopeBreadcrumb";
 import {
@@ -46,13 +46,17 @@ export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
 function ArchivedThreadsBreadcrumb() {
   const search = useSearch({ from: "/settings/archived" });
   const navigate = useNavigate({ from: "/settings/archived" });
-  const { isLoading, projectGroups } = useArchivedProjectModel();
-  const selectedProjectKey = resolveArchivedProjectKey(projectGroups, search.project ?? null);
+  const { canValidateProjectKey, isLoading, projectGroups } = useArchivedProjectModel();
+  const selection = resolveArchivedProjectSelection({
+    canValidateProjectKey,
+    projectGroups,
+    requestedProjectKey: search.project ?? null,
+  });
 
   useEffect(() => {
-    if (search.project === undefined || isLoading || selectedProjectKey !== null) return;
+    if (!selection.shouldClearRequestedProjectKey) return;
     void navigate({ search: {}, replace: true, hashScrollIntoView: false });
-  }, [isLoading, navigate, search.project, selectedProjectKey]);
+  }, [navigate, selection.shouldClearRequestedProjectKey]);
 
   return (
     <ProjectScopeBreadcrumb
@@ -67,8 +71,8 @@ function ArchivedThreadsBreadcrumb() {
         });
       }}
       rootLabel="Archive"
-      selectedKey={selectedProjectKey}
-      unavailableLabel="All"
+      selectedKey={selection.selectedProjectKey}
+      unavailableLabel={isLoading ? "Loading project" : "Unavailable project"}
     />
   );
 }

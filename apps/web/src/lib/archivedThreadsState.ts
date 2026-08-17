@@ -7,9 +7,12 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useMemo } from "react";
 
-import { buildArchivedProjectModel } from "../archiveProjectFiltering";
+import {
+  buildArchivedProjectModel,
+  canValidateArchivedProjectKey,
+} from "../archiveProjectFiltering";
 import { selectProjectGroupingSettings } from "../logicalProject";
-import { useClientSettings } from "../hooks/useSettings";
+import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useProjects } from "../state/entities";
@@ -35,6 +38,7 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
   readonly snapshots: ReadonlyArray<ArchivedSnapshotEntry>;
   readonly error: string | null;
   readonly isLoading: boolean;
+  readonly isReady: boolean;
   readonly refresh: () => void;
 } {
   const environmentKey = useMemo(
@@ -57,8 +61,9 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
 export function useArchivedProjectModel() {
   const liveProjects = useProjects();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const settingsHydrated = useClientSettingsHydrated();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const { environments } = useEnvironments();
+  const { environments, isReady: environmentsReady } = useEnvironments();
   const environmentIds = useMemo(
     () =>
       [
@@ -92,9 +97,25 @@ export function useArchivedProjectModel() {
       resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
     });
   }, [archiveState.snapshots, environmentLabelById, primaryEnvironmentId, projectGroupingSettings]);
+  const isLoading =
+    archiveState.isLoading ||
+    !archiveState.isReady ||
+    !environmentsReady ||
+    primaryEnvironmentId === null ||
+    !settingsHydrated;
+  const canValidateProjectKey = canValidateArchivedProjectKey({
+    archiveError: archiveState.error,
+    archivesReady: archiveState.isReady,
+    environmentsReady,
+    primaryEnvironmentReady: primaryEnvironmentId !== null,
+    isLoadingArchive: archiveState.isLoading,
+    settingsHydrated,
+  });
 
   return {
     ...archiveState,
     ...model,
+    canValidateProjectKey,
+    isLoading,
   };
 }

@@ -14,6 +14,7 @@ export interface ArchivedThreadSnapshotsState {
   readonly snapshots: ReadonlyArray<ArchivedSnapshotEntry>;
   readonly error: string | null;
   readonly isLoading: boolean;
+  readonly isReady: boolean;
 }
 
 const ARCHIVED_THREADS_ENVIRONMENT_KEY_SEPARATOR = "\u001f";
@@ -48,10 +49,12 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
       const snapshots: ArchivedSnapshotEntry[] = [];
       let error: string | null = null;
       let isLoading = false;
+      let isReady = true;
 
       for (const environmentId of parseArchivedThreadsEnvironmentKey(environmentKey)) {
         const result = get(options.getSnapshotAtom(environmentId));
         isLoading ||= result.waiting;
+        isReady &&= result._tag !== "Initial";
 
         const snapshot = Option.getOrNull(AsyncResult.value(result));
         if (snapshot !== null) {
@@ -63,7 +66,7 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
         }
       }
 
-      return { snapshots, error, isLoading };
+      return { snapshots, error, isLoading, isReady };
     }).pipe(Atom.withLabel(`${options.labelPrefix}:${environmentKey}`)),
   );
 }
