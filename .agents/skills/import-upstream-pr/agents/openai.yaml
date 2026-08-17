@@ -1,0 +1,4 @@
+interface:
+  display_name: "Import Upstream PR"
+  short_description: "Evaluate and port unmerged T3 Code PRs"
+  default_prompt: "Use $import-upstream-pr to evaluate and import a pinned T3 Code pull request into LastCode."
