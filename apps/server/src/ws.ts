@@ -12,6 +12,7 @@ import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AuthAccessStreamError,
+  ActionResumeError,
   type AuthAccessStreamEvent,
   type AuthEnvironmentScope,
   AuthSessionId,
@@ -92,6 +93,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
@@ -435,6 +437,7 @@ const makeWsRpcLayer = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -2187,6 +2190,36 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
             "rpc.aggregate": "terminal",
           }),
+        [WS_METHODS.actionResumeResume]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.actionResumeResume,
+            Option.match(actionResume, {
+              onNone: () =>
+                Effect.fail(
+                  new ActionResumeError({
+                    reason: "internal_error",
+                    message: "Action resume is unavailable in this server runtime.",
+                  }),
+                ),
+              onSome: (service) => service.resumeInterrupted(input.threadId),
+            }),
+            { "rpc.aggregate": "action-resume" },
+          ),
+        [WS_METHODS.actionResumeDiscard]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.actionResumeDiscard,
+            Option.match(actionResume, {
+              onNone: () =>
+                Effect.fail(
+                  new ActionResumeError({
+                    reason: "internal_error",
+                    message: "Action resume is unavailable in this server runtime.",
+                  }),
+                ),
+              onSome: (service) => service.discardInterrupted(input.threadId),
+            }),
+            { "rpc.aggregate": "action-resume" },
+          ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           observeRpcStream(
             WS_METHODS.subscribeTerminalEvents,
