@@ -737,6 +737,20 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("working");
   });
 
+  it("reports Waiting for a running Action once higher-priority work is idle", () => {
+    const actionResume = { outcome: "running" } as never;
+    expect(resolveSidebarThreadStatus({ ...idle, session: null, actionResume })).toBe("waiting");
+    expect(resolveSidebarThreadStatus({ ...idle, session, actionResume })).toBe("working");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        hasPendingApprovals: true,
+        session: null,
+        actionResume,
+      }),
+    ).toBe("approval");
+  });
+
   it("reports failed only while the session status is error", () => {
     expect(
       resolveSidebarThreadStatus({
