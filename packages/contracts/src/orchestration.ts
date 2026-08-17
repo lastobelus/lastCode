@@ -234,8 +234,73 @@ export const ProjectScript = Schema.Struct({
    * the moment this script starts. Ignored without `previewUrl` or on web.
    */
   autoOpenPreview: Schema.optional(Schema.Boolean),
+  /**
+   * Local opt-in for the provider-scoped MCP Action runner. Kept optional so
+   * existing project rows and older clients continue to decode; absent means
+   * the Action can only be launched by a user from the normal UI.
+   */
+  allowAgentResume: Schema.optional(Schema.Boolean),
 });
 export type ProjectScript = typeof ProjectScript.Type;
+
+export const ActionResumeOutcome = Schema.Literals([
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled_by_user",
+  "cancelled_by_archive",
+  "cancelled_by_shutdown",
+  "process_lost",
+]);
+export type ActionResumeOutcome = typeof ActionResumeOutcome.Type;
+
+export const ActionResumeDelivery = Schema.Literals([
+  "armed",
+  "pending",
+  "delivered",
+  "disposed",
+  "available",
+]);
+export type ActionResumeDelivery = typeof ActionResumeDelivery.Type;
+
+/**
+ * Durable one-shot state recorded in `action.resume.lifecycle` thread
+ * activities. The shell only exposes the latest row; the full activity
+ * history remains the audit trail and output stays in the terminal artifact.
+ */
+export const ActionResumeState = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  actionId: TrimmedNonEmptyString,
+  actionName: TrimmedNonEmptyString,
+  terminalId: TrimmedNonEmptyString,
+  outcome: ActionResumeOutcome,
+  delivery: ActionResumeDelivery,
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+  exitCode: Schema.NullOr(Schema.Int),
+  exitSignal: Schema.NullOr(Schema.Int),
+});
+export type ActionResumeState = typeof ActionResumeState.Type;
+
+export class ActionResumeError extends Schema.TaggedErrorClass<ActionResumeError>()(
+  "ActionResumeError",
+  {
+    reason: Schema.Literals([
+      "unsupported_provider",
+      "thread_not_found",
+      "project_not_found",
+      "action_not_found",
+      "action_not_enabled",
+      "action_already_running",
+      "action_not_recoverable",
+      "launch_failed",
+      "internal_error",
+    ]),
+    message: Schema.String,
+  },
+) {}
 
 export const ProjectFaviconPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(1024),
@@ -509,6 +574,12 @@ export const OrchestrationThreadShell = Schema.Struct({
    * live work. Optional so old servers/clients interop; absent = none.
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
+  /**
+   * Latest resume-capable Action state. Optional on the wire so older clients
+   * ignore it. Web/desktop render `running` as Waiting and `process_lost` as a
+   * passive recovery affordance; mobile deliberately ignores the field.
+   */
+  actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   /**
    * Current plan step while a turn runs, for the Working indicators
    * (sidebar row, in-chat working line). Cleared when the turn settles —
@@ -858,7 +929,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
   threadId: ThreadId,
   message: Schema.Struct({
     messageId: MessageId,
-    role: Schema.Literal("user"),
+    // `system` is reserved for server-originated one-shot continuations. The
+    // client command schema below remains user-only.
+    role: Schema.Literals(["user", "system"]),
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
