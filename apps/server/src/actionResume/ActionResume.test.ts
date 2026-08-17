@@ -107,6 +107,8 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   const opened: TerminalOpenInput[] = [];
   const written: TerminalWriteInput[] = [];
   const timeline: string[] = [];
+  let terminalStatus: "running" | "exited" = "running";
+  let failWrite = false;
   let terminalListener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
 
   const dependencies = Layer.mergeAll(
@@ -131,13 +133,24 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
         Effect.sync(() => {
           timeline.push("terminal:open");
           opened.push(input);
-          return { shellFamily: "posix" } as TerminalManager.OpenTerminalSessionSnapshot;
+          return {
+            status: terminalStatus,
+            shellFamily: "posix",
+          } as TerminalManager.OpenTerminalSessionSnapshot;
         }),
       write: (input) =>
-        Effect.sync(() => {
-          written.push(input);
-        }),
-      close: () => Effect.void,
+        failWrite
+          ? Effect.die("write failed")
+          : Effect.sync(() => {
+              written.push(input);
+            }),
+      close: (input) =>
+        terminalListener?.({
+          type: "closed",
+          threadId: input.threadId,
+          terminalId: input.terminalId ?? "default",
+          deleteHistory: input.deleteHistory ?? false,
+        }) ?? Effect.void,
       subscribe: (listener) =>
         Effect.sync(() => {
           terminalListener = listener;
@@ -234,6 +247,22 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       outcome: "cancelled_by_user",
       delivery: "disposed",
     });
+
+    failWrite = true;
+    const failedWrite = yield* service
+      .runProjectActionAndResume({ threadId, providerInstanceId }, "qa")
+      .pipe(Effect.flip);
+    assert.equal(failedWrite.reason, "launch_failed");
+    const failedState = registry.getLatest(threadId);
+    assert.deepInclude(failedState, { outcome: "failed", delivery: "disposed" });
+
+    failWrite = false;
+    terminalStatus = "exited";
+    const earlyExit = yield* service
+      .runProjectActionAndResume({ threadId, providerInstanceId }, "qa")
+      .pipe(Effect.flip);
+    assert.equal(earlyExit.reason, "launch_failed");
+    assert.equal(registry.getLatest(threadId)?.runId, failedState?.runId);
   }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
 });
 

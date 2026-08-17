@@ -458,6 +458,9 @@ const make = Effect.gen(function* () {
         cols: 120,
         rows: 30,
       });
+      if (terminal.status !== "running") {
+        return yield* Effect.die("Action terminal exited during launch.");
+      }
       yield* persistState(state);
       yield* terminals.write({
         threadId: invocation.threadId,
@@ -467,10 +470,14 @@ const make = Effect.gen(function* () {
     });
     const launched = yield* Effect.exit(launch);
     if (launched._tag === "Failure") {
+      yield* finishUnlocked({
+        threadId: invocation.threadId,
+        outcome: "failed",
+        deliver: false,
+      });
       yield* terminals
         .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
         .pipe(Effect.ignoreCause({ log: true }));
-      yield* finishUnlocked({ threadId: invocation.threadId, outcome: "failed" });
       return yield* new ActionResumeError({
         reason: "launch_failed",
         message: `Failed to launch Action "${script.name}".`,
