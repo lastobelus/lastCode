@@ -562,7 +562,12 @@ export const make = Effect.gen(function* () {
     }
 
     return yield* Effect.gen(function* () {
-      yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
+      yield* setState(
+        reduceDesktopUpdateStateOnDownloadStart(
+          state,
+          state.source === "lastcode-local" ? null : 0,
+        ),
+      );
       if (state.source === "lastcode-local") {
         const checkpointTag = yield* Ref.get(localCheckpointTagRef).pipe(
           Effect.flatMap(
