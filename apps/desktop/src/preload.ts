@@ -46,6 +46,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstraps"]>;
   },
+  reportRunningActionCount: (count) =>
+    ipcRenderer.invoke(IpcChannels.REPORT_RUNNING_ACTION_COUNT_CHANNEL, count),
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
@@ -124,9 +126,13 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   onQuitShortcut: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+    const wrappedListener = (
+      _event: Electron.IpcRendererEvent,
+      state: unknown,
+      runningActionCount: unknown,
+    ) => {
       if (state !== "down" && state !== "up") return;
-      listener(state);
+      listener(state, typeof runningActionCount === "number" ? runningActionCount : 0);
     };
 
     ipcRenderer.on(IpcChannels.QUIT_SHORTCUT_CHANNEL, wrappedListener);

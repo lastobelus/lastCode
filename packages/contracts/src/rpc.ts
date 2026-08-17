@@ -61,6 +61,7 @@ import {
 } from "./review.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
+  ActionResumeError,
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
@@ -79,6 +80,7 @@ import {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
+import { ThreadId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestActionInput,
@@ -256,6 +258,10 @@ export const WS_METHODS = {
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
+
+  // One-shot Project Action continuation methods
+  actionResumeResume: "actionResume.resume",
+  actionResumeDiscard: "actionResume.discard",
 
   // Preview methods
   previewOpen: "preview.open",
@@ -828,6 +834,16 @@ export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 });
 
+export const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
+});
+
+export const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
+});
+
 export const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
   payload: PreviewOpenInput,
   success: PreviewSessionSnapshot,
@@ -1093,6 +1109,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsActionResumeResumeRpc,
+  WsActionResumeDiscardRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
   WsPreviewOpenRpc,
