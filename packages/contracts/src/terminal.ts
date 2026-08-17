@@ -177,6 +177,7 @@ const TerminalExitedEvent = Schema.Struct({
 const TerminalClosedEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("closed"),
+  deleteHistory: Schema.Boolean,
 });
 
 const TerminalErrorEvent = Schema.Struct({
