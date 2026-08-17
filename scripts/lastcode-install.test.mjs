@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   acquireInstallLock,
+  cleanLaunchEnvironment,
   discoverDmgs,
   installCommand,
+  launchApp,
   parseDmgChoice,
   parseHandoffOptions,
   parseOptions,
@@ -176,7 +178,58 @@ describe("LastCode userland install command", () => {
     ).rejects.toThrow("did not quit within 30 seconds");
   });
 
-  it("restores the previous app when launch fails after the swap", () => {
+  it("scrubs Electron's Node mode and retries until the app remains running", async () => {
+    let elapsed = 0;
+    let launches = 0;
+    const commands = [];
+
+    await launchApp("/Applications/LastCode.app", {
+      environment: { ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" },
+      isRunning: () => launches >= 2 && elapsed >= 2_500,
+      now: () => elapsed,
+      pollIntervalMs: 250,
+      retryIntervalMs: 1_000,
+      runCommand: (command, args, options) => {
+        launches += 1;
+        commands.push([command, args, options]);
+      },
+      stabilityMs: 500,
+      timeoutMs: 5_000,
+      wait: async (delay) => {
+        elapsed += delay;
+      },
+    });
+
+    expect(launches).toBe(3);
+    expect(commands).toEqual([
+      ["open", ["-n", "-a", "/Applications/LastCode.app"], { environment: { KEEP_ME: "yes" } }],
+      ["open", ["-n", "-a", "/Applications/LastCode.app"], { environment: { KEEP_ME: "yes" } }],
+      ["open", ["-n", "-a", "/Applications/LastCode.app"], { environment: { KEEP_ME: "yes" } }],
+    ]);
+    expect(cleanLaunchEnvironment({ ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" })).toEqual({
+      KEEP_ME: "yes",
+    });
+  });
+
+  it("bounds relaunch attempts when the app never remains running", async () => {
+    let elapsed = 0;
+    await expect(
+      launchApp("/Applications/LastCode.app", {
+        isRunning: () => false,
+        now: () => elapsed,
+        pollIntervalMs: 250,
+        retryIntervalMs: 500,
+        runCommand: () => undefined,
+        stabilityMs: 500,
+        timeoutMs: 1_000,
+        wait: async (delay) => {
+          elapsed += delay;
+        },
+      }),
+    ).rejects.toThrow("did not remain running");
+  });
+
+  it("restores the previous app when launch fails after the swap", async () => {
     const root = temporaryDirectory();
     const targetPath = NodePath.join(root, "LastCode.app");
     const staging = NodePath.join(root, ".LastCode.install.app");
@@ -188,20 +241,17 @@ describe("LastCode userland install command", () => {
     const prepared = { targetPath, staging, backup, oldAppMoved: false };
 
     const launchAttempts = [];
-    expect(() =>
+    await expect(
       replacePreparedApp(prepared, {
-        runCommand: (command, args) => {
-          launchAttempts.push([command, args]);
+        launchApp: async (path) => {
+          launchAttempts.push(path);
           throw new Error("launch failed");
         },
       }),
-    ).toThrow("launch failed");
+    ).rejects.toThrow("launch failed");
     expect(NodeFS.readFileSync(NodePath.join(targetPath, "version"), "utf8")).toBe("old");
     expect(NodeFS.existsSync(backup)).toBe(false);
-    expect(launchAttempts).toEqual([
-      ["open", [targetPath]],
-      ["open", [targetPath]],
-    ]);
+    expect(launchAttempts).toEqual([targetPath, targetPath]);
   });
 
   it("launches with the repository's pinned Node runtime", () => {
