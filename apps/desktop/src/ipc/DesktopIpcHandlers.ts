@@ -41,6 +41,7 @@ import {
   getWindowFullscreenState,
   openExternal,
   probeRemoteEditors,
+  reportRunningActionCount,
   pickFolder,
   pickThemeFiles,
   setTheme,
@@ -58,6 +59,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getWindowFullscreenState);
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
+  yield* ipc.handle(reportRunningActionCount);
 
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
