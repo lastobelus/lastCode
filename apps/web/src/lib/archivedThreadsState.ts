@@ -17,6 +17,7 @@ import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { isHostedStaticApp } from "../hostedPairing";
 
 function archivedSnapshotAtom(environmentId: EnvironmentId) {
   return orchestrationEnvironment.archivedShellSnapshot({
@@ -97,13 +98,18 @@ export function useArchivedProjectModel() {
       resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
     });
   }, [archiveState.snapshots, environmentLabelById, primaryEnvironmentId, projectGroupingSettings]);
+  const environmentTopologyReady = isHostedStaticApp() || primaryEnvironmentId !== null;
   const isLoading =
-    archiveState.isLoading || !archiveState.isReady || !environmentsReady || !settingsHydrated;
+    archiveState.isLoading ||
+    !archiveState.isReady ||
+    !environmentsReady ||
+    !environmentTopologyReady ||
+    !settingsHydrated;
   const canValidateProjectKey = canValidateArchivedProjectKey({
     archiveError: archiveState.error,
     archivesReady: archiveState.isReady,
     environmentsReady,
-    hasProjectGroups: model.projectGroups.length > 0,
+    environmentTopologyReady,
     isLoadingArchive: archiveState.isLoading,
     settingsHydrated,
   });
