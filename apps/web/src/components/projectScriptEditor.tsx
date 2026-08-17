@@ -83,6 +83,8 @@ export interface NewProjectScriptInput {
   previewUrl: string | null;
   /** When true, automatically open the preview panel pointed at `previewUrl`. */
   autoOpenPreview: boolean;
+  /** Permit provider-scoped MCP launch plus a one-shot automated follow-up. */
+  allowAgentResume: boolean;
 }
 
 export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
@@ -95,6 +97,7 @@ export const EMPTY_PROJECT_SCRIPT_INPUT: NewProjectScriptInput = {
   keybinding: null,
   previewUrl: null,
   autoOpenPreview: false,
+  allowAgentResume: false,
 };
 
 /** What the editor dialog should open with. `scriptId: null` means "add". */
@@ -119,6 +122,7 @@ export function editorRequestForScript(
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
+      allowAgentResume: script.allowAgentResume ?? false,
     },
   };
 }
@@ -154,6 +158,7 @@ export function ProjectScriptEditorDialog({
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
+  const [allowAgentResume, setAllowAgentResume] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
@@ -171,6 +176,7 @@ export function ProjectScriptEditorDialog({
     setKeybinding(request.initial.keybinding ?? "");
     setPreviewUrl(request.initial.previewUrl ?? "");
     setAutoOpenPreview(request.initial.autoOpenPreview);
+    setAllowAgentResume(request.initial.allowAgentResume);
     setValidationError(request.error ?? null);
   }, [request]);
 
@@ -222,6 +228,7 @@ export function ProjectScriptEditorDialog({
         keybinding: keybindingRule?.key ?? null,
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
+        allowAgentResume,
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : "Failed to save action.");
@@ -350,6 +357,19 @@ export function ProjectScriptEditorDialog({
                 <Switch
                   checked={runOnWorktreeCreate}
                   onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
+                />
+              </label>
+              <label className="flex items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+                <span className="space-y-0.5">
+                  <span className="block">Allow agents to run and resume</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Lets a Codex agent launch this command and receive one automated follow-up when
+                    it finishes. The terminal transcript stays available as the output artifact.
+                  </span>
+                </span>
+                <Switch
+                  checked={allowAgentResume}
+                  onCheckedChange={(checked) => setAllowAgentResume(Boolean(checked))}
                 />
               </label>
               <label
