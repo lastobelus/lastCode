@@ -1149,6 +1149,7 @@ export interface DesktopBridge {
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
+  reportRunningActionCount?: (count: number) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
@@ -1209,7 +1210,9 @@ export interface DesktopBridge {
    * "up" when it is released before the hold completes. Optional: older
    * desktop builds never emit it.
    */
-  onQuitShortcut?: (listener: (state: "down" | "up") => void) => () => void;
+  onQuitShortcut?: (
+    listener: (state: "down" | "up", runningActionCount: number) => void,
+  ) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
