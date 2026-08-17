@@ -13,13 +13,15 @@ const HIDE_AFTER_RELEASE_MS = 1200;
  */
 export function QuitHoldOverlay() {
   const [visible, setVisible] = useState(false);
+  const [runningActionCount, setRunningActionCount] = useState(0);
 
   useEffect(() => {
     const subscribe = window.desktopBridge?.onQuitShortcut;
     if (!subscribe) return;
     let hideTimer: number | undefined;
-    const unsubscribe = subscribe((state) => {
+    const unsubscribe = subscribe((state, nextRunningActionCount) => {
       window.clearTimeout(hideTimer);
+      setRunningActionCount(nextRunningActionCount);
       if (state === "down") {
         setVisible(true);
         return;
@@ -41,6 +43,9 @@ export function QuitHoldOverlay() {
     >
       <div className="rounded-full bg-neutral-700/95 px-8 py-4 text-2xl font-bold text-white shadow-xl">
         Hold {shortcut} to Quit
+        {runningActionCount > 0
+          ? ` and cancel ${runningActionCount} running ${runningActionCount === 1 ? "Action" : "Actions"}`
+          : ""}
       </div>
     </div>
   );
