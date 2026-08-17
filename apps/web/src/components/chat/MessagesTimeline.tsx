@@ -965,6 +965,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "turn-plan" ? <TurnPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
@@ -1161,6 +1164,28 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         ) : null}
       </div>
     </>
+  );
+}
+
+function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <div className="mx-1 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-yellow-800 dark:text-yellow-200">
+        <BotIcon aria-hidden className="size-3.5" />
+        Automated follow-up
+      </div>
+      <div className="text-sm text-foreground/90">
+        <ChatMarkdown
+          text={row.message.text}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          isStreaming={false}
+          lineBreaks
+          skills={ctx.skills}
+        />
+      </div>
+    </div>
   );
 }
 
