@@ -185,7 +185,7 @@ describe("archive project filtering", () => {
       archiveError: null,
       archivesReady: true,
       environmentsReady: true,
-      primaryEnvironmentReady: true,
+      hasProjectGroups: true,
       isLoadingArchive: false,
       settingsHydrated: true,
     };
@@ -193,7 +193,7 @@ describe("archive project filtering", () => {
     expect(canValidateArchivedProjectKey(ready)).toBe(true);
     expect(canValidateArchivedProjectKey({ ...ready, archivesReady: false })).toBe(false);
     expect(canValidateArchivedProjectKey({ ...ready, environmentsReady: false })).toBe(false);
-    expect(canValidateArchivedProjectKey({ ...ready, primaryEnvironmentReady: false })).toBe(false);
+    expect(canValidateArchivedProjectKey({ ...ready, hasProjectGroups: false })).toBe(false);
     expect(canValidateArchivedProjectKey({ ...ready, settingsHydrated: false })).toBe(false);
     expect(canValidateArchivedProjectKey({ ...ready, isLoadingArchive: true })).toBe(false);
     expect(canValidateArchivedProjectKey({ ...ready, archiveError: "Failed" })).toBe(false);

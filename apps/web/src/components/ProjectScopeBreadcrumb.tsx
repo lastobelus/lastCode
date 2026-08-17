@@ -30,6 +30,7 @@ export function ProjectScopeBreadcrumb(props: {
     props.selectedKey === null
       ? (props.allLabel ?? null)
       : (props.items.find((item) => item.id === props.selectedKey)?.label ?? null);
+  const selectionAvailable = props.allLabel !== undefined || props.items.length > 0;
   const openProjectMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
     const api = readLocalApi();
     if (!api) return;
@@ -54,7 +55,7 @@ export function ProjectScopeBreadcrumb(props: {
       <WorkspaceBreadcrumbItem>{props.rootLabel}</WorkspaceBreadcrumbItem>
       <WorkspaceBreadcrumbSeparator />
       <WorkspaceBreadcrumbItem current>
-        {selectedLabel ? (
+        {selectedLabel || selectionAvailable ? (
           <button
             type="button"
             aria-haspopup="menu"
@@ -62,7 +63,7 @@ export function ProjectScopeBreadcrumb(props: {
             onClick={openProjectMenu}
             className="group/project-title inline-flex min-w-0 max-w-64 cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <span className="min-w-0 truncate">{selectedLabel}</span>
+            <span className="min-w-0 truncate">{selectedLabel ?? props.unavailableLabel}</span>
             <ChevronDownIcon
               aria-hidden
               className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project-title:opacity-100 group-focus-visible/project-title:opacity-100"

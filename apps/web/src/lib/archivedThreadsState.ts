@@ -98,16 +98,12 @@ export function useArchivedProjectModel() {
     });
   }, [archiveState.snapshots, environmentLabelById, primaryEnvironmentId, projectGroupingSettings]);
   const isLoading =
-    archiveState.isLoading ||
-    !archiveState.isReady ||
-    !environmentsReady ||
-    primaryEnvironmentId === null ||
-    !settingsHydrated;
+    archiveState.isLoading || !archiveState.isReady || !environmentsReady || !settingsHydrated;
   const canValidateProjectKey = canValidateArchivedProjectKey({
     archiveError: archiveState.error,
     archivesReady: archiveState.isReady,
     environmentsReady,
-    primaryEnvironmentReady: primaryEnvironmentId !== null,
+    hasProjectGroups: model.projectGroups.length > 0,
     isLoadingArchive: archiveState.isLoading,
     settingsHydrated,
   });
