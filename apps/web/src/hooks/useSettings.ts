@@ -50,6 +50,9 @@ import { useTheme } from "./useTheme";
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
 type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
+export type ClientSettingsUpdate =
+  | ClientSettingsPatch
+  | ((settings: ClientSettings) => ClientSettingsPatch);
 
 const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
@@ -57,6 +60,9 @@ let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
 let clientSettingsHydrated = false;
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
+// Desktop persistence crosses an async IPC boundary. Keep writes in invocation
+// order so a slower earlier write cannot replace a newer client snapshot on disk.
+let clientSettingsPersistenceTail = Promise.resolve();
 
 function emitClientSettingsChange() {
   for (const listener of clientSettingsListeners) {
@@ -149,14 +155,23 @@ async function hydrateClientSettings(): Promise<void> {
 
 function persistClientSettings(settings: ClientSettings): void {
   replaceClientSettingsSnapshot(settings);
-  void ensureLocalApi()
-    .persistence.setClientSettings(settings)
+  clientSettingsPersistenceTail = clientSettingsPersistenceTail
+    .then(() => ensureLocalApi().persistence.setClientSettings(settings))
     .catch((error) => {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
         operation: "persist",
         ...safeErrorLogAttributes(error),
       });
     });
+}
+
+export function updateClientSettings(update: ClientSettingsUpdate): void {
+  const currentSettings = getClientSettingsSnapshot();
+  const patch = typeof update === "function" ? update(currentSettings) : update;
+  persistClientSettings({
+    ...currentSettings,
+    ...patch,
+  });
 }
 
 // ── Key sets for routing patches ─────────────────────────────────────
@@ -471,10 +486,5 @@ export function useUpdatePrimarySettings() {
 }
 
 export function useUpdateClientSettings() {
-  return useCallback((patch: ClientSettingsPatch) => {
-    persistClientSettings({
-      ...getClientSettingsSnapshot(),
-      ...patch,
-    });
-  }, []);
+  return useCallback(updateClientSettings, []);
 }
