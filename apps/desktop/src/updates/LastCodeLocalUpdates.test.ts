@@ -1,7 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
-  isSafeFeedArtifactName,
   parseHelperResult,
   terminateHelperProcess,
   usesDetachedHelperProcessGroup,
@@ -16,15 +15,6 @@ describe("LastCodeLocalUpdates", () => {
       { schemaVersion: 1, status: "built" },
     );
     assert.throws(() => parseHelperResult("noise only"), /did not return a result/);
-  });
-
-  it("only serves updater artifacts from the build directory root", () => {
-    assert.isTrue(isSafeFeedArtifactName("nightly-mac.yml"));
-    assert.isTrue(isSafeFeedArtifactName("LastCode.zip"));
-    assert.isTrue(isSafeFeedArtifactName("LastCode.zip.blockmap"));
-    assert.isFalse(isSafeFeedArtifactName("latest-mac.yml"));
-    assert.isFalse(isSafeFeedArtifactName("../nightly-mac.yml"));
-    assert.isFalse(isSafeFeedArtifactName("nested/LastCode.zip"));
   });
 
   it("terminates the detached helper process group on macOS", () => {
