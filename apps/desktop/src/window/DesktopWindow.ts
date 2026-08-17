@@ -106,6 +106,10 @@ export class DesktopWindow extends Context.Service<
     // guest page instead of the app UI. The menu routes here to always target
     // the main window.
     readonly zoomMain: (direction: MainWindowZoomDirection) => Effect.Effect<void>;
+    readonly runningActionCount: Effect.Effect<number>;
+    readonly reportRunningActionCount: (count: number) => Effect.Effect<void>;
+    readonly acknowledgeRunningActionQuitWarning: Effect.Effect<void>;
+    readonly consumeRunningActionQuitWarningAcknowledgment: Effect.Effect<boolean>;
     readonly syncAppearance: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
@@ -283,6 +287,9 @@ export const make = Effect.gen(function* () {
   // The transient "Connecting to WSL" splash window, tracked separately so it
   // is never mistaken for the real main window.
   const splashWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  const runningActionCountRef = yield* Ref.make(0);
+  const quitHoldDisplayedActionCountRef = yield* Ref.make(0);
+  const runningActionQuitWarningAcknowledgedRef = yield* Ref.make(false);
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
@@ -558,21 +565,41 @@ export const make = Effect.gen(function* () {
       platform: environment.platform,
       isEnabled: () =>
         runPromise(
-          Effect.map(
-            clientSettings.get,
-            Option.match({
-              onNone: () => DEFAULT_CLIENT_SETTINGS.confirmQuit,
-              onSome: (settings) => settings.confirmQuit,
-            }),
+          Effect.all([clientSettings.get, Ref.get(runningActionCountRef)]).pipe(
+            Effect.map(
+              ([settings, runningActionCount]) =>
+                runningActionCount > 0 ||
+                Option.match(settings, {
+                  onNone: () => DEFAULT_CLIENT_SETTINGS.confirmQuit,
+                  onSome: (value) => value.confirmQuit,
+                }),
+            ),
           ),
         ),
       notify: (state) => {
-        if (!window.isDestroyed()) {
-          window.webContents.send(QUIT_SHORTCUT_CHANNEL, state);
-        }
+        void runPromise(
+          Effect.gen(function* () {
+            const runningActionCount = yield* Ref.get(runningActionCountRef);
+            if (state === "down") {
+              yield* Ref.set(quitHoldDisplayedActionCountRef, runningActionCount);
+            }
+            if (!window.isDestroyed()) {
+              window.webContents.send(QUIT_SHORTCUT_CHANNEL, state, runningActionCount);
+            }
+          }),
+        );
       },
       quit: () => {
-        void runPromise(electronApp.quit);
+        void runPromise(
+          Effect.gen(function* () {
+            const runningActionCount = yield* Ref.get(runningActionCountRef);
+            const displayedActionCount = yield* Ref.get(quitHoldDisplayedActionCountRef);
+            if (runningActionCount > 0 && displayedActionCount >= runningActionCount) {
+              yield* Ref.set(runningActionQuitWarningAcknowledgedRef, true);
+            }
+            yield* electronApp.quit;
+          }),
+        );
       },
     });
     window.webContents.on("before-input-event", (event, input) => {
@@ -908,6 +935,16 @@ export const make = Effect.gen(function* () {
       // own zoom, so put each guest back where the preview left it.
       yield* previewManager.reapplyZoom();
     }),
+    runningActionCount: Ref.get(runningActionCountRef),
+    reportRunningActionCount: (count) =>
+      Ref.set(runningActionCountRef, Math.max(0, Math.trunc(count))).pipe(
+        Effect.withSpan("desktop.window.reportRunningActionCount"),
+      ),
+    acknowledgeRunningActionQuitWarning: Ref.set(runningActionQuitWarningAcknowledgedRef, true),
+    consumeRunningActionQuitWarningAcknowledgment: Ref.getAndSet(
+      runningActionQuitWarningAcknowledgedRef,
+      false,
+    ),
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
       yield* electronWindow.syncAllAppearance((window) =>

@@ -170,6 +170,7 @@ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
+  CircleAlertIcon,
   ChevronDownIcon,
   GitBranchIcon,
   PaperclipIcon,
@@ -1278,6 +1279,12 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+    reportFailure: false,
+  });
+  const resumeActionFollowUp = useAtomCommand(threadEnvironment.resumeAction, {
+    reportFailure: false,
+  });
+  const discardActionFollowUp = useAtomCommand(threadEnvironment.discardAction, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -4588,6 +4595,91 @@ function ChatViewContent(props: ChatViewProps) {
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
   ]);
+  const [isResumingInterruptedAction, setIsResumingInterruptedAction] = useState(false);
+  const [isDiscardingInterruptedAction, setIsDiscardingInterruptedAction] = useState(false);
+  const interruptedAction =
+    activeThreadShell?.actionResume?.delivery === "available"
+      ? activeThreadShell.actionResume
+      : null;
+  useEffect(() => {
+    if (interruptedAction === null) {
+      setIsResumingInterruptedAction(false);
+      setIsDiscardingInterruptedAction(false);
+    }
+  }, [interruptedAction]);
+  const handleResumeInterruptedAction = useCallback(async () => {
+    if (!activeThreadRef || interruptedAction === null) return;
+    setIsResumingInterruptedAction(true);
+    const result = await resumeActionFollowUp({
+      environmentId: activeThreadRef.environmentId,
+      input: { threadId: activeThreadRef.threadId },
+    });
+    if (result._tag === "Failure") {
+      setIsResumingInterruptedAction(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to resume the interrupted Action.",
+        );
+      }
+    }
+  }, [activeThreadRef, interruptedAction, resumeActionFollowUp, setThreadError]);
+  const handleDiscardInterruptedAction = useCallback(async () => {
+    if (!activeThreadRef || interruptedAction === null) return;
+    setIsDiscardingInterruptedAction(true);
+    const result = await discardActionFollowUp({
+      environmentId: activeThreadRef.environmentId,
+      input: { threadId: activeThreadRef.threadId },
+    });
+    if (result._tag === "Failure") {
+      setIsDiscardingInterruptedAction(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to discard the interrupted Action.",
+        );
+      }
+    }
+  }, [activeThreadRef, discardActionFollowUp, interruptedAction, setThreadError]);
+  const interruptedActionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (interruptedAction === null) return null;
+    return {
+      id: `action-interrupted:${interruptedAction.runId}`,
+      variant: "warning",
+      icon: <CircleAlertIcon />,
+      title: `${interruptedAction.actionName} was interrupted`,
+      description:
+        "LastCode did not restart the command or wake the agent. Resume only the agent follow-up when you are ready.",
+      actions: (
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            onClick={() => void handleDiscardInterruptedAction()}
+          >
+            {isDiscardingInterruptedAction ? "Discarding..." : "Discard"}
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            onClick={() => void handleResumeInterruptedAction()}
+          >
+            {isResumingInterruptedAction ? "Resuming..." : "Resume agent"}
+          </Button>
+        </div>
+      ),
+    };
+  }, [
+    handleDiscardInterruptedAction,
+    handleResumeInterruptedAction,
+    interruptedAction,
+    isDiscardingInterruptedAction,
+    isResumingInterruptedAction,
+  ]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
   // pill); sending a message clears it as a side effect of the send path.
@@ -4667,11 +4759,14 @@ function ChatViewContent(props: ChatViewProps) {
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const interruptedActionItems =
+      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
+        ...interruptedActionItems,
         ...backgroundLivenessItems,
         ...calmSystemItems,
         ...wokeThreadItems,
@@ -4680,6 +4775,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [
       ...urgentSystemItems,
+      ...interruptedActionItems,
       ...backgroundLivenessItems,
       ...calmSystemItems,
       ...wokeThreadItems,
@@ -4727,6 +4823,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    interruptedActionBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
