@@ -24,10 +24,14 @@ for LastCode review, validation, or merge authority.
 1. Capture the upstream PR URL, state, observed date, title, author, base, exact
    `headRefOid`, ordered commits, changed files, checks, reviews, review threads,
    linked issues, and closure reason when closed.
-2. Fetch every page of the PR commit list. Require the recorded count to match
-   the complete API result and its final commit SHA to equal `headRefOid`.
-3. Fetch `pull/<number>/head` into a remote-tracking ref and require its SHA to
-   equal the captured `headRefOid`. Never import a moving branch name.
+2. Force-fetch `pull/<number>/head` into a dedicated remote-tracking ref so a
+   previously cached ref cannot reject a legitimate upstream force-push.
+   Require the fetched SHA to equal the captured `headRefOid`. Never import a
+   moving branch name.
+3. Derive the complete, oldest-first commit list from the pinned base and head
+   Git objects. Record its count and require its final SHA to equal
+   `headRefOid`. Do not use GitHub's PR commits response as the source of truth;
+   that endpoint is capped at 250 commits even when paginated.
 4. Inspect metadata and the full diff before installing dependencies or running
    any code controlled by the PR.
 5. Check current `upstream/main` and `origin/lastcode/main` for the same behavior,
@@ -59,8 +63,10 @@ Record the adoption decision. Upstream CI is supporting evidence only.
 
 1. Fetch `origin` with pruning and create a clean worktree on
    `pr/upstream/<number>-<slug>` from the exact `origin/lastcode/main`.
-2. Apply the PR API's ordered commit list with `git cherry-pick -x`. Preserve
-   authorship and commit boundaries when the stack is coherent.
+2. Apply the pinned Git graph's ordered commit list with `git cherry-pick -x`.
+   Preserve authorship and commit boundaries when the stack is coherent. If
+   the range contains merge commits, stop and plan an ancestry-aware import or
+   a reimplementation instead of flattening it blindly.
 3. Do not merge the upstream PR branch; that drags its base history into
    LastCode.
 4. If the stack does not fit current LastCode, reimplement only the coherent

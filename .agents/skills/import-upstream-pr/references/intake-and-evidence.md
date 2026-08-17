@@ -11,32 +11,45 @@ Capture PR metadata before fetching or executing the candidate:
 repo=pingdotgg/t3code
 pr=<number>
 
-gh pr view "$pr" --repo "$repo" --json \
+metadata=$(gh pr view "$pr" --repo "$repo" --json \
   number,title,url,state,isDraft,author,baseRefName,baseRefOid,headRefOid,\
   mergeable,mergeStateStatus,changedFiles,statusCheckRollup,\
-  reviewDecision,labels,body,closedAt,mergedAt,updatedAt
+  reviewDecision,labels,body,closedAt,mergedAt,updatedAt)
 
-head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)
-commit_receipt=$(
-  gh api --paginate --slurp \
-    "repos/$repo/pulls/$pr/commits?per_page=100" |
-    jq -c 'flatten | {
-      count: length,
-      shas: map(.sha),
-      final_sha: (last.sha // null)
-    }'
+printf '%s\n' "$metadata"
+base_ref=$(printf '%s' "$metadata" | jq -r .baseRefName)
+base_sha=$(printf '%s' "$metadata" | jq -r .baseRefOid)
+head_sha=$(printf '%s' "$metadata" | jq -r .headRefOid)
+
+git fetch upstream \
+  "+refs/heads/${base_ref}:refs/remotes/upstream/${base_ref}" \
+  "+refs/pull/$pr/head:refs/remotes/upstream/pr/$pr"
+
+fetched_base=$(git rev-parse "refs/remotes/upstream/$base_ref")
+fetched_head=$(git rev-parse "refs/remotes/upstream/pr/$pr")
+git cat-file -e "$base_sha^{commit}"
+test "$fetched_head" = "$head_sha"
+
+commit_count=$(git rev-list --count "$base_sha..$head_sha")
+final_sha=$(
+  git rev-list --reverse --topo-order "$base_sha..$head_sha" | tail -n 1
 )
-test "$(printf '%s' "$commit_receipt" | jq -r .final_sha)" = "$head_sha"
-printf '%s\n' "$commit_receipt"
-
-git fetch upstream "pull/$pr/head:refs/remotes/upstream/pr/$pr"
-git rev-parse "refs/remotes/upstream/pr/$pr"
+test "$commit_count" -gt 0
+test "$final_sha" = "$head_sha"
+printf '{"count":%s,"final_sha":"%s","current_base_sha":"%s"}\n' \
+  "$commit_count" "$final_sha" "$fetched_base"
+git rev-list --reverse --topo-order "$base_sha..$head_sha"
 ```
 
-The REST request must use both `--paginate` and `--slurp`; `gh pr view --json
-commits` exposes only the first 100 commits. Require the receipt's `count` to
-equal the complete flattened result and both `final_sha` and the fetched PR ref
-to equal `headRefOid`. Also record:
+The leading `+` on both fetch refspecs is intentional: a previously fetched PR
+or force-updated base must not make the receipt fail as a non-fast-forward
+update. `baseRefOid` can legitimately predate the current base branch tip, so
+require that exact commit object to exist rather than equating it with
+`fetched_base`. Requiring the fetched PR ref to equal `headRefOid` detects a
+head race; restart the capture if it changed. Git's `base..head` walk is the
+complete source of truth because the GitHub PR commits endpoint returns at most
+250 commits, while `gh pr view --json commits` exposes only the first 100.
+Record the oldest-first `--topo-order` list and its count. Also record:
 
 - observed date and timezone;
 - ordered commit SHAs and authors;
@@ -66,8 +79,11 @@ Before adoption, compare the candidate against both current destinations:
   applicability; and
 - source review establishes semantic compatibility.
 
-For multiple commits, preserve the PR API order. Use `git range-diff` when the
-candidate head changes or when validating a rebased port.
+For multiple commits, preserve the pinned Git graph's oldest-first topological
+order. Check `git rev-list --merges "$base_sha..$head_sha"` before cherry-pick;
+if it is non-empty, plan an ancestry-aware import or reimplementation rather
+than flattening merge commits blindly. Use `git range-diff` when the candidate
+head changes or when validating a rebased port.
 
 ## Validation receipt
 
