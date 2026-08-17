@@ -2092,6 +2092,21 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "action-resume" },
           ),
+        [WS_METHODS.actionResumeDiscard]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.actionResumeDiscard,
+            Option.match(actionResume, {
+              onNone: () =>
+                Effect.fail(
+                  new ActionResumeError({
+                    reason: "internal_error",
+                    message: "Action resume is unavailable in this server runtime.",
+                  }),
+                ),
+              onSome: (service) => service.discardInterrupted(input.threadId),
+            }),
+            { "rpc.aggregate": "action-resume" },
+          ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           observeRpcStream(
             WS_METHODS.subscribeTerminalEvents,

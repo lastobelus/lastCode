@@ -174,6 +174,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
 
     assert.isDefined(terminalListener);
     yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: "QA failed: expected 2, received 3\n",
+    });
+    yield* terminalListener!({
       type: "exited",
       threadId,
       terminalId: running.terminalId,
@@ -195,6 +201,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts.length, 1);
     assert.equal(turnStarts[0]?.message.role, "system");
     assert.match(turnStarts[0]?.message.text ?? "", /Automated Project Action follow-up/);
+    assert.match(turnStarts[0]?.message.text ?? "", /QA failed: expected 2, received 3/);
     assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
     assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
 
@@ -224,6 +231,16 @@ it.effect("requires an explicit resume after a running Action is found on startu
       exitCode: null,
       exitSignal: null,
     };
+    const recoveredThreadId = ThreadId.make("thread-action-resume-recovered");
+    const available: ActionResumeState = {
+      ...running,
+      runId: "available-run",
+      threadId: recoveredThreadId,
+      terminalId: "action-available-run",
+      outcome: "process_lost",
+      delivery: "available",
+      finishedAt: now,
+    };
 
     const dependencies = Layer.mergeAll(
       Layer.mock(OrchestrationEngineService)({
@@ -235,7 +252,9 @@ it.effect("requires an explicit resume after a running Action is found on startu
               command.activity.payload !== null &&
               typeof command.activity.payload === "object" &&
               "outcome" in command.activity.payload &&
-              command.activity.payload.outcome === "process_lost"
+              command.activity.payload.outcome === "process_lost" &&
+              "runId" in command.activity.payload &&
+              command.activity.payload.runId === "interrupted-run"
             ) {
               yield* Deferred.succeed(reconciled, command.activity.payload as ActionResumeState);
             }
@@ -261,6 +280,17 @@ it.effect("requires an explicit resume after a running Action is found on startu
               sequence: 1,
               createdAt: now,
             },
+            {
+              activityId: EventId.make("action-resume:available-run:process_lost:available"),
+              threadId: recoveredThreadId,
+              turnId: null,
+              tone: "error",
+              kind: ActionResume.ACTION_RESUME_ACTIVITY_KIND,
+              summary: "Action interrupted when LastCode stopped: QA",
+              payload: available,
+              sequence: 2,
+              createdAt: now,
+            },
           ]),
       }),
       Layer.mock(TerminalManager.TerminalManager)({
@@ -282,6 +312,14 @@ it.effect("requires an explicit resume after a running Action is found on startu
     yield* Effect.scoped(
       Effect.gen(function* () {
         const service = yield* ActionResume.ActionResume;
+        const registry = yield* ThreadActionResume.ThreadActionResumeService;
+        assert.deepInclude(registry.getLatest(recoveredThreadId), {
+          outcome: "process_lost",
+          delivery: "available",
+        });
+        yield* service.discardInterrupted(recoveredThreadId);
+        assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
+
         const interrupted = yield* Deferred.await(reconciled);
         assert.equal(interrupted.outcome, "process_lost");
         assert.equal(interrupted.delivery, "available");

@@ -243,6 +243,7 @@ export const WS_METHODS = {
 
   // One-shot Project Action continuation methods
   actionResumeResume: "actionResume.resume",
+  actionResumeDiscard: "actionResume.discard",
 
   // Preview methods
   previewOpen: "preview.open",
@@ -803,6 +804,11 @@ export const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
   error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
 });
 
+export const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
+});
+
 export const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
   payload: PreviewOpenInput,
   success: PreviewSessionSnapshot,
@@ -1066,6 +1072,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
   WsActionResumeResumeRpc,
+  WsActionResumeDiscardRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
   WsPreviewOpenRpc,

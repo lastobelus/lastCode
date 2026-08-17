@@ -162,6 +162,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    discardAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:discard-action",
+      tag: WS_METHODS.actionResumeDiscard,
+      scheduler,
+      concurrency,
+    }),
     setRuntimeMode: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:set-runtime-mode",
       execute: (input: SetThreadRuntimeModeInput) => setThreadRuntimeMode(input),
