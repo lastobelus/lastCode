@@ -246,6 +246,18 @@ const make = Effect.gen(function* () {
     if (state === null || state.delivery !== "pending") return;
     const thread = yield* eligibleThreadForFollowUp(threadId);
     if (thread === null) return;
+    const outputTail =
+      outputTailByRunId.get(state.runId) ??
+      (yield* terminals.history({ threadId: state.threadId, terminalId: state.terminalId }).pipe(
+        Effect.map((history) => history.slice(-MAX_ACTION_OUTPUT_CHARS)),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not recover the Action terminal transcript", {
+            threadId: state.threadId,
+            terminalId: state.terminalId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(undefined)),
+        ),
+      ));
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
@@ -256,7 +268,7 @@ const make = Effect.gen(function* () {
       message: {
         messageId,
         role: "system",
-        text: followUpText(state, outputTailByRunId.get(state.runId)),
+        text: followUpText(state, outputTail),
         attachments: [],
       },
       runtimeMode: thread.runtimeMode,
@@ -321,12 +333,39 @@ const make = Effect.gen(function* () {
   const cancel = (threadId: ThreadId, outcome: "cancelled_by_user" | "cancelled_by_archive") =>
     Effect.gen(function* () {
       const current = registry.getLatest(threadId);
-      if (current === null || current.outcome !== "running") return;
-      yield* finish({ threadId, outcome });
-      yield* terminals
-        .close({ threadId, terminalId: current.terminalId })
-        .pipe(Effect.ignoreCause({ log: true }));
-    });
+      if (current === null) return;
+      if (current.outcome === "running") {
+        yield* finish({ threadId, outcome });
+        yield* terminals
+          .close({ threadId, terminalId: current.terminalId })
+          .pipe(Effect.ignoreCause({ log: true }));
+        return;
+      }
+      if (
+        outcome === "cancelled_by_archive" &&
+        (current.delivery === "pending" || current.delivery === "available")
+      ) {
+        yield* mutex.withPermits(1)(
+          Effect.gen(function* () {
+            const latest = registry.getLatest(threadId);
+            if (
+              latest !== null &&
+              (latest.delivery === "pending" || latest.delivery === "available")
+            ) {
+              yield* persistState({ ...latest, delivery: "disposed" });
+            }
+          }),
+        );
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError("Failed to cancel or dispose Project Action state", {
+          threadId,
+          outcome,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
 
   const resolveProjectContext = Effect.fn("ActionResume.resolveProjectContext")(function* (
     threadId: ThreadId,

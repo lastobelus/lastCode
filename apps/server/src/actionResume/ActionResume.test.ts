@@ -296,6 +296,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
       Layer.mock(TerminalManager.TerminalManager)({
         open: () => Effect.die("unexpected terminal open"),
         write: () => Effect.die("unexpected terminal write"),
+        history: () => Effect.succeed("Persisted failure detail after restart."),
         close: () => Effect.void,
         subscribe: () => Effect.succeed(() => undefined),
       }),
@@ -319,6 +320,9 @@ it.effect("requires an explicit resume after a running Action is found on startu
         });
         yield* service.discardInterrupted(recoveredThreadId);
         assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
+        registry.record(available);
+        yield* service.cancelByArchive(recoveredThreadId);
+        assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
 
         const interrupted = yield* Deferred.await(reconciled);
         assert.equal(interrupted.outcome, "process_lost");
@@ -337,6 +341,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
         assert.equal(turnStarts.length, 1);
         assert.equal(turnStarts[0]?.message.role, "system");
         assert.match(turnStarts[0]?.message.text ?? "", /was interrupted because LastCode stopped/);
+        assert.match(turnStarts[0]?.message.text ?? "", /Persisted failure detail after restart/);
       }),
     ).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))));
   }),

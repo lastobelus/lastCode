@@ -167,6 +167,9 @@ export class TerminalManager extends Context.Service<
      */
     readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
 
+    /** Read the persisted transcript without opening or restarting the terminal. */
+    readonly history: (input: TerminalClearInput) => Effect.Effect<string, TerminalHistoryError>;
+
     /**
      * Restart a terminal session in place.
      *
@@ -2698,12 +2701,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
+  const history: TerminalManager["Service"]["history"] = (input) =>
+    readHistory(input.threadId, input.terminalId);
+
   return TerminalManager.of({
     open,
     attachStream,
     write,
     resize,
     clear,
+    history,
     restart,
     close,
     subscribe,
