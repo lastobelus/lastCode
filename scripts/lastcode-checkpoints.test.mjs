@@ -14,6 +14,7 @@ import {
   renderLauncher,
   selectAutomationWorktree,
   selectCheckpointTags,
+  selectRevisionBuilds,
   selectNightlySyncWorktree,
 } from "./lastcode-checkpoints.mjs";
 
@@ -51,6 +52,31 @@ describe("LastCode checkpoint dashboard", () => {
     ).toEqual([
       "lastcode/checkpoint/v0.0.1-nightly.20260812.3",
       "lastcode/checkpoint/v0.0.1-nightly.20260812.2",
+    ]);
+  });
+
+  it("nests only built LastCode revisions beneath their checkpoint", () => {
+    expect(
+      selectRevisionBuilds("lastcode/checkpoint/v0.0.34-nightly.20260817.1113", [
+        "lastcode/build/v0.0.34-nightly.20260817.1113.1",
+        "lastcode/build/v0.0.34-nightly.20260817.1113.1.1",
+        "lastcode/build/v0.0.34-nightly.20260817.1113.3.1",
+        "lastcode/build/v0.0.34-nightly.20260817.1113.3.2",
+        "lastcode/build/v0.0.34-nightly.20260816.1112.1.9",
+      ]),
+    ).toEqual([
+      {
+        build: 1,
+        buildTag: "lastcode/build/v0.0.34-nightly.20260817.1113.1.1",
+        revisionTag: "lastcode/revision/v0.0.34-nightly.20260817.1113.1",
+        version: "v0.0.34-nightly.20260817.1113.1",
+      },
+      {
+        build: 2,
+        buildTag: "lastcode/build/v0.0.34-nightly.20260817.1113.3.2",
+        revisionTag: "lastcode/revision/v0.0.34-nightly.20260817.1113.3",
+        version: "v0.0.34-nightly.20260817.1113.3",
+      },
     ]);
   });
 
