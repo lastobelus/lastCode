@@ -13,6 +13,10 @@ const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const INSTALL_LOCK_NAME = "install.lock";
 const INSTALL_MANAGED_MARKER = "LastCode managed command: lastcode-install";
+const LAUNCH_POLL_INTERVAL_MS = 250;
+const LAUNCH_RETRY_INTERVAL_MS = 2_000;
+const LAUNCH_STABILITY_MS = 3_000;
+const LAUNCH_TIMEOUT_MS = 30_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
 function shellQuote(value) {
@@ -178,6 +182,7 @@ function selectDmg(dmgs) {
 function run(command, args, options = {}) {
   const result = NodeChildProcess.spawnSync(command, args, {
     encoding: "utf8",
+    ...(options.environment ? { env: options.environment } : {}),
     stdio: options.inherit ? "inherit" : ["ignore", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
@@ -210,6 +215,62 @@ function validateApp(appPath) {
 
 function appIsRunning() {
   return run("osascript", ["-e", `application id "${APP_BUNDLE_ID}" is running`]) === "true";
+}
+
+export function cleanLaunchEnvironment(environment = process.env) {
+  const clean = { ...environment };
+  delete clean.ELECTRON_RUN_AS_NODE;
+  return clean;
+}
+
+export async function launchApp(appPath, options = {}) {
+  const isRunning = options.isRunning ?? appIsRunning;
+  const now = options.now ?? Date.now;
+  const runCommand = options.runCommand ?? run;
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const pollIntervalMs = options.pollIntervalMs ?? LAUNCH_POLL_INTERVAL_MS;
+  const retryIntervalMs = options.retryIntervalMs ?? LAUNCH_RETRY_INTERVAL_MS;
+  const stabilityMs = options.stabilityMs ?? LAUNCH_STABILITY_MS;
+  const timeoutMs = options.timeoutMs ?? LAUNCH_TIMEOUT_MS;
+  const deadline = now() + timeoutMs;
+  const environment = cleanLaunchEnvironment(options.environment ?? process.env);
+  let launchAttempts = 0;
+  let lastLaunchError;
+  let nextLaunchAt = Number.NEGATIVE_INFINITY;
+  let runningSince;
+
+  while (true) {
+    const currentTime = now();
+    if (isRunning()) {
+      runningSince ??= currentTime;
+      if (currentTime - runningSince >= stabilityMs) {
+        console.log(`LastCode remained running after ${launchAttempts} launch attempt(s).`);
+        return;
+      }
+    } else {
+      runningSince = undefined;
+      if (currentTime >= nextLaunchAt) {
+        launchAttempts += 1;
+        console.log(`Launching LastCode (attempt ${launchAttempts})…`);
+        try {
+          runCommand("open", ["-n", "-a", appPath], { environment });
+          lastLaunchError = undefined;
+        } catch (error) {
+          lastLaunchError = error;
+        }
+        nextLaunchAt = currentTime + retryIntervalMs;
+      }
+    }
+
+    if (currentTime >= deadline) {
+      const detail =
+        lastLaunchError instanceof Error ? ` Last launch error: ${lastLaunchError.message}` : "";
+      throw new Error(
+        `LastCode did not remain running for ${stabilityMs / 1_000} seconds after ${timeoutMs / 1_000} seconds of launch attempts.${detail}`,
+      );
+    }
+    await wait(Math.min(pollIntervalMs, Math.max(0, deadline - currentTime)));
+  }
 }
 
 export async function quitApp(options = {}) {
@@ -415,22 +476,22 @@ async function prepareDmgInstall(dmgPath, options = {}) {
   }
 }
 
-export function replacePreparedApp(prepared, options = {}) {
-  const runCommand = options.runCommand ?? run;
+export async function replacePreparedApp(prepared, options = {}) {
+  const launch = options.launchApp ?? ((appPath) => launchApp(appPath, options));
   if (NodeFS.existsSync(prepared.targetPath)) {
     NodeFS.renameSync(prepared.targetPath, prepared.backup);
     prepared.oldAppMoved = true;
   }
   try {
     NodeFS.renameSync(prepared.staging, prepared.targetPath);
-    runCommand("open", [prepared.targetPath]);
+    await launch(prepared.targetPath);
   } catch (error) {
     NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
     if (prepared.oldAppMoved) {
       NodeFS.renameSync(prepared.backup, prepared.targetPath);
       prepared.oldAppMoved = false;
       try {
-        runCommand("open", [prepared.targetPath]);
+        await launch(prepared.targetPath);
       } catch (relaunchError) {
         console.error(
           `Warning: restored the previous LastCode app but could not relaunch it: ${relaunchError.message}`,
@@ -471,7 +532,7 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
   const prepared = await prepareDmgInstall(dmgPath, { targetPath });
   try {
     await quitApp();
-    replacePreparedApp(prepared);
+    await replacePreparedApp(prepared);
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
     cleanupPreparedInstall(prepared);
@@ -493,7 +554,7 @@ async function handoffInstall(options) {
     const command = await readHandoffCommand();
     if (command === "CANCEL") return;
     await waitForProcessExit(options.parentPid);
-    replacePreparedApp(prepared);
+    await replacePreparedApp(prepared);
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
     cleanupPreparedInstall(prepared);
