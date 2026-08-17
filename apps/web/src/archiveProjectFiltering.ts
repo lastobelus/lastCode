@@ -26,6 +26,11 @@ export interface ArchivedThreadsSearch {
   readonly project?: string;
 }
 
+export interface ArchivedProjectSelection {
+  readonly selectedProjectKey: string | null;
+  readonly shouldClearRequestedProjectKey: boolean;
+}
+
 export function validateArchivedThreadsSearch(raw: Record<string, unknown>): ArchivedThreadsSearch {
   return typeof raw.project === "string" && raw.project ? { project: raw.project } : {};
 }
@@ -90,14 +95,42 @@ export function buildArchivedProjectModel(input: {
   };
 }
 
-export function resolveArchivedProjectKey(
-  projectGroups: ReadonlyArray<SidebarProjectSnapshot>,
-  requestedProjectKey: string | null,
-): string | null {
-  if (requestedProjectKey === null) return null;
-  return projectGroups.some((group) => group.projectKey === requestedProjectKey)
-    ? requestedProjectKey
-    : null;
+export function canValidateArchivedProjectKey(input: {
+  readonly archiveError: string | null;
+  readonly archivesReady: boolean;
+  readonly environmentsReady: boolean;
+  readonly primaryEnvironmentReady: boolean;
+  readonly isLoadingArchive: boolean;
+  readonly settingsHydrated: boolean;
+}): boolean {
+  return (
+    input.environmentsReady &&
+    input.primaryEnvironmentReady &&
+    input.settingsHydrated &&
+    input.archivesReady &&
+    !input.isLoadingArchive &&
+    input.archiveError === null
+  );
+}
+
+export function resolveArchivedProjectSelection(input: {
+  readonly canValidateProjectKey: boolean;
+  readonly projectGroups: ReadonlyArray<SidebarProjectSnapshot>;
+  readonly requestedProjectKey: string | null;
+}): ArchivedProjectSelection {
+  if (input.requestedProjectKey === null) {
+    return { selectedProjectKey: null, shouldClearRequestedProjectKey: false };
+  }
+  if (
+    input.projectGroups.some((group) => group.projectKey === input.requestedProjectKey) ||
+    !input.canValidateProjectKey
+  ) {
+    return {
+      selectedProjectKey: input.requestedProjectKey,
+      shouldClearRequestedProjectKey: false,
+    };
+  }
+  return { selectedProjectKey: null, shouldClearRequestedProjectKey: true };
 }
 
 export function filterArchivedProjectGroups(

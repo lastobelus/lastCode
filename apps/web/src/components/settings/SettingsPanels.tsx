@@ -81,7 +81,7 @@ import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../.
 import { useArchivedProjectModel } from "../../lib/archivedThreadsState";
 import {
   filterArchivedProjectGroups,
-  resolveArchivedProjectKey,
+  resolveArchivedProjectSelection,
 } from "../../archiveProjectFiltering";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
@@ -2411,19 +2411,24 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {
     archivedGroups,
+    canValidateProjectKey,
     error: archiveError,
     isLoading: isLoadingArchive,
     projectGroups,
     refresh: refreshArchivedThreads,
   } = useArchivedProjectModel();
-  const selectedProjectKey = resolveArchivedProjectKey(projectGroups, projectKey);
+  const selection = resolveArchivedProjectSelection({
+    canValidateProjectKey,
+    projectGroups,
+    requestedProjectKey: projectKey,
+  });
   const selectedProject =
-    selectedProjectKey === null
+    selection.selectedProjectKey === null
       ? null
-      : (projectGroups.find((group) => group.projectKey === selectedProjectKey) ?? null);
+      : (projectGroups.find((group) => group.projectKey === selection.selectedProjectKey) ?? null);
   const visibleArchivedGroups = useMemo(
-    () => filterArchivedProjectGroups(archivedGroups, selectedProjectKey),
-    [archivedGroups, selectedProjectKey],
+    () => filterArchivedProjectGroups(archivedGroups, selection.selectedProjectKey),
+    [archivedGroups, selection.selectedProjectKey],
   );
 
   const handleArchivedThreadContextMenu = useCallback(
