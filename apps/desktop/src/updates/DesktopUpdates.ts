@@ -743,9 +743,77 @@ export const make = Effect.gen(function* () {
           return { accepted: false, completed: false, failed: false };
         }
 
+        const state = yield* Ref.get(updateStateRef);
         yield* Ref.set(desktopState.quitting, true);
 
         return yield* Effect.gen(function* () {
+          if (state.source === "lastcode-local") {
+            const selected = yield* Ref.get(localBuildRef).pipe(
+              Effect.flatMap(
+                Option.match({
+                  onNone: () =>
+                    Effect.fail(
+                      new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                        operation: "install",
+                        message: "The built LastCode DMG is no longer selected. Build it again.",
+                      }),
+                    ),
+                  onSome: Effect.succeed,
+                }),
+              ),
+            );
+            if (selected.version !== state.downloadedVersion) {
+              return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "install",
+                message: "The selected LastCode DMG does not match the downloaded version.",
+              });
+            }
+            return yield* Effect.acquireUseRelease(
+              localUpdates.prepareInstall({
+                dmgPath: selected.build.dmgPath,
+                dmgSha256: selected.build.dmgSha256,
+                expectedVersion: selected.version,
+              }),
+              (acceptedHandoff) =>
+                Effect.gen(function* () {
+                  const instances = yield* pool.list;
+                  const instanceSnapshots = yield* Effect.forEach(
+                    instances,
+                    (instance) =>
+                      instance.snapshot.pipe(Effect.map((snapshot) => ({ instance, snapshot }))),
+                    { concurrency: "unbounded" },
+                  );
+                  const previouslyRunningInstances = instanceSnapshots
+                    .filter(({ snapshot }) => snapshot.desiredRunning)
+                    .map(({ instance }) => instance);
+                  yield* Effect.gen(function* () {
+                    yield* Effect.forEach(
+                      instances,
+                      (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+                      { concurrency: "unbounded" },
+                    );
+                    yield* acceptedHandoff.commit;
+                  }).pipe(
+                    Effect.catchCause((cause) =>
+                      acceptedHandoff.cancel.pipe(
+                        Effect.andThen(
+                          Effect.forEach(
+                            previouslyRunningInstances,
+                            (instance) => instance.start,
+                            { concurrency: "unbounded", discard: true },
+                          ),
+                        ),
+                        Effect.andThen(Effect.failCause(cause)),
+                      ),
+                    ),
+                  );
+                  yield* electronApp.quit;
+                  return { accepted: true, completed: false, failed: false };
+                }),
+              (acceptedHandoff) => acceptedHandoff.cancel,
+            );
+          }
+
           // Stop every backend in the pool, not just the primary. With
           // parallel WSL + Windows backends, leaving the WSL instance up
           // means quitAndInstall's app.quit() exits before the pool's
@@ -766,6 +834,19 @@ export const make = Effect.gen(function* () {
           return { accepted: true, completed: false, failed: false };
         }).pipe(
           Effect.catchTags({
+            LastCodeLocalUpdateError: Effect.fn("desktop.updates.handleLocalInstallFailure")(
+              function* (error) {
+                yield* resetInstallAction;
+                yield* updateState((current) =>
+                  reduceDesktopUpdateStateOnInstallFailure(current, error.message),
+                );
+                yield* logUpdaterError(error.message, {
+                  errorTag: error._tag,
+                  operation: error.operation,
+                });
+                return { accepted: true, completed: false, failed: true };
+              },
+            ),
             ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
               function* (error) {
                 yield* recoverFailedInstall(error.message);
