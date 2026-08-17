@@ -86,6 +86,7 @@ function compile(bindings: TestBinding[]): ResolvedKeybindingsConfig {
 
 const DEFAULT_BINDINGS = compile([
   { shortcut: modShortcut("b"), command: "sidebar.toggle" },
+  { shortcut: modShortcut("b", { shiftKey: true }), command: "sidebar.mode.toggle" },
   { shortcut: modShortcut("j"), command: "terminal.toggle" },
   { shortcut: modShortcut("b", { altKey: true }), command: "rightPanel.toggle" },
   {
@@ -413,6 +414,43 @@ describe("shortcutLabelForCommand", () => {
         context: { terminalFocus: true },
       }),
       "Ctrl+D",
+    );
+  });
+});
+
+describe("sidebar mode shortcut", () => {
+  it("dispatches a configured sidebar mode command", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "b", metaKey: true, shiftKey: true }), DEFAULT_BINDINGS, {
+        platform: "MacIntel",
+      }),
+      "sidebar.mode.toggle",
+    );
+  });
+
+  it("respects shortcut context for a conditional sidebar mode binding", () => {
+    const keybindings = compile([
+      {
+        shortcut: modShortcut("b", { shiftKey: true }),
+        command: "sidebar.mode.toggle",
+        whenAst: whenIdentifier("terminalFocus"),
+      },
+    ]);
+    const shortcutEvent = event({ key: "b", metaKey: true, shiftKey: true });
+
+    assert.strictEqual(
+      resolveShortcutCommand(shortcutEvent, keybindings, {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+      null,
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(shortcutEvent, keybindings, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "sidebar.mode.toggle",
     );
   });
 });

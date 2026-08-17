@@ -202,6 +202,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       assert.equal(defaultsByCommand.get("filePicker.toggle"), "mod+p");
       assert.equal(defaultsByCommand.get("projectSearch.toggle"), "mod+shift+f");
       assert.equal(defaultsByCommand.get("sidebar.toggle"), "mod+b");
+      assert.isFalse(defaultsByCommand.has("sidebar.mode.toggle"));
       assert.equal(defaultsByCommand.get("rightPanel.toggle"), "mod+alt+b");
       assert.isFalse(defaultsByCommand.has("rightPanel.toggleMaximized"));
       assert.equal(defaultsByCommand.get("terminal.splitVertical"), "mod+shift+d");
