@@ -11,6 +11,7 @@ export type ThreadStatusKind =
   | "pending-approval"
   | "awaiting-input"
   | "working"
+  | "waiting"
   | "connecting"
   | "error"
   | "plan-ready";
@@ -105,6 +106,18 @@ export function resolveThreadStatus(
       textClassName: "text-rose-700 dark:text-rose-300",
       iconColor: "#ff453a",
       iconBackground: "rgba(255,69,58,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.actionResume?.outcome === "running") {
+    return {
+      kind: "waiting",
+      label: "Waiting",
+      pillClassName: "bg-yellow-500/12 dark:bg-yellow-500/16",
+      textClassName: "text-yellow-700 dark:text-yellow-300",
+      iconColor: "#eab308",
+      iconBackground: "rgba(234,179,8,0.22)",
       pulse: false,
     };
   }
