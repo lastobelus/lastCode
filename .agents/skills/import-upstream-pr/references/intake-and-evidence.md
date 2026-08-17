@@ -24,11 +24,13 @@ base_sha=$(printf '%s' "$metadata" | jq -r .baseRefOid)
 head_sha=$(printf '%s' "$metadata" | jq -r .headRefOid)
 
 git fetch upstream \
-  "+refs/heads/${base_ref}:refs/remotes/upstream/${base_ref}" \
   "+refs/pull/$pr/head:refs/remotes/upstream/pr/$pr"
 
-fetched_base=$(git rev-parse "refs/remotes/upstream/$base_ref")
 fetched_head=$(git rev-parse "refs/remotes/upstream/pr/$pr")
+if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+  git fetch upstream "$base_sha" ||
+    printf 'exact base SHA was not directly fetchable: %s\n' "$base_sha" >&2
+fi
 git cat-file -e "$base_sha^{commit}" || {
   printf 'missing pinned base commit: %s\n' "$base_sha" >&2
   exit 1
@@ -38,6 +40,15 @@ test "$fetched_head" = "$head_sha" || {
     "$head_sha" "$fetched_head" >&2
   exit 1
 }
+
+if git ls-remote --exit-code --heads upstream \
+  "refs/heads/$base_ref" >/dev/null; then
+  git fetch upstream \
+    "+refs/heads/${base_ref}:refs/remotes/upstream/${base_ref}"
+  current_base_sha=$(git rev-parse "refs/remotes/upstream/$base_ref")
+else
+  current_base_sha=unavailable
+fi
 
 commit_count=$(git rev-list --count "$base_sha..$head_sha")
 final_sha=$(
@@ -52,19 +63,20 @@ test "$final_sha" = "$head_sha" || {
   exit 1
 }
 printf '{"count":%s,"final_sha":"%s","current_base_sha":"%s"}\n' \
-  "$commit_count" "$final_sha" "$fetched_base"
+  "$commit_count" "$final_sha" "$current_base_sha"
 git rev-list --reverse --topo-order "$base_sha..$head_sha"
 ```
 
-The leading `+` on both fetch refspecs is intentional: a previously fetched PR
-or force-updated base must not make the receipt fail as a non-fast-forward
-update. `baseRefOid` can legitimately predate the current base branch tip, so
-require that exact commit object to exist rather than equating it with
-`fetched_base`. Requiring the fetched PR ref to equal `headRefOid` detects a
-head race; restart the capture if it changed. Git's `base..head` walk is the
-complete source of truth because the GitHub PR commits endpoint returns at most
-250 commits, while `gh pr view --json commits` exposes only the first 100.
-Record the oldest-first `--topo-order` list and its count. Also record:
+Fetching the PR head is independent of fetching its named base branch because
+a closed PR can outlive a deleted target branch. The leading `+` refspecs allow
+cached PR and live-base refs to follow legitimate force-pushes. `baseRefOid`
+can predate the current base tip; require that exact commit object from the PR
+history or a direct SHA fetch rather than equating it with `current_base_sha`.
+If the named base no longer exists, record it as unavailable instead of failing
+the already pinned head. Requiring the fetched PR ref to equal `headRefOid`
+detects a head race; restart the capture if it changed. Git's `base..head` walk
+is the complete source of truth because the GitHub PR commits endpoint returns
+at most 250 commits, while `gh pr view --json commits` exposes only the first 100. Record the oldest-first `--topo-order` list and its count. Also record:
 
 - observed date and timezone;
 - ordered commit SHAs and authors;
