@@ -548,8 +548,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
   /**
    * Latest resume-capable Action state. Optional on the wire so older clients
-   * ignore it. Web/desktop render `running` as Waiting and `process_lost` as a
-   * passive recovery affordance; mobile deliberately ignores the field.
+   * ignore it. Clients render `running` as Waiting and `process_lost` as a
+   * passive recovery affordance.
    */
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   /**
