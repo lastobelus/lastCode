@@ -112,11 +112,12 @@ export function reduceDesktopUpdateStateOnNoUpdate(
 
 export function reduceDesktopUpdateStateOnDownloadStart(
   state: DesktopUpdateState,
+  downloadPercent: number | null = 0,
 ): DesktopUpdateState {
   return {
     ...state,
     status: "downloading",
-    downloadPercent: 0,
+    downloadPercent,
     message: null,
     errorContext: null,
     canRetry: false,
