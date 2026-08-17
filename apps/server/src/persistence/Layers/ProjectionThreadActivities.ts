@@ -10,6 +10,7 @@ import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 
 import {
   DeleteProjectionThreadActivitiesInput,
+  ListProjectionThreadActivitiesByKindInput,
   ListProjectionThreadActivitiesInput,
   ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
@@ -106,6 +107,40 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
+  const listProjectionThreadActivityRowsByKind = SqlSchema.findAll({
+    Request: ListProjectionThreadActivitiesByKindInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ kind }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE kind = ${kind}
+        ORDER BY created_at ASC, activity_id ASC
+      `,
+  });
+
+  const normalizeRows = (rows: ReadonlyArray<typeof ProjectionThreadActivityDbRowSchema.Type>) =>
+    rows.map((row) => ({
+      activityId: row.activityId,
+      threadId: row.threadId,
+      turnId: row.turnId,
+      tone: row.tone,
+      kind: row.kind,
+      summary: row.summary,
+      payload: row.payload,
+      ...(row.sequence !== null && row.sequence !== undefined ? { sequence: row.sequence } : {}),
+      createdAt: row.createdAt,
+    }));
+
   const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadActivityRow(row).pipe(
       Effect.mapError(
@@ -124,19 +159,18 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           "ProjectionThreadActivityRepository.listByThreadId:decodeRows",
         ),
       ),
-      Effect.map((rows) =>
-        rows.map((row) => ({
-          activityId: row.activityId,
-          threadId: row.threadId,
-          turnId: row.turnId,
-          tone: row.tone,
-          kind: row.kind,
-          summary: row.summary,
-          payload: row.payload,
-          ...(row.sequence !== null ? { sequence: row.sequence } : {}),
-          createdAt: row.createdAt,
-        })),
+      Effect.map(normalizeRows),
+    );
+
+  const listByKind: ProjectionThreadActivityRepositoryShape["listByKind"] = (input) =>
+    listProjectionThreadActivityRowsByKind(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionThreadActivityRepository.listByKind:query",
+          "ProjectionThreadActivityRepository.listByKind:decodeRows",
+        ),
       ),
+      Effect.map(normalizeRows),
     );
 
   const deleteByThreadId: ProjectionThreadActivityRepositoryShape["deleteByThreadId"] = (input) =>
@@ -149,6 +183,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   return {
     upsert,
     listByThreadId,
+    listByKind,
     deleteByThreadId,
   } satisfies ProjectionThreadActivityRepositoryShape;
 });

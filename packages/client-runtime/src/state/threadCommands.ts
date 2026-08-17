@@ -1,7 +1,12 @@
 import * as Crypto from "effect/Crypto";
+import { WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
-import { createAtomCommandScheduler, createEnvironmentCommand } from "./runtime.ts";
+import {
+  createAtomCommandScheduler,
+  createEnvironmentCommand,
+  createEnvironmentRpcCommand,
+} from "./runtime.ts";
 import {
   type ArchiveThreadInput,
   type CreateThreadInput,
@@ -148,6 +153,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     updateMetadata: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:update-metadata",
       execute: (input: UpdateThreadMetadataInput) => updateThreadMetadata(input),
+      scheduler,
+      concurrency,
+    }),
+    resumeAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:resume-action",
+      tag: WS_METHODS.actionResumeResume,
       scheduler,
       concurrency,
     }),
