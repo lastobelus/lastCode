@@ -63,7 +63,15 @@ export function ProjectScopeBreadcrumb(props: {
             onClick={openProjectMenu}
             className="group/project-title inline-flex min-w-0 max-w-64 cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <span className="min-w-0 truncate">{selectedLabel ?? props.unavailableLabel}</span>
+            <span
+              className={
+                selectedLabel === null
+                  ? "min-w-0 truncate text-muted-foreground"
+                  : "min-w-0 truncate"
+              }
+            >
+              {selectedLabel ?? props.unavailableLabel}
+            </span>
             <ChevronDownIcon
               aria-hidden
               className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project-title:opacity-100 group-focus-visible/project-title:opacity-100"
