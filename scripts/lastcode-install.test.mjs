@@ -11,6 +11,7 @@ import {
   parseDmgChoice,
   parseHandoffOptions,
   parseOptions,
+  quitApp,
   replacePreparedApp,
   renderDmgChoices,
   renderLauncher,
@@ -132,6 +133,47 @@ describe("LastCode userland install command", () => {
       backup: "/Applications/.LastCode.previous-42.app",
       staging: "/Applications/.LastCode.install-42.app",
     });
+  });
+
+  it("requests quit without waiting for an AppleEvent response", async () => {
+    let checks = 0;
+    const commands = [];
+    await quitApp({
+      isRunning: () => {
+        checks += 1;
+        return checks < 3;
+      },
+      now: () => 0,
+      runCommand: (command, args) => commands.push([command, args]),
+      wait: () => Promise.resolve(),
+    });
+
+    expect(commands).toEqual([
+      [
+        "osascript",
+        [
+          "-e",
+          "ignoring application responses",
+          "-e",
+          'tell application id "codes.lastobelus.lastcode" to quit',
+          "-e",
+          "end ignoring",
+        ],
+      ],
+    ]);
+    expect(checks).toBe(3);
+  });
+
+  it("bounds the wait for an application that does not quit", async () => {
+    const times = [0, 30_000];
+    await expect(
+      quitApp({
+        isRunning: () => true,
+        now: () => times.shift() ?? 30_000,
+        runCommand: () => undefined,
+        wait: () => Promise.resolve(),
+      }),
+    ).rejects.toThrow("did not quit within 30 seconds");
   });
 
   it("restores the previous app when launch fails after the swap", () => {
