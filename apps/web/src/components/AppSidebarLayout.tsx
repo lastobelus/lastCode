@@ -21,6 +21,7 @@ import { primaryServerKeybindingsAtom } from "../state/server";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import {
+  useClientSettingsHydrated,
   useEnvironmentIdentificationMode,
   useLegacySidebarEnabled,
   useUpdateClientSettings,
@@ -78,6 +79,7 @@ function SidebarControl() {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar } = useSidebar();
   const updateClientSettings = useUpdateClientSettings();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const routeTarget = useParams({
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),
@@ -102,7 +104,7 @@ function SidebarControl() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.repeat) return;
       if (
         event.target instanceof HTMLElement &&
         event.target.closest("[data-keybinding-capture]")
@@ -119,6 +121,7 @@ function SidebarControl() {
         },
       });
       if (command !== "sidebar.toggle" && command !== "sidebar.mode.toggle") return;
+      if (command === "sidebar.mode.toggle" && !clientSettingsHydrated) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -134,7 +137,14 @@ function SidebarControl() {
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [keybindings, previewOpen, terminalOpen, toggleSidebar, updateClientSettings]);
+  }, [
+    clientSettingsHydrated,
+    keybindings,
+    previewOpen,
+    terminalOpen,
+    toggleSidebar,
+    updateClientSettings,
+  ]);
 
   return (
     // The right-side layout controls carry mr-px (border compensation inside
