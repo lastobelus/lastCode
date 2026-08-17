@@ -225,6 +225,7 @@ describe("updateMachine", () => {
       2,
     );
     const downloading = reduceDesktopUpdateStateOnDownloadStart(available);
+    const indeterminateDownload = reduceDesktopUpdateStateOnDownloadStart(available, null);
     const progress = reduceDesktopUpdateStateOnDownloadProgress(downloading, 55.5);
 
     expect(available.status).toBe("available");
@@ -234,6 +235,7 @@ describe("updateMachine", () => {
     expect(downloading.releaseNotes).toBe(releaseNotes);
     expect(downloading.status).toBe("downloading");
     expect(downloading.downloadPercent).toBe(0);
+    expect(indeterminateDownload.downloadPercent).toBeNull();
     expect(progress.downloadPercent).toBe(55.5);
     expect(progress.errorContext).toBeNull();
   });
