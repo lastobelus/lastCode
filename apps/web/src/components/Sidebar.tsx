@@ -111,6 +111,7 @@ import { useProjects, useThreadShells } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
+import { terminalEnvironment } from "../state/terminal";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -789,6 +790,34 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
+  const ensureTerminal = useTerminalUiStateStore((state) => state.ensureTerminal);
+  const actionResume = thread.actionResume ?? null;
+  const openActionTerminal = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (actionResume === null) return;
+      ensureTerminal(threadRef, actionResume.terminalId, { open: true, active: true });
+      onThreadActivate(threadRef);
+    },
+    [actionResume, ensureTerminal, onThreadActivate, threadRef],
+  );
+  const cancelAction = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (actionResume === null) return;
+      void closeTerminal({
+        environmentId: thread.environmentId,
+        input: {
+          threadId: thread.id,
+          terminalId: actionResume.terminalId,
+        },
+      });
+    },
+    [actionResume, closeTerminal, thread.environmentId, thread.id],
+  );
 
   const gitCwd = thread.worktreePath ?? props.projectCwd;
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
@@ -841,7 +870,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // working threads aren't your problem yet) — only the colored status label
   // stands out.
   const isInFlight =
-    status === "working" || status === "monitoring" || status === "approval" || status === "input";
+    status === "working" ||
+    status === "monitoring" ||
+    status === "waiting" ||
+    status === "approval" ||
+    status === "input";
   const shouldRecede =
     (status === "ready" || isInFlight) && !isUnread && !isWoke && !props.isActive && !isSelected;
   // Status hues follow the system-wide convention set by sidebar v1 and the
@@ -867,37 +900,43 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             icon: null,
             className: "text-sky-600 dark:text-sky-400",
           }
-        : status === "approval"
+        : status === "waiting"
           ? {
-              label: "Approval",
-              icon: null,
-              className: "text-amber-700 dark:text-amber-300",
+              label: "Waiting",
+              icon: "waiting" as const,
+              className: "text-yellow-700 dark:text-yellow-300",
             }
-          : status === "input"
+          : status === "approval"
             ? {
-                label: "Input",
+                label: "Approval",
                 icon: null,
-                className: "text-indigo-600 dark:text-indigo-300",
+                className: "text-amber-700 dark:text-amber-300",
               }
-            : status === "failed"
+            : status === "input"
               ? {
-                  label: "Failed",
+                  label: "Input",
                   icon: null,
-                  className: "text-red-700 dark:text-red-300",
+                  className: "text-indigo-600 dark:text-indigo-300",
                 }
-              : isWoke
+              : status === "failed"
                 ? {
-                    label: "Woke",
-                    icon: "woke" as const,
-                    className: "text-amber-700 dark:text-amber-300",
+                    label: "Failed",
+                    icon: null,
+                    className: "text-red-700 dark:text-red-300",
                   }
-                : isUnread
+                : isWoke
                   ? {
-                      label: "Done",
-                      icon: "done" as const,
-                      className: "text-emerald-700 dark:text-emerald-300",
+                      label: "Woke",
+                      icon: "woke" as const,
+                      className: "text-amber-700 dark:text-amber-300",
                     }
-                  : null;
+                  : isUnread
+                    ? {
+                        label: "Done",
+                        icon: "done" as const,
+                        className: "text-emerald-700 dark:text-emerald-300",
+                      }
+                    : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -1445,7 +1484,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     while the other controls appear beside it. */}
                 <span
                   className={cn(
-                    isWokeStatus
+                    isWokeStatus || status === "waiting"
                       ? "pointer-events-auto"
                       : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-hover/sidebar-row:absolute group-hover/sidebar-row:right-0 group-hover/sidebar-row:opacity-0",
                     "flex items-center self-center justify-self-end tabular-nums text-secondary-label transition-opacity",
@@ -1453,7 +1492,56 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   )}
                 >
                   {topStatus ? (
-                    isWokeStatus ? (
+                    status === "waiting" && actionResume !== null ? (
+                      <Popover>
+                        <PopoverTrigger
+                          render={
+                            <button
+                              type="button"
+                              aria-label={`Waiting for Action: ${actionResume.actionName}`}
+                              onClick={(event) => event.stopPropagation()}
+                              className={cn(
+                                "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring",
+                                topStatus.className,
+                              )}
+                            />
+                          }
+                        >
+                          <span
+                            aria-hidden
+                            className="size-2 shrink-0 rounded-full bg-yellow-500 dark:bg-yellow-300"
+                          />
+                          <span role="status">Waiting</span>
+                        </PopoverTrigger>
+                        <PopoverPopup
+                          align="end"
+                          className="w-72"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <div className="space-y-3">
+                            <div>
+                              <p className="text-sm font-medium">{actionResume.actionName}</p>
+                              <p className="text-xs text-muted-foreground">
+                                Running for <WorkingDuration startedAt={actionResume.startedAt} />
+                              </p>
+                            </div>
+                            <div className="flex justify-end gap-2">
+                              <Button size="sm" variant="outline" onClick={openActionTerminal}>
+                                <TerminalIcon className="size-3.5" />
+                                Open Terminal
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="destructive-outline"
+                                onClick={cancelAction}
+                              >
+                                Cancel Action
+                              </Button>
+                            </div>
+                          </div>
+                        </PopoverPopup>
+                      </Popover>
+                    ) : isWokeStatus ? (
                       <Tooltip>
                         <TooltipTrigger
                           render={
@@ -1482,6 +1570,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       >
                         {topStatus.icon === "working" ? (
                           <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                        ) : topStatus.icon === "waiting" ? (
+                          <span
+                            aria-hidden
+                            className="size-2 shrink-0 rounded-full bg-yellow-500 dark:bg-yellow-300"
+                          />
                         ) : topStatus.icon === "done" ? (
                           <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
                         ) : null}
@@ -1750,6 +1843,7 @@ export default function Sidebar() {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -1813,6 +1907,18 @@ export default function Sidebar() {
   );
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge?.reportRunningActionCount) return;
+    const localEnvironmentIds = new Set(
+      bridge.getLocalEnvironmentBootstraps().map((bootstrap) => bootstrap.id),
+    );
+    const runningActionCount = threads.filter(
+      (thread) =>
+        localEnvironmentIds.has(thread.environmentId) && thread.actionResume?.outcome === "running",
+    ).length;
+    void bridge.reportRunningActionCount(runningActionCount);
+  }, [threads]);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
@@ -2332,6 +2438,36 @@ export default function Sidebar() {
     },
     [clearSelection, isMobile, router, setOpenMobile, setSelectionAnchor],
   );
+  const interruptedActionNoticeKeyRef = useRef<string | null>(null);
+  const interruptedActionThreads = useMemo(
+    () => threads.filter((thread) => thread.actionResume?.delivery === "available"),
+    [threads],
+  );
+  useEffect(() => {
+    if (interruptedActionThreads.length === 0) return;
+    const noticeKey = interruptedActionThreads
+      .map((thread) => thread.actionResume?.runId ?? "")
+      .sort()
+      .join(":");
+    if (noticeKey === interruptedActionNoticeKeyRef.current) return;
+    interruptedActionNoticeKeyRef.current = noticeKey;
+    const first = interruptedActionThreads[0];
+    if (!first) return;
+    const count = interruptedActionThreads.length;
+    toastManager.add(
+      stackedThreadToast({
+        type: "warning",
+        title: `${count} Action${count === 1 ? " was" : "s were"} interrupted`,
+        description: "No command was restarted and no agent was woken.",
+        timeout: 0,
+        actionProps: {
+          children: "Review",
+          onClick: () => navigateToThread(scopeThreadRef(first.environmentId, first.id)),
+        },
+        data: { hideCopyButton: true },
+      }),
+    );
+  }, [interruptedActionThreads, navigateToThread]);
 
   const navigateToDraft = useCallback(
     (draftId: DraftId) => {
@@ -3087,6 +3223,7 @@ export default function Sidebar() {
               isRegeneratingTitle,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
+              hasRunningAction: thread.actionResume?.outcome === "running",
               supports: {
                 settlement: supportsSettlement,
                 snooze: supportsSnooze,
@@ -3164,6 +3301,15 @@ export default function Sidebar() {
                 }),
               );
             }
+            return;
+          }
+          case "cancel-action": {
+            const action = thread.actionResume;
+            if (action?.outcome !== "running") return;
+            await closeTerminal({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id, terminalId: action.terminalId },
+            });
             return;
           }
           case "mark-unread":
@@ -3252,6 +3398,7 @@ export default function Sidebar() {
     },
     [
       archiveThread,
+      closeTerminal,
       attemptPin,
       attemptSettle,
       attemptSnooze,
