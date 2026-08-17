@@ -99,13 +99,13 @@ export function canValidateArchivedProjectKey(input: {
   readonly archiveError: string | null;
   readonly archivesReady: boolean;
   readonly environmentsReady: boolean;
-  readonly hasProjectGroups: boolean;
+  readonly environmentTopologyReady: boolean;
   readonly isLoadingArchive: boolean;
   readonly settingsHydrated: boolean;
 }): boolean {
   return (
     input.environmentsReady &&
-    input.hasProjectGroups &&
+    input.environmentTopologyReady &&
     input.settingsHydrated &&
     input.archivesReady &&
     !input.isLoadingArchive &&
