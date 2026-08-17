@@ -80,8 +80,10 @@ picker.
    bundle, and stages the replacement beside `/Applications/LastCode.app`.
 7. Only after the installer reports readiness does LastCode gracefully stop its
    backends and transfer commit ownership to the helper. The current app quits,
-   then the helper swaps the staged bundle with rollback protection and launches
-   the requested version.
+   then the helper swaps the staged bundle with rollback protection. It launches
+   the requested version without Electron's helper-only Node mode, retries a
+   forced new app launch when macOS accepts but drops the request, and requires
+   the process to remain running before deleting the previous bundle.
 
 The DMG is retained as both the inspectable manual artifact and the in-app
 install source. The paired ZIP and `nightly-mac.yml` remain part of the complete
@@ -136,7 +138,9 @@ acquisition fails before readiness, LastCode keeps its backends and visible
 window running and presents a retryable install error. If shutdown cannot finish
 after readiness, LastCode cancels the handoff so the helper removes its staging
 area and releases the lock. A failure after the old process exits restores the
-previous app before the helper reports the error in the install log.
+previous app before the helper reports the error in the install log. The log
+contains the complete helper transcript, including successful preflight and
+relaunch attempts.
 
 The dedicated build worktree is preserved for inspection. The helper refuses
 to reuse that path if it belongs to another Git repository, refuses a dirty
