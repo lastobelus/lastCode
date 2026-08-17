@@ -9,7 +9,9 @@ import {
   discoverDmgs,
   installCommand,
   parseDmgChoice,
+  parseHandoffOptions,
   parseOptions,
+  replacePreparedApp,
   renderDmgChoices,
   renderLauncher,
   temporaryAppPaths,
@@ -41,6 +43,42 @@ describe("LastCode userland install command", () => {
     expect(() => parseOptions(["one.dmg", "two.dmg"])).toThrow("Unexpected second DMG");
     expect(parseOptions(["--uninstall"]).uninstall).toBe(true);
     expect(() => parseOptions(["--uninstall", "one.dmg"])).toThrow("cannot be combined");
+  });
+
+  it("requires an exact artifact identity for managed handoff", () => {
+    expect(
+      parseHandoffOptions([
+        "--dmg",
+        "/tmp/LastCode.dmg",
+        "--expected-sha256",
+        "a".repeat(64),
+        "--expected-version",
+        "1.2.3-nightly.1",
+        "--parent-pid",
+        "42",
+        "--ready-fd",
+        "3",
+      ]),
+    ).toMatchObject({
+      dmgPath: "/tmp/LastCode.dmg",
+      expectedSha256: "a".repeat(64),
+      expectedVersion: "1.2.3-nightly.1",
+      parentPid: 42,
+      readyFd: 3,
+      targetPath: "/Applications/LastCode.app",
+    });
+    expect(() =>
+      parseHandoffOptions([
+        "--dmg",
+        "/tmp/LastCode.dmg",
+        "--expected-version",
+        "1.2.3",
+        "--parent-pid",
+        "42",
+        "--ready-fd",
+        "3",
+      ]),
+    ).toThrow("expected-sha256");
   });
 
   it("discovers DMGs recursively with the newest first", () => {
@@ -94,6 +132,34 @@ describe("LastCode userland install command", () => {
       backup: "/Applications/.LastCode.previous-42.app",
       staging: "/Applications/.LastCode.install-42.app",
     });
+  });
+
+  it("restores the previous app when launch fails after the swap", () => {
+    const root = temporaryDirectory();
+    const targetPath = NodePath.join(root, "LastCode.app");
+    const staging = NodePath.join(root, ".LastCode.install.app");
+    const backup = NodePath.join(root, ".LastCode.previous.app");
+    NodeFS.mkdirSync(targetPath);
+    NodeFS.writeFileSync(NodePath.join(targetPath, "version"), "old");
+    NodeFS.mkdirSync(staging);
+    NodeFS.writeFileSync(NodePath.join(staging, "version"), "new");
+    const prepared = { targetPath, staging, backup, oldAppMoved: false };
+
+    const launchAttempts = [];
+    expect(() =>
+      replacePreparedApp(prepared, {
+        runCommand: (command, args) => {
+          launchAttempts.push([command, args]);
+          throw new Error("launch failed");
+        },
+      }),
+    ).toThrow("launch failed");
+    expect(NodeFS.readFileSync(NodePath.join(targetPath, "version"), "utf8")).toBe("old");
+    expect(NodeFS.existsSync(backup)).toBe(false);
+    expect(launchAttempts).toEqual([
+      ["open", [targetPath]],
+      ["open", [targetPath]],
+    ]);
   });
 
   it("launches with the repository's pinned Node runtime", () => {

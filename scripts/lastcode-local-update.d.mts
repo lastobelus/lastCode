@@ -16,6 +16,8 @@ export interface LocalUpdateOptions {
 export interface ExistingBuild {
   readonly outputDir: string;
   readonly manifestPath: string;
+  readonly dmgPath: string;
+  readonly dmgSha256: string;
 }
 
 export interface ExistingBuildOptions {
