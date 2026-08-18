@@ -16,7 +16,24 @@ const isShellVisible = (state: ActionResumeState): boolean =>
   state.delivery === "pending" ||
   state.delivery === "available";
 
+const hydrationDeliveryRank = (delivery: ActionResumeState["delivery"]): number => {
+  switch (delivery) {
+    case "armed":
+      return 0;
+    case "pending":
+      return 1;
+    case "available":
+      return 2;
+    case "delivered":
+      return 3;
+    case "disposed":
+      return 4;
+  }
+};
+
 export interface ThreadActionResumeShape {
+  /** Restore one latest run per thread without reviving superseded delivery states. */
+  readonly hydrate: (states: ReadonlyArray<ActionResumeState>) => void;
   readonly record: (state: ActionResumeState) => void;
   readonly clear: (threadId: string) => void;
   readonly getLatest: (threadId: string) => ActionResumeState | null;
@@ -29,6 +46,19 @@ export function make(): ThreadActionResumeShape {
   const latestByThreadId = new Map<string, ActionResumeState>();
 
   return {
+    hydrate: (states) => {
+      for (const state of states) {
+        const current = latestByThreadId.get(state.threadId);
+        if (
+          current === undefined ||
+          state.startedAt > current.startedAt ||
+          (state.runId === current.runId &&
+            hydrationDeliveryRank(state.delivery) > hydrationDeliveryRank(current.delivery))
+        ) {
+          latestByThreadId.set(state.threadId, state);
+        }
+      }
+    },
     record: (state) => {
       latestByThreadId.set(state.threadId, state);
     },
