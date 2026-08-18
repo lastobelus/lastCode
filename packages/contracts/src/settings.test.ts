@@ -120,6 +120,7 @@ describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar with automatic merge and inactivity settling", () => {
     const settings = decodeClientSettings({});
     expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.legacySidebarScale).toBe(100);
     expect(settings.sidebarAutoSettleAfterDays).toBe(3);
     expect(settings.sidebarAutoSettleOnMerge).toBe(true);
   });
@@ -145,6 +146,16 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
     expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+
+  it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
+    expect(decodeClientSettings({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+    expect(decodeClientSettingsPatch({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+  });
+
+  it.each([49, 101, 74.5])("rejects an invalid legacy sidebar scale: %s", (value) => {
+    expect(() => decodeClientSettings({ legacySidebarScale: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ legacySidebarScale: value })).toThrow();
   });
 
   it("allows auto-settle by inactivity to be disabled", () => {
