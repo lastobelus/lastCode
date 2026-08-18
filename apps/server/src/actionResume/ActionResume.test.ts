@@ -313,6 +313,17 @@ it.effect("requires an explicit resume after a running Action is found on startu
       delivery: "available",
       finishedAt: now,
     };
+    const settledThreadId = ThreadId.make("thread-action-resume-settled");
+    const settled: ActionResumeState = {
+      ...running,
+      runId: "settled-run",
+      threadId: settledThreadId,
+      terminalId: "action-settled-run",
+      outcome: "succeeded",
+      delivery: "disposed",
+      finishedAt: now,
+      exitCode: 0,
+    };
 
     const dependencies = Layer.mergeAll(
       Layer.mock(OrchestrationEngineService)({
@@ -372,6 +383,26 @@ it.effect("requires an explicit resume after a running Action is found on startu
               sequence: 2,
               createdAt: now,
             },
+            {
+              activityId: EventId.make("action-resume:settled-run:succeeded:disposed"),
+              threadId: settledThreadId,
+              turnId: null,
+              tone: "info",
+              kind: ActionResume.ACTION_RESUME_ACTIVITY_KIND,
+              summary: "Action completed: QA",
+              payload: settled,
+              createdAt: now,
+            },
+            {
+              activityId: EventId.make("action-resume:settled-run:succeeded:pending"),
+              threadId: settledThreadId,
+              turnId: null,
+              tone: "info",
+              kind: ActionResume.ACTION_RESUME_ACTIVITY_KIND,
+              summary: "Action completed: QA",
+              payload: { ...settled, delivery: "pending" },
+              createdAt: now,
+            },
           ]),
       }),
       Layer.mock(TerminalManager.TerminalManager)({
@@ -400,6 +431,11 @@ it.effect("requires an explicit resume after a running Action is found on startu
           outcome: "process_lost",
           delivery: "available",
         });
+        assert.deepInclude(registry.getLatest(settledThreadId), {
+          outcome: "succeeded",
+          delivery: "disposed",
+        });
+        assert.isNull(registry.getForShell(settledThreadId));
         yield* service.discardInterrupted(recoveredThreadId);
         assert.deepInclude(registry.getLatest(recoveredThreadId), { delivery: "disposed" });
         registry.record(available);
