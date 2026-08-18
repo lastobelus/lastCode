@@ -378,9 +378,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
         open: () => Effect.die("unexpected terminal open"),
         write: () => Effect.die("unexpected terminal write"),
         history: () =>
-          Effect.succeed(
-            `Persisted failure detail after the start marker was capped.${ActionResume.actionOutputMarker("interrupted-run", "end")}`,
-          ),
+          Effect.succeed("Persisted failure detail after both markers were unavailable."),
         close: () => Effect.void,
         subscribe: () => Effect.succeed(() => undefined),
       }),
@@ -432,7 +430,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
         assert.match(turnStarts[0]?.message.text ?? "", /was interrupted because LastCode stopped/);
         assert.match(
           turnStarts[0]?.message.text ?? "",
-          /Persisted failure detail after the start marker was capped/,
+          /Persisted failure detail after both markers were unavailable/,
         );
       }),
     ).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))));

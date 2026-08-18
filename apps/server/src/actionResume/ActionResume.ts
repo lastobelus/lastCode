@@ -165,14 +165,20 @@ function finishActionOutputCapture(capture: ActionOutputCapture): string | undef
   return capture.output;
 }
 
-function actionOutputFromTranscript(transcript: string, runId: string): string | undefined {
+function actionOutputFromTranscript(
+  transcript: string,
+  runId: string,
+  recoverUnmarkedTail: boolean,
+): string | undefined {
   const capture = createActionOutputCapture(runId);
   consumeActionTerminalOutput(capture, transcript);
   const captured = finishActionOutputCapture(capture);
   if (captured !== undefined) return captured;
 
   const endIndex = transcript.indexOf(actionOutputMarker(runId, "end"));
-  if (endIndex === -1) return undefined;
+  if (endIndex === -1) {
+    return recoverUnmarkedTail ? transcript.slice(-MAX_ACTION_OUTPUT_CHARS) : undefined;
+  }
 
   // Action terminals are dedicated to one run. If persisted history was capped
   // after a very chatty command, the retained prefix is still Action output even
@@ -333,7 +339,9 @@ const make = Effect.gen(function* () {
         outputCaptureByRunId.get(state.runId) ?? createActionOutputCapture(state.runId),
       ) ??
       (yield* terminals.history({ threadId: state.threadId, terminalId: state.terminalId }).pipe(
-        Effect.map((history) => actionOutputFromTranscript(history, state.runId)),
+        Effect.map((history) =>
+          actionOutputFromTranscript(history, state.runId, state.outcome === "process_lost"),
+        ),
         Effect.catchCause((cause) =>
           Effect.logWarning("Could not recover the Action terminal transcript", {
             threadId: state.threadId,
