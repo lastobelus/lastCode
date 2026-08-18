@@ -25,7 +25,15 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { SidebarDraftBlock } from "./Sidebar";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
-import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  memo,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   DndContext,
@@ -67,6 +75,7 @@ import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
+  type LegacySidebarScale,
   type SidebarProjectSortOrder,
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
@@ -110,6 +119,7 @@ import { ensureLocalApi, readLocalApi } from "../localApi";
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
+import { legacySidebarScaleStyle } from "../legacySidebarScale";
 
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
@@ -893,6 +903,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 });
 
 interface SidebarProjectThreadListProps {
+  legacySidebarScale: LegacySidebarScale;
+  scaleStyle: CSSProperties;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -949,6 +961,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   props: SidebarProjectThreadListProps,
 ) {
   const {
+    legacySidebarScale,
+    scaleStyle,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -992,6 +1006,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     <SidebarMenuSub
       ref={attachThreadListAutoAnimateRef}
       className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden border-l-0 px-1 py-0 sm:mx-1 sm:px-1.5"
+      data-legacy-sidebar-scale={legacySidebarScale}
+      style={scaleStyle}
     >
       {shouldShowThreadPanel && showEmptyThreadState ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
@@ -1076,6 +1092,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 });
 
 interface SidebarProjectItemProps {
+  legacySidebarScale: LegacySidebarScale;
+  scaleStyle: CSSProperties;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1097,6 +1115,8 @@ interface SidebarProjectItemProps {
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
+    legacySidebarScale,
+    scaleStyle,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
@@ -2244,7 +2264,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   return (
     <>
-      <div className="group/project-header relative">
+      <div
+        className="group/project-header relative"
+        data-legacy-sidebar-scale={legacySidebarScale}
+        style={scaleStyle}
+      >
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
           className={`pr-8 group-hover/project-header:bg-sidebar-row-hover group-hover/project-header:text-sidebar-foreground max-sm:pr-14 ${
@@ -2354,6 +2378,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       </div>
 
       <SidebarProjectThreadList
+        legacySidebarScale={legacySidebarScale}
+        scaleStyle={scaleStyle}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -2795,6 +2821,8 @@ interface SidebarProjectsContentProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
+  legacySidebarScale: LegacySidebarScale;
+  projectTreeScaleStyle: CSSProperties;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -2903,6 +2931,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     suppressProjectClickForContextMenuRef,
     attachProjectListAutoAnimateRef,
     projectsLength,
+    legacySidebarScale,
+    projectTreeScaleStyle,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3029,6 +3059,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   <SortableProjectItem key={project.projectKey} projectId={project.projectKey}>
                     {(dragHandleProps) => (
                       <SidebarProjectItem
+                        legacySidebarScale={legacySidebarScale}
+                        scaleStyle={projectTreeScaleStyle}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3062,6 +3094,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             {sortedProjects.map((project) => (
               <SidebarProjectListRow
                 key={project.projectKey}
+                legacySidebarScale={legacySidebarScale}
+                scaleStyle={projectTreeScaleStyle}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3087,7 +3121,13 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
         )}
 
         {projectsLength === 0 && (
-          <div className="px-2 pt-4 text-center text-secondary-label text-xs">No projects yet</div>
+          <div
+            className="px-2 pt-4 text-center text-secondary-label text-xs"
+            data-legacy-sidebar-scale={legacySidebarScale}
+            style={projectTreeScaleStyle}
+          >
+            No projects yet
+          </div>
         )}
       </SidebarGroup>
     </SidebarContent>
@@ -3105,6 +3145,11 @@ export default function LegacySidebar() {
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
+  const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
+  const scaleStyle = useMemo(
+    () => legacySidebarScaleStyle(legacySidebarScale),
+    [legacySidebarScale],
+  );
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
   const { archiveThread, deleteThread } = useThreadActions();
@@ -3766,6 +3811,8 @@ export default function LegacySidebar() {
         suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
         attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
         projectsLength={projects.length}
+        legacySidebarScale={legacySidebarScale}
+        projectTreeScaleStyle={scaleStyle}
       />
       <SidebarChromeFooter />
     </>
