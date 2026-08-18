@@ -804,6 +804,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 ref={handleConfirmArchiveRef}
                 type="button"
                 data-thread-selection-safe
+                data-legacy-sidebar-unscaled-icon
                 data-testid={`thread-archive-confirm-${thread.id}`}
                 aria-label={`Confirm archive ${thread.title}`}
                 className="absolute top-1/2 right-1 inline-flex h-5 -translate-y-1/2 cursor-pointer items-center rounded-md bg-destructive/12 px-2 text-[10px] font-medium text-destructive transition-colors hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
