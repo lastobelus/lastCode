@@ -40,7 +40,8 @@ Open **Settings -> LastCode** and adjust **Scale legacy sidebar** from 50% throu
 mark is labeled as a useful compact reference point. The default is 100%, and your selection is
 stored locally and retained when LastCode restarts.
 
-This setting scales project headings and thread rows only. The LastCode header, Search field,
-Projects heading, drafts, status notices, and footer stay at their standard size. On desktop,
-**View -> Actual Size**, **Zoom In**, and **Zoom Out** continue to zoom the whole application and
-compose with the legacy sidebar scale.
+This setting compacts project headings and thread rows while keeping project favicons and action
+or status icons at their standard size. The LastCode header, Search field, Projects heading,
+drafts, status notices, and footer also stay at their standard size. On desktop, **View -> Actual
+Size**, **Zoom In**, and **Zoom Out** continue to zoom the whole application and compose with the
+legacy sidebar scale.
