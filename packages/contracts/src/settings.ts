@@ -55,6 +55,17 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_LEGACY_SIDEBAR_SCALE = 50;
+export const MAX_LEGACY_SIDEBAR_SCALE = 100;
+export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
+export const LegacySidebarScale = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_LEGACY_SIDEBAR_SCALE,
+    maximum: MAX_LEGACY_SIDEBAR_SCALE,
+  }),
+);
+export type LegacySidebarScale = typeof LegacySidebarScale.Type;
+export const DEFAULT_LEGACY_SIDEBAR_SCALE: LegacySidebarScale = 100;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
@@ -230,6 +241,9 @@ export const ClientSettingsSchema = Schema.Struct({
   // old keys, so everyone, including prior beta opt-outs, resets to the new
   // default sidebar.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  legacySidebarScale: LegacySidebarScale.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
+  ),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -914,6 +928,7 @@ export const ClientSettingsPatch = Schema.Struct({
   ),
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
