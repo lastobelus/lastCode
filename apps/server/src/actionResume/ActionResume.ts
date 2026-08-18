@@ -699,10 +699,12 @@ const make = Effect.gen(function* () {
 
   const hydrate = Effect.fn("ActionResume.hydrate")(function* () {
     const rows = yield* activities.listByKind({ kind: ACTION_RESUME_ACTIVITY_KIND });
+    const states: ActionResumeState[] = [];
     for (const row of rows) {
       const decoded = yield* Effect.option(decodeState(row.payload));
-      if (Option.isSome(decoded)) registry.record(decoded.value);
+      if (Option.isSome(decoded)) states.push(decoded.value);
     }
+    registry.hydrate(states);
   });
 
   const reconcile = Effect.fn("ActionResume.reconcile")(function* () {
