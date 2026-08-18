@@ -109,12 +109,18 @@ describe("searchSettings", () => {
       targetId: "appearance",
     });
   });
-
   it("routes browser recording quality to integrations", () => {
     expect(searchSettings("recording frame rate")[0]).toMatchObject({
       id: "browser-recording-frame-rate",
       to: "/settings/integrations",
       targetId: "browser",
+    });
+  });
+
+  it("routes legacy sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
     });
   });
 });
