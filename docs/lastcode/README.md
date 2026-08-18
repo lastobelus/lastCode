@@ -13,6 +13,8 @@ directories.
 
 ## Documents
 
+- [Set up alongside T3 Code](setup.md): prerequisites, guarded bootstrap,
+  initial source build, runtime isolation, and daemon operation.
 - [Nightly workflow](nightly-workflow.md): checkpoint tags, rebasing, promotion,
   scheduling, recovery, and provenance.
 - [Release workflow](release.md): local CI, PR merging, ad-hoc signing, builds,
@@ -28,6 +30,9 @@ directories.
 ## Command Summary
 
 ```bash
+# Provision a personal checkout, daemon, and managed helper commands.
+pnpm run lastcode:setup -- --enable-nightly-writes
+
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
 
