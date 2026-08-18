@@ -102,10 +102,9 @@ The core feature shipped through LastCode PR #32:
   merge commit `36d6ddef7`. The normal nightly mechanism published
   `lastcode/revision/v0.0.34-nightly.20260817.1120.1` for installation.
 - Follow-up QA on that revision found that the original console patch also kept
-  favicons, action targets, and status icons at stock size. The follow-up branch
-  publishes a reciprocal icon zoom for SVG and image glyphs and explicitly unscales
-  archive/new-thread targets and status dots while row geometry and typography
-  remain compact.
+  favicons and action/status icons at stock size. The follow-up branch publishes a
+  reciprocal icon zoom for SVG and image glyphs and explicitly unscales non-SVG
+  status dots while row geometry, action containers, and typography remain compact.
 - Follow-up focused validation passes seven scale/status tests, the web typecheck,
   the web production build, formatting, and `git diff --check`. Integrated nightly
   QA and publication of the follow-up remain pending.

@@ -488,7 +488,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* The original compact-sidebar patch changed row geometry and typography but
-   left favicons, action targets, and status glyphs at their stock dimensions.
+   left favicons, action glyphs, and status glyphs at their stock dimensions.
    Each scaled legacy-sidebar surface publishes the reciprocal of its row zoom
    so icon descendants retain that behavior. */
 [data-legacy-sidebar-scale] :is(svg, img),
