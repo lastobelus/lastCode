@@ -500,6 +500,7 @@ export function ThreadStatusLabel({
           }
         >
           <span
+            data-legacy-sidebar-unscaled-icon
             className={`size-[9px] rounded-full ${status.dotClass} ${
               status.pulse ? "animate-status-pulse" : ""
             }`}
@@ -521,6 +522,7 @@ export function ThreadStatusLabel({
         }
       >
         <span
+          data-legacy-sidebar-unscaled-icon
           className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
             status.pulse ? "animate-status-pulse" : ""
           }`}
