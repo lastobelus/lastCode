@@ -818,6 +818,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   <button
                     type="button"
                     data-thread-selection-safe
+                    data-legacy-sidebar-unscaled-icon
                     data-testid={`thread-archive-${thread.id}`}
                     aria-label={`Archive ${thread.title}`}
                     className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
@@ -835,6 +836,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                         <button
                           type="button"
                           data-thread-selection-safe
+                          data-legacy-sidebar-unscaled-icon
                           data-testid={`thread-archive-${thread.id}`}
                           aria-label={`Archive ${thread.title}`}
                           className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
@@ -2361,6 +2363,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 <button
                   type="button"
                   aria-label={`Create new thread in ${project.displayName}`}
+                  data-legacy-sidebar-unscaled-icon
                   data-testid="new-thread-button"
                   className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
                   onClick={handleCreateThreadClick}
