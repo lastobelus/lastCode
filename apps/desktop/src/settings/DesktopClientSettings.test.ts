@@ -49,6 +49,7 @@ const clientSettings: ClientSettings = {
   sidebarThreadSortOrder: "created_at",
   sidebarThreadPreviewCount: 6,
   legacySidebarEnabled: false,
+  legacySidebarScale: 100,
   timestampFormat: "24-hour",
   wordWrap: true,
 };
