@@ -91,6 +91,7 @@ describe("LastCodeSettingsImport", () => {
     const sourceCustom = ProviderInstanceId.make("source_custom");
     const lastCodeCustom = ProviderInstanceId.make("lastcode_custom");
     const sourceClient = { ...DEFAULT_CLIENT_SETTINGS, fontSizeInterface: 17 };
+    Reflect.deleteProperty(sourceClient, "legacySidebarScale");
     sourceClient.favorites = [
       { provider: codex, model: "gpt-source" },
       { provider: sourceCustom, model: "source-model" },
@@ -101,6 +102,7 @@ describe("LastCodeSettingsImport", () => {
     };
     const destinationClient = {
       ...DEFAULT_CLIENT_SETTINGS,
+      legacySidebarScale: 75,
       favorites: [{ provider: lastCodeCustom, model: "lastcode-model" }],
       providerModelPreferences: {
         [lastCodeCustom]: { hiddenModels: [], modelOrder: ["lastcode-model"] },
@@ -209,6 +211,7 @@ describe("LastCodeSettingsImport", () => {
       ) as unknown,
     );
     assert.equal(importedClient.fontSizeInterface, 17);
+    assert.equal(importedClient.legacySidebarScale, 75);
     assert.deepEqual(importedClient.favorites, [
       { provider: "lastcode_custom", model: "lastcode-model" },
       { provider: "codex", model: "gpt-source" },
