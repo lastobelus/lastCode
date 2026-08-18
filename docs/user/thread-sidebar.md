@@ -64,6 +64,18 @@ and copying a thread reference. A copied reference uses the thread's pull reques
 link when available, otherwise its thread ID. See [keybindings](./keybindings.md)
 for custom configuration.
 
+## Legacy sidebar scale in LastCode
+
+When the legacy sidebar is enabled, LastCode can make its project and thread rows more compact.
+Open **Settings → LastCode** and adjust **Scale legacy sidebar** from 50% through 100%. The 75%
+mark is labeled as a useful compact reference point. The default is 100%, and your selection is
+stored locally and retained when LastCode restarts.
+
+This setting scales project headings and thread rows only. The LastCode header, Search field,
+Projects heading, drafts, status notices, and footer stay at their standard size. On desktop,
+**View → Actual Size**, **Zoom In**, and **Zoom Out** continue to zoom the whole application and
+compose with the legacy sidebar scale.
+
 ## Inspect agent work
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
