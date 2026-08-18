@@ -84,12 +84,16 @@ const project = {
 
 it("writes shell-specific status propagation for Action terminals", () => {
   assert.equal(
-    ActionResume.actionCommandForShell("vp test run", "powershell"),
+    ActionResume.actionCommandForShell("vp test run", "powershell", "run-1"),
     "vp test run\nif ($?) { exit 0 }\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nexit 1\n",
   );
   assert.equal(
-    ActionResume.actionCommandForShell("vp test run", "cmd"),
+    ActionResume.actionCommandForShell("vp test run", "cmd", "run-1"),
     "vp test run\nexit /b %errorlevel%\n",
+  );
+  assert.equal(
+    ActionResume.actionCommandForShell("printf '\\033[31mred\\033[0m\\n'", "posix", "run-1"),
+    "printf '\\033]777;T3ActionOutput;run-1;start\\007'; eval 'printf '\"'\"'\\033[31mred\\033[0m\\n'\"'\"''; __t3_action_status=$?; printf '\\033]777;T3ActionOutput;run-1;end\\007'; exit $__t3_action_status\n",
   );
 });
 
@@ -194,11 +198,19 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.match(written[0]?.data ?? "", /exit \$__t3_action_status/);
 
     assert.isDefined(terminalListener);
+    const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
+    const endMarker = ActionResume.actionOutputMarker(running.runId, "end");
     yield* terminalListener!({
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: "QA failed: expected 2, received 3\n",
+      data: `prompt and echoed command\n${startMarker.slice(0, -2)}`,
+    });
+    yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${endMarker}prompt`,
     });
     yield* terminalListener!({
       type: "exited",
@@ -222,7 +234,11 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts.length, 1);
     assert.equal(turnStarts[0]?.message.role, "system");
     assert.match(turnStarts[0]?.message.text ?? "", /Automated Project Action follow-up/);
-    assert.match(turnStarts[0]?.message.text ?? "", /QA failed: expected 2, received 3/);
+    assert.include(
+      turnStarts[0]?.message.text ?? "",
+      "QA failed: \u001b[31mexpected 2, received 3\u001b[0m",
+    );
+    assert.notInclude(turnStarts[0]?.message.text ?? "", "prompt and echoed command");
     assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
     assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
 
@@ -361,7 +377,8 @@ it.effect("requires an explicit resume after a running Action is found on startu
       Layer.mock(TerminalManager.TerminalManager)({
         open: () => Effect.die("unexpected terminal open"),
         write: () => Effect.die("unexpected terminal write"),
-        history: () => Effect.succeed("Persisted failure detail after restart."),
+        history: () =>
+          Effect.succeed("Persisted failure detail after both markers were unavailable."),
         close: () => Effect.void,
         subscribe: () => Effect.succeed(() => undefined),
       }),
@@ -411,7 +428,10 @@ it.effect("requires an explicit resume after a running Action is found on startu
         assert.equal(turnStarts.length, 1);
         assert.equal(turnStarts[0]?.message.role, "system");
         assert.match(turnStarts[0]?.message.text ?? "", /was interrupted because LastCode stopped/);
-        assert.match(turnStarts[0]?.message.text ?? "", /Persisted failure detail after restart/);
+        assert.match(
+          turnStarts[0]?.message.text ?? "",
+          /Persisted failure detail after both markers were unavailable/,
+        );
       }),
     ).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))));
   }),
