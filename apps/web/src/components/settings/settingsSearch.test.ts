@@ -176,7 +176,6 @@ describe("searchSettings", () => {
       targetId: "appearance",
     });
   });
-
   it("routes browser recording quality to integrations", () => {
     const result = searchSettings("recording frame rate")[0];
     expect(result).toMatchObject({
@@ -184,5 +183,12 @@ describe("searchSettings", () => {
       to: "/settings/integrations",
     });
     expect(result).not.toHaveProperty("targetId");
+  });
+
+  it("routes legacy sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
   });
 });
