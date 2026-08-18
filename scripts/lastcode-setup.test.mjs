@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isCanonicalUpstreamUrl, parseOptions, setupCommands } from "./lastcode-setup.mjs";
+import {
+  executeSetupCommands,
+  isCanonicalUpstreamUrl,
+  parseOptions,
+  setupCommands,
+} from "./lastcode-setup.mjs";
 
 describe("lastcode-setup", () => {
   it("parses the explicit acknowledgement of nightly writes", () => {
@@ -28,5 +33,44 @@ describe("lastcode-setup", () => {
       ["/node", "/repo/scripts/lastcode-build.mjs", "--install"],
       ["/node", "/repo/scripts/lastcode-install.mjs", "--install"],
     ]);
+  });
+
+  it("disables a newly installed service when a later helper fails", () => {
+    const commands = setupCommands("/repo", "/node");
+    const executed = [];
+
+    expect(() =>
+      executeSetupCommands(
+        commands,
+        (step) => {
+          executed.push(step);
+          if (step.kind === "builder") throw new Error("helper conflict");
+        },
+        false,
+      ),
+    ).toThrow("helper conflict");
+
+    expect(executed.at(-1)?.args).toEqual([
+      "/repo/scripts/lastcode-nightly-service.ts",
+      "uninstall",
+    ]);
+  });
+
+  it("preserves a service that existed before a failed rerun", () => {
+    const commands = setupCommands("/repo", "/node");
+    const executed = [];
+
+    expect(() =>
+      executeSetupCommands(
+        commands,
+        (step) => {
+          executed.push(step);
+          if (step.kind === "builder") throw new Error("helper conflict");
+        },
+        true,
+      ),
+    ).toThrow("helper conflict");
+
+    expect(executed.some((step) => step.args.at(-1) === "uninstall")).toBe(false);
   });
 });

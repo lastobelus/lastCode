@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 const CANONICAL_UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
+const SERVICE_PLIST_NAME = "codes.lastobelus.lastcode-nightly-checkpoint.plist";
 
 export function parseOptions(argv) {
   let dryRun = false;
@@ -29,28 +32,63 @@ export function isCanonicalUpstreamUrl(value) {
 
 export function setupCommands(repoRoot, nodeExecutable = process.execPath) {
   return [
-    { command: "vp", args: ["install", "--frozen-lockfile"], cwd: repoRoot },
     {
+      kind: "dependencies",
+      command: "vp",
+      args: ["install", "--frozen-lockfile"],
+      cwd: repoRoot,
+    },
+    {
+      kind: "service",
       command: nodeExecutable,
       args: [NodePath.join(repoRoot, "scripts", "lastcode-nightly-service.ts"), "install"],
       cwd: repoRoot,
     },
     {
+      kind: "dashboard",
       command: nodeExecutable,
       args: [NodePath.join(repoRoot, "scripts", "lastcode-checkpoints.mjs"), "--install"],
       cwd: repoRoot,
     },
     {
+      kind: "builder",
       command: nodeExecutable,
       args: [NodePath.join(repoRoot, "scripts", "lastcode-build.mjs"), "--install"],
       cwd: repoRoot,
     },
     {
+      kind: "installer",
       command: nodeExecutable,
       args: [NodePath.join(repoRoot, "scripts", "lastcode-install.mjs"), "--install"],
       cwd: repoRoot,
     },
   ];
+}
+
+export function executeSetupCommands(commands, execute, serviceWasInstalled) {
+  let attemptedNewService = false;
+  try {
+    for (const step of commands) {
+      if (step.kind === "service" && !serviceWasInstalled) attemptedNewService = true;
+      execute(step);
+    }
+  } catch (error) {
+    if (!attemptedNewService) throw error;
+    const service = commands.find((step) => step.kind === "service");
+    if (!service) throw error;
+    try {
+      execute({ ...service, args: [service.args[0], "uninstall"] });
+    } catch (rollbackError) {
+      const setupDetail = error instanceof Error ? error.message : String(error);
+      const rollbackDetail =
+        rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      throw new Error(
+        `LastCode setup failed (${setupDetail}) and could not disable its newly installed checkpoint service: ${rollbackDetail}`,
+        { cause: rollbackError },
+      );
+    }
+    throw error;
+  }
 }
 
 function run(command, args, options = {}) {
@@ -147,12 +185,20 @@ function main(argv) {
     });
   }
 
-  for (const step of setupCommands(repoRoot)) {
-    if (options.dryRun) console.log(shellDisplay(step.command, step.args));
-    else run(step.command, step.args, { cwd: step.cwd });
+  const commands = setupCommands(repoRoot);
+  if (options.dryRun) {
+    for (const step of commands) console.log(shellDisplay(step.command, step.args));
+    return;
   }
 
-  if (options.dryRun) return;
+  const serviceWasInstalled = NodeFS.existsSync(
+    NodePath.join(NodeOS.homedir(), "Library", "LaunchAgents", SERVICE_PLIST_NAME),
+  );
+  executeSetupCommands(
+    commands,
+    (step) => run(step.command, step.args, { cwd: step.cwd }),
+    serviceWasInstalled,
+  );
   console.log("[lastcode:setup] Setup complete.");
   console.log(
     "[lastcode:setup] Wait for lastcode-checkpoints to show a ready installable, then run:",

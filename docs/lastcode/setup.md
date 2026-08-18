@@ -59,6 +59,10 @@ The explicit flag acknowledges the remote writes described above. The command:
 5. installs `lastcode-checkpoints`, `lastcode-build`, and `lastcode-install`
    under `~/.local/bin` with their managed files under `~/.lastcode/bin`.
 
+If service setup or a later helper installation fails, the bootstrap disables a
+checkpoint service that it newly installed during that run. A service that was
+already installed before a rerun is not removed by this rollback.
+
 Add `~/.local/bin` to `PATH` if it is not already present. To inspect the exact
 actions without changing anything, add `--dry-run`.
 
