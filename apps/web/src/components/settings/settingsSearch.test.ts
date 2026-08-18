@@ -90,4 +90,11 @@ describe("searchSettings", () => {
       targetId: "appearance",
     });
   });
+
+  it("routes legacy sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
 });
