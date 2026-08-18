@@ -487,6 +487,21 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* The original compact-sidebar patch changed row geometry and typography but
+   left favicons, action glyphs, and status glyphs at their stock dimensions.
+   Each scaled legacy-sidebar surface publishes the reciprocal of its row zoom
+   so icon descendants retain that behavior. */
+[data-legacy-sidebar-scale] :is(svg, img),
+[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-icon] {
+  zoom: var(--legacy-sidebar-icon-zoom);
+}
+
+/* An explicitly unscaled icon container already supplies the reciprocal zoom;
+   do not apply it a second time to a nested SVG or image. */
+[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-icon] :is(svg, img) {
+  zoom: 1;
+}
+
 @layer components {
   /* Each maintainer palette gives the same line art its own material: rose
      vellum, forest drafting paper, marine cyanotype, copper, and violet ink.
