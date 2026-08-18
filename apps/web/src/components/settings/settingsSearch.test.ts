@@ -210,7 +210,6 @@ describe("searchSettings", () => {
       targetId: "appearance-interface",
     });
   });
-
   it("routes browser recording quality to integrations", () => {
     const result = searchSettings("recording frame rate")[0];
     expect(result).toMatchObject({
@@ -219,7 +218,6 @@ describe("searchSettings", () => {
     });
     expect(result).not.toHaveProperty("targetId");
   });
-
   it("routes where links open to integrations", () => {
     expect(searchSettings("open links in")[0]).toMatchObject({
       id: "browser-link-target",
@@ -227,12 +225,18 @@ describe("searchSettings", () => {
     });
     expect(searchSettings("external links")[0]).toMatchObject({ id: "browser-link-target" });
   });
-
   it("finds the default browser profile action in the profiles list", () => {
     expect(searchSettings("default profile")[0]).toMatchObject({
       id: "browser-default-profile",
       to: "/settings/integrations",
       targetId: "browser-profiles",
+    });
+  });
+
+  it("routes legacy sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
     });
   });
 });
