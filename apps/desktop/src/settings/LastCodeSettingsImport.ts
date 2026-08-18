@@ -232,7 +232,12 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
       isBuiltInProviderPreference(provider),
     ),
   ]);
-  return `${encodeClientSettingsJson({ ...source, favorites, providerModelPreferences })}\n`;
+  return `${encodeClientSettingsJson({
+    ...source,
+    favorites,
+    providerModelPreferences,
+    legacySidebarScale: destination.legacySidebarScale,
+  })}\n`;
 }
 
 function mergeServerSettings(sourceRaw: string, destinationRaw: string | null): string {
