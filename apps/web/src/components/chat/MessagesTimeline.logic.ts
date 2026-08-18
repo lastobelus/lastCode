@@ -343,7 +343,8 @@ export type MessagesTimelineRow =
       kind: "thinking";
       id: string;
       createdAt: string | null;
-    };
+    }
+  | { kind: "waiting"; id: string; createdAt: string };
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -631,6 +632,7 @@ export function deriveMessagesTimelineRows(input: {
   expandedWorkGroupIds?: ReadonlySet<string>;
   isWorking: boolean;
   activeTurnStartedAt: string | null;
+  waitingStartedAt?: string | null;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
 }): MessagesTimelineRow[] {
@@ -945,6 +947,13 @@ export function deriveMessagesTimelineRows(input: {
       createdAt: input.activeTurnStartedAt,
     });
   }
+  if (!input.isWorking && input.waitingStartedAt) {
+    nextRows.push({
+      kind: "waiting",
+      id: "waiting-indicator-row",
+      createdAt: input.waitingStartedAt,
+    });
+  }
 
   return nextRows;
 }
@@ -976,6 +985,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   switch (a.kind) {
     case "working":
     case "thinking":
+      return a.createdAt === (b as typeof a).createdAt;
+    case "waiting":
       return a.createdAt === (b as typeof a).createdAt;
 
     case "turn-fold": {
