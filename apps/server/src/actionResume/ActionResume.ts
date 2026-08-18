@@ -168,7 +168,16 @@ function finishActionOutputCapture(capture: ActionOutputCapture): string | undef
 function actionOutputFromTranscript(transcript: string, runId: string): string | undefined {
   const capture = createActionOutputCapture(runId);
   consumeActionTerminalOutput(capture, transcript);
-  return finishActionOutputCapture(capture);
+  const captured = finishActionOutputCapture(capture);
+  if (captured !== undefined) return captured;
+
+  const endIndex = transcript.indexOf(actionOutputMarker(runId, "end"));
+  if (endIndex === -1) return undefined;
+
+  // Action terminals are dedicated to one run. If persisted history was capped
+  // after a very chatty command, the retained prefix is still Action output even
+  // though the start marker has fallen out of history.
+  return transcript.slice(0, endIndex).slice(-MAX_ACTION_OUTPUT_CHARS);
 }
 
 const followUpText = (state: ActionResumeState, outputTail: string | undefined): string => {
