@@ -273,6 +273,31 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
+  it("shows a Waiting row after the turn settles and prefers Working while a turn is active", () => {
+    const base = {
+      timelineEntries: [],
+      activeTurnStartedAt: "2026-01-01T00:01:00Z",
+      waitingStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+
+    expect(deriveMessagesTimelineRows({ ...base, isWorking: false })).toEqual([
+      {
+        kind: "waiting",
+        id: "waiting-indicator-row",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    expect(deriveMessagesTimelineRows({ ...base, isWorking: true })).toEqual([
+      {
+        kind: "working",
+        id: "working-indicator-row",
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+    ]);
+  });
+
   it("only enables assistant copy for the terminal assistant message in a turn", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [
