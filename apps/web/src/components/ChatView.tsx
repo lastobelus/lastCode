@@ -7323,6 +7323,11 @@ function ChatViewContent(props: ChatViewProps) {
                 key={activeThread.id}
                 isWorking={isWorking}
                 activeTurnStartedAt={activeWorkStartedAt}
+                waitingStartedAt={
+                  activeThreadShell?.actionResume?.outcome === "running"
+                    ? activeThreadShell.actionResume.startedAt
+                    : null
+                }
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
                 latestTurn={activeLatestTurn}
