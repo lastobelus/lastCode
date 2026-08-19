@@ -585,6 +585,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   zoom: 1;
 }
 
+[data-slot="project-favicon"] {
+  border-radius: 0;
+}
+
+html[data-rounded-project-icons] [data-slot="project-favicon"] {
+  border-radius: var(--radius-sm);
+}
+
 @layer components {
   /* Each maintainer palette gives the same line art its own material: rose
      vellum, forest drafting paper, marine cyanotype, copper, and violet ink.
