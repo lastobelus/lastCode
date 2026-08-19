@@ -108,6 +108,15 @@ rebase. If publication succeeds but promotion fails, a later run recognizes the
 published checkpoint as belonging to the unchanged source commit and retries
 promotion instead of treating the older main branch as current.
 
+That source snapshot is stored as `Source-Commit` in every annotated checkpoint
+and revision tag. Besides making publication idempotent, it lets the packaged
+desktop updater distinguish new LastCode commits from patches replayed with new
+SHAs during later checkpoint rebases. The updater walks adjacent immutable
+installable tags, using either the previous installable commit or its recorded
+source commit as the ancestry boundary. If the metadata or ancestry cannot
+establish a safe boundary, LastCode changes are reported as unavailable rather
+than inferred from commit titles.
+
 When a LastCode PR merges after a newer checkpoint was created while PR
 promotion was paused, the daemon replays only the newly merged commits onto that
 checkpoint. It publishes the result as the next immutable
@@ -117,6 +126,15 @@ requests an immediate daemon run without interrupting one already in progress;
 the hourly schedule repairs a missed request.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
+
+### Local updater inspection protocol
+
+The dependency-free local-update helper keeps its unflagged inspect response in
+the original flat format so an already-installed app can discover and build a
+newer repository checkout. A desktop build that supports grouped notes requests
+`--release-notes-format grouped-v1`. That negotiated response carries separate
+LastCode provenance state and bounded, consecutive upstream-nightly groups. The
+build command and artifact protocol remain unchanged.
 
 ### Failure recovery
 
