@@ -237,6 +237,7 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
     favorites,
     providerModelPreferences,
     legacySidebarScale: destination.legacySidebarScale,
+    roundedProjectIcons: destination.roundedProjectIcons,
   })}\n`;
 }
 
