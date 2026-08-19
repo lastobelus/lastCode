@@ -40,6 +40,7 @@ const clientSettings: ClientSettings = {
   planModeEnabled: false,
   showSkillsInSlashMenu: false,
   providerModelPreferences: {},
+  roundedProjectIcons: false,
   sidebarProjectGroupingMode: "repository_path",
   sidebarProjectGroupingOverrides: {
     "environment-1:/tmp/project-a": "separate",
