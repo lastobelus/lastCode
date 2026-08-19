@@ -11,6 +11,7 @@ export interface LocalUpdateOptions {
   readonly home: string;
   readonly currentVersion?: string;
   readonly checkpointTag?: string;
+  readonly releaseNotesFormat?: "grouped-v1";
 }
 
 export interface ExistingBuild {
