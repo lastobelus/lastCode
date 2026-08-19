@@ -5,6 +5,7 @@ import {
   type DesktopUpdateActionResult,
   type DesktopUpdateChannel,
   type DesktopUpdateCheckResult,
+  type DesktopUpdateReleaseNote,
   type DesktopUpdateState,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -68,6 +69,67 @@ const decodeUpdateInfo = Schema.decodeUnknownEffect(UpdateInfo);
 const decodeDownloadProgressInfo = Schema.decodeUnknownEffect(DownloadProgressInfo);
 
 const currentIsoTimestamp = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+export function mapLastCodeLocalReleaseNotes(
+  inspection: Extract<
+    LastCodeLocalUpdates.LastCodeLocalUpdateInspection,
+    { readonly status: "available" }
+  >,
+): ReadonlyArray<DesktopUpdateReleaseNote> {
+  const groups: DesktopUpdateReleaseNote[] = [];
+  const lastCode = inspection.releaseNotes.lastCode;
+  if (lastCode.status === "unavailable") {
+    groups.push({
+      version: inspection.availableVersion,
+      heading: "LastCode changes",
+      items: [],
+      summaries: ["Couldn’t determine changes from this installed build."],
+    });
+  } else if (lastCode.items.length > 0) {
+    groups.push({
+      version: inspection.availableVersion,
+      heading: "LastCode changes",
+      items: lastCode.items,
+      ...(lastCode.omittedItems > 0
+        ? {
+            summaries: [
+              `…and ${lastCode.omittedItems} more LastCode ${lastCode.omittedItems === 1 ? "change" : "changes"}`,
+            ],
+          }
+        : {}),
+    });
+  }
+
+  const upstreamGroups = inspection.releaseNotes.upstream.groups.map(
+    (group): DesktopUpdateReleaseNote => ({
+      version: group.version,
+      heading: group.isTarget ? "Upstream changes" : `Upstream changes in ${group.version}`,
+      items: group.items,
+      ...(group.omittedItems > 0
+        ? {
+            summaries: [
+              `…and ${group.omittedItems} more ${group.omittedItems === 1 ? "change" : "changes"}`,
+            ],
+          }
+        : {}),
+    }),
+  );
+  const omittedGroups = inspection.releaseNotes.upstream.omittedGroups;
+  if (omittedGroups > 0 && upstreamGroups.length > 0) {
+    const index = upstreamGroups.length - 1;
+    const oldest = upstreamGroups[index];
+    if (oldest) {
+      upstreamGroups[index] = {
+        ...oldest,
+        summaries: [
+          ...(oldest.summaries ?? []),
+          `${omittedGroups} older ${omittedGroups === 1 ? "nightly" : "nightlies"} not shown`,
+        ],
+      };
+    }
+  }
+  return [...groups, ...upstreamGroups];
+}
 
 export class DesktopUpdateActionInProgressError extends Schema.TaggedErrorClass<DesktopUpdateActionInProgressError>()(
   "DesktopUpdateActionInProgressError",
@@ -418,15 +480,7 @@ export const make = Effect.gen(function* () {
             Effect.as(true),
           );
         }
-        const releaseNotes = [
-          {
-            version: inspection.availableVersion,
-            items:
-              inspection.releaseNotes.length > 0
-                ? inspection.releaseNotes
-                : ["Local update contains no additional commit summaries."],
-          },
-        ];
+        const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         return Ref.set(localCheckpointTagRef, Option.some(inspection.checkpointTag)).pipe(
           Effect.andThen(
             setState(
