@@ -21,6 +21,16 @@ each checkout in the project group and appears on your connected clients.
 
 To use automatic detection again, select **Automatic**.
 
+## Choose the icon shape
+
+Project icons keep the shape of their source image by default. To round their corners in the web
+or desktop app, open **Settings → LastCode** and enable **Rounded project icons**. This preference
+is saved in the current LastCode profile.
+
+T3 Code Mobile stores the same preference separately on each device. Open
+**Settings → Appearance** and enable **Rounded project icons** on every mobile device where you
+want rounded corners.
+
 ## Keep the default branch current
 
 Turn on **Automatically pull** in a project's settings to keep its default-branch checkout current.
