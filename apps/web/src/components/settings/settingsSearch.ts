@@ -256,6 +256,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "rounded-project-icons",
+    title: "Rounded project icons",
+    to: "/settings/lastcode",
+  },
+  {
     id: "import-t3-settings",
     title: "Import settings from T3 Code",
     to: "/settings/lastcode",
