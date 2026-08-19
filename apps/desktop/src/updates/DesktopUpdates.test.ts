@@ -309,6 +309,94 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
 }
 
 describe("DesktopUpdates", () => {
+  it("maps local sections, unavailable provenance, and overflow summaries", () => {
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+        availableVersion: "1.2.4-nightly.20260814.1090",
+        releaseNotes: {
+          lastCode: {
+            status: "known",
+            items: ["feat(lastcode): new workflow"],
+            omittedItems: 2,
+          },
+          upstream: {
+            groups: [
+              {
+                version: "1.2.4-nightly.20260814.1090",
+                isTarget: true,
+                items: ["fix(web): newest upstream fix"],
+                omittedItems: 1,
+              },
+              {
+                version: "1.2.4-nightly.20260814.1089",
+                isTarget: false,
+                items: ["fix(server): earlier upstream fix"],
+                omittedItems: 0,
+              },
+            ],
+            omittedGroups: 3,
+          },
+        },
+      }),
+      [
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "LastCode changes",
+          items: ["feat(lastcode): new workflow"],
+          summaries: ["…and 2 more LastCode changes"],
+        },
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "Upstream changes",
+          items: ["fix(web): newest upstream fix"],
+          summaries: ["…and 1 more change"],
+        },
+        {
+          version: "1.2.4-nightly.20260814.1089",
+          heading: "Upstream changes in 1.2.4-nightly.20260814.1089",
+          items: ["fix(server): earlier upstream fix"],
+          summaries: ["3 older nightlies not shown"],
+        },
+      ],
+    );
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/revision/v1.2.4-nightly.20260814.1090.1",
+        availableVersion: "1.2.4-nightly.20260814.1090.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      }),
+      [],
+    );
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+        availableVersion: "1.2.4-nightly.20260814.1090",
+        releaseNotes: {
+          lastCode: { status: "unavailable" },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      }),
+      [
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "LastCode changes",
+          items: [],
+          summaries: ["Couldn’t determine changes from this installed build."],
+        },
+      ],
+    );
+  });
+
   it("preserves complete causes for update poller and event failures", () => {
     const cause = Cause.combine(
       Cause.fail(new Error("updater failed")),
@@ -400,11 +488,18 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
-        releaseNotes: ["feat(lastcode): local update"],
+        releaseNotes: {
+          lastCode: {
+            status: "known",
+            items: ["feat(lastcode): local update"],
+            omittedItems: 0,
+          },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
       },
       localBuild: {
         schemaVersion: 1,
@@ -426,6 +521,7 @@ describe("DesktopUpdates", () => {
         assert.equal(available.source, "lastcode-local");
         assert.equal(available.status, "available");
         assert.deepEqual(available.releaseNotes[0]?.items, ["feat(lastcode): local update"]);
+        assert.equal(available.releaseNotes[0]?.heading, "LastCode changes");
 
         const result = yield* updates.download;
         assert.isTrue(result.accepted);
@@ -450,11 +546,14 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
-        releaseNotes: [],
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
       },
       localBuild: {
         schemaVersion: 1,
@@ -497,11 +596,14 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
-        releaseNotes: [],
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
       },
       localBuild: {
         schemaVersion: 1,
@@ -546,11 +648,14 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
-        releaseNotes: [],
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
       },
       localBuild: {
         schemaVersion: 1,
@@ -598,11 +703,14 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
-        releaseNotes: [],
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
       },
       localBuild: {
         schemaVersion: 1,
@@ -669,7 +777,7 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "up-to-date",
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",
@@ -708,7 +816,7 @@ describe("DesktopUpdates", () => {
       const releaseInspection = yield* Deferred.make<void>();
       let blockInspection = false;
       const inspection = {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         status: "up-to-date" as const,
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",
