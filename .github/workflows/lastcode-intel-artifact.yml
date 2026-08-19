@@ -1,0 +1,105 @@
+name: LastCode Intel artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      installable_tag:
+        description: Exact lastcode/checkpoint or lastcode/revision tag
+        required: true
+        type: string
+      installable_commit:
+        description: Full commit SHA advertised for the installable tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Validate and build macOS x64
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      INSTALLABLE_TAG: ${{ inputs.installable_tag }}
+      INSTALLABLE_COMMIT: ${{ inputs.installable_commit }}
+    steps:
+      - name: Checkout exact installable
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.installable_commit }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Validate immutable tag and commit
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$INSTALLABLE_TAG" =~ ^lastcode/(checkpoint|revision)/v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Unsupported installable tag: $INSTALLABLE_TAG" >&2
+            exit 1
+          fi
+          if [[ ! "$INSTALLABLE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "installable_commit must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
+
+          git fetch --force --no-tags origin "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}"
+          resolved_commit="$(git rev-parse "${INSTALLABLE_TAG}^{commit}")"
+          if [[ "$resolved_commit" != "$INSTALLABLE_COMMIT" ]]; then
+            echo "Tag/commit mismatch: expected $INSTALLABLE_COMMIT, resolved $resolved_commit" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$resolved_commit" ]]; then
+            echo "Checkout does not match validated installable commit." >&2
+            exit 1
+          fi
+
+          version="${INSTALLABLE_TAG#lastcode/checkpoint/v}"
+          version="${version#lastcode/revision/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Rust x64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-apple-darwin
+
+      - name: Install mobile CI prerequisites
+        run: brew bundle install --file apps/mobile/Brewfile
+
+      - name: Run full checkpoint gate
+        run: env -u ELECTRON_RUN_AS_NODE node scripts/lastcode-local-ci.ts --full --checkpoint "$INSTALLABLE_TAG"
+
+      - name: Build certificate-free x64 DMG
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: lastobelus/lastCode
+        run: >-
+          env -u ELECTRON_RUN_AS_NODE node scripts/lastcode-build-mac.ts
+          --arch x64
+          --checkpoint "$INSTALLABLE_TAG"
+          --output-root release-lastcode
+          --verbose
+
+      - name: Upload exact-tag artifact for inspection
+        uses: actions/upload-artifact@v7
+        with:
+          name: lastcode-macos-x64-${{ steps.target.outputs.version }}
+          path: release-lastcode/v${{ steps.target.outputs.version }}/**
+          if-no-files-found: error
+          retention-days: 14
