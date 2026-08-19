@@ -230,12 +230,16 @@ export interface DesktopUpdateReleaseNote {
   version: string;
   items: ReadonlyArray<string>;
   totalItems: number;
+  heading?: string;
+  summaries?: ReadonlyArray<string>;
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   version: Schema.String,
   items: Schema.Array(Schema.String),
   totalItems: Schema.Number,
+  heading: Schema.optionalKey(Schema.String),
+  summaries: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
