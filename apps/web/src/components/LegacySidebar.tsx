@@ -859,6 +859,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                         <span
                           aria-label={threadEnvironmentLabel ?? "Remote"}
                           className="inline-flex items-center justify-center"
+                          data-legacy-sidebar-unscaled-content
                         />
                       }
                     >
@@ -886,6 +887,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                     className={`text-[10px] tabular-nums ${
                       isHighlighted ? "text-foreground" : "text-secondary-label"
                     }`}
+                    data-legacy-sidebar-unscaled-content
                   >
                     {formatRelativeTimeLabel(
                       thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
@@ -2292,7 +2294,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               >
                 <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
                   <span
-                    data-legacy-sidebar-unscaled-icon
+                    data-legacy-sidebar-unscaled-content
                     className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
                       projectStatus.pulse ? "animate-status-pulse" : ""
                     }`}
