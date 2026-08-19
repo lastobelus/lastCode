@@ -640,7 +640,7 @@ function assertForkInvariants(worktree: string): void {
   const requiredText = new Map([
     ["packages/shared/src/desktopDistribution.ts", "codes.lastobelus.lastcode"],
     ["apps/web/src/components/branding/LastCodeWordmark.tsx", "LastCode"],
-    ["scripts/lastcode-build-mac-arm64.ts", "lastcode/checkpoint/"],
+    ["scripts/lastcode-build-mac.ts", "lastcode/checkpoint/"],
   ]);
   for (const [relativePath, expected] of requiredText) {
     const path = NodePath.join(worktree, relativePath);
