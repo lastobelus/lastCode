@@ -268,7 +268,7 @@ export function buildKeybindingCommandOptions(
 export function commandLabel(command: KeybindingCommand): string {
   const raw = String(command);
   if (raw === "sidebar.mode.toggle") {
-    return "Switch Between Inbox and Legacy Sidebars";
+    return "Sidebar: Toggle Inbox/Legacy";
   }
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
     return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
