@@ -13,6 +13,9 @@ const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
 const BUILD_PREFIX = "lastcode/build/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
+const GROUPED_RELEASE_NOTES_FORMAT = "grouped-v1";
+const MAX_RELEASE_NOTE_GROUPS = 6;
+const MAX_RELEASE_NOTE_ITEMS = 8;
 
 export function resolveDeterministicBuildEnvironment(environment = process.env) {
   return { ...environment, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
@@ -138,10 +141,15 @@ export function parseOptions(argv) {
   let repoRoot;
   let currentVersion;
   let checkpointTag;
+  let releaseNotesFormat;
   let home = NodeOS.homedir();
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (!["--repo", "--current-version", "--checkpoint", "--home"].includes(arg)) {
+    if (
+      !["--repo", "--current-version", "--checkpoint", "--home", "--release-notes-format"].includes(
+        arg,
+      )
+    ) {
       throw new Error(`Unknown argument '${arg}'.`);
     }
     const value = argv[index + 1];
@@ -149,13 +157,20 @@ export function parseOptions(argv) {
     if (arg === "--repo") repoRoot = NodePath.resolve(value);
     else if (arg === "--current-version") currentVersion = value;
     else if (arg === "--checkpoint") checkpointTag = value;
+    else if (arg === "--release-notes-format") releaseNotesFormat = value;
     else home = NodePath.resolve(value);
     index += 1;
   }
   if (!repoRoot) throw new Error("Missing --repo.");
   if (command === "inspect" && !currentVersion) throw new Error("Missing --current-version.");
   if (command === "build" && !checkpointTag) throw new Error("Missing --checkpoint.");
-  return { command, repoRoot, home, currentVersion, checkpointTag };
+  if (command === "build" && releaseNotesFormat !== undefined) {
+    throw new Error("--release-notes-format is only valid for inspect.");
+  }
+  if (releaseNotesFormat !== undefined && releaseNotesFormat !== GROUPED_RELEASE_NOTES_FORMAT) {
+    throw new Error(`Unsupported release notes format '${releaseNotesFormat}'.`);
+  }
+  return { command, repoRoot, home, currentVersion, checkpointTag, releaseNotesFormat };
 }
 
 export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
@@ -230,6 +245,194 @@ export function quarantineIncompleteBuild(
   return quarantinePath;
 }
 
+function checkpointSourceCommit(repoRoot, tag) {
+  const message = git(repoRoot, ["for-each-ref", `refs/tags/${tag}`, "--format=%(contents)"]);
+  return /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1];
+}
+
+function hasCommit(repoRoot, ref) {
+  const result = NodeChildProcess.spawnSync("git", ["cat-file", "-e", `${ref}^{commit}`], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) return true;
+  if (result.status === 1 || result.status === 128) return false;
+  throw new Error(
+    `git cat-file -e ${ref}^{commit} failed with exit code ${result.status ?? "unknown"}.`,
+  );
+}
+
+function isAncestor(repoRoot, ancestor, descendant) {
+  const result = NodeChildProcess.spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", ancestor, descendant],
+    { cwd: repoRoot, stdio: "ignore" },
+  );
+  if (result.error) throw result.error;
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  throw new Error(
+    `git merge-base --is-ancestor ${ancestor} ${descendant} failed with exit code ${result.status ?? "unknown"}.`,
+  );
+}
+
+function parseCommitSubjects(value) {
+  return value
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf("\0");
+      if (separator < 0) throw new Error("Could not parse a Git commit subject.");
+      return { commit: line.slice(0, separator), subject: line.slice(separator + 1).trim() };
+    })
+    .filter(({ subject }) => subject.length > 0);
+}
+
+function listInstallableRefs(repoRoot, tags) {
+  return tags
+    .flatMap((tag) => {
+      const installable = parseInstallableTag(tag);
+      if (!installable) return [];
+      return [
+        {
+          ...installable,
+          commit: git(repoRoot, ["rev-parse", `${tag}^{commit}`]),
+          sourceCommit: checkpointSourceCommit(repoRoot, tag),
+        },
+      ];
+    })
+    .toSorted((left, right) => compareNightlyVersions(left.version.tag, right.version.tag));
+}
+
+function collectLastCodeReleaseNotes(repoRoot, installables, currentInstallable, target) {
+  if (!currentInstallable) return { status: "unavailable" };
+  const chain = installables.filter(
+    ({ version }) =>
+      compareNightlyVersions(version.tag, currentInstallable.version.tag) >= 0 &&
+      compareNightlyVersions(version.tag, target.version.tag) <= 0,
+  );
+  if (
+    chain[0]?.tag !== currentInstallable.tag ||
+    chain.at(-1)?.tag !== target.tag ||
+    chain.some(
+      ({ sourceCommit }) => sourceCommit === undefined || !hasCommit(repoRoot, sourceCommit),
+    )
+  ) {
+    return { status: "unavailable" };
+  }
+
+  let candidates = [];
+  for (let index = 1; index < chain.length; index += 1) {
+    const previous = chain[index - 1];
+    const next = chain[index];
+    if (!previous?.sourceCommit || !next?.sourceCommit) return { status: "unavailable" };
+    if (previous.sourceCommit === next.sourceCommit) continue;
+
+    const boundary = isAncestor(repoRoot, previous.commit, next.sourceCommit)
+      ? previous.commit
+      : isAncestor(repoRoot, previous.sourceCommit, next.sourceCommit)
+        ? previous.sourceCommit
+        : undefined;
+    if (!boundary) return { status: "unavailable" };
+
+    const downstreamCommits = new Set(
+      splitLines(git(repoRoot, ["cherry", target.version.nightlyTag, next.sourceCommit, boundary]))
+        .filter((line) => line.startsWith("+ "))
+        .map((line) => line.slice(2).split(/\s+/, 1)[0])
+        .filter(Boolean),
+    );
+    const edgeCandidates = parseCommitSubjects(
+      git(repoRoot, [
+        "log",
+        "--format=%H%x00%s",
+        "--no-merges",
+        `${boundary}..${next.sourceCommit}`,
+      ]),
+    ).filter(({ commit }) => downstreamCommits.has(commit));
+    candidates = edgeCandidates.concat(candidates);
+  }
+
+  const items = candidates.map(({ subject }) => subject);
+  return {
+    status: "known",
+    items: items.slice(0, MAX_RELEASE_NOTE_ITEMS),
+    omittedItems: Math.max(0, items.length - MAX_RELEASE_NOTE_ITEMS),
+  };
+}
+
+function listUpstreamNightlyTags(repoRoot) {
+  return splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]))
+    .filter((tag) => {
+      const parsed = parseNightlyVersion(tag);
+      return parsed?.revision === 0 && parsed.tag === parsed.nightlyTag;
+    })
+    .toSorted(compareNightlyVersions);
+}
+
+function collectUpstreamReleaseNotes(repoRoot, current, target) {
+  if (current.nightlyTag === target.version.nightlyTag) {
+    return { groups: [], omittedGroups: 0 };
+  }
+  const nightlyTags = listUpstreamNightlyTags(repoRoot);
+  const currentIndex = nightlyTags.indexOf(current.nightlyTag);
+  const targetIndex = nightlyTags.indexOf(target.version.nightlyTag);
+  if (currentIndex < 0 || targetIndex <= currentIndex) {
+    throw new Error("Could not resolve the installed-to-target upstream nightly interval.");
+  }
+
+  const nonEmptyGroups = nightlyTags
+    .slice(currentIndex + 1, targetIndex + 1)
+    .toReversed()
+    .flatMap((tag) => {
+      const index = nightlyTags.indexOf(tag);
+      const previous = nightlyTags[index - 1];
+      if (!previous) return [];
+      const subjects = splitLines(
+        git(repoRoot, ["log", "--format=%s", "--no-merges", `${previous}..${tag}`]),
+      );
+      if (subjects.length === 0) return [];
+      return [
+        {
+          version: tag.slice(1),
+          isTarget: tag === target.version.nightlyTag,
+          items: subjects.slice(0, MAX_RELEASE_NOTE_ITEMS),
+          omittedItems: Math.max(0, subjects.length - MAX_RELEASE_NOTE_ITEMS),
+        },
+      ];
+    });
+  return {
+    groups: nonEmptyGroups.slice(0, MAX_RELEASE_NOTE_GROUPS),
+    omittedGroups: Math.max(0, nonEmptyGroups.length - MAX_RELEASE_NOTE_GROUPS),
+  };
+}
+
+function inspectGrouped(options, installableTags, checkpointTag, availableVersion, current) {
+  const installables = listInstallableRefs(options.repoRoot, installableTags);
+  const target = installables.find(({ tag }) => tag === checkpointTag);
+  if (!target) throw new Error(`Could not resolve target installable ${checkpointTag}.`);
+  const currentTag =
+    current.revision === 0
+      ? `${CHECKPOINT_PREFIX}${current.tag}`
+      : `${REVISION_PREFIX}${current.tag}`;
+  const currentInstallable = installables.find(({ tag }) => tag === currentTag);
+  return {
+    schemaVersion: 2,
+    status: "available",
+    checkpointTag,
+    availableVersion,
+    releaseNotes: {
+      lastCode: collectLastCodeReleaseNotes(
+        options.repoRoot,
+        installables,
+        currentInstallable,
+        target,
+      ),
+      upstream: collectUpstreamReleaseNotes(options.repoRoot, current, target),
+    },
+  };
+}
+
 function inspect(options) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
@@ -246,11 +449,19 @@ function inspect(options) {
   if (!checkpointTag) throw new Error("No local LastCode installable tags were found.");
   const availableVersion = versionFromInstallableTag(checkpointTag);
   if (compareNightlyVersions(availableVersion, options.currentVersion) <= 0) {
-    return { schemaVersion: 1, status: "up-to-date", checkpointTag, availableVersion };
+    return {
+      schemaVersion: options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT ? 2 : 1,
+      status: "up-to-date",
+      checkpointTag,
+      availableVersion,
+    };
   }
 
   const current = parseNightlyVersion(options.currentVersion);
   if (!current) throw new Error(`Installed version '${options.currentVersion}' is invalid.`);
+  if (options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT) {
+    return inspectGrouped(options, installableTags, checkpointTag, availableVersion, current);
+  }
   const currentInstallable =
     current.revision === 0
       ? `${CHECKPOINT_PREFIX}${current.tag}`
