@@ -75,6 +75,8 @@ type ProjectFaviconImageProps = {
 
 type ImageElement = ReactElement<{
   readonly src: string;
+  readonly "data-slot"?: string;
+  readonly className?: string;
   readonly onLoad?: () => void;
   readonly onError?: () => void;
 }>;
@@ -217,5 +219,15 @@ describe("ProjectFavicon", () => {
       cwd: "/workspace-test",
       path: "brand/icon.svg",
     });
+  });
+
+  it("marks displayed images for global project icon styling", () => {
+    const { Component, props } = resolveImageComponent();
+    const loadingImage = renderImage(Component, props).props.children[2];
+    loadingImage?.props.onLoad?.();
+
+    const displayedImage = renderImage(Component, props).props.children[1];
+    expect(displayedImage?.props["data-slot"]).toBe("project-favicon");
+    expect(displayedImage?.props.className).not.toContain("rounded-sm");
   });
 });
