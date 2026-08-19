@@ -39,6 +39,7 @@ const clientSettings: ClientSettings = {
   planModeEnabled: false,
   showSkillsInSlashMenu: false,
   providerModelPreferences: {},
+  roundedProjectIcons: false,
   sidebarAutoSettleAfterDays: 3,
   sidebarAutoSettleMode: "change-request",
   sidebarProjectGroupingMode: "repository_path",
