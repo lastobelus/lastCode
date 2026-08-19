@@ -4,18 +4,25 @@ import {
   parseBuildOptions,
   resolveBuildEnvironment,
   resolveNextBuildNumber,
-} from "./lastcode-build-mac-arm64.ts";
+} from "./lastcode-build-mac.ts";
 
 const checkpoint = "lastcode/checkpoint/v1.2.3-nightly.20260811.9";
 
 it("requires an explicit immutable installable tag", () => {
   expect(() => parseBuildOptions([])).toThrow("An installable tag is required");
-  expect(parseBuildOptions(["--checkpoint", checkpoint, "--push-tag"])).toEqual({
+  expect(() => parseBuildOptions(["--checkpoint", checkpoint])).toThrow(
+    "A target architecture is required",
+  );
+  expect(parseBuildOptions(["--arch", "x64", "--checkpoint", checkpoint, "--push-tag"])).toEqual({
+    arch: "x64",
     checkpointTag: checkpoint,
     outputRoot: "release-lastcode",
     pushTag: true,
     verbose: false,
   });
+  expect(() => parseBuildOptions(["--arch", "universal", "--checkpoint", checkpoint])).toThrow(
+    "Unsupported macOS architecture",
+  );
 });
 
 it("allocates monotonically increasing build tags per checkpoint", () => {
