@@ -142,6 +142,14 @@ describe("ClientSettings sidebar", () => {
   });
 });
 
+describe("ClientSettings project icons", () => {
+  it("defaults to unrounded icons and preserves an explicit opt-in", () => {
+    expect(decodeClientSettings({}).roundedProjectIcons).toBe(false);
+    expect(decodeClientSettings({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+    expect(decodeClientSettingsPatch({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults text generation to Luna at low reasoning effort", () => {
     expect(DEFAULT_SERVER_SETTINGS.textGenerationModelSelection).toEqual({

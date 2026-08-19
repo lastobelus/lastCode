@@ -203,6 +203,19 @@ export function LastCodeSettingsPanel() {
             </div>
           }
         />
+        <SettingsRow
+          {...searchableSetting("rounded-project-icons")}
+          description="Round the corners of project favicon images. Leave this off to show each icon's original shape."
+          control={
+            <Switch
+              checked={clientSettings.roundedProjectIcons}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ roundedProjectIcons: Boolean(checked) })
+              }
+              aria-label="Rounded project icons"
+            />
+          }
+        />
       </SettingsSection>
       <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
         <SettingsRow
