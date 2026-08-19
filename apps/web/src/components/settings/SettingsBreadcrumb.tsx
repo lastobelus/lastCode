@@ -20,9 +20,14 @@ function settingsBreadcrumbLabel(pathname: string): string | null {
 }
 
 export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
+  const archiveProjectKey = useSearch({
+    from: "/settings/archived",
+    shouldThrow: false,
+    select: (search) => search.project ?? null,
+  });
   const normalizedPathname = pathname.replace(/\/+$/, "") || "/";
-  if (normalizedPathname === "/settings/archived") {
-    return <ArchivedThreadsBreadcrumb />;
+  if (normalizedPathname === "/settings/archived" && archiveProjectKey !== undefined) {
+    return <ArchivedThreadsBreadcrumb projectKey={archiveProjectKey} />;
   }
   const sectionLabel = settingsBreadcrumbLabel(pathname);
 
@@ -41,8 +46,7 @@ export function SettingsBreadcrumb({ pathname }: { pathname: string }) {
   );
 }
 
-function ArchivedThreadsBreadcrumb() {
-  const search = useSearch({ from: "/settings/archived" });
+function ArchivedThreadsBreadcrumb({ projectKey }: { projectKey: string | null }) {
   const navigate = useNavigate({ from: "/settings/archived" });
   const { isLoading, projectGroups } = useArchivedProjectModel();
 
@@ -59,7 +63,7 @@ function ArchivedThreadsBreadcrumb() {
         });
       }}
       rootLabel="Archive"
-      selectedKey={search.project ?? null}
+      selectedKey={projectKey}
       unavailableLabel={isLoading ? "Loading project" : "Unavailable project"}
     />
   );
