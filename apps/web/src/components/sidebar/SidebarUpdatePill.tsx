@@ -1,4 +1,5 @@
 import { TriangleAlertIcon } from "lucide-react";
+import type { DesktopUpdateReleaseNote } from "@t3tools/contracts";
 import { useCallback, useEffect, useState } from "react";
 import { isElectron } from "../../env";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -64,6 +65,66 @@ function keyReleaseNoteItems(items: ReadonlyArray<string>) {
   });
 }
 
+export function resolveReleaseNoteHeading(
+  releaseNote: DesktopUpdateReleaseNote,
+  index: number,
+): string {
+  return (
+    releaseNote.heading ?? (index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`)
+  );
+}
+
+export function keyReleaseNoteGroups(releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>) {
+  const occurrences = new Map<string, number>();
+  return releaseNotes.map((releaseNote) => {
+    const identity = JSON.stringify([releaseNote.version, releaseNote.heading ?? null]);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    return { releaseNote, key: JSON.stringify([identity, occurrence]) };
+  });
+}
+
+export function SidebarUpdateReleaseNotesContent({
+  releaseNotes,
+}: {
+  readonly releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>;
+}) {
+  return (
+    <div className="max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
+      {keyReleaseNoteGroups(releaseNotes).map(({ releaseNote, key }, index) => (
+        <div key={key}>
+          {index > 0 && <Separator className="my-3 bg-border/60" />}
+          <section>
+            <h3 className="text-foreground text-xs leading-4 font-semibold">
+              {resolveReleaseNoteHeading(releaseNote, index)}
+            </h3>
+            {releaseNote.items.length > 0 ? (
+              <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
+                {keyReleaseNoteItems(releaseNote.items).map(({ item, key: itemKey }) => (
+                  <li className="list-disc break-words" key={itemKey}>
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {releaseNote.summaries && releaseNote.summaries.length > 0 ? (
+              <div className="mt-2 space-y-1 text-xs leading-5 text-popover-foreground/70">
+                {keyReleaseNoteItems(releaseNote.summaries).map(
+                  ({ item: summary, key: summaryKey }) => (
+                    <p className="break-words" key={summaryKey}>
+                      {summary}
+                    </p>
+                  ),
+                )}
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SidebarUpdateReleaseNotesTooltip({
   state,
   tooltip,
@@ -95,25 +156,7 @@ function SidebarUpdateReleaseNotesTooltip({
           <div className="text-sm leading-5 font-medium">{tooltip}</div>
         )}
       </div>
-      <div className="max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
-        {state.releaseNotes.map((releaseNote, index) => (
-          <div key={releaseNote.version}>
-            {index > 0 && <Separator className="my-3 bg-border/60" />}
-            <section>
-              <h3 className="text-foreground text-xs leading-4 font-semibold">
-                {index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`}
-              </h3>
-              <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
-                {keyReleaseNoteItems(releaseNote.items).map(({ item, key }) => (
-                  <li className="list-disc break-words" key={key}>
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          </div>
-        ))}
-      </div>
+      <SidebarUpdateReleaseNotesContent releaseNotes={state.releaseNotes} />
     </div>
   );
 }
