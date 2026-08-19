@@ -1,7 +1,27 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
+import { DesktopEnvironmentBootstrapSchema, DesktopUpdateReleaseNoteSchema } from "./ipc.ts";
+
+describe("DesktopUpdateReleaseNoteSchema", () => {
+  const decode = Schema.decodeUnknownSync(DesktopUpdateReleaseNoteSchema);
+
+  it("preserves optional local headings and non-bulleted summaries", () => {
+    expect(
+      decode({
+        version: "1.2.3-nightly.2",
+        heading: "LastCode changes",
+        items: ["feat(lastcode): local change"],
+        summaries: ["…and 2 more LastCode changes"],
+      }),
+    ).toEqual({
+      version: "1.2.3-nightly.2",
+      heading: "LastCode changes",
+      items: ["feat(lastcode): local change"],
+      summaries: ["…and 2 more LastCode changes"],
+    });
+  });
+});
 
 describe("DesktopEnvironmentBootstrapSchema", () => {
   const decode = Schema.decodeUnknownSync(DesktopEnvironmentBootstrapSchema);
