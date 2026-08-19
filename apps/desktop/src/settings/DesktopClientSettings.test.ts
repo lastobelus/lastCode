@@ -40,6 +40,7 @@ const clientSettings: ClientSettings = {
   planModeEnabled: false,
   showSkillsInSlashMenu: false,
   providerModelPreferences: {},
+  roundedProjectIcons: false,
   sidebarAutoSettleAfterDays: 3,
   sidebarAutoSettleOnMerge: true,
   sidebarProjectGroupingMode: "repository_path",
