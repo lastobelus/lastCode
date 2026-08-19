@@ -1,4 +1,8 @@
-import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopBridge,
+  DesktopUpdateReleaseNote,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 
 import {
@@ -16,6 +20,25 @@ function keyReleaseNoteItems(items: ReadonlyArray<string>) {
     const occurrence = occurrences.get(item) ?? 0;
     occurrences.set(item, occurrence + 1);
     return { item, key: JSON.stringify([item, occurrence]) };
+  });
+}
+
+export function resolveReleaseNoteHeading(
+  releaseNote: DesktopUpdateReleaseNote,
+  index: number,
+): string {
+  return (
+    releaseNote.heading ?? (index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`)
+  );
+}
+
+export function keyReleaseNoteGroups(releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>) {
+  const occurrences = new Map<string, number>();
+  return releaseNotes.map((releaseNote) => {
+    const identity = JSON.stringify([releaseNote.version, releaseNote.heading ?? null]);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    return { releaseNote, key: JSON.stringify([identity, occurrence]) };
   });
 }
 
@@ -77,7 +100,7 @@ export function SidebarUpdateReleaseNotes({
         )}
       </div>
       <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-4 pb-1">
-        {state.releaseNotes.map((releaseNote, index) => {
+        {keyReleaseNoteGroups(state.releaseNotes).map(({ releaseNote, key }, index) => {
           const releaseUrl = getDesktopUpdateReleaseUrl(releaseNote.version);
           const omittedItemCount = Math.max(0, releaseNote.totalItems - releaseNote.items.length);
           const linkLabel =
@@ -86,11 +109,11 @@ export function SidebarUpdateReleaseNotes({
               : `${omittedItemCount} more ${omittedItemCount === 1 ? "change" : "changes"} on GitHub`;
 
           return (
-            <div key={releaseNote.version}>
+            <div key={key}>
               {index > 0 && <Separator className="my-3 bg-border/60" />}
               <section>
                 <h3 className="text-foreground text-xs leading-4 font-semibold">
-                  {index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`}
+                  {resolveReleaseNoteHeading(releaseNote, index)}
                 </h3>
                 <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
                   {keyReleaseNoteItems(releaseNote.items).map(({ item, key }) => (
@@ -99,6 +122,17 @@ export function SidebarUpdateReleaseNotes({
                     </li>
                   ))}
                 </ul>
+                {releaseNote.summaries && releaseNote.summaries.length > 0 ? (
+                  <div className="mt-2 space-y-1 text-xs leading-5 text-popover-foreground/70">
+                    {keyReleaseNoteItems(releaseNote.summaries).map(
+                      ({ item: summary, key: summaryKey }) => (
+                        <p className="break-words" key={summaryKey}>
+                          {summary}
+                        </p>
+                      ),
+                    )}
+                  </div>
+                ) : null}
                 {releaseUrl ? (
                   <ReleaseLink releaseUrl={releaseUrl} shell={shell}>
                     {linkLabel}
