@@ -30,7 +30,8 @@ changing whether or how an agent provider runs.
 Favorites and model-display preferences for built-in providers are imported.
 Source-only custom-provider references are omitted because their provider
 instances are not copied; existing LastCode custom-provider preferences are
-preserved.
+preserved. LastCode-only appearance preferences, including legacy sidebar scale
+and rounded project icons, are also preserved.
 
 ## Deliberate exclusions
 
