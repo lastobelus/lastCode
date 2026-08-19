@@ -1,12 +1,22 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  groupedInspectionArgs,
   parseHelperResult,
   terminateHelperProcess,
   usesDetachedHelperProcessGroup,
 } from "./LastCodeLocalUpdates.ts";
 
 describe("LastCodeLocalUpdates", () => {
+  it("requests the negotiated grouped release notes format", () => {
+    assert.deepEqual(groupedInspectionArgs("1.2.3-nightly.4"), [
+      "--current-version",
+      "1.2.3-nightly.4",
+      "--release-notes-format",
+      "grouped-v1",
+    ]);
+  });
+
   it("parses the helper's final structured result", () => {
     assert.deepEqual(
       parseHelperResult(
