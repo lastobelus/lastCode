@@ -571,17 +571,17 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* The original compact-sidebar patch changed row geometry and typography but
-   left favicons, action glyphs, and status glyphs at their stock dimensions.
+   left favicons, action/status glyphs, and thread metadata at stock dimensions.
    Each scaled legacy-sidebar surface publishes the reciprocal of its row zoom
-   so icon descendants retain that behavior. */
+   so selected descendants retain that behavior. */
 [data-legacy-sidebar-scale] :is(svg, img),
-[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-icon] {
-  zoom: var(--legacy-sidebar-icon-zoom);
+[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-content] {
+  zoom: var(--legacy-sidebar-content-zoom);
 }
 
-/* An explicitly unscaled icon container already supplies the reciprocal zoom;
+/* An explicitly unscaled content container already supplies the reciprocal zoom;
    do not apply it a second time to a nested SVG or image. */
-[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-icon] :is(svg, img) {
+[data-legacy-sidebar-scale] [data-legacy-sidebar-unscaled-content] :is(svg, img) {
   zoom: 1;
 }
 
