@@ -133,6 +133,7 @@ function RootRouteView() {
         <DocumentTitleSync />
         <GlassAppearanceSync />
         <FontAppearanceSync />
+        <ProjectIconAppearanceSync />
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         <RelayClientInstallDialog />
         <ConnectOnboardingDialog />
@@ -158,6 +159,19 @@ function GlassAppearanceSync() {
   useEffect(() => {
     document.documentElement.style.setProperty("--glass-opacity", `${glassOpacity}%`);
   }, [glassOpacity]);
+
+  return null;
+}
+
+function ProjectIconAppearanceSync() {
+  const roundedProjectIcons = useClientSettings((settings) => settings.roundedProjectIcons);
+
+  useEffect(() => {
+    document.documentElement.toggleAttribute("data-rounded-project-icons", roundedProjectIcons);
+    return () => {
+      document.documentElement.removeAttribute("data-rounded-project-icons");
+    };
+  }, [roundedProjectIcons]);
 
   return null;
 }
