@@ -404,5 +404,13 @@ Do not introduce a general release-notes component framework for this change.
 - Read-only external review is blocked: the prescribed Codex reviewer model is
   unsupported by the configured ChatGPT-backed CLI, and the configured Z.AI
   reviewer returns a server error even for an availability probe.
-- Packaged visual QA remains pending explicit computer-use permission and a
-  safe isolated packaged-app setup, as allowed by the validation contract.
+- Packaged visual QA passed in a signed Apple Silicon build with a unique QA
+  bundle identity and isolated T3/LastCode state, using published checkpoint
+  topology from `1113.6` through `1130`; the unrelated running LastCode app was
+  left untouched.
+- The packaged hover card showed `LastCode changes` before `Upstream changes`,
+  rendered upstream nightly headings newest first, exposed `3 more LastCode
+changes` and `3 older nightlies not shown` instead of silently truncating,
+  and scrolled successfully to older nightly groups. Focused rendered coverage
+  proves the explicit unavailable-provenance presentation for the topology
+  where that state applies.
