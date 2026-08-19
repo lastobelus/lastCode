@@ -14,6 +14,7 @@ import {
 } from "./lastcode-nightly.ts";
 
 interface BuildOptions {
+  readonly arch: "arm64" | "x64";
   readonly checkpointTag: string;
   readonly outputRoot: string;
   readonly pushTag: boolean;
@@ -28,7 +29,7 @@ interface BuildArtifact {
 
 interface BuildManifest {
   readonly schemaVersion: 1;
-  readonly arch: "arm64";
+  readonly arch: "arm64" | "x64";
   readonly artifacts: ReadonlyArray<BuildArtifact>;
   readonly buildTag: string;
   readonly builtAt: string;
@@ -40,6 +41,7 @@ interface BuildManifest {
 }
 
 export function parseBuildOptions(argv: ReadonlyArray<string>): BuildOptions {
+  let arch: "arm64" | "x64" | undefined;
   let checkpointTag: string | undefined;
   let outputRoot = "release-lastcode";
   let pushTag = false;
@@ -48,10 +50,15 @@ export function parseBuildOptions(argv: ReadonlyArray<string>): BuildOptions {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
-    if (arg === "--checkpoint" || arg === "--output-root") {
+    if (arg === "--arch" || arg === "--checkpoint" || arg === "--output-root") {
       const value = argv[index + 1];
       if (!value) throw new Error(`Missing value for ${arg}.`);
-      if (arg === "--checkpoint") checkpointTag = value;
+      if (arg === "--arch") {
+        if (value !== "arm64" && value !== "x64") {
+          throw new Error(`Unsupported macOS architecture '${value}'.`);
+        }
+        arch = value;
+      } else if (arg === "--checkpoint") checkpointTag = value;
       else outputRoot = value;
       index += 1;
     } else if (arg === "--push-tag") pushTag = true;
@@ -67,7 +74,8 @@ export function parseBuildOptions(argv: ReadonlyArray<string>): BuildOptions {
   if (!parseLastCodeInstallableTag(checkpointTag)) {
     throw new Error(`Invalid LastCode installable tag '${checkpointTag}'.`);
   }
-  return { checkpointTag, outputRoot, pushTag, verbose };
+  if (!arch) throw new Error("A target architecture is required. Pass --arch arm64 or --arch x64.");
+  return { arch, checkpointTag, outputRoot, pushTag, verbose };
 }
 
 export function resolveNextBuildNumber(
@@ -179,7 +187,9 @@ function main(argv: ReadonlyArray<string>): void {
     capture: true,
   });
   const env = resolveBuildEnvironment(cargoPath);
-  console.log(`[lastcode:build] Building ${options.checkpointTag} at ${commit}.`);
+  console.log(
+    `[lastcode:build] Building ${options.checkpointTag} at ${commit} for macOS ${options.arch}.`,
+  );
   run(
     repoRoot,
     "node",
@@ -190,7 +200,7 @@ function main(argv: ReadonlyArray<string>): void {
       "--target",
       "dmg",
       "--arch",
-      "arm64",
+      options.arch,
       "--build-version",
       versionFromLastCodeInstallableTag(options.checkpointTag),
       "--output-dir",
@@ -207,7 +217,7 @@ function main(argv: ReadonlyArray<string>): void {
   const buildTag = buildTagFromInstallableTag(options.checkpointTag, buildNumber);
   const manifest: BuildManifest = {
     schemaVersion: 1,
-    arch: "arm64",
+    arch: options.arch,
     artifacts: collectArtifacts(outputDir),
     buildTag,
     builtAt: new Date().toISOString(),
