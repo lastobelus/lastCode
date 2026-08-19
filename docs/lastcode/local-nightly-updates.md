@@ -56,9 +56,11 @@ picker.
 
 1. The desktop checks the local repository at startup, every four minutes, and
    when the sidebar update button is clicked.
-2. If a checkpoint or revision is newer than the installed LastCode version, the sidebar
-   button changes state. Its hover card lists commit subjects between the
-   installed build and the selected installable tag.
+2. If a checkpoint or revision is newer than the installed LastCode version,
+   the sidebar button changes state. Its hover card separates new downstream
+   work under **LastCode changes** from upstream work grouped by the nightly
+   that introduced it. This also applies when upstream has not moved and only a
+   newer LastCode revision is available.
 3. The first click creates or reuses
    `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
    runs full checkpoint CI, and builds the selected tag's DMG plus updater ZIP.
@@ -89,6 +91,26 @@ The DMG is retained as both the inspectable manual artifact and the in-app
 install source. The paired ZIP and `nightly-mac.yml` remain part of the complete
 desktop build output, but the certificate-free local channel does not hand them
 to Squirrel. Hosted signed releases continue to use `electron-updater`.
+
+### Release-note grouping
+
+The local updater compares the exact installed checkpoint or revision with the
+newest installable tag. **LastCode changes** contains only downstream patches
+that entered after the installed tag's recorded source snapshot and remain
+downstream-only at the offered target. Rebased copies of changes already in the
+installed build are not repeated. If upstream has since adopted an equivalent
+patch, that change appears only in the upstream nightly that adopted it.
+
+Upstream subjects are compared between consecutive nightly tags and shown
+newest-first. Empty nightly groups are omitted. The hover card shows at most
+eight subjects in each section and at most six upstream nightly sections; an
+explicit summary reports anything omitted by those bounds.
+
+This classification depends on the immutable installable tag and its annotated
+`Source-Commit` metadata. When the installed tag or a safe source boundary is
+unavailable, the LastCode section says **Couldn’t determine changes from this
+installed build.** Accurate upstream nightly groups are still shown. A known
+empty LastCode section is omitted.
 
 Electron's macOS credential storage can synchronously block its main process
 while the Keychain prompt is open. If a long-running request returns Electron's
