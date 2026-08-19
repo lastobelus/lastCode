@@ -382,3 +382,27 @@ Do not introduce a general release-notes component framework for this change.
 - No mobile surface; local nightly build/install is a packaged desktop feature.
 - No general changelog persistence service or compatibility framework beyond
   the explicitly negotiated installed-app helper format.
+
+## Results
+
+- Implemented a negotiated grouped inspect response while retaining the
+  unflagged flat response for installed-app bootstrap compatibility.
+- Classified LastCode subjects across adjacent immutable installable tags,
+  excluded replayed and target-upstream-equivalent patches, and returned an
+  explicit unavailable state when source provenance is missing or unsafe.
+- Grouped upstream subjects by consecutive nightly tags, omitted empty groups,
+  and enforced the agreed item and group bounds with explicit omitted counts.
+- Carried explicit headings and non-bulleted summaries through the desktop IPC
+  contract and sidebar hover card without changing hosted release-note
+  normalization.
+- Added focused Git-topology, desktop-state, contract, and rendered-tooltip
+  coverage. The focused suite passes with 44 tests; targeted lint and
+  contracts/desktop/web typechecks pass, and `git diff --check` is clean.
+- Exercised real published tags for a multi-nightly range and an isolated
+  same-nightly `1120.3` to `1120.4` range. The latter remained available and
+  contained exactly its one new LastCode subject with no upstream groups.
+- Read-only external review is blocked: the prescribed Codex reviewer model is
+  unsupported by the configured ChatGPT-backed CLI, and the configured Z.AI
+  reviewer returns a server error even for an availability probe.
+- Packaged visual QA remains pending explicit computer-use permission and a
+  safe isolated packaged-app setup, as allowed by the validation contract.
