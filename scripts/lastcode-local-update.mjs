@@ -680,7 +680,9 @@ function buildUnlocked(options, updateRoot) {
       mise,
       [
         ...nodeCommand,
-        "scripts/lastcode-build-mac-arm64.ts",
+        "scripts/lastcode-build-mac.ts",
+        "--arch",
+        "arm64",
         "--checkpoint",
         options.checkpointTag,
         "--output-root",
