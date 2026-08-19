@@ -18,8 +18,9 @@ not affect the current sidebar or the mobile client.
 - Use a range slider with whole-number values from 50% through 100%, a live numeric
   output, and an explicitly labeled 75% reference tick.
 - Treat the percentage as a geometric scale for project and thread row layout and
-  typography. Keep project favicons and action/status icons at their stock visual
-  size, matching the original console patch.
+  typography. Keep project favicons, action/status icons, remote cloud indicators,
+  and relative timestamps at their stock visual size, matching the original console
+  patch.
 - Keep the LastCode header, Search field, Projects heading, drafts, status notices,
   and footer at standard size. Apply layout-aware CSS zoom to each project header
   and thread list while leaving sortable project containers unscaled, so the
@@ -41,11 +42,12 @@ not affect the current sidebar or the mobile client.
    reset action, and client-settings update path. Reuse the existing settings-slider
    styling and persistence rather than adding LastCode-specific IPC or storage.
 3. Apply a layout-aware scaling surface to each rendered project header and thread
-   list. Derive its CSS zoom and reciprocal icon zoom from the persisted percentage
-   with a pure helper that can be tested independently. Keep the sortable project
-   item outside that surface so drag transforms use unscaled coordinates, and do not
-   place the header, Search field, Projects heading, drafts, notices, or footer
-   inside it.
+   list. Derive its CSS zoom and reciprocal content zoom from the persisted percentage
+   with a pure helper that can be tested independently. Apply reciprocal zoom to
+   favicons, action/status glyphs, remote cloud metadata, and relative timestamps.
+   Keep the sortable project item outside that surface so drag transforms use
+   unscaled coordinates, and do not place the header, Search field, Projects heading,
+   drafts, notices, or footer inside it.
 4. Add focused tests for schema defaults and bounds, scale-style geometry, settings
    search routing, and desktop client-settings persistence fixtures.
 5. Update this plan with implementation and validation results before handoff.
@@ -82,8 +84,9 @@ not affect the current sidebar or the mobile client.
   reset behavior, and a visible 75% reference tick.
 - The setting affects only the legacy sidebar and updates it without an app restart.
 - At 75%, legacy project and thread row layout and typography render at 0.75 scale
-  while project favicons, action/status icons, the header, Search field, Projects
-  heading, drafts, notices, and footer remain at standard size.
+  while project favicons, action/status icons, remote cloud indicators, relative
+  timestamps, the header, Search field, Projects heading, drafts, notices, and footer
+  remain at standard size.
 - Electron's View zoom commands remain implemented solely by the existing main-window
   zoom path and continue to compose with the sidebar scale.
 
@@ -102,9 +105,12 @@ The core feature shipped through LastCode PR #32:
   merge commit `36d6ddef7`. The normal nightly mechanism published
   `lastcode/revision/v0.0.34-nightly.20260817.1120.1` for installation.
 - Follow-up QA on that revision found that the original console patch also kept
-  favicons and action/status icons at stock size. The follow-up branch publishes a
-  reciprocal icon zoom for SVG and image glyphs and explicitly unscales non-SVG
-  status dots while row geometry, action containers, and typography remain compact.
-- Follow-up focused validation passes seven scale/status tests, the web typecheck,
-  the web production build, formatting, and `git diff --check`. Integrated nightly
-  QA and publication of the follow-up remain pending.
+  favicons and action/status icons at stock size. PR #35 added reciprocal zoom for
+  SVG and image glyphs and explicitly unscaled non-SVG status dots while row geometry,
+  action containers, and typography remain compact. Guarded merge commit `444dd7027`
+  was published as `lastcode/revision/v0.0.34-nightly.20260817.1120.4`.
+- Subsequent QA found that the remote cloud metadata footprint and relative timestamp
+  still inherited the row scale. The content marker now covers those elements as well
+  as non-SVG status dots, while nested SVGs avoid double compensation. Focused scale
+  and status-indicator tests, the web typecheck, the production web build, formatting,
+  and diff checks pass for this follow-up.
