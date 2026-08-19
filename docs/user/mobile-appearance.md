@@ -13,3 +13,9 @@ To change themes:
 
 **System** follows the device appearance automatically. Theme, text, code, and terminal appearance
 preferences are stored on the device.
+
+## Choose the project icon shape
+
+Project icons keep the shape of their source image by default. To round their corners, open
+**Settings → Appearance** and enable **Rounded project icons**. This preference is stored on the
+device, so set it separately on each mobile device.
