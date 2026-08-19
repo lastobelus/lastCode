@@ -412,6 +412,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   // for desktop-local projects, see sidebarProjectGrouping).
   const isDesktopLocalThread =
     environment !== null && isDesktopLocalConnectionTarget(environment.entry.target);
+  const showsRemoteThreadIcon = isRemoteThread && !isDesktopLocalThread;
   const threadEnvironmentLabel = isRemoteThread
     ? (remoteEnvLabel ?? (isDesktopLocalThread ? "Local" : "Remote"))
     : null;
@@ -852,9 +853,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 </Tooltip>
               )
             ) : null}
-            <span className={threadMetaClassName}>
+            <span
+              className={`${threadMetaClassName}${showsRemoteThreadIcon ? " flex items-center" : ""}`}
+            >
               <span className="inline-flex items-center gap-1">
-                {isRemoteThread && !isDesktopLocalThread && (
+                {showsRemoteThreadIcon && (
                   <Tooltip>
                     <TooltipTrigger
                       render={
