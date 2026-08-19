@@ -244,6 +244,7 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -929,6 +930,7 @@ export const ClientSettingsPatch = Schema.Struct({
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
