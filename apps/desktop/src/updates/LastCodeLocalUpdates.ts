@@ -14,19 +14,43 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
+const LastCodeReleaseNotes = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("known"),
+    items: Schema.Array(Schema.String),
+    omittedItems: Schema.Number,
+  }),
+  Schema.Struct({ status: Schema.Literal("unavailable") }),
+]);
+
+const UpstreamReleaseNotes = Schema.Struct({
+  groups: Schema.Array(
+    Schema.Struct({
+      version: Schema.String,
+      isTarget: Schema.Boolean,
+      items: Schema.Array(Schema.String),
+      omittedItems: Schema.Number,
+    }),
+  ),
+  omittedGroups: Schema.Number,
+});
+
 const InspectionResult = Schema.Union([
   Schema.Struct({
-    schemaVersion: Schema.Literal(1),
+    schemaVersion: Schema.Literal(2),
     status: Schema.Literal("up-to-date"),
     checkpointTag: Schema.String,
     availableVersion: Schema.String,
   }),
   Schema.Struct({
-    schemaVersion: Schema.Literal(1),
+    schemaVersion: Schema.Literal(2),
     status: Schema.Literal("available"),
     checkpointTag: Schema.String,
     availableVersion: Schema.String,
-    releaseNotes: Schema.Array(Schema.String),
+    releaseNotes: Schema.Struct({
+      lastCode: LastCodeReleaseNotes,
+      upstream: UpstreamReleaseNotes,
+    }),
   }),
 ]);
 export type LastCodeLocalUpdateInspection = typeof InspectionResult.Type;
@@ -99,6 +123,10 @@ export function parseHelperResult(raw: string): unknown {
 
 export function usesDetachedHelperProcessGroup(platform: NodeJS.Platform): boolean {
   return platform !== "win32";
+}
+
+export function groupedInspectionArgs(currentVersion: string): ReadonlyArray<string> {
+  return ["--current-version", currentVersion, "--release-notes-format", "grouped-v1"];
 }
 
 export function terminateHelperProcess(
@@ -404,7 +432,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
       environment.platform === "darwin" &&
       environment.runtimeInfo.hostArch === "arm64",
     inspect: (currentVersion) =>
-      runHelper("inspect", ["--current-version", currentVersion]).pipe(
+      runHelper("inspect", groupedInspectionArgs(currentVersion)).pipe(
         Effect.flatMap((result) =>
           Effect.try({
             try: () => decodeInspectionResult(result),
