@@ -220,4 +220,11 @@ describe("searchSettings", () => {
       to: "/settings/lastcode",
     });
   });
+
+  it("routes project icon rounding to LastCode settings", () => {
+    expect(searchSettings("rounded project icons")[0]).toMatchObject({
+      id: "rounded-project-icons",
+      to: "/settings/lastcode",
+    });
+  });
 });
