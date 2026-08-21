@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -263,10 +264,16 @@ describe("LastCode userland install command", () => {
   it("installs the locking companion beside the standalone installer", () => {
     const home = temporaryDirectory();
     installCommand(home);
+    const modulePath = NodePath.join(home, ".lastcode", "bin", "lastcode-install.mjs");
 
     expect(
       NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"), "utf8"),
     ).toContain("LastCode managed companion: lastcode-lock");
+    const result = NodeChildProcess.spawnSync(process.execPath, [modulePath, "--help"], {
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Usage: lastcode-install");
   });
 
   itMacOnly("serializes installers and releases the kernel lock", () => {
