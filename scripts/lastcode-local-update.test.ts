@@ -80,7 +80,10 @@ describe("lastcode-local-update", () => {
       release();
 
       const lockPath = NodePath.join(root, "build.lock");
-      assert.strictEqual(NodeFS.readFileSync(lockPath, "utf8"), "");
+      assert.deepInclude(JSON.parse(NodeFS.readFileSync(lockPath, "utf8")), {
+        schemaVersion: 2,
+        pid: process.pid,
+      });
       const releaseAgain = acquireBuildLock(root);
       releaseAgain();
     } finally {
