@@ -91,4 +91,38 @@ describe("update drain decider and projector", () => {
       );
     }),
   );
+
+  it.effect("does not describe a cancelled drain as active for another request", () =>
+    Effect.gen(function* () {
+      const cancelled = {
+        sequence: 2,
+        intent: { requestId, targetVersion, status: "cancelled" as const },
+      };
+      const sameRequest = yield* Effect.result(
+        decideUpdateDrainCommand(cancelled, {
+          type: "update-drain.cancel",
+          commandId: CommandId.make("cancel-again"),
+          requestId,
+          createdAt: requestedAt,
+        }),
+      );
+      const otherRequest = yield* Effect.result(
+        decideUpdateDrainCommand(cancelled, {
+          type: "update-drain.cancel",
+          commandId: CommandId.make("cancel-stale"),
+          requestId: UpdateDrainRequestId.make("update-2"),
+          createdAt: requestedAt,
+        }),
+      );
+
+      assert.equal(
+        sameRequest._tag === "Failure" ? sameRequest.failure.reason : null,
+        "request_already_cancelled",
+      );
+      assert.equal(
+        otherRequest._tag === "Failure" ? otherRequest.failure.reason : null,
+        "no_active_drain",
+      );
+    }),
+  );
 });

@@ -76,19 +76,27 @@ export function decideUpdateDrainCommand(
       }),
     );
   }
+  if (state.intent.status === "cancelled") {
+    if (state.intent.requestId === command.requestId) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "request_already_cancelled",
+          message: `Update drain request '${command.requestId}' is already cancelled.`,
+        }),
+      );
+    }
+    return Effect.fail(
+      new UpdateDrainError({
+        reason: "no_active_drain",
+        message: "There is no active update drain to cancel.",
+      }),
+    );
+  }
   if (state.intent.requestId !== command.requestId) {
     return Effect.fail(
       new UpdateDrainError({
         reason: "request_mismatch",
         message: `Update drain '${command.requestId}' does not match active request '${state.intent.requestId}'.`,
-      }),
-    );
-  }
-  if (state.intent.status === "cancelled") {
-    return Effect.fail(
-      new UpdateDrainError({
-        reason: "request_already_cancelled",
-        message: `Update drain request '${command.requestId}' is already cancelled.`,
       }),
     );
   }
