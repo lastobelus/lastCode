@@ -564,10 +564,17 @@ export const make = Effect.gen(function* () {
 
   const downloadAvailableUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
+    const canRetryLocalBuild =
+      state.source === "lastcode-local" &&
+      state.status === "error" &&
+      state.errorContext === "download" &&
+      state.canRetry &&
+      state.availableVersion !== null &&
+      state.localBuildFailure !== null;
     if (
       !(yield* Ref.get(updaterConfiguredRef)) ||
       (yield* Ref.get(updateDownloadInFlightRef)) ||
-      state.status !== "available"
+      (state.status !== "available" && !canRetryLocalBuild)
     ) {
       return { accepted: false, completed: false };
     }

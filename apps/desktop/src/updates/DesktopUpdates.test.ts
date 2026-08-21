@@ -547,6 +547,7 @@ describe("DesktopUpdates", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const targetVersion = "1.2.4-nightly.20260814.1089.1";
     const buildError = "packaging failed: disk image is invalid";
+    let buildAttempts = 0;
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
@@ -561,14 +562,26 @@ describe("DesktopUpdates", () => {
       },
       localBuildEffect: (_checkpointTag, onProgress) =>
         Effect.gen(function* () {
+          buildAttempts += 1;
           if (onProgress) {
             yield* onProgress({ phase: "Workspace tests", percent: 20, errorKind: "build" });
             yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
           }
-          return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
-            operation: "build",
-            message: buildError,
-          });
+          if (buildAttempts === 1) {
+            return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+              operation: "build",
+              message: buildError,
+            });
+          }
+          return {
+            schemaVersion: 1,
+            status: "built",
+            checkpointTag,
+            outputDir: "/tmp/lastcode-local-build",
+            manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+            dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+            dmgSha256: "a".repeat(64),
+          };
         }),
     });
 
@@ -607,6 +620,16 @@ describe("DesktopUpdates", () => {
             .map((sent) => sent.localBuildProgress?.phase),
           ["Preparing", "Workspace tests", "Building DMG"],
         );
+
+        const retry = yield* updates.download;
+        assert.isTrue(retry.accepted);
+        assert.isTrue(retry.completed);
+        assert.equal(buildAttempts, 2);
+
+        const downloaded = yield* updates.getState;
+        assert.equal(downloaded.status, "downloaded");
+        assert.equal(downloaded.downloadedVersion, targetVersion);
+        assert.isNull(downloaded.localBuildFailure);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
