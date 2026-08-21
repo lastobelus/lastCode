@@ -10,6 +10,7 @@ import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   canCheckForUpdate,
+  formatLocalBuildFailureError,
   formatLocalBuildFailureDetails,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
@@ -75,6 +76,18 @@ export function resolveSidebarUpdateButtonToneClassName({
     return "bg-update-surface text-update-foreground enabled:hover:bg-update/12";
   }
   return "text-[var(--sidebar-icon-color)] enabled:hover:bg-sidebar-row-hover enabled:hover:text-sidebar-foreground";
+}
+
+export function shouldNativelyDisableSidebarUpdateButton({
+  disabled,
+  isActionPending,
+  isLocalBuildInProgress,
+}: {
+  readonly disabled: boolean;
+  readonly isActionPending: boolean;
+  readonly isLocalBuildInProgress: boolean;
+}): boolean {
+  return (disabled || isActionPending) && !isLocalBuildInProgress;
 }
 
 function keyReleaseNoteItems(items: ReadonlyArray<string>) {
@@ -202,7 +215,7 @@ export function SidebarLocalBuildFailureTooltip({
         </div>
       </div>
       <p className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-4 text-popover-foreground/90">
-        {failure.error}
+        {formatLocalBuildFailureError(failure.error)}
       </p>
       <div className="flex items-center justify-between gap-3 border-t border-destructive/20 pt-2">
         <span className="min-w-0 truncate text-[11px] text-muted-foreground">
@@ -307,6 +320,13 @@ function SidebarUpdateControl() {
       ? state.localBuildFailure
       : null;
   const progressPercent = state ? getDesktopUpdateProgressPercent(state) : null;
+  const isLocalBuildInProgress =
+    state?.source === "lastcode-local" && state.status === "downloading";
+  const nativeDisabled = shouldNativelyDisableSidebarUpdateButton({
+    disabled,
+    isActionPending,
+    isLocalBuildInProgress,
+  });
 
   const handleAction = useCallback(async () => {
     const bridge = window.desktopBridge;
@@ -449,9 +469,9 @@ function SidebarUpdateControl() {
               type="button"
               aria-label={tooltip}
               aria-disabled={disabled || isActionPending || undefined}
-              disabled={disabled || isActionPending}
+              disabled={nativeDisabled}
               className={cn(
-                "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors enabled:cursor-pointer focus-visible:ring-2 disabled:cursor-not-allowed",
+                "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors enabled:cursor-pointer focus-visible:ring-2 aria-disabled:cursor-not-allowed disabled:cursor-not-allowed",
                 resolveSidebarUpdateButtonToneClassName({
                   hasLocalBuildFailure: localBuildFailure !== null,
                   showUpdateIconState,

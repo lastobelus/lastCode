@@ -58,6 +58,10 @@ function sanitizeLocalBuildDiagnosticValue(
   return sanitized.trim();
 }
 
+export function formatLocalBuildFailureError(error: string): string {
+  return sanitizeLocalBuildDiagnosticValue(error, 32_000, true);
+}
+
 export function formatLocalBuildFailureDetails(failure: DesktopLocalBuildFailure): string {
   const context = failure.errorKind === "packaging" ? "Packaging" : "Build";
   return [
@@ -67,7 +71,7 @@ export function formatLocalBuildFailureDetails(failure: DesktopLocalBuildFailure
     `Checkpoint: ${sanitizeLocalBuildDiagnosticValue(failure.checkpointTag, 500)}`,
     `Last phase: ${sanitizeLocalBuildDiagnosticValue(failure.phase, 100)} · ${failure.percent}% est.`,
     `Failure context: ${context}`,
-    `Error: ${sanitizeLocalBuildDiagnosticValue(failure.error, 32_000, true)}`,
+    `Error: ${formatLocalBuildFailureError(failure.error)}`,
     `Build log: ${sanitizeLocalBuildDiagnosticValue(failure.logPath, 4_096)}`,
   ]
     .join("\n")
