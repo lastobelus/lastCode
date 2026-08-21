@@ -192,27 +192,53 @@ function run(command, args, options = {}) {
     const detail = options.inherit ? "" : result.stderr.trim() || result.stdout.trim();
     throw new Error(detail || `${command} failed with exit code ${result.status}.`);
   }
-  return options.inherit ? "" : result.stdout.trim();
+  if (options.inherit) return "";
+  return (options.output === "stderr" ? result.stderr : result.stdout).trim();
 }
 
-function bundleValue(appPath, key) {
-  return run("/usr/libexec/PlistBuddy", [
+function bundleValue(appPath, key, runCommand = run) {
+  return runCommand("/usr/libexec/PlistBuddy", [
     "-c",
     `Print:${key}`,
     NodePath.join(appPath, "Contents", "Info.plist"),
   ]);
 }
 
-function validateApp(appPath) {
+export function validateAppBundle(appPath, options = {}) {
+  const runCommand = options.runCommand ?? run;
   if (!NodeFS.statSync(appPath, { throwIfNoEntry: false })?.isDirectory()) {
     throw new Error(`The DMG does not contain ${NodePath.basename(appPath)}.`);
   }
-  const bundleIdentifier = bundleValue(appPath, "CFBundleIdentifier");
+  const bundleIdentifier = bundleValue(appPath, "CFBundleIdentifier", runCommand);
   if (bundleIdentifier !== APP_BUNDLE_ID) {
     throw new Error(`Expected bundle ${APP_BUNDLE_ID}, found ${bundleIdentifier}.`);
   }
-  run("codesign", ["--verify", "--deep", "--strict", appPath]);
-  return bundleValue(appPath, "CFBundleShortVersionString");
+  const version = bundleValue(appPath, "CFBundleShortVersionString", runCommand);
+  if (options.expectedVersion && version !== options.expectedVersion) {
+    throw new Error(`Expected LastCode ${options.expectedVersion}, found ${version} in the DMG.`);
+  }
+  runCommand("codesign", ["--verify", "--deep", "--strict", appPath]);
+  if (options.signaturePolicy === "adhoc") {
+    const signature = runCommand("codesign", ["-d", "--verbose=4", appPath], {
+      output: "stderr",
+    });
+    if (!/^Signature=adhoc$/mu.test(signature) || !/^TeamIdentifier=not set$/mu.test(signature)) {
+      throw new Error("Expected a certificate-free ad-hoc LastCode signature.");
+    }
+  }
+  if (options.expectedArchitecture) {
+    const executable = bundleValue(appPath, "CFBundleExecutable", runCommand);
+    const architectures = runCommand("lipo", [
+      "-archs",
+      NodePath.join(appPath, "Contents", "MacOS", executable),
+    ]);
+    if (architectures !== options.expectedArchitecture) {
+      throw new Error(
+        `Expected ${options.expectedArchitecture} LastCode executable, found ${architectures}.`,
+      );
+    }
+  }
+  return version;
 }
 
 function appIsRunning() {
@@ -314,10 +340,52 @@ export function acquireInstallLock(lockDirectory) {
   return acquirePortableLock(lockDirectory, INSTALL_LOCK_NAME, "install");
 }
 
-async function hashFile(path) {
+export async function hashFile(path) {
   const hash = NodeCrypto.createHash("sha256");
   for await (const chunk of NodeFS.createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
+}
+
+export async function validateDmgArtifact(dmgPath, options = {}) {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
+  if (process.platform !== "darwin" && options.allowNonDarwin !== true) {
+    throw new Error("LastCode DMG validation only supports macOS.");
+  }
+  const resolvedDmg = NodePath.resolve(dmgPath);
+  if (!NodeFS.statSync(resolvedDmg, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`DMG not found: ${resolvedDmg}`);
+  }
+  const actualSha256 = await hashFile(resolvedDmg);
+  if (options.expectedSha256 && actualSha256 !== options.expectedSha256) {
+    throw new Error(
+      `DMG checksum mismatch: expected ${options.expectedSha256}, found ${actualSha256}.`,
+    );
+  }
+  const runCommand = options.runCommand ?? run;
+  const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-validate-"));
+  let attached = false;
+  try {
+    runCommand("hdiutil", [
+      "attach",
+      "-nobrowse",
+      "-readonly",
+      "-mountpoint",
+      mountPoint,
+      resolvedDmg,
+    ]);
+    attached = true;
+    const appPath = NodePath.join(mountPoint, "LastCode.app");
+    const version = validateAppBundle(appPath, {
+      expectedArchitecture: options.expectedArchitecture,
+      expectedVersion: options.expectedVersion,
+      runCommand,
+      signaturePolicy: options.signaturePolicy,
+    });
+    return { appPath: "LastCode.app", sha256: actualSha256, version };
+  } finally {
+    if (attached) runCommand("hdiutil", ["detach", mountPoint]);
+    NodeFS.rmSync(mountPoint, { force: true, recursive: true });
+  }
 }
 
 async function waitForProcessExit(pid, timeoutMs = 30_000) {
@@ -390,7 +458,7 @@ async function prepareDmgInstall(dmgPath, options = {}) {
     run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
     prepared.attached = true;
     const sourceApp = NodePath.join(mountPoint, "LastCode.app");
-    const version = validateApp(sourceApp);
+    const version = validateAppBundle(sourceApp);
     if (options.expectedVersion && version !== options.expectedVersion) {
       throw new Error(`Expected LastCode ${options.expectedVersion}, found ${version} in the DMG.`);
     }
@@ -400,7 +468,7 @@ async function prepareDmgInstall(dmgPath, options = {}) {
     NodeFS.rmSync(backup, { force: true, recursive: true });
     console.log(`Preparing LastCode ${version}…`);
     run("ditto", [sourceApp, staging]);
-    const stagedVersion = validateApp(staging);
+    const stagedVersion = validateAppBundle(staging);
     if (stagedVersion !== version) {
       throw new Error(`Staged LastCode version changed from ${version} to ${stagedVersion}.`);
     }
