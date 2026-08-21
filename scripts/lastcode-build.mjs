@@ -306,6 +306,22 @@ function assertManagedSymlink(exposed, target) {
   }
 }
 
+function assertManagedProgressModelDirectory(directory, progressModel) {
+  const existing = NodeFS.lstatSync(directory, { throwIfNoEntry: false });
+  if (!existing) return;
+
+  const installedModel = NodeFS.lstatSync(progressModel, { throwIfNoEntry: false });
+  if (
+    !existing.isDirectory() ||
+    !installedModel?.isFile() ||
+    !NodeFS.readFileSync(progressModel, "utf8").includes(PROGRESS_MODEL_MANAGED_MARKER)
+  ) {
+    throw new Error(
+      `Refusing to modify ${directory} because it is not a LastCode-managed directory.`,
+    );
+  }
+}
+
 export function installCommandAssets(automationWorktree, home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
@@ -319,6 +335,7 @@ export function installCommandAssets(automationWorktree, home) {
   const configPath = NodePath.join(home, ".lastcode", "dashboard.json");
 
   assertManagedFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
+  assertManagedProgressModelDirectory(libDirectory, progressModelTarget);
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
@@ -390,6 +407,7 @@ export function uninstallCommand(home) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
   assertManagedFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
+  assertManagedProgressModelDirectory(libDirectory, progressModelTarget);
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
