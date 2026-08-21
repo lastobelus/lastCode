@@ -8,6 +8,8 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 
+import { LOCK_MODULE_MANAGED_MARKER } from "./lastcode-lock.mjs";
+
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
@@ -352,6 +354,7 @@ function assertManagedSymlink(exposed, target) {
 
 export function installCommandAssets(automationWorktree, home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
   const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const target = NodePath.join(binDirectory, "lastcode-build");
@@ -359,6 +362,7 @@ export function installCommandAssets(automationWorktree, home) {
   const exposed = NodePath.join(exposedDirectory, "lastcode-build");
   const configPath = NodePath.join(home, ".lastcode", "dashboard.json");
 
+  assertManagedFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
@@ -366,6 +370,7 @@ export function installCommandAssets(automationWorktree, home) {
 
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
+  NodeFS.copyFileSync(new NodeURL.URL("./lastcode-lock.mjs", import.meta.url), lockModuleTarget);
   NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
   NodeFS.copyFileSync(
     NodePath.join(
@@ -406,20 +411,24 @@ function assertManagedFile(path, marker) {
 
 export function uninstallCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
   const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
+  const installerModuleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-build");
   const exposed = NodePath.join(home, ".local", "bin", "lastcode-build");
   const exposedEntry = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
+  assertManagedFile(lockModuleTarget, LOCK_MODULE_MANAGED_MARKER);
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
   for (const path of [moduleTarget, helperTarget, target]) NodeFS.rmSync(path, { force: true });
+  if (!NodeFS.existsSync(installerModuleTarget)) NodeFS.rmSync(lockModuleTarget, { force: true });
   try {
     NodeFS.rmdirSync(binDirectory);
   } catch (error) {
