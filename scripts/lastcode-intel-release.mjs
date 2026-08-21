@@ -34,6 +34,7 @@ function assertPlainAssetName(name, options = {}) {
   if (
     typeof name !== "string" ||
     name.length === 0 ||
+    name.startsWith(".") ||
     NodePath.basename(name) !== name ||
     name.includes("\n") ||
     name.includes("\r")

@@ -28,10 +28,22 @@ jobs:
       INSTALLABLE_TAG: ${{ inputs.installable_tag }}
       INSTALLABLE_COMMIT: ${{ inputs.installable_commit }}
     steps:
+      - name: Checkout workflow automation
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          path: automation
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: |
+            /package.json
+            /scripts/lastcode-intel-release.mjs
+          sparse-checkout-cone-mode: false
+
       - name: Checkout exact installable
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          path: target
           ref: ${{ inputs.installable_commit }}
           sparse-checkout: |
             /*
@@ -41,6 +53,7 @@ jobs:
       - name: Validate immutable tag and commit
         id: target
         shell: bash
+        working-directory: target
         run: |
           set -euo pipefail
 
@@ -71,11 +84,12 @@ jobs:
       - name: Setup Node for release validation
         uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version-file: automation/package.json
 
       - name: Reuse a validated exact-tag release
         id: release
         shell: bash
+        working-directory: automation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -125,6 +139,7 @@ jobs:
         if: steps.release.outputs.needs_build == 'true'
         uses: voidzero-dev/setup-vp@v1
         with:
+          working-directory: target
           node-version-file: package.json
           cache: true
           run-install: true
@@ -138,14 +153,17 @@ jobs:
 
       - name: Install mobile CI prerequisites
         if: steps.release.outputs.needs_build == 'true'
+        working-directory: target
         run: brew bundle install --file apps/mobile/Brewfile
 
       - name: Run full checkpoint gate
         if: steps.release.outputs.needs_build == 'true'
+        working-directory: target
         run: env -u ELECTRON_RUN_AS_NODE node scripts/lastcode-local-ci.ts --full --checkpoint "$INSTALLABLE_TAG"
 
       - name: Build certificate-free x64 DMG
         if: steps.release.outputs.needs_build == 'true'
+        working-directory: target
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
@@ -161,13 +179,15 @@ jobs:
       - name: Publish immutable exact-tag assets
         if: steps.release.outputs.needs_build == 'true'
         shell: bash
+        working-directory: target
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          artifact_dir="release-lastcode/v${{ steps.target.outputs.version }}/${INSTALLABLE_COMMIT:0:10}"
-          node scripts/lastcode-intel-release.mjs validate \
+          short_commit="$(git rev-parse --short=10 "$INSTALLABLE_COMMIT")"
+          artifact_dir="release-lastcode/v${{ steps.target.outputs.version }}/${short_commit}"
+          node "$GITHUB_WORKSPACE/automation/scripts/lastcode-intel-release.mjs" validate \
             --directory "$artifact_dir" \
             --tag "$INSTALLABLE_TAG" \
             --commit "$INSTALLABLE_COMMIT"
@@ -192,7 +212,7 @@ jobs:
           gh release download "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$verify_dir"
-          node scripts/lastcode-intel-release.mjs validate \
+          node "$GITHUB_WORKSPACE/automation/scripts/lastcode-intel-release.mjs" validate \
             --directory "$verify_dir" \
             --tag "$INSTALLABLE_TAG" \
             --commit "$INSTALLABLE_COMMIT" \

@@ -133,6 +133,14 @@ describe("immutable Intel release validation", () => {
     expect(() => validate(foreign)).toThrow("foreign: foreign.txt");
   });
 
+  it("rejects hidden manifest assets that a release upload glob would omit", () => {
+    const fixture = createFixture();
+    const manifest = JSON.parse(NodeFS.readFileSync(fixture.manifestPath, "utf8"));
+    manifest.artifacts[0].path = ".hidden.dmg";
+    writeJson(fixture.manifestPath, manifest);
+    expect(() => validate(fixture)).toThrow("unsafe asset path");
+  });
+
   it("rejects artifact and checksum disagreement", () => {
     const tamperedArtifact = createFixture();
     NodeFS.appendFileSync(
