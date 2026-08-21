@@ -9,6 +9,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { acquirePortableLock } from "./lastcode-lock.mjs";
+
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
 const BUILD_PREFIX = "lastcode/build/";
@@ -518,71 +520,8 @@ export function prepareBuildWorktree(repoRoot, worktreePath, checkpointTag, logF
   if (status) throw new Error(`Dedicated local-update worktree is not clean:\n${status}`);
 }
 
-function readLockOwner(path) {
-  try {
-    return JSON.parse(NodeFS.readFileSync(path, "utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
-export function acquireBuildLock(updateRoot, options = {}) {
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- Dependency-free desktop helper has no Effect runtime.
-  if (process.platform !== "darwin") {
-    throw new Error("Local LastCode build locking is only available on macOS.");
-  }
-  const pid = options.pid ?? process.pid;
-  const lockPath = NodePath.join(updateRoot, "build.lock");
-  const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  NodeFS.mkdirSync(updateRoot, { recursive: true });
-
-  const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
-  // macOS lockf's fd form locks inherited child fd 3. The BSD lock remains on
-  // the shared open-file description held by this parent descriptor after
-  // lockf exits, and the kernel releases it if this process dies.
-  const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe", descriptor],
-  });
-  if (result.error || result.status !== 0) {
-    const owner = readLockOwner(lockPath);
-    NodeFS.closeSync(descriptor);
-    if (result.error) throw result.error;
-    if (result.status !== 75) {
-      throw new Error(result.stderr.trim() || `lockf failed with exit code ${result.status}.`);
-    }
-    throw new Error(
-      `Another LastCode build is already running (PID ${owner?.pid ?? "unknown"}, started ${owner?.startedAt ?? "at an unknown time"}).`,
-    );
-  }
-  const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
-  try {
-    NodeFS.ftruncateSync(descriptor, 0);
-    NodeFS.writeSync(descriptor, `${JSON.stringify(owner)}\n`);
-    NodeFS.fsyncSync(descriptor);
-  } catch (error) {
-    NodeFS.closeSync(descriptor);
-    throw error;
-  }
-  const lockIdentity = NodeFS.fstatSync(descriptor);
-  let released = false;
-  return () => {
-    if (released) return;
-    const currentIdentity = NodeFS.statSync(lockPath, { throwIfNoEntry: false });
-    const currentOwner = readLockOwner(lockPath);
-    if (
-      currentIdentity?.dev !== lockIdentity.dev ||
-      currentIdentity?.ino !== lockIdentity.ino ||
-      currentOwner?.token !== token
-    ) {
-      NodeFS.closeSync(descriptor);
-      released = true;
-      throw new Error("Refusing to release a local build lock now owned by another process.");
-    }
-    NodeFS.ftruncateSync(descriptor, 0);
-    NodeFS.closeSync(descriptor);
-    released = true;
-  };
+export function acquireBuildLock(updateRoot) {
+  return acquirePortableLock(updateRoot, "build.lock", "local build");
 }
 
 function buildUnlocked(options, updateRoot) {
