@@ -13,11 +13,15 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: lastcode-intel-artifact-${{ inputs.installable_tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Validate and build macOS x64
+    name: Validate and publish macOS x64
     runs-on: macos-15-intel
     timeout-minutes: 90
     env:
@@ -64,7 +68,61 @@ jobs:
           version="${version#lastcode/revision/v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Setup Node for release validation
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Reuse a validated exact-tag release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          encoded_tag="${INSTALLABLE_TAG//\//%2F}"
+          set +e
+          probe="$(
+            gh api --include --silent \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}" 2>&1
+          )"
+          probe_exit=$?
+          set -e
+          http_status="$(
+            printf '%s\n' "$probe" |
+              awk '$1 ~ /^HTTP\// { status = $2 } END { print status }'
+          )"
+
+          if [[ "$http_status" == "404" ]]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$probe_exit" -ne 0 || "$http_status" != "200" ]]; then
+            printf '%s\n' "$probe" >&2
+            echo "Could not determine whether the exact-tag release exists." >&2
+            exit 1
+          fi
+
+          release_dir="$RUNNER_TEMP/existing-intel-release"
+          release_json="$RUNNER_TEMP/existing-intel-release.json"
+          mkdir -p "$release_dir"
+          gh release view "$INSTALLABLE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets,isDraft,isPrerelease,tagName > "$release_json"
+          gh release download "$INSTALLABLE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$release_dir"
+          node scripts/lastcode-intel-release.mjs validate \
+            --directory "$release_dir" \
+            --tag "$INSTALLABLE_TAG" \
+            --commit "$INSTALLABLE_COMMIT" \
+            --release-json "$release_json"
+          echo "Exact-tag Intel release is already complete; skipping CI and packaging."
+          echo "needs_build=false" >> "$GITHUB_OUTPUT"
+
       - name: Setup Vite+
+        if: steps.release.outputs.needs_build == 'true'
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
@@ -72,18 +130,22 @@ jobs:
           run-install: true
 
       - name: Setup Rust x64 target
+        if: steps.release.outputs.needs_build == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
           targets: x86_64-apple-darwin
 
       - name: Install mobile CI prerequisites
+        if: steps.release.outputs.needs_build == 'true'
         run: brew bundle install --file apps/mobile/Brewfile
 
       - name: Run full checkpoint gate
+        if: steps.release.outputs.needs_build == 'true'
         run: env -u ELECTRON_RUN_AS_NODE node scripts/lastcode-local-ci.ts --full --checkpoint "$INSTALLABLE_TAG"
 
       - name: Build certificate-free x64 DMG
+        if: steps.release.outputs.needs_build == 'true'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
@@ -96,10 +158,42 @@ jobs:
           --output-root release-lastcode
           --verbose
 
-      - name: Upload exact-tag artifact for inspection
-        uses: actions/upload-artifact@v7
-        with:
-          name: lastcode-macos-x64-${{ steps.target.outputs.version }}
-          path: release-lastcode/v${{ steps.target.outputs.version }}/**
-          if-no-files-found: error
-          retention-days: 14
+      - name: Publish immutable exact-tag assets
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          artifact_dir="release-lastcode/v${{ steps.target.outputs.version }}/${INSTALLABLE_COMMIT:0:10}"
+          node scripts/lastcode-intel-release.mjs validate \
+            --directory "$artifact_dir" \
+            --tag "$INSTALLABLE_TAG" \
+            --commit "$INSTALLABLE_COMMIT"
+
+          release_notes="$(printf '%s\n%s\n' \
+            "Certificate-free LastCode macOS x64 artifacts for ${INSTALLABLE_TAG}." \
+            "Exact commit: ${INSTALLABLE_COMMIT}")"
+          gh release create "$INSTALLABLE_TAG" "$artifact_dir"/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "LastCode Intel ${{ steps.target.outputs.version }}" \
+            --notes "$release_notes"
+
+          verify_dir="$RUNNER_TEMP/published-intel-release"
+          release_json="$RUNNER_TEMP/published-intel-release.json"
+          mkdir -p "$verify_dir"
+          gh release view "$INSTALLABLE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets,isDraft,isPrerelease,tagName > "$release_json"
+          gh release download "$INSTALLABLE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$verify_dir"
+          node scripts/lastcode-intel-release.mjs validate \
+            --directory "$verify_dir" \
+            --tag "$INSTALLABLE_TAG" \
+            --commit "$INSTALLABLE_COMMIT" \
+            --release-json "$release_json"

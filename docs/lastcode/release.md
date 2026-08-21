@@ -1,8 +1,8 @@
 # LastCode Local Release Workflow
 
-LastCode uses local validation and ad-hoc macOS releases. GitHub Actions are
-intentionally disabled, releases have no schedule, and artifacts remain local
-unless an explicit publishing operation is performed.
+LastCode uses local validation and ad-hoc macOS releases. Ordinary branch CI
+remains local. The one GitHub-hosted packaging path is manually dispatched for
+an exact Intel checkpoint or revision; releases have no schedule.
 
 Nightly source tracking is documented separately in
 [Nightly Checkpoint Workflow](nightly-workflow.md).
@@ -118,6 +118,30 @@ Developer certificate. It is not notarized for public distribution.
 
 Local builds omit the hosted update feed. The built-in updater remains disabled
 until LastCode intentionally publishes compatible releases.
+
+## Intel Build Publication
+
+The manually dispatched **LastCode Intel artifact** workflow accepts one exact
+`lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
+commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
+full CI gate on `macos-15-intel`, and builds a certificate-free x64 artifact.
+
+Successful output is attached to the installable tag as a GitHub prerelease,
+explicitly excluded from GitHub's latest-release selection. The release contains
+the complete build-manifest asset set, `build-manifest.json`, and `SHA256SUMS`.
+Before publishing, and again after downloading the published assets, automation
+requires the manifest's x64/macOS architecture, exact tag and commit, byte
+counts, checksums, and asset set to agree.
+
+A rerun for a complete matching release exits successfully before dependency
+installation, CI, or packaging. An existing draft, non-prerelease, partial,
+foreign, or mismatched asset set fails closed. Automation never clobbers or
+deletes an exact-tag release. Recovery from a partial or conflicting publication
+therefore requires a maintainer decision rather than silently changing an
+immutable artifact.
+
+This workflow remains manual-only. Scheduling, target-host staging, and
+installation are separate rollout gates.
 
 ## Runtime Identity
 
