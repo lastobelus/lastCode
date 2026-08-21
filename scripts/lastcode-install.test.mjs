@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -260,6 +261,26 @@ describe("LastCode userland install command", () => {
     );
   });
 
+  it("installs the locking companion beside the standalone installer", () => {
+    const home = temporaryDirectory();
+    installCommand(home);
+    const modulePath = NodePath.join(home, ".lastcode", "bin", "lastcode-install.mjs");
+
+    expect(
+      NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"), "utf8"),
+    ).toContain("LastCode managed companion: lastcode-lock");
+    const result = NodeChildProcess.spawnSync(process.execPath, [modulePath, "--help"], {
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Usage: lastcode-install");
+
+    uninstallCommand(home);
+    expect(NodeFS.existsSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"))).toBe(
+      false,
+    );
+  });
+
   itMacOnly("serializes installers and releases the kernel lock", () => {
     const root = temporaryDirectory();
     const release = acquireInstallLock(root);
@@ -267,7 +288,10 @@ describe("LastCode userland install command", () => {
     release();
 
     const lockPath = NodePath.join(root, "install.lock");
-    expect(NodeFS.readFileSync(lockPath, "utf8")).toBe("");
+    expect(JSON.parse(NodeFS.readFileSync(lockPath, "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      pid: process.pid,
+    });
     const releaseAgain = acquireInstallLock(root);
     releaseAgain();
   });
@@ -285,11 +309,20 @@ describe("LastCode userland install command", () => {
       NodePath.join(binDirectory, "lastcode-install.mjs"),
       "// LastCode managed command: lastcode-install\n",
     );
+    NodeFS.writeFileSync(
+      NodePath.join(binDirectory, "lastcode-lock.mjs"),
+      "// LastCode managed companion: lastcode-lock\n",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(binDirectory, "lastcode-build.mjs"),
+      "// LastCode managed command: lastcode-build\n",
+    );
     NodeFS.symlinkSync(target, exposed);
 
     uninstallCommand(home);
     expect(NodeFS.existsSync(exposed)).toBe(false);
     expect(NodeFS.existsSync(target)).toBe(false);
+    expect(NodeFS.existsSync(NodePath.join(binDirectory, "lastcode-lock.mjs"))).toBe(true);
 
     NodeFS.writeFileSync(exposed, "mine");
     expect(() => uninstallCommand(home)).toThrow("not managed by LastCode");
@@ -306,6 +339,7 @@ describe("LastCode userland install command", () => {
   it("preflights every installer-command destination before installing", () => {
     for (const relativePath of [
       ".lastcode/bin/lastcode-install.mjs",
+      ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-install",
       ".local/bin/lastcode-install",
     ]) {
@@ -320,6 +354,7 @@ describe("LastCode userland install command", () => {
       expect(NodeFS.readFileSync(foreignPath, "utf8")).toBe("foreign content\n");
       for (const candidate of [
         ".lastcode/bin/lastcode-install.mjs",
+        ".lastcode/bin/lastcode-lock.mjs",
         ".lastcode/bin/lastcode-install",
       ]) {
         const candidatePath = NodePath.join(home, candidate);
