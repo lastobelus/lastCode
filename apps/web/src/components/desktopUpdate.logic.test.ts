@@ -3,10 +3,13 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/con
 
 import {
   canCheckForUpdate,
+  formatLocalBuildFailureDetails,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateProgressPercent,
+  MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH,
   getDesktopUpdateReleaseUrl,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -108,6 +111,56 @@ describe("desktop update button state", () => {
     expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(isDesktopUpdateButtonDisabled(state)).toBe(true);
     expect(getDesktopUpdateButtonTooltip(state)).toContain("42%");
+  });
+
+  it("uses typed local estimates without changing hosted byte progress", () => {
+    const localState: DesktopUpdateState = {
+      ...baseState,
+      source: "lastcode-local",
+      status: "downloading",
+      availableVersion: "1.1.0-nightly.2",
+      downloadPercent: null,
+      localBuildProgress: {
+        checkpointTag: "lastcode/checkpoint/v1.1.0-nightly.2",
+        phase: "Workspace tests",
+        percent: 31,
+        errorKind: "build",
+      },
+    };
+
+    expect(getDesktopUpdateProgressPercent(localState)).toBe(31);
+    expect(getDesktopUpdateButtonTooltip(localState)).toBe("Workspace tests · 31% est.");
+
+    const hostedState = { ...baseState, status: "downloading", downloadPercent: 42.5 } as const;
+    expect(getDesktopUpdateProgressPercent(hostedState)).toBe(42.5);
+    expect(getDesktopUpdateButtonTooltip(hostedState)).toBe("Downloading update (42%)");
+  });
+});
+
+describe("local build failure diagnostic", () => {
+  it("formats a prompt-ready bounded diagnostic and strips terminal controls", () => {
+    const details = formatLocalBuildFailureDetails({
+      checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",
+      phase: "Building DMG",
+      percent: 94,
+      errorKind: "packaging",
+      currentVersion: "1.2.2",
+      targetVersion: "1.2.3-nightly.4",
+      logPath: "/Users/test/.lastcode/local-updates/build.log",
+      error: `hdiutil \u001B[31mfailed\u001B[0m\0${"x".repeat(32_000)}`,
+    });
+
+    expect(details).toContain("[lastcode:local-update] Local LastCode build failed");
+    expect(details).toContain("Installed version: 1.2.2");
+    expect(details).toContain("Target version: 1.2.3-nightly.4");
+    expect(details).toContain("Checkpoint: lastcode/checkpoint/v1.2.3-nightly.4");
+    expect(details).toContain("Last phase: Building DMG · 94% est.");
+    expect(details).toContain("Failure context: Packaging");
+    expect(details).toContain("Error: hdiutil failed");
+    expect(details).toContain("Build log: /Users/test/.lastcode/local-updates/build.log");
+    expect(details).not.toContain("\u001B");
+    expect(details).not.toContain("\0");
+    expect(details.length).toBeLessThanOrEqual(MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH);
   });
 });
 

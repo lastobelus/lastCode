@@ -1,8 +1,84 @@
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopLocalBuildFailure,
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
 const DESKTOP_RELEASE_TAG_URL = "https://github.com/pingdotgg/t3code/releases/tag";
+export const MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH = 40_000;
+
+function stripTerminalEscapeSequences(value: string): string {
+  let plain = "";
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 27) {
+      plain += value[index];
+      continue;
+    }
+
+    const introducer = value[index + 1];
+    index += 1;
+    if (introducer === "[") {
+      while (index + 1 < value.length) {
+        index += 1;
+        const code = value.charCodeAt(index);
+        if (code >= 64 && code <= 126) break;
+      }
+    } else if (introducer === "]") {
+      while (index + 1 < value.length) {
+        index += 1;
+        if (value.charCodeAt(index) === 7) break;
+        if (value.charCodeAt(index) === 27 && value[index + 1] === "\\") {
+          index += 1;
+          break;
+        }
+      }
+    }
+  }
+  return plain;
+}
+
+function sanitizeLocalBuildDiagnosticValue(
+  value: string,
+  maxLength: number,
+  preserveLines = false,
+): string {
+  const withoutAnsi = stripTerminalEscapeSequences(value);
+  let sanitized = "";
+  for (const character of withoutAnsi) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 32 || (codePoint >= 127 && codePoint <= 159)) {
+      if (preserveLines && (character === "\n" || character === "\t")) sanitized += character;
+      continue;
+    }
+    sanitized += character;
+    if (sanitized.length >= maxLength) break;
+  }
+  return sanitized.trim();
+}
+
+export function formatLocalBuildFailureDetails(failure: DesktopLocalBuildFailure): string {
+  const context = failure.errorKind === "packaging" ? "Packaging" : "Build";
+  return [
+    "[lastcode:local-update] Local LastCode build failed",
+    `Installed version: ${sanitizeLocalBuildDiagnosticValue(failure.currentVersion, 200)}`,
+    `Target version: ${sanitizeLocalBuildDiagnosticValue(failure.targetVersion, 200)}`,
+    `Checkpoint: ${sanitizeLocalBuildDiagnosticValue(failure.checkpointTag, 500)}`,
+    `Last phase: ${sanitizeLocalBuildDiagnosticValue(failure.phase, 100)} · ${failure.percent}% est.`,
+    `Failure context: ${context}`,
+    `Error: ${sanitizeLocalBuildDiagnosticValue(failure.error, 32_000, true)}`,
+    `Build log: ${sanitizeLocalBuildDiagnosticValue(failure.logPath, 4_096)}`,
+  ]
+    .join("\n")
+    .slice(0, MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH);
+}
+
+export function getDesktopUpdateProgressPercent(state: DesktopUpdateState): number | null {
+  return state.source === "lastcode-local"
+    ? (state.localBuildProgress?.percent ?? null)
+    : state.downloadPercent;
+}
 
 /**
  * The main process fills `downloadedVersion` from the updater's `update-downloaded`
@@ -78,6 +154,9 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
       : `Update ${state.availableVersion ?? "available"} ready to download`;
   }
   if (state.status === "downloading") {
+    if (isLocal && state.localBuildProgress) {
+      return `${state.localBuildProgress.phase} · ${state.localBuildProgress.percent}% est.`;
+    }
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
     return isLocal
