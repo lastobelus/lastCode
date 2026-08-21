@@ -237,6 +237,47 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("keeps an annotation visible in the minimap with only one loaded marker", () => {
+    const entry = buildUserTimelineEntry("Annotated prompt");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "# Follow up",
+          anchorMessageId: entry.message.id,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: null,
+        }}
+        timelineEntries={[entry]}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-minimap"');
+    expect(markup).toContain("data-thread-annotation-marker");
+    expect(markup).not.toContain("data-thread-annotation-overflow");
+  });
+
+  it("uses an honest earlier-message marker when the anchor is outside loaded history", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "Resolved note",
+          anchorMessageId: MessageId.make("older-message"),
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: MESSAGE_CREATED_AT,
+        }}
+        timelineEntries={[buildUserTimelineEntry("Loaded prompt")]}
+      />,
+    );
+
+    expect(markup).toContain("data-thread-annotation-overflow");
+    expect(markup).toContain('aria-label="Annotation attached to an earlier message"');
+    expect(markup).not.toContain("data-thread-annotation-marker");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

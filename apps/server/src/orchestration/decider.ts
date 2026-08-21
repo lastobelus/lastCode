@@ -142,6 +142,18 @@ function threadHasQueuedTurnStart(
   );
 }
 
+function latestUserMessageId(thread: OrchestrationReadModel["threads"][number]) {
+  return (
+    thread.latestUserMessageId ??
+    thread.messages
+      .filter((message) => message.role === "user")
+      .toSorted(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+      )[0]?.id
+  );
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -801,6 +813,121 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           orderKey: command.orderKey,
           updatedAt: keyUnchanged ? thread.updatedAt : occurredAt,
+        },
+      };
+    }
+
+    case "thread.annotation.upsert": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const anchorMessageId = latestUserMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-upserted",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            body: command.body,
+            anchorMessageId,
+            createdAt: thread.annotation?.createdAt ?? occurredAt,
+            updatedAt: occurredAt,
+            resolvedAt: thread.annotation?.resolvedAt ?? null,
+          },
+        },
+      };
+    }
+
+    case "thread.annotation.resolve": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.annotation == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no annotation to resolve`,
+        });
+      }
+      const anchorMessageId = latestUserMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-resolved",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            ...thread.annotation,
+            anchorMessageId,
+            updatedAt: occurredAt,
+            resolvedAt: occurredAt,
+          },
+        },
+      };
+    }
+
+    case "thread.annotation.reopen": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.annotation == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no annotation to reopen`,
+        });
+      }
+      const anchorMessageId = latestUserMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-reopened",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            ...thread.annotation,
+            anchorMessageId,
+            updatedAt: occurredAt,
+            resolvedAt: null,
+          },
         },
       };
     }

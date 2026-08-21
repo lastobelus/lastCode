@@ -25,6 +25,7 @@ import {
   ThreadSettledPayload,
   ThreadPinnedPayload,
   ThreadPinReorderedPayload,
+  ThreadAnnotationChangedPayload,
   ThreadSnoozedPayload,
   ThreadUnpinnedPayload,
   ThreadUnarchivedPayload,
@@ -305,6 +306,7 @@ export function projectEvent(
             settledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
+            annotation: null,
             deletedAt: null,
             messages: [],
             activities: [],
@@ -442,6 +444,23 @@ export function projectEvent(
         })),
       );
 
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+      return decodeForEvent(
+        ThreadAnnotationChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            annotation: payload.annotation,
+          }),
+        })),
+      );
+
     case "thread.meta-updated":
       return decodeForEvent(ThreadMetaUpdatedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
@@ -544,6 +563,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             messages: cappedMessages,
+            ...(payload.role === "user" ? { latestUserMessageId: payload.messageId } : {}),
             updatedAt: event.occurredAt,
           }),
         };

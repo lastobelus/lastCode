@@ -3,6 +3,7 @@ import {
   type MessageId,
   type ScopedThreadRef,
   type ServerProviderSkill,
+  type ThreadAnnotation,
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -107,6 +108,10 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
+import {
+  ThreadAnnotationActions,
+  ThreadAnnotationBody,
+} from "../thread-annotation/ThreadAnnotation";
 
 import {
   buildInlineTerminalContextText,
@@ -243,6 +248,10 @@ interface MessagesTimelineProps {
   topFadeEnabled?: boolean;
   /** Non-null when older turns exist beyond the loaded window. */
   loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: () => void;
+  onAnnotationResolve?: () => void;
+  onAnnotationReopen?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +292,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
   loadEarlier = null,
+  annotation = null,
+  onAnnotationEdit = NOOP_OPEN_AGENTS,
+  onAnnotationResolve = NOOP_OPEN_AGENTS,
+  onAnnotationReopen = NOOP_OPEN_AGENTS,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -614,10 +627,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListFooterComponent={TIMELINE_LIST_FOOTER}
           />
           <TimelineMinimap
+            annotation={annotation}
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             stripMap={minimapStripMap}
+            threadRef={parseScopedThreadKey(routeThreadKey)}
+            markdownCwd={markdownCwd}
+            onAnnotationEdit={onAnnotationEdit}
+            onAnnotationResolve={onAnnotationResolve}
+            onAnnotationReopen={onAnnotationReopen}
             onSelect={(item) => {
               onManualNavigation();
               void listRef.current?.scrollToIndex({
@@ -643,6 +662,7 @@ function getItemType(item: MessagesTimelineRow) {
 
 interface TimelineMinimapItem {
   readonly id: string;
+  readonly messageId: MessageId;
   readonly rowIndex: number;
   readonly userText: string | null;
   readonly assistantText: string | null;
@@ -668,6 +688,7 @@ function deriveTimelineMinimapItems(
 
     items.push({
       id: row.id,
+      messageId: row.message.id,
       rowIndex: index,
       userText: compactMinimapPreview(row.message.text),
       assistantText: compactMinimapPreview(resolveFinalAssistantTextForTurn(rows, index)),
@@ -716,23 +737,42 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
 }
 
 function TimelineMinimap({
+  annotation,
   hasPersistentGutter,
   hitStripWidth,
   items,
+  markdownCwd,
   stripMap,
+  threadRef,
+  onAnnotationEdit,
+  onAnnotationResolve,
+  onAnnotationReopen,
   onSelect,
 }: {
+  annotation: ThreadAnnotation | null;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   items: ReadonlyArray<TimelineMinimapItem>;
+  markdownCwd: string | undefined;
   stripMap: Map<string, HTMLSpanElement>;
+  threadRef: ScopedThreadRef | null;
+  onAnnotationEdit: () => void;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [overflowAnnotationOpen, setOverflowAnnotationOpen] = useState(false);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
   const activeItem = resolvedActiveIndex === null ? null : (items[resolvedActiveIndex] ?? null);
+  const annotationItemIndex = annotation
+    ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
+    : -1;
+  const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
+  const activeItemHasAnnotation =
+    annotation !== null && activeItem?.messageId === annotation.anchorMessageId;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -777,7 +817,7 @@ function TimelineMinimap({
     [items.length],
   );
 
-  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS) {
+  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS && annotation === null) {
     return null;
   }
 
@@ -793,15 +833,19 @@ function TimelineMinimap({
       data-persistent-gutter={hasPersistentGutter ? "true" : "false"}
     >
       <div className="relative h-full w-full select-none">
-        <button
-          aria-label={`Jump to message: ${activeItem?.userText ?? "User message"}`}
+        <div
+          aria-label={`Conversation minimap. Selected message: ${activeItem?.userText ?? "User message"}. Use arrow keys to choose a message and Enter to jump.`}
           className={cn(
             "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
             hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
           )}
-          onBlur={() => setActiveIndex(null)}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) {
+              setActiveIndex(null);
+            }
+          }}
           onClick={(event) => {
             if (timelineMinimapEventTargetsPreview(event.target)) {
               return;
@@ -846,7 +890,8 @@ function TimelineMinimap({
             height: resolveTimelineMinimapHeightStyle(items.length),
             width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
           }}
-          type="button"
+          role="group"
+          tabIndex={0}
         >
           <div className="absolute top-0 left-3 h-full w-px bg-border/15" />
           {items.map((item, index) => {
@@ -877,7 +922,15 @@ function TimelineMinimap({
                   }
                 }}
                 style={{ top }}
-              />
+              >
+                {annotation?.anchorMessageId === item.messageId ? (
+                  <span
+                    aria-label="Thread annotation"
+                    className="absolute left-full top-1/2 ml-1 size-2 -translate-y-1/2 rounded-full bg-yellow-400 shadow-[0_0_0_2px_color-mix(in_srgb,var(--background)_80%,transparent)] dark:bg-yellow-300"
+                    data-thread-annotation-marker
+                  />
+                ) : null}
+              </span>
             );
           })}
           {activeItem ? (
@@ -890,26 +943,91 @@ function TimelineMinimap({
                 transform: `translateY(${activeTooltipTranslate})`,
               }}
             >
-              <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
-                <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
-                  {activeItem.userText ?? "User message"}
-                </span>
-                {activeItem.assistantText ? (
-                  <span
-                    className="mt-1 max-h-[3.75rem] overflow-hidden text-muted-foreground text-sm leading-5"
-                    style={{
-                      display: "-webkit-box",
-                      WebkitBoxOrient: "vertical",
-                      WebkitLineClamp: 3,
-                    }}
-                  >
-                    {activeItem.assistantText}
+              {activeItemHasAnnotation && annotation && threadRef ? (
+                <span className="block rounded-xl border border-yellow-300/70 bg-yellow-100/95 p-3 text-left text-yellow-950 shadow-xl shadow-black/25 dark:border-yellow-700/50 dark:bg-yellow-950/90 dark:text-yellow-50">
+                  <ThreadAnnotationBody
+                    annotation={annotation}
+                    className="max-h-52 overflow-y-auto"
+                    cwd={markdownCwd}
+                    threadRef={threadRef}
+                  />
+                  <span className="mt-2 block">
+                    <ThreadAnnotationActions
+                      annotation={annotation}
+                      onEdit={onAnnotationEdit}
+                      onReopen={onAnnotationReopen}
+                      onResolve={onAnnotationResolve}
+                    />
                   </span>
-                ) : null}
-              </span>
+                </span>
+              ) : (
+                <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
+                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
+                    {activeItem.userText ?? "User message"}
+                  </span>
+                  {activeItem.assistantText ? (
+                    <span
+                      className="mt-1 max-h-[3.75rem] overflow-hidden text-muted-foreground text-sm leading-5"
+                      style={{
+                        display: "-webkit-box",
+                        WebkitBoxOrient: "vertical",
+                        WebkitLineClamp: 3,
+                      }}
+                    >
+                      {activeItem.assistantText}
+                    </span>
+                  ) : null}
+                </span>
+              )}
             </span>
           ) : null}
-        </button>
+        </div>
+        {annotationIsEarlier && annotation && threadRef ? (
+          <div
+            className="pointer-events-auto absolute left-3"
+            data-thread-annotation-overflow
+            onMouseEnter={() => setOverflowAnnotationOpen(true)}
+            onMouseLeave={() => setOverflowAnnotationOpen(false)}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                setOverflowAnnotationOpen(false);
+              }
+            }}
+            style={{
+              top: "50%",
+              transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
+            }}
+          >
+            <button
+              aria-label="Annotation attached to an earlier message"
+              className="size-2 rounded-full bg-yellow-400 shadow-[0_0_0_2px_color-mix(in_srgb,var(--background)_80%,transparent)] dark:bg-yellow-300"
+              type="button"
+              onClick={() => setOverflowAnnotationOpen((open) => !open)}
+              onFocus={() => setOverflowAnnotationOpen(true)}
+            />
+            {overflowAnnotationOpen ? (
+              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-yellow-300/70 bg-yellow-100/95 p-3 text-left text-yellow-950 shadow-xl shadow-black/25 dark:border-yellow-700/50 dark:bg-yellow-950/90 dark:text-yellow-50">
+                <div className="mb-2 text-[11px] font-medium text-yellow-900/55 dark:text-yellow-100/55">
+                  Attached to an earlier message
+                </div>
+                <ThreadAnnotationBody
+                  annotation={annotation}
+                  className="max-h-52 overflow-y-auto"
+                  cwd={markdownCwd}
+                  threadRef={threadRef}
+                />
+                <div className="mt-2">
+                  <ThreadAnnotationActions
+                    annotation={annotation}
+                    onEdit={onAnnotationEdit}
+                    onReopen={onAnnotationReopen}
+                    onResolve={onAnnotationResolve}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
