@@ -1188,7 +1188,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       );
     }),
   );
-
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
