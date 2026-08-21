@@ -163,9 +163,7 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
     }
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return isLocal
-      ? `Building and staging local nightly${progress}`
-      : `Downloading update${progress}`;
+    return isLocal ? `Building local nightly${progress}` : `Downloading update${progress}`;
   }
   if (state.status === "downloaded") {
     return isLocal
