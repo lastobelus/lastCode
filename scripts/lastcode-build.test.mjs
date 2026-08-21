@@ -57,6 +57,10 @@ describe("LastCode userland build command", () => {
         NodePath.join(binDirectory, "lastcode-local-update.mjs"),
         "// LastCode managed helper: lastcode-local-update\n",
       );
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "lastcode-lock.mjs"),
+        "// LastCode managed companion: lastcode-lock\n",
+      );
       NodeFS.writeFileSync(dashboard, "shared config");
       NodeFS.symlinkSync(target, exposed);
 
@@ -64,6 +68,7 @@ describe("LastCode userland build command", () => {
 
       expect(NodeFS.existsSync(exposed)).toBe(false);
       expect(NodeFS.existsSync(target)).toBe(false);
+      expect(NodeFS.existsSync(NodePath.join(binDirectory, "lastcode-lock.mjs"))).toBe(false);
       expect(NodeFS.existsSync(dashboard)).toBe(true);
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
@@ -94,6 +99,7 @@ describe("LastCode userland build command", () => {
     for (const relativePath of [
       ".lastcode/bin/lastcode-build.mjs",
       ".lastcode/bin/lastcode-local-update.mjs",
+      ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-build",
       ".local/bin/lastcode-build",
     ]) {
@@ -110,6 +116,7 @@ describe("LastCode userland build command", () => {
         for (const candidate of [
           ".lastcode/bin/lastcode-build.mjs",
           ".lastcode/bin/lastcode-local-update.mjs",
+          ".lastcode/bin/lastcode-lock.mjs",
           ".lastcode/bin/lastcode-build",
         ]) {
           const candidatePath = NodePath.join(home, candidate);
@@ -118,6 +125,27 @@ describe("LastCode userland build command", () => {
       } finally {
         NodeFS.rmSync(home, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("installs the lock companion and retains it for the standalone installer", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-lock-module-"));
+    try {
+      installCommandAssets("/tmp/lastcode-automation", home);
+      const binDirectory = NodePath.join(home, ".lastcode", "bin");
+      const lockModule = NodePath.join(binDirectory, "lastcode-lock.mjs");
+      expect(NodeFS.readFileSync(lockModule, "utf8")).toContain(
+        "LastCode managed companion: lastcode-lock",
+      );
+
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "lastcode-install.mjs"),
+        "// LastCode managed command: lastcode-install\n",
+      );
+      uninstallCommand(home);
+      expect(NodeFS.existsSync(lockModule)).toBe(true);
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
     }
   });
 
