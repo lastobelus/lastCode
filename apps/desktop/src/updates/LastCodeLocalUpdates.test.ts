@@ -202,4 +202,35 @@ describe("LastCodeLocalUpdates", () => {
       ({ directory }) => Effect.sync(() => NodeFS.rmSync(directory, { recursive: true })),
     ),
   );
+
+  it.effect("drains pending chunks before the helper failure finishes", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-drain-"));
+        return { directory, logPath: NodePath.join(directory, "build.log") };
+      }),
+      ({ logPath }) =>
+        Effect.gen(function* () {
+          NodeFS.writeFileSync(logPath, "", "utf8");
+          const helperDone = yield* Deferred.make<void, "failed">();
+          const observed = yield* Ref.make<ReadonlyArray<string>>([]);
+          const helperFiber = yield* monitorLocalBuildProgress(
+            logPath,
+            Deferred.await(helperDone),
+            (progress) => Ref.update(observed, (phases) => [...phases, progress.phase]),
+          ).pipe(Effect.forkChild({ startImmediately: true }));
+
+          NodeFS.appendFileSync(
+            logPath,
+            `${"x".repeat(512_000)}[desktop-artifact] Building mac/dmg\n`,
+            "utf8",
+          );
+          yield* Deferred.fail(helperDone, "failed");
+          yield* Fiber.await(helperFiber);
+
+          assert.deepEqual(yield* Ref.get(observed), ["Building DMG"]);
+        }),
+      ({ directory }) => Effect.sync(() => NodeFS.rmSync(directory, { recursive: true })),
+    ),
+  );
 });

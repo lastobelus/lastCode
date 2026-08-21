@@ -125,6 +125,19 @@ export class LocalBuildProgressTracker {
     };
   }
 
+  hasPendingLogBytes(): boolean {
+    try {
+      const stat = NodeFS.statSync(this.#logPath);
+      return (
+        !sameBuildLogIdentity(this.#identity, readBuildLogIdentity(stat)) ||
+        stat.size !== this.#offset
+      );
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return false;
+      throw cause;
+    }
+  }
+
   *#readAppendedLog(): Generator<string> {
     let stat: NodeFS.Stats;
     try {
@@ -170,15 +183,23 @@ export function monitorLocalBuildProgress<A, E, R>(
         const progress = tracker.poll(now);
         return progress ? onProgress(progress) : Effect.void;
       }),
-      Effect.catchCause(() => Effect.void),
     );
     const monitor = Effect.forever(
-      pollProgress.pipe(Effect.andThen(Effect.sleep(BUILD_PROGRESS_POLL_INTERVAL))),
+      pollProgress.pipe(
+        Effect.catchCause(() => Effect.void),
+        Effect.andThen(Effect.sleep(BUILD_PROGRESS_POLL_INTERVAL)),
+      ),
     );
     const monitorFiber = yield* monitor.pipe(Effect.forkChild({ startImmediately: true }));
+    const drainProgress = Effect.gen(function* () {
+      while (tracker.hasPendingLogBytes()) {
+        yield* pollProgress;
+        yield* Effect.yieldNow;
+      }
+    }).pipe(Effect.catchCause(() => Effect.void));
     return yield* helperEffect.pipe(
       Effect.ensuring(
-        pollProgress.pipe(Effect.andThen(Fiber.interrupt(monitorFiber)), Effect.asVoid),
+        drainProgress.pipe(Effect.andThen(Fiber.interrupt(monitorFiber)), Effect.asVoid),
       ),
     );
   });
