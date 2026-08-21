@@ -42,6 +42,7 @@ interface UpdatesHarnessOptions {
     currentVersion: string,
   ) => Effect.Effect<LastCodeLocalUpdates.LastCodeLocalUpdateInspection>;
   readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+  readonly localBuildEffect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["build"];
   readonly localPrepareInstall?: (
     args: Parameters<LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["prepareInstall"]>[0],
   ) => Effect.Effect<
@@ -230,16 +231,19 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const localUpdatesLayer = LastCodeLocalUpdates.layerTest({
     supported: options.localNightliesEnabled ?? false,
+    buildLogPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
     inspect: (currentVersion) =>
       options.localInspect
         ? options.localInspect(currentVersion)
         : options.localInspection
           ? Effect.succeed(options.localInspection)
           : Effect.die("unexpected local update inspection"),
-    build: () =>
-      options.localBuild
-        ? Effect.succeed(options.localBuild)
-        : Effect.die("unexpected local update build"),
+    build: (checkpointTag, onProgress) =>
+      options.localBuildEffect
+        ? options.localBuildEffect(checkpointTag, onProgress)
+        : options.localBuild
+          ? Effect.succeed(options.localBuild)
+          : Effect.die("unexpected local update build"),
     prepareInstall: (args) => {
       localInstallArgs.push(args);
       installEvents.push("prepare-install");
@@ -535,6 +539,74 @@ describe("DesktopUpdates", () => {
           { provider: "generic", url: "http://localhost:4141" },
         ]);
         assert.deepEqual(harness.installEvents(), []);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("preserves typed local build diagnostics after progress", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const targetVersion = "1.2.4-nightly.20260814.1089.1";
+    const buildError = "packaging failed: disk image is invalid";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: targetVersion,
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuildEffect: (_checkpointTag, onProgress) =>
+        Effect.gen(function* () {
+          if (onProgress) {
+            yield* onProgress({ phase: "Workspace tests", percent: 20, errorKind: "build" });
+            yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
+          }
+          return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "build",
+            message: buildError,
+          });
+        }),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "error");
+        assert.isNull(failed.downloadPercent);
+        assert.equal(failed.message, buildError);
+        assert.deepEqual(failed.localBuildProgress, {
+          checkpointTag,
+          phase: "Building DMG",
+          percent: 94,
+          errorKind: "packaging",
+        });
+        assert.deepEqual(failed.localBuildFailure, {
+          checkpointTag,
+          phase: "Building DMG",
+          percent: 94,
+          errorKind: "packaging",
+          currentVersion: "1.2.3",
+          targetVersion,
+          logPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
+          error: buildError,
+        });
+        assert.deepEqual(
+          harness.sentStates
+            .filter((sent) => sent.status === "downloading")
+            .map((sent) => sent.localBuildProgress?.phase),
+          ["Preparing", "Workspace tests", "Building DMG"],
+        );
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
