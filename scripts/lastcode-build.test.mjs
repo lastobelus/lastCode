@@ -5,18 +5,20 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  BUILD_PHASES,
-  estimateBuildProgress,
   installCommandAssets,
   parseBuildResult,
   parseOptions,
   renderProgressBar,
   renderLauncher,
-  resolveBuildPhaseIndex,
   resolveCheckpointTag,
   sanitizeLogLine,
   uninstallCommand,
 } from "./lastcode-build.mjs";
+import {
+  BUILD_PHASES,
+  estimateBuildProgress,
+  resolveBuildPhaseIndex,
+} from "./lib/lastcode-build-progress.ts";
 
 const tags = [
   "lastcode/checkpoint/v0.0.34-nightly.20260814.1090",
@@ -61,6 +63,12 @@ describe("LastCode userland build command", () => {
         NodePath.join(binDirectory, "lastcode-lock.mjs"),
         "// LastCode managed companion: lastcode-lock\n",
       );
+      const libDirectory = NodePath.join(binDirectory, "lib");
+      NodeFS.mkdirSync(libDirectory);
+      NodeFS.writeFileSync(
+        NodePath.join(libDirectory, "lastcode-build-progress.ts"),
+        "// LastCode managed module: local-build-progress\n",
+      );
       NodeFS.writeFileSync(dashboard, "shared config");
       NodeFS.symlinkSync(target, exposed);
 
@@ -69,6 +77,7 @@ describe("LastCode userland build command", () => {
       expect(NodeFS.existsSync(exposed)).toBe(false);
       expect(NodeFS.existsSync(target)).toBe(false);
       expect(NodeFS.existsSync(NodePath.join(binDirectory, "lastcode-lock.mjs"))).toBe(false);
+      expect(NodeFS.existsSync(libDirectory)).toBe(false);
       expect(NodeFS.existsSync(dashboard)).toBe(true);
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
@@ -99,6 +108,7 @@ describe("LastCode userland build command", () => {
     for (const relativePath of [
       ".lastcode/bin/lastcode-build.mjs",
       ".lastcode/bin/lastcode-local-update.mjs",
+      ".lastcode/bin/lib/lastcode-build-progress.ts",
       ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-build",
       ".local/bin/lastcode-build",
@@ -116,6 +126,7 @@ describe("LastCode userland build command", () => {
         for (const candidate of [
           ".lastcode/bin/lastcode-build.mjs",
           ".lastcode/bin/lastcode-local-update.mjs",
+          ".lastcode/bin/lib/lastcode-build-progress.ts",
           ".lastcode/bin/lastcode-lock.mjs",
           ".lastcode/bin/lastcode-build",
         ]) {
@@ -149,6 +160,28 @@ describe("LastCode userland build command", () => {
     }
   });
 
+  it("installs the shared progress model beside the userland command", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-assets-"));
+    try {
+      installCommandAssets("/tmp/lastcode-automation", home);
+
+      const progressModel = NodePath.join(
+        home,
+        ".lastcode",
+        "bin",
+        "lib",
+        "lastcode-build-progress.ts",
+      );
+      expect(NodeFS.readFileSync(progressModel, "utf8")).toContain(
+        "LastCode managed module: local-build-progress",
+      );
+      expect(
+        NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-build.mjs"), "utf8"),
+      ).toContain("./lib/lastcode-build-progress.ts");
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
   it("selects the newest installable revision by default", () => {
     expect(resolveCheckpointTag(tags)).toBe("lastcode/revision/v0.0.34-nightly.20260814.1095.1");
   });
