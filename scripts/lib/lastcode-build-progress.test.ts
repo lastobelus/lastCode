@@ -3,7 +3,6 @@ import * as NodeFS from "node:fs";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveLocalCiSteps } from "../lastcode-local-ci.ts";
 import {
   BUILD_PHASES,
   estimateBuildProgress,
@@ -40,13 +39,28 @@ const expectedLabels = [
 
 describe("LastCode local build progress model", () => {
   it("covers every concrete CI phase without drifting from the CI runner", () => {
-    const steps = resolveLocalCiSteps("full");
+    const ciSource = NodeFS.readFileSync(
+      new URL("../lastcode-local-ci.ts", import.meta.url),
+      "utf8",
+    );
+    const quickSteps = ciSource.slice(
+      ciSource.indexOf("const QUICK_STEPS"),
+      ciSource.indexOf("const FULL_ONLY_STEPS"),
+    );
+    const fullOnlySteps = ciSource.slice(
+      ciSource.indexOf("const FULL_ONLY_STEPS"),
+      ciSource.indexOf("const PRELOAD_PATH"),
+    );
+    const ciLabels = [
+      ...quickSteps.matchAll(/label: "([^"]+)"/g),
+      ...fullOnlySteps.matchAll(/label: "([^"]+)"/g),
+    ].map((match) => match[1]);
     const ciMarkers = BUILD_PHASES.filter(({ marker }) => marker.startsWith("[lastcode:ci] "))
       .filter(({ marker }) => !marker.includes("Full local CI passed"))
       .map(({ marker }) => marker);
 
     expect(ciMarkers).toEqual(
-      steps.map(({ label }, index) => `[lastcode:ci] ${index + 1}/${steps.length} ${label}`),
+      ciLabels.map((label, index) => `[lastcode:ci] ${index + 1}/${ciLabels.length} ${label}`),
     );
     expect(BUILD_PHASES.map(({ label }) => label)).toEqual(expectedLabels);
     expect(new Set(BUILD_PHASES.map(({ marker }) => marker)).size).toBe(BUILD_PHASES.length);
