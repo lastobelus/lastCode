@@ -260,6 +260,15 @@ describe("LastCode userland install command", () => {
     );
   });
 
+  it("installs the locking companion beside the standalone installer", () => {
+    const home = temporaryDirectory();
+    installCommand(home);
+
+    expect(
+      NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"), "utf8"),
+    ).toContain("LastCode managed companion: lastcode-lock");
+  });
+
   itMacOnly("serializes installers and releases the kernel lock", () => {
     const root = temporaryDirectory();
     const release = acquireInstallLock(root);
@@ -267,7 +276,10 @@ describe("LastCode userland install command", () => {
     release();
 
     const lockPath = NodePath.join(root, "install.lock");
-    expect(NodeFS.readFileSync(lockPath, "utf8")).toBe("");
+    expect(JSON.parse(NodeFS.readFileSync(lockPath, "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      pid: process.pid,
+    });
     const releaseAgain = acquireInstallLock(root);
     releaseAgain();
   });

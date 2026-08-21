@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // LastCode managed command: lastcode-install
 
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeURL from "node:url";
+
+import { LOCK_MODULE_MANAGED_MARKER, acquirePortableLock } from "./lastcode-lock.mjs";
 
 const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
@@ -308,71 +309,8 @@ export function temporaryAppPaths(targetPath, processId = process.pid) {
   };
 }
 
-function readLockOwner(path) {
-  try {
-    return JSON.parse(NodeFS.readFileSync(path, "utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
-export function acquireInstallLock(lockDirectory, options = {}) {
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
-  if (process.platform !== "darwin") {
-    throw new Error("LastCode install locking is only available on macOS.");
-  }
-  const pid = options.pid ?? process.pid;
-  const lockPath = NodePath.join(lockDirectory, INSTALL_LOCK_NAME);
-  const token = `${pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  NodeFS.mkdirSync(lockDirectory, { recursive: true });
-
-  const descriptor = NodeFS.openSync(lockPath, "a+", 0o600);
-  // macOS lockf's fd form locks inherited child fd 3. The BSD lock remains on
-  // the shared open-file description held by this parent descriptor after
-  // lockf exits, and the kernel releases it if this process dies.
-  const result = NodeChildProcess.spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe", descriptor],
-  });
-  if (result.error || result.status !== 0) {
-    const owner = readLockOwner(lockPath);
-    NodeFS.closeSync(descriptor);
-    if (result.error) throw result.error;
-    if (result.status !== 75) {
-      throw new Error(result.stderr.trim() || `lockf failed with exit code ${result.status}.`);
-    }
-    throw new Error(
-      `Another LastCode install is already running (PID ${owner?.pid ?? "unknown"}, started ${owner?.startedAt ?? "at an unknown time"}).`,
-    );
-  }
-  const owner = { schemaVersion: 1, pid, token, startedAt: new Date().toISOString() };
-  try {
-    NodeFS.ftruncateSync(descriptor, 0);
-    NodeFS.writeSync(descriptor, `${JSON.stringify(owner)}\n`);
-    NodeFS.fsyncSync(descriptor);
-  } catch (error) {
-    NodeFS.closeSync(descriptor);
-    throw error;
-  }
-  const lockIdentity = NodeFS.fstatSync(descriptor);
-  let released = false;
-  return () => {
-    if (released) return;
-    const currentIdentity = NodeFS.statSync(lockPath, { throwIfNoEntry: false });
-    const currentOwner = readLockOwner(lockPath);
-    if (
-      currentIdentity?.dev !== lockIdentity.dev ||
-      currentIdentity?.ino !== lockIdentity.ino ||
-      currentOwner?.token !== token
-    ) {
-      NodeFS.closeSync(descriptor);
-      released = true;
-      throw new Error("Refusing to release a LastCode install lock now owned by another process.");
-    }
-    NodeFS.ftruncateSync(descriptor, 0);
-    NodeFS.closeSync(descriptor);
-    released = true;
-  };
+export function acquireInstallLock(lockDirectory) {
+  return acquirePortableLock(lockDirectory, INSTALL_LOCK_NAME, "install");
 }
 
 async function hashFile(path) {
@@ -587,19 +525,32 @@ function assertManagedInstallerFile(path) {
   }
 }
 
+function assertManagedLockModule(path) {
+  const existing = NodeFS.lstatSync(path, { throwIfNoEntry: false });
+  if (
+    existing &&
+    (!existing.isFile() || !NodeFS.readFileSync(path, "utf8").includes(LOCK_MODULE_MANAGED_MARKER))
+  ) {
+    throw new Error(`Refusing to modify ${path} because it is not a LastCode-managed file.`);
+  }
+}
+
 export function installCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-install");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-install");
 
+  assertManagedLockModule(lockModuleTarget);
   assertManagedInstallerFile(moduleTarget);
   assertManagedInstallerFile(target);
   assertManagedSymlink(exposed, target);
 
   NodeFS.mkdirSync(binDirectory, { recursive: true });
   NodeFS.mkdirSync(exposedDirectory, { recursive: true });
+  NodeFS.copyFileSync(new NodeURL.URL("./lastcode-lock.mjs", import.meta.url), lockModuleTarget);
   NodeFS.copyFileSync(NodeURL.fileURLToPath(import.meta.url), moduleTarget);
   NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
@@ -610,6 +561,7 @@ export function installCommand(home) {
 
 export function uninstallCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
+  const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-install");
   const exposed = NodePath.join(home, ".local", "bin", "lastcode-install");
@@ -617,10 +569,11 @@ export function uninstallCommand(home) {
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
     throw new Error(`Refusing to remove ${exposed} because it is not managed by LastCode.`);
   }
+  assertManagedLockModule(lockModuleTarget);
   for (const path of [moduleTarget, target]) assertManagedInstallerFile(path);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
-  for (const path of [moduleTarget, target]) NodeFS.rmSync(path, { force: true });
+  for (const path of [lockModuleTarget, moduleTarget, target]) NodeFS.rmSync(path, { force: true });
   try {
     NodeFS.rmdirSync(binDirectory);
   } catch (error) {
