@@ -91,8 +91,7 @@ export class LocalBuildProgressTracker {
 
   poll(now: number): LastCodeLocalBuildProgress | null {
     const previousPhaseIndex = this.#phaseIndex;
-    const appended = this.#readAppendedLog();
-    if (appended.length > 0) {
+    for (const appended of this.#readAppendedLog()) {
       const plainAppended = NodeUtil.stripVTControlCharacters(appended);
       this.#phaseIndex = resolveBuildPhaseIndex(
         `${this.#markerCarry}${plainAppended}`,
@@ -126,12 +125,12 @@ export class LocalBuildProgressTracker {
     };
   }
 
-  #readAppendedLog(): string {
+  *#readAppendedLog(): Generator<string> {
     let stat: NodeFS.Stats;
     try {
       stat = NodeFS.statSync(this.#logPath);
     } catch (cause) {
-      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return "";
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
       throw cause;
     }
 
@@ -142,16 +141,18 @@ export class LocalBuildProgressTracker {
       this.#decoder = new NodeStringDecoder.StringDecoder("utf8");
       this.#markerCarry = "";
     }
-    if (stat.size <= this.#offset) return "";
+    if (stat.size <= this.#offset) return;
 
-    const start = Math.max(this.#offset, stat.size - MAX_BUILD_LOG_READ_BYTES);
-    const length = stat.size - start;
-    const buffer = Buffer.allocUnsafe(length);
     const fd = NodeFS.openSync(this.#logPath, "r");
     try {
-      const bytesRead = NodeFS.readSync(fd, buffer, 0, length, start);
-      this.#offset = start + bytesRead;
-      return this.#decoder.write(buffer.subarray(0, bytesRead));
+      while (this.#offset < stat.size) {
+        const length = Math.min(MAX_BUILD_LOG_READ_BYTES, stat.size - this.#offset);
+        const buffer = Buffer.allocUnsafe(length);
+        const bytesRead = NodeFS.readSync(fd, buffer, 0, length, this.#offset);
+        if (bytesRead === 0) return;
+        this.#offset += bytesRead;
+        yield this.#decoder.write(buffer.subarray(0, bytesRead));
+      }
     } finally {
       NodeFS.closeSync(fd);
     }

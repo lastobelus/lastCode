@@ -116,6 +116,24 @@ describe("LastCodeLocalUpdates", () => {
     });
   });
 
+  it("does not skip markers before an oversized appended burst", () => {
+    withBuildLog((logPath) => {
+      const tracker = new LocalBuildProgressTracker(logPath, 0);
+
+      NodeFS.appendFileSync(
+        logPath,
+        `[desktop-artifact] Building desktop/server/web artifacts\n${"x".repeat(512_100)}`,
+        "utf8",
+      );
+
+      assert.deepEqual(tracker.poll(100), {
+        phase: "Building artifacts",
+        percent: 78,
+        errorKind: "packaging",
+      });
+    });
+  });
+
   it("coalesces interpolation while keeping progress bounded below completion", () => {
     withBuildLog((logPath) => {
       const tracker = new LocalBuildProgressTracker(logPath, 0);
