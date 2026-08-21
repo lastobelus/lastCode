@@ -25,7 +25,7 @@ const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 const BUILD_PROGRESS_POLL_INTERVAL = Duration.millis(400);
 const BUILD_PROGRESS_EMIT_INTERVAL_MS = 1_000;
-const MAX_BUILD_LOG_READ_BYTES = 512_000;
+const MAX_BUILD_LOG_BYTES_PER_POLL = 512_000;
 const BUILD_LOG_MARKER_CARRY_LENGTH = 512;
 const PACKAGING_PHASE_INDEX = BUILD_PHASES.findIndex(
   ({ marker }) => marker === "[desktop-artifact] Building desktop/server/web artifacts",
@@ -145,14 +145,12 @@ export class LocalBuildProgressTracker {
 
     const fd = NodeFS.openSync(this.#logPath, "r");
     try {
-      while (this.#offset < stat.size) {
-        const length = Math.min(MAX_BUILD_LOG_READ_BYTES, stat.size - this.#offset);
-        const buffer = Buffer.allocUnsafe(length);
-        const bytesRead = NodeFS.readSync(fd, buffer, 0, length, this.#offset);
-        if (bytesRead === 0) return;
-        this.#offset += bytesRead;
-        yield this.#decoder.write(buffer.subarray(0, bytesRead));
-      }
+      const length = Math.min(MAX_BUILD_LOG_BYTES_PER_POLL, stat.size - this.#offset);
+      const buffer = Buffer.allocUnsafe(length);
+      const bytesRead = NodeFS.readSync(fd, buffer, 0, length, this.#offset);
+      if (bytesRead === 0) return;
+      this.#offset += bytesRead;
+      yield this.#decoder.write(buffer.subarray(0, bytesRead));
     } finally {
       NodeFS.closeSync(fd);
     }

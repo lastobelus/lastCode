@@ -134,6 +134,25 @@ describe("LastCodeLocalUpdates", () => {
     });
   });
 
+  it("bounds each poll while continuing through an oversized appended burst", () => {
+    withBuildLog((logPath) => {
+      const tracker = new LocalBuildProgressTracker(logPath, 0);
+
+      NodeFS.appendFileSync(
+        logPath,
+        `${"x".repeat(512_000)}[desktop-artifact] Building mac/dmg\n`,
+        "utf8",
+      );
+
+      assert.isNull(tracker.poll(100));
+      assert.deepEqual(tracker.poll(200), {
+        phase: "Building DMG",
+        percent: 94,
+        errorKind: "packaging",
+      });
+    });
+  });
+
   it("coalesces interpolation while keeping progress bounded below completion", () => {
     withBuildLog((logPath) => {
       const tracker = new LocalBuildProgressTracker(logPath, 0);
