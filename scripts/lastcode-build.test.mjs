@@ -104,6 +104,38 @@ describe("LastCode userland build command", () => {
     }
   });
 
+  it("refuses foreign and symlinked progress-model directories", () => {
+    for (const directoryKind of ["directory", "symlink"]) {
+      for (const operation of ["install", "uninstall"]) {
+        const home = NodeFS.mkdtempSync(
+          NodePath.join(NodeOS.tmpdir(), `lastcode-build-${operation}-${directoryKind}-`),
+        );
+        try {
+          const binDirectory = NodePath.join(home, ".lastcode", "bin");
+          const libDirectory = NodePath.join(binDirectory, "lib");
+          const foreignDirectory = NodePath.join(home, "foreign-lib");
+          NodeFS.mkdirSync(binDirectory, { recursive: true });
+          NodeFS.mkdirSync(foreignDirectory);
+          NodeFS.writeFileSync(NodePath.join(foreignDirectory, "keep.txt"), "foreign\n");
+          if (directoryKind === "directory") NodeFS.mkdirSync(libDirectory);
+          else NodeFS.symlinkSync(foreignDirectory, libDirectory, "dir");
+
+          const action =
+            operation === "install"
+              ? () => installCommandAssets("/tmp/lastcode-automation", home)
+              : () => uninstallCommand(home);
+          expect(action).toThrow("not a LastCode-managed directory");
+          expect(NodeFS.readFileSync(NodePath.join(foreignDirectory, "keep.txt"), "utf8")).toBe(
+            "foreign\n",
+          );
+          expect(NodeFS.existsSync(NodePath.join(binDirectory, "lastcode-build.mjs"))).toBe(false);
+        } finally {
+          NodeFS.rmSync(home, { recursive: true, force: true });
+        }
+      }
+    }
+  });
+
   it("preflights every build-command destination before installing", () => {
     for (const relativePath of [
       ".lastcode/bin/lastcode-build.mjs",
@@ -120,7 +152,7 @@ describe("LastCode userland build command", () => {
         NodeFS.writeFileSync(foreignPath, "foreign content\n");
 
         expect(() => installCommandAssets("/tmp/lastcode-automation", home)).toThrow(
-          /not (?:a LastCode-managed file|managed by LastCode)/,
+          /not (?:a LastCode-managed (?:directory|file)|managed by LastCode)/,
         );
         expect(NodeFS.readFileSync(foreignPath, "utf8")).toBe("foreign content\n");
         for (const candidate of [
