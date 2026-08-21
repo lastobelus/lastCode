@@ -2418,8 +2418,13 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
       ? null
       : (projectGroups.find((group) => group.projectKey === projectKey) ?? null);
   const visibleArchivedGroups = useMemo(
-    () => filterArchivedProjectGroups(archivedGroups, projectKey),
-    [archivedGroups, projectKey],
+    () =>
+      filterArchivedProjectGroups(
+        archivedGroups,
+        projectKey,
+        !isLoadingArchive && archiveError === null,
+      ),
+    [archiveError, archivedGroups, isLoadingArchive, projectKey],
   );
 
   const handleArchivedThreadContextMenu = useCallback(

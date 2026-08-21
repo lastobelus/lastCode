@@ -93,8 +93,9 @@ export function buildArchivedProjectModel(input: {
 export function filterArchivedProjectGroups(
   archivedGroups: ReadonlyArray<ArchivedProjectGroup>,
   projectKey: string | null,
+  scopeReady: boolean,
 ): ReadonlyArray<ArchivedProjectGroup> {
-  return projectKey === null
-    ? archivedGroups
-    : archivedGroups.filter((group) => group.logicalProjectKey === projectKey);
+  if (projectKey === null) return archivedGroups;
+  if (!scopeReady) return [];
+  return archivedGroups.filter((group) => group.logicalProjectKey === projectKey);
 }

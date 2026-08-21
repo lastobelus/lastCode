@@ -98,11 +98,11 @@ describe("archive project filtering", () => {
     const model = buildModel([beta, alpha], [makeThread(beta), makeThread(alpha)]);
 
     expect(model.projectGroups.map((group) => group.displayName)).toEqual(["Alpha", "Beta"]);
-    expect(filterArchivedProjectGroups(model.archivedGroups, null)).toHaveLength(2);
+    expect(filterArchivedProjectGroups(model.archivedGroups, null, true)).toHaveLength(2);
 
     const alphaKey = model.projectGroups.find((group) => group.displayName === "Alpha")?.projectKey;
     expect(alphaKey).toBeDefined();
-    expect(filterArchivedProjectGroups(model.archivedGroups, alphaKey ?? null)).toEqual([
+    expect(filterArchivedProjectGroups(model.archivedGroups, alphaKey ?? null, true)).toEqual([
       expect.objectContaining({ project: expect.objectContaining({ title: "Alpha" }) }),
     ]);
   });
@@ -120,7 +120,7 @@ describe("archive project filtering", () => {
 
     expect(model.projectGroups).toHaveLength(1);
     expect(
-      filterArchivedProjectGroups(model.archivedGroups, model.projectGroups[0]!.projectKey),
+      filterArchivedProjectGroups(model.archivedGroups, model.projectGroups[0]!.projectKey, true),
     ).toHaveLength(2);
   });
 
@@ -151,7 +151,16 @@ describe("archive project filtering", () => {
     const project = makeProject();
     const model = buildModel([project], [makeThread(project)]);
 
-    expect(filterArchivedProjectGroups(model.archivedGroups, "pending-project")).toEqual([]);
+    expect(filterArchivedProjectGroups(model.archivedGroups, "pending-project", true)).toEqual([]);
+  });
+
+  it("keeps a known project scope empty until project identity is stable", () => {
+    const project = makeProject();
+    const model = buildModel([project], [makeThread(project)]);
+    const projectKey = model.projectGroups[0]!.projectKey;
+
+    expect(filterArchivedProjectGroups(model.archivedGroups, projectKey, false)).toEqual([]);
+    expect(filterArchivedProjectGroups(model.archivedGroups, projectKey, true)).toHaveLength(1);
   });
 
   it("preserves a project key longer than 500 characters during route validation", () => {
