@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This host-side test reads emitter source files directly to catch marker drift.
+import * as NodeFS from "node:fs";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveLocalCiSteps } from "../lastcode-local-ci.ts";
@@ -53,6 +56,40 @@ describe("LastCode local build progress model", () => {
         return wordCount >= 1 && wordCount <= 3;
       }),
     ).toBe(true);
+  });
+
+  it("keeps owned non-CI markers coupled to their emitters", () => {
+    const markersByEmitter = new Map([
+      ["../lastcode-local-update.mjs", ["Reusing full local CI stamp"]],
+      ["../lastcode-local-ci.ts", ["[lastcode:ci] Full local CI passed"]],
+      ["../lastcode-build-mac.ts", ["[lastcode:build] Building", "[lastcode:build] Created"]],
+      [
+        "../build-desktop-artifact.ts",
+        [
+          "[desktop-artifact] Building desktop/server/web artifacts",
+          "web client branding",
+          "[desktop-artifact] Staging release app",
+          "[desktop-artifact] Installing staged production dependencies",
+          "[desktop-artifact] Done. Artifacts",
+        ],
+      ],
+    ]);
+
+    for (const [relativePath, markers] of markersByEmitter) {
+      const source = NodeFS.readFileSync(new URL(relativePath, import.meta.url), "utf8");
+      for (const marker of markers) {
+        expect(source, `${marker} must remain emitted by ${relativePath}`).toContain(marker);
+        expect(BUILD_PHASES.some((phase) => phase.marker === marker)).toBe(true);
+      }
+    }
+
+    const localUpdateSource = NodeFS.readFileSync(
+      new URL("../lastcode-local-update.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(localUpdateSource).toContain('const CHECKPOINT_PREFIX = "lastcode/checkpoint/"');
+    expect(localUpdateSource).toContain("Building ${options.checkpointTag}");
+    expect(BUILD_PHASES[0].marker).toBe("Building lastcode/");
   });
 
   it("advances only forward through every real marker", () => {
