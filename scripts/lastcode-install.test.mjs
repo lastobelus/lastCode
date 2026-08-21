@@ -274,6 +274,11 @@ describe("LastCode userland install command", () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Usage: lastcode-install");
+
+    uninstallCommand(home);
+    expect(NodeFS.existsSync(NodePath.join(home, ".lastcode", "bin", "lastcode-lock.mjs"))).toBe(
+      false,
+    );
   });
 
   itMacOnly("serializes installers and releases the kernel lock", () => {
@@ -304,11 +309,20 @@ describe("LastCode userland install command", () => {
       NodePath.join(binDirectory, "lastcode-install.mjs"),
       "// LastCode managed command: lastcode-install\n",
     );
+    NodeFS.writeFileSync(
+      NodePath.join(binDirectory, "lastcode-lock.mjs"),
+      "// LastCode managed companion: lastcode-lock\n",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(binDirectory, "lastcode-build.mjs"),
+      "// LastCode managed command: lastcode-build\n",
+    );
     NodeFS.symlinkSync(target, exposed);
 
     uninstallCommand(home);
     expect(NodeFS.existsSync(exposed)).toBe(false);
     expect(NodeFS.existsSync(target)).toBe(false);
+    expect(NodeFS.existsSync(NodePath.join(binDirectory, "lastcode-lock.mjs"))).toBe(true);
 
     NodeFS.writeFileSync(exposed, "mine");
     expect(() => uninstallCommand(home)).toThrow("not managed by LastCode");
@@ -325,6 +339,7 @@ describe("LastCode userland install command", () => {
   it("preflights every installer-command destination before installing", () => {
     for (const relativePath of [
       ".lastcode/bin/lastcode-install.mjs",
+      ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-install",
       ".local/bin/lastcode-install",
     ]) {
@@ -339,6 +354,7 @@ describe("LastCode userland install command", () => {
       expect(NodeFS.readFileSync(foreignPath, "utf8")).toBe("foreign content\n");
       for (const candidate of [
         ".lastcode/bin/lastcode-install.mjs",
+        ".lastcode/bin/lastcode-lock.mjs",
         ".lastcode/bin/lastcode-install",
       ]) {
         const candidatePath = NodePath.join(home, candidate);

@@ -563,6 +563,8 @@ export function installCommand(home) {
 export function uninstallCommand(home) {
   const binDirectory = NodePath.join(home, ".lastcode", "bin");
   const lockModuleTarget = NodePath.join(binDirectory, "lastcode-lock.mjs");
+  const buildModuleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
+  const updateHelperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const moduleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const target = NodePath.join(binDirectory, "lastcode-install");
   const exposed = NodePath.join(home, ".local", "bin", "lastcode-install");
@@ -574,7 +576,10 @@ export function uninstallCommand(home) {
   for (const path of [moduleTarget, target]) assertManagedInstallerFile(path);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
-  for (const path of [lockModuleTarget, moduleTarget, target]) NodeFS.rmSync(path, { force: true });
+  for (const path of [moduleTarget, target]) NodeFS.rmSync(path, { force: true });
+  if (!NodeFS.existsSync(buildModuleTarget) && !NodeFS.existsSync(updateHelperTarget)) {
+    NodeFS.rmSync(lockModuleTarget, { force: true });
+  }
   try {
     NodeFS.rmdirSync(binDirectory);
   } catch (error) {
