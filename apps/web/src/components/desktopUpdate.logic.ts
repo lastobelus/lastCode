@@ -199,7 +199,10 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
   if (!result.accepted || result.completed) return null;
   if (typeof result.state.message !== "string") return null;
   const message = result.state.message.trim();
-  return message.length > 0 ? message : null;
+  if (message.length === 0) return null;
+  return result.state.source === "lastcode-local" && result.state.localBuildFailure
+    ? formatLocalBuildFailureError(message)
+    : message;
 }
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {

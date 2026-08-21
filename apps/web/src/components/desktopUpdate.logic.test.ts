@@ -181,6 +181,43 @@ describe("getDesktopUpdateActionError", () => {
     expect(getDesktopUpdateActionError(result)).toBe("checksum mismatch");
   });
 
+  it("sanitizes local failure toasts without changing hosted messages", () => {
+    const rawMessage = "hdiutil \u001B[31mfailed\u001B[0m\0";
+    const failure = {
+      checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",
+      phase: "Building DMG",
+      percent: 94,
+      errorKind: "packaging" as const,
+      currentVersion: "1.2.2",
+      targetVersion: "1.2.3-nightly.4",
+      logPath: "/Users/test/.lastcode/local-updates/build.log",
+      error: rawMessage,
+    };
+
+    expect(
+      getDesktopUpdateActionError({
+        accepted: true,
+        completed: false,
+        state: {
+          ...baseState,
+          source: "lastcode-local",
+          status: "error",
+          message: rawMessage,
+          errorContext: "download",
+          localBuildProgress: failure,
+          localBuildFailure: failure,
+        },
+      }),
+    ).toBe("hdiutil failed");
+    expect(
+      getDesktopUpdateActionError({
+        accepted: true,
+        completed: false,
+        state: { ...baseState, status: "error", message: rawMessage },
+      }),
+    ).toBe(rawMessage);
+  });
+
   it("ignores messages for non-accepted attempts", () => {
     const result: DesktopUpdateActionResult = {
       accepted: false,
