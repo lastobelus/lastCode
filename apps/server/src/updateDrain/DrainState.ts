@@ -51,6 +51,14 @@ export function decideUpdateDrainCommand(
         }),
       );
     }
+    if (state.intent?.status === "claimed") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "activation_claimed",
+          message: `Update drain '${state.intent.requestId}' has already been claimed for activation.`,
+        }),
+      );
+    }
     if (usedRequestIds.has(command.requestId)) {
       return Effect.fail(
         new UpdateDrainError({
@@ -67,6 +75,42 @@ export function decideUpdateDrainCommand(
       requestId: command.requestId,
       targetVersion: command.targetVersion,
       status: "draining",
+    });
+  }
+
+  if (command.type === "update-drain.claim") {
+    if (state.intent === null || state.intent.status === "cancelled") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "no_active_drain",
+          message: "There is no active update drain to claim.",
+        }),
+      );
+    }
+    if (state.intent.requestId !== command.requestId) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "request_mismatch",
+          message: `Update drain '${command.requestId}' does not match active request '${state.intent.requestId}'.`,
+        }),
+      );
+    }
+    if (state.intent.status === "claimed") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "activation_claimed",
+          message: `Update drain '${command.requestId}' has already been claimed for activation.`,
+        }),
+      );
+    }
+    return Effect.succeed({
+      type: "update-drain.claimed",
+      eventId: eventIdFor(command),
+      commandId: command.commandId,
+      occurredAt: command.createdAt,
+      requestId: command.requestId,
+      targetVersion: state.intent.targetVersion,
+      status: "claimed",
     });
   }
 
@@ -91,6 +135,14 @@ export function decideUpdateDrainCommand(
       new UpdateDrainError({
         reason: "no_active_drain",
         message: "There is no active update drain to cancel.",
+      }),
+    );
+  }
+  if (state.intent.status === "claimed") {
+    return Effect.fail(
+      new UpdateDrainError({
+        reason: "activation_claimed",
+        message: `Update drain '${state.intent.requestId}' has already been claimed for activation.`,
       }),
     );
   }

@@ -124,6 +124,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -516,9 +517,12 @@ const RuntimeCoreDependenciesBaseLive = ReactorLayerLive.pipe(
   ),
 );
 
-const RuntimeCoreDependenciesLive = Layer.merge(
-  RuntimeCoreDependenciesBaseLive,
-  ActionResume.layer.pipe(Layer.provide(RuntimeCoreDependenciesBaseLive)),
+const RuntimeCoreDependenciesWithDrainAdmissionLive = UpdateDrainAdmission.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesBaseLive),
+);
+
+const RuntimeCoreDependenciesLive = ActionResume.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesWithDrainAdmissionLive),
 );
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
