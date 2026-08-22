@@ -880,6 +880,8 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           }
           const trackedEvents = yield* engine.subscribeDomainEvents;
           const composedTurnId = TurnId.make("turn-composed-wait");
+          const spilledResponse = "s".repeat(24_001);
+          const responseTail = " exact buffered tail";
           const responder = yield* trackedEvents.pipe(
             Stream.filter(
               (event) =>
@@ -902,6 +904,15 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
                       threadId,
                       messageId: event.payload.messageId,
                       outcome: { kind: "started", turnId: composedTurnId },
+                      createdAt: responseAt,
+                    });
+                    yield* engine.dispatch({
+                      type: "thread.message.assistant.delta",
+                      commandId: CommandId.make("cmd-composed-wait-spill"),
+                      threadId,
+                      messageId: MessageId.make("message-composed-wait-answer"),
+                      delta: spilledResponse,
+                      turnId: composedTurnId,
                       createdAt: responseAt,
                     });
                     yield* engine.dispatch({
@@ -943,10 +954,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
                     );
                     yield* engine.dispatch({
                       type: "thread.message.assistant.delta",
-                      commandId: CommandId.make("cmd-composed-wait-answer"),
+                      commandId: CommandId.make("cmd-composed-wait-tail"),
                       threadId,
                       messageId: MessageId.make("message-composed-wait-answer"),
-                      delta: "Composed exact answer",
+                      delta: responseTail,
                       turnId: composedTurnId,
                       createdAt: responseAt,
                     });
@@ -1006,7 +1017,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             threadId,
             messageId: composedMessageId,
             turnId: composedTurnId,
-            response: "Composed exact answer",
+            response: `${spilledResponse}${responseTail}`,
             responseTruncated: false,
           });
           const trackedTurnId = TurnId.make("turn-live-wait");
