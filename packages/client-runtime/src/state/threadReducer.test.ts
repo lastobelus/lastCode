@@ -37,6 +37,7 @@ const baseThread: OrchestrationThread = {
   archivedAt: null,
   settledOverride: null,
   settledAt: null,
+  annotation: null,
   deletedAt: null,
   messages: [],
   proposedPlans: [],
@@ -303,6 +304,35 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.branch).toBe("feature/demo");
         // Model selection should be unchanged since it wasn't in the payload
         expect(result.thread.modelSelection).toEqual(baseThread.modelSelection);
+      }
+    });
+  });
+
+  describe("thread annotation events", () => {
+    it("replaces annotation state without changing thread recency", () => {
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.annotation-resolved",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          annotation: {
+            body: "- [x] Done",
+            anchorMessageId: MessageId.make("msg-1"),
+            createdAt: "2026-04-01T05:00:00.000Z",
+            updatedAt: "2026-04-01T06:00:00.000Z",
+            resolvedAt: "2026-04-01T06:00:00.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.annotation?.resolvedAt).toBe("2026-04-01T06:00:00.000Z");
+        expect(result.thread.updatedAt).toBe(baseThread.updatedAt);
       }
     });
   });
