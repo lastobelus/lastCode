@@ -112,6 +112,7 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  taskListDisabled?: boolean;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -1358,6 +1359,7 @@ function ChatMarkdown({
   cwd,
   threadRef,
   onTaskListChange,
+  taskListDisabled = false,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
@@ -1615,6 +1617,7 @@ function ChatMarkdown({
             name="markdown-task"
             aria-label="Toggle task"
             checked={checked}
+            disabled={taskListDisabled}
             onChange={(event) => {
               const markerOffset = Number(
                 event.currentTarget.closest("li")?.dataset.taskMarkerOffset,
@@ -1778,6 +1781,7 @@ function ChatMarkdown({
     openMarkdownFileInPreview,
     resolvedTheme,
     skills,
+    taskListDisabled,
     text,
     threadRef,
   ]);

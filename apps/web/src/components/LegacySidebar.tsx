@@ -95,6 +95,7 @@ import {
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import {
+  runThreadAnnotationBodySave,
   ThreadAnnotationEditorDialog,
   ThreadAnnotationHoverPopover,
 } from "./thread-annotation/ThreadAnnotation";
@@ -207,7 +208,7 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
-import { primaryServerKeybindingsAtom } from "../state/server";
+import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import {
   derivePhysicalProjectKey,
   deriveProjectGroupingOverrideKey,
@@ -215,6 +216,14 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
+import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
+import {
+  deriveProviderInstanceEntries,
+  shouldShowInstanceBadge,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
+import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
+import { SidebarThreadHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
@@ -320,7 +329,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   projectCwd: string | null;
-  legacySidebarScale: LegacySidebarScale;
+  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -360,6 +369,7 @@ interface SidebarThreadRowProps {
     threadRef?: ScopedThreadRef,
   ) => boolean;
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
+  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
   onResolveAnnotation: (thread: SidebarThreadSummary) => void;
 }
 
@@ -389,8 +399,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     attemptArchiveThread,
     openPrLink,
     onEditAnnotation,
+    onSaveAnnotationBody,
     onResolveAnnotation,
-    legacySidebarScale,
+    providerEntryByInstanceId,
     thread,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -486,6 +497,39 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
+  const branchMismatch = resolveLocalCheckoutBranchMismatch({
+    effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
+    activeWorktreePath: thread.worktreePath,
+    activeThreadBranch: thread.branch,
+    currentGitBranch: gitStatus.data?.refName ?? null,
+  });
+  const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+  const providerEntry = providerEntryByInstanceId.get(modelInstanceId) ?? null;
+  const showInstanceBadge =
+    providerEntry !== null &&
+    shouldShowInstanceBadge(providerEntry, providerEntryByInstanceId.values());
+  const selectedModel = providerEntry?.models.find(
+    (model) => model.slug === thread.modelSelection.model,
+  );
+  const modelLabel = selectedModel
+    ? getTriggerDisplayModelLabel(selectedModel)
+    : thread.modelSelection.model;
+  const threadHoverDetails = (
+    <SidebarThreadHoverContent
+      branchMismatch={branchMismatch}
+      environmentLabel={threadEnvironmentLabel}
+      modelInstanceId={modelInstanceId}
+      modelLabel={modelLabel}
+      projectCwd={threadProjectCwd ?? props.projectCwd}
+      projectFaviconPath={threadProject?.faviconPath ?? null}
+      projectTitle={threadProject?.title ?? null}
+      providerEntry={providerEntry}
+      showInstanceBadge={showInstanceBadge}
+      terminalProcessCount={runningTerminalIds.length}
+      terminalStatus={terminalStatus}
+      thread={thread}
+    />
+  );
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
     : !isThreadRunning
@@ -754,6 +798,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               onClick={handleRenameInputClick}
               onDoubleClick={handleRenameInputClick}
             />
+          ) : hasActiveAnnotation ? (
+            <span
+              className="min-w-0 flex-1 truncate text-sm"
+              data-testid={`thread-title-${thread.id}`}
+            >
+              {thread.title}
+            </span>
           ) : (
             <Tooltip>
               <TooltipTrigger
@@ -766,8 +817,14 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   </span>
                 }
               />
-              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
-                {thread.title}
+              <TooltipPopup
+                align="start"
+                className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+                side="right"
+                sideOffset={4}
+                variant="glass"
+              >
+                {threadHoverDetails}
               </TooltipPopup>
             </Tooltip>
           )}
@@ -893,15 +950,16 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                     <ThreadAnnotationHoverPopover
                       annotation={thread.annotation}
                       cwd={gitCwd ?? undefined}
+                      onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                       onEdit={() => onEditAnnotation(thread)}
                       onResolve={() => onResolveAnnotation(thread)}
                       rowActive={annotationRowActive}
-                      scalePercent={legacySidebarScale}
+                      threadDetails={threadHoverDetails}
                       threadRef={threadRef}
                       trigger={
                         <span
                           aria-label={`${jumpLabel}; annotated`}
-                          className="inline-flex h-5 items-center rounded-full border border-dotted border-yellow-500/65 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+                          className="inline-flex h-5 items-center rounded-full border border-dotted border-yellow-500/65 bg-accent/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-accent-foreground shadow-sm"
                         >
                           {jumpLabel}
                         </span>
@@ -926,10 +984,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   <ThreadAnnotationHoverPopover
                     annotation={thread.annotation}
                     cwd={gitCwd ?? undefined}
+                    onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                     onEdit={() => onEditAnnotation(thread)}
                     onResolve={() => onResolveAnnotation(thread)}
                     rowActive={annotationRowActive}
-                    scalePercent={legacySidebarScale}
+                    threadDetails={threadHoverDetails}
                     threadRef={threadRef}
                     trigger={
                       <span
@@ -968,6 +1027,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 interface SidebarProjectThreadListProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
+  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -1017,6 +1077,7 @@ interface SidebarProjectThreadListProps {
     threadRef?: ScopedThreadRef,
   ) => boolean;
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
+  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
   onResolveAnnotation: (thread: SidebarThreadSummary) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
@@ -1028,6 +1089,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     legacySidebarScale,
     scaleStyle,
+    providerEntryByInstanceId,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -1062,6 +1124,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     attemptArchiveThread,
     openPrLink,
     onEditAnnotation,
+    onSaveAnnotationBody,
     onResolveAnnotation,
     expandThreadListForProject,
     collapseThreadListForProject,
@@ -1094,7 +1157,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               key={threadKey}
               thread={thread}
               projectCwd={projectCwd}
-              legacySidebarScale={legacySidebarScale}
+              providerEntryByInstanceId={providerEntryByInstanceId}
               orderedProjectThreadKeys={orderedProjectThreadKeys}
               isActive={activeRouteThreadKey === threadKey}
               openPullRequestsInRightPanel={openPullRequestsInRightPanel}
@@ -1119,6 +1182,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               attemptArchiveThread={attemptArchiveThread}
               openPrLink={openPrLink}
               onEditAnnotation={onEditAnnotation}
+              onSaveAnnotationBody={onSaveAnnotationBody}
               onResolveAnnotation={onResolveAnnotation}
             />
           );
@@ -1164,6 +1228,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
+  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1187,6 +1252,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     legacySidebarScale,
     scaleStyle,
+    providerEntryByInstanceId,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
@@ -2108,28 +2174,39 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     renamingInputRef.current = null;
   }, []);
 
+  const saveAnnotationBody = useCallback(
+    async (target: SidebarThreadSummary, body: string): Promise<boolean> => {
+      return runThreadAnnotationBodySave(
+        scopeThreadRef(target.environmentId, target.id),
+        async () => {
+          const result = await upsertThreadAnnotation({
+            environmentId: target.environmentId,
+            input: { threadId: target.id, body },
+          });
+          if (result._tag === "Success") return true;
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to save annotation",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
+          return false;
+        },
+      );
+    },
+    [upsertThreadAnnotation],
+  );
+
   const saveAnnotation = useCallback(
     async (body: string): Promise<boolean> => {
-      const target = annotationEditorTarget;
-      if (!target) return false;
-      const result = await upsertThreadAnnotation({
-        environmentId: target.environmentId,
-        input: { threadId: target.id, body },
-      });
-      if (result._tag === "Success") return true;
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to save annotation",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
-      return false;
+      if (!annotationEditorTarget) return false;
+      return saveAnnotationBody(annotationEditorTarget, body);
     },
-    [annotationEditorTarget, upsertThreadAnnotation],
+    [annotationEditorTarget, saveAnnotationBody],
   );
 
   const resolveAnnotation = useCallback(
@@ -2525,6 +2602,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarProjectThreadList
         legacySidebarScale={legacySidebarScale}
         scaleStyle={scaleStyle}
+        providerEntryByInstanceId={providerEntryByInstanceId}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -2559,6 +2637,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         attemptArchiveThread={attemptArchiveThread}
         openPrLink={openPrLink}
         onEditAnnotation={setAnnotationEditorTarget}
+        onSaveAnnotationBody={saveAnnotationBody}
         onResolveAnnotation={(thread) => void resolveAnnotation(thread)}
         expandThreadListForProject={expandThreadListForProject}
         collapseThreadListForProject={collapseThreadListForProject}
@@ -2979,6 +3058,7 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   legacySidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
+  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -3089,6 +3169,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     legacySidebarScale,
     projectTreeScaleStyle,
+    providerEntryByInstanceId,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3217,6 +3298,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         legacySidebarScale={legacySidebarScale}
                         scaleStyle={projectTreeScaleStyle}
+                        providerEntryByInstanceId={providerEntryByInstanceId}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3252,6 +3334,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 legacySidebarScale={legacySidebarScale}
                 scaleStyle={projectTreeScaleStyle}
+                providerEntryByInstanceId={providerEntryByInstanceId}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3302,6 +3385,16 @@ export default function LegacySidebar() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
+  const serverProviders = useAtomValue(primaryServerProvidersAtom);
+  const providerEntryByInstanceId = useMemo(
+    () =>
+      new Map(
+        deriveProviderInstanceEntries(serverProviders).map(
+          (entry) => [entry.instanceId as string, entry] as const,
+        ),
+      ),
+    [serverProviders],
+  );
   const scaleStyle = useMemo(
     () => legacySidebarScaleStyle(legacySidebarScale),
     [legacySidebarScale],
@@ -3968,6 +4061,7 @@ export default function LegacySidebar() {
         projectsLength={projects.length}
         legacySidebarScale={legacySidebarScale}
         projectTreeScaleStyle={scaleStyle}
+        providerEntryByInstanceId={providerEntryByInstanceId}
       />
       <SidebarChromeFooter />
     </>

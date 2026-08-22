@@ -3,9 +3,19 @@ import {
   type ScopedThreadRef,
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import { formatRelativeTimeLabel } from "../../timestampFormat";
+import { setMarkdownTaskChecked } from "../../markdownTaskList";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import {
@@ -19,6 +29,49 @@ import {
 } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+
+const pendingBodyChanges = new Set<string>();
+const pendingBodyChangeListeners = new Map<string, Set<() => void>>();
+
+function setBodyChangePending(threadKey: string, pending: boolean) {
+  if (pending) pendingBodyChanges.add(threadKey);
+  else pendingBodyChanges.delete(threadKey);
+  pendingBodyChangeListeners.get(threadKey)?.forEach((listener) => listener());
+}
+
+function subscribeToBodyChange(threadKey: string | null, listener: () => void) {
+  if (!threadKey) return () => undefined;
+  const listeners = pendingBodyChangeListeners.get(threadKey) ?? new Set();
+  listeners.add(listener);
+  pendingBodyChangeListeners.set(threadKey, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) pendingBodyChangeListeners.delete(threadKey);
+  };
+}
+
+export function useThreadAnnotationBodyPending(threadRef: ScopedThreadRef | null): boolean {
+  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
+  return useSyncExternalStore(
+    (listener) => subscribeToBodyChange(threadKey, listener),
+    () => (threadKey ? pendingBodyChanges.has(threadKey) : false),
+    () => false,
+  );
+}
+
+export async function runThreadAnnotationBodySave(
+  threadRef: ScopedThreadRef,
+  save: () => Promise<boolean>,
+): Promise<boolean> {
+  const threadKey = scopedThreadKey(threadRef);
+  if (pendingBodyChanges.has(threadKey)) return false;
+  setBodyChangePending(threadKey, true);
+  try {
+    return await save();
+  } finally {
+    setBodyChangePending(threadKey, false);
+  }
+}
 
 export function ThreadAnnotationEditorDialog(props: {
   annotation: ThreadAnnotationModel | null;
@@ -92,7 +145,7 @@ export function ThreadAnnotationEditorDialog(props: {
 function AnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
   return (
-    <span className="text-[11px] text-yellow-900/55 dark:text-yellow-100/55">
+    <span className="text-[11px] text-accent-foreground/55">
       {annotation.resolvedAt ? "Resolved" : "Edited"} {formatRelativeTimeLabel(timestamp)}
     </span>
   );
@@ -103,13 +156,27 @@ export function ThreadAnnotationBody(props: {
   threadRef: ScopedThreadRef;
   cwd?: string | undefined;
   className?: string;
+  compact?: boolean;
+  onBodyChange?: ((body: string) => Promise<boolean>) | undefined;
 }) {
+  const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
+
+  const onTaskListChange = props.onBodyChange
+    ? ({ markerOffset, checked }: { markerOffset: number; checked: boolean }) => {
+        const nextBody = setMarkdownTaskChecked(props.annotation.body, markerOffset, checked);
+        if (nextBody === props.annotation.body) return;
+        void props.onBodyChange!(nextBody);
+      }
+    : undefined;
+
   return (
     <div className={props.className}>
       <ChatMarkdown
-        className="text-sm text-yellow-950 dark:text-yellow-50"
+        className={props.compact ? "thread-annotation-compact" : "text-sm text-accent-foreground"}
         cwd={props.cwd}
+        onTaskListChange={onTaskListChange}
         parseRawHtml={false}
+        taskListDisabled={bodyChangePending}
         text={props.annotation.body}
         threadRef={props.threadRef}
       />
@@ -129,7 +196,7 @@ export function ThreadAnnotationActions(props: {
   return (
     <div className="flex items-center gap-3 text-xs">
       <button
-        className="font-medium text-yellow-950/75 underline-offset-2 hover:underline disabled:opacity-50 dark:text-yellow-50/75"
+        className="font-medium text-accent-foreground/75 underline-offset-2 hover:underline disabled:opacity-50"
         disabled={props.pending}
         type="button"
         onClick={props.onEdit}
@@ -137,7 +204,7 @@ export function ThreadAnnotationActions(props: {
         Edit
       </button>
       <button
-        className="font-medium text-yellow-950/75 underline-offset-2 hover:underline disabled:opacity-50 dark:text-yellow-50/75"
+        className="font-medium text-accent-foreground/75 underline-offset-2 hover:underline disabled:opacity-50"
         disabled={props.pending}
         type="button"
         onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
@@ -156,14 +223,17 @@ export function ThreadAnnotationPostIt(props: {
   onDismiss: () => void;
   onEdit: () => void;
   onResolve: () => void;
+  onBodyChange: (body: string) => Promise<boolean>;
   pending?: boolean | undefined;
 }) {
+  const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   return (
-    <div className="mx-auto mb-1.5 w-full max-w-3xl rounded-xl border border-yellow-300/70 bg-yellow-100/92 px-3.5 py-2.5 text-yellow-950 shadow-sm dark:border-yellow-700/50 dark:bg-yellow-950/72 dark:text-yellow-50">
+    <div className="mx-auto mb-1.5 w-full max-w-3xl rounded-xl border border-border/80 bg-accent px-3.5 py-2.5 text-accent-foreground shadow-sm">
       <ThreadAnnotationBody
         annotation={props.annotation}
         className="max-h-48 overflow-y-auto"
         cwd={props.cwd}
+        onBodyChange={props.onBodyChange}
         threadRef={props.threadRef}
       />
       <div className="mt-2 flex items-center justify-between">
@@ -172,10 +242,10 @@ export function ThreadAnnotationPostIt(props: {
           onEdit={props.onEdit}
           onReopen={() => undefined}
           onResolve={props.onResolve}
-          pending={props.pending}
+          pending={props.pending || bodyChangePending}
         />
         <button
-          className="text-xs text-yellow-950/55 hover:text-yellow-950 dark:text-yellow-50/55 dark:hover:text-yellow-50"
+          className="text-xs text-accent-foreground/55 hover:text-accent-foreground"
           type="button"
           onClick={props.onDismiss}
         >
@@ -191,11 +261,13 @@ export function ThreadAnnotationHoverPopover(props: {
   threadRef: ScopedThreadRef;
   cwd?: string | undefined;
   rowActive: boolean;
-  scalePercent: number;
   trigger: ReactNode;
+  threadDetails: ReactNode;
   onEdit: () => void;
   onResolve: () => void;
+  onBodyChange: (body: string) => Promise<boolean>;
 }) {
+  const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   const [open, setOpen] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
   const openRef = useRef(false);
@@ -249,12 +321,13 @@ export function ThreadAnnotationHoverPopover(props: {
         {props.trigger}
       </PopoverTrigger>
       <PopoverPopup
-        align="end"
-        className="w-80 border border-yellow-300/70 bg-yellow-100/95 dark:border-yellow-700/50 dark:bg-yellow-950/90"
+        align="start"
+        className="max-w-80 text-left whitespace-normal shadow-xl shadow-black/25 before:hidden"
         finalFocus={false}
         initialFocus={false}
         side="right"
-        style={{ zoom: props.scalePercent / 100 }}
+        tooltipStyle
+        viewportClassName="p-0"
         onMouseEnter={() => {
           if (!openRef.current && !rowActiveRef.current) return;
           popupHoveredRef.current = true;
@@ -274,25 +347,33 @@ export function ThreadAnnotationHoverPopover(props: {
           scheduleClose();
         }}
       >
-        <ThreadAnnotationBody
-          annotation={props.annotation}
-          className="max-h-64 overflow-y-auto"
-          cwd={props.cwd}
-          threadRef={props.threadRef}
-        />
-        <div className="mt-2">
-          <ThreadAnnotationActions
-            annotation={props.annotation}
-            onEdit={() => {
-              setPopoverOpen(false);
-              props.onEdit();
-            }}
-            onReopen={() => undefined}
-            onResolve={() => {
-              setPopoverOpen(false);
-              props.onResolve();
-            }}
-          />
+        <div className="flex min-w-0 w-80 max-w-80 flex-col">
+          {props.threadDetails}
+          <div className="border-t border-border/70 bg-accent p-[var(--floating-content-inset)] text-accent-foreground">
+            <ThreadAnnotationBody
+              annotation={props.annotation}
+              className="max-h-64 overflow-y-auto"
+              compact
+              cwd={props.cwd}
+              onBodyChange={props.onBodyChange}
+              threadRef={props.threadRef}
+            />
+            <div className="mt-2">
+              <ThreadAnnotationActions
+                annotation={props.annotation}
+                onEdit={() => {
+                  setPopoverOpen(false);
+                  props.onEdit();
+                }}
+                onReopen={() => undefined}
+                onResolve={() => {
+                  setPopoverOpen(false);
+                  props.onResolve();
+                }}
+                pending={bodyChangePending}
+              />
+            </div>
+          </div>
         </div>
       </PopoverPopup>
     </Popover>

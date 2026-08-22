@@ -285,6 +285,7 @@ import {
 } from "./ThreadStatusIndicators";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
+  runThreadAnnotationBodySave,
   ThreadAnnotationEditorDialog,
   ThreadAnnotationPostIt,
 } from "./thread-annotation/ThreadAnnotation";
@@ -4218,17 +4219,22 @@ function ChatViewContent(props: ChatViewProps) {
   const saveThreadAnnotation = useCallback(
     async (body: string): Promise<boolean> => {
       if (!activeThread || !canAnnotateThread) return false;
-      setAnnotationMutationPending(true);
-      const result = await upsertThreadAnnotation({
-        environmentId: activeThread.environmentId,
-        input: { threadId: activeThread.id, body },
-      });
-      setAnnotationMutationPending(false);
-      if (result._tag === "Success") return true;
-      if (!isAtomCommandInterrupted(result)) {
-        reportAnnotationFailure("save", squashAtomCommandFailure(result));
-      }
-      return false;
+      return runThreadAnnotationBodySave(
+        scopeThreadRef(activeThread.environmentId, activeThread.id),
+        async () => {
+          setAnnotationMutationPending(true);
+          const result = await upsertThreadAnnotation({
+            environmentId: activeThread.environmentId,
+            input: { threadId: activeThread.id, body },
+          });
+          setAnnotationMutationPending(false);
+          if (result._tag === "Success") return true;
+          if (!isAtomCommandInterrupted(result)) {
+            reportAnnotationFailure("save", squashAtomCommandFailure(result));
+          }
+          return false;
+        },
+      );
     },
     [activeThread, canAnnotateThread, reportAnnotationFailure, upsertThreadAnnotation],
   );
@@ -6597,6 +6603,7 @@ function ChatViewContent(props: ChatViewProps) {
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={loadEarlierTurns}
                 annotation={threadAnnotation}
+                onAnnotationBodyChange={saveThreadAnnotation}
                 onAnnotationEdit={() => setAnnotationEditorOpen(true)}
                 onAnnotationResolve={() => void changeThreadAnnotationResolution("resolve")}
                 onAnnotationReopen={() => void changeThreadAnnotationResolution("reopen")}
@@ -6665,6 +6672,7 @@ function ChatViewContent(props: ChatViewProps) {
                     <ThreadAnnotationPostIt
                       annotation={threadAnnotation}
                       cwd={gitCwd ?? undefined}
+                      onBodyChange={saveThreadAnnotation}
                       onDismiss={() => setDismissedAnnotationKey(annotationVersionKey)}
                       onEdit={() => setAnnotationEditorOpen(true)}
                       onResolve={() => void changeThreadAnnotationResolution("resolve")}

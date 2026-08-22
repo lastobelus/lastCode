@@ -111,6 +111,7 @@ import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../times
 import {
   ThreadAnnotationActions,
   ThreadAnnotationBody,
+  useThreadAnnotationBodyPending,
 } from "../thread-annotation/ThreadAnnotation";
 
 import {
@@ -250,6 +251,7 @@ interface MessagesTimelineProps {
   loadEarlier?: { readonly loading: boolean; readonly onLoadEarlier: () => void } | null;
   annotation?: ThreadAnnotation | null;
   onAnnotationEdit?: () => void;
+  onAnnotationBodyChange?: ((body: string) => Promise<boolean>) | undefined;
   onAnnotationResolve?: () => void;
   onAnnotationReopen?: () => void;
 }
@@ -294,6 +296,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   loadEarlier = null,
   annotation = null,
   onAnnotationEdit = NOOP_OPEN_AGENTS,
+  onAnnotationBodyChange,
   onAnnotationResolve = NOOP_OPEN_AGENTS,
   onAnnotationReopen = NOOP_OPEN_AGENTS,
 }: MessagesTimelineProps) {
@@ -635,6 +638,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             threadRef={parseScopedThreadKey(routeThreadKey)}
             markdownCwd={markdownCwd}
             onAnnotationEdit={onAnnotationEdit}
+            onAnnotationBodyChange={onAnnotationBodyChange}
             onAnnotationResolve={onAnnotationResolve}
             onAnnotationReopen={onAnnotationReopen}
             onSelect={(item) => {
@@ -745,6 +749,7 @@ function TimelineMinimap({
   stripMap,
   threadRef,
   onAnnotationEdit,
+  onAnnotationBodyChange,
   onAnnotationResolve,
   onAnnotationReopen,
   onSelect,
@@ -757,10 +762,12 @@ function TimelineMinimap({
   stripMap: Map<string, HTMLSpanElement>;
   threadRef: ScopedThreadRef | null;
   onAnnotationEdit: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
   onAnnotationResolve: () => void;
   onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
+  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [overflowAnnotationOpen, setOverflowAnnotationOpen] = useState(false);
 
@@ -926,7 +933,7 @@ function TimelineMinimap({
                 {annotation?.anchorMessageId === item.messageId ? (
                   <span
                     aria-label="Thread annotation"
-                    className="absolute left-full top-1/2 ml-1 size-2 -translate-y-1/2 rounded-full bg-yellow-400 shadow-[0_0_0_2px_color-mix(in_srgb,var(--background)_80%,transparent)] dark:bg-yellow-300"
+                    className="absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
                     data-thread-annotation-marker
                   />
                 ) : null}
@@ -944,11 +951,13 @@ function TimelineMinimap({
               }}
             >
               {activeItemHasAnnotation && annotation && threadRef ? (
-                <span className="block rounded-xl border border-yellow-300/70 bg-yellow-100/95 p-3 text-left text-yellow-950 shadow-xl shadow-black/25 dark:border-yellow-700/50 dark:bg-yellow-950/90 dark:text-yellow-50">
+                <span className="block rounded-xl border border-border/80 bg-accent p-3 text-left text-accent-foreground shadow-xl shadow-black/25">
                   <ThreadAnnotationBody
                     annotation={annotation}
                     className="max-h-52 overflow-y-auto"
+                    compact
                     cwd={markdownCwd}
+                    onBodyChange={onAnnotationBodyChange}
                     threadRef={threadRef}
                   />
                   <span className="mt-2 block">
@@ -957,6 +966,7 @@ function TimelineMinimap({
                       onEdit={onAnnotationEdit}
                       onReopen={onAnnotationReopen}
                       onResolve={onAnnotationResolve}
+                      pending={annotationBodyPending}
                     />
                   </span>
                 </span>
@@ -1003,20 +1013,22 @@ function TimelineMinimap({
           >
             <button
               aria-label="Annotation attached to an earlier message"
-              className="size-2 rounded-full bg-yellow-400 shadow-[0_0_0_2px_color-mix(in_srgb,var(--background)_80%,transparent)] dark:bg-yellow-300"
+              className="size-1.5 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
               type="button"
               onClick={() => setOverflowAnnotationOpen((open) => !open)}
               onFocus={() => setOverflowAnnotationOpen(true)}
             />
             {overflowAnnotationOpen ? (
-              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-yellow-300/70 bg-yellow-100/95 p-3 text-left text-yellow-950 shadow-xl shadow-black/25 dark:border-yellow-700/50 dark:bg-yellow-950/90 dark:text-yellow-50">
-                <div className="mb-2 text-[11px] font-medium text-yellow-900/55 dark:text-yellow-100/55">
+              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-border/80 bg-accent p-3 text-left text-accent-foreground shadow-xl shadow-black/25">
+                <div className="mb-2 text-[11px] font-medium text-accent-foreground/55">
                   Attached to an earlier message
                 </div>
                 <ThreadAnnotationBody
                   annotation={annotation}
                   className="max-h-52 overflow-y-auto"
+                  compact
                   cwd={markdownCwd}
+                  onBodyChange={onAnnotationBodyChange}
                   threadRef={threadRef}
                 />
                 <div className="mt-2">
@@ -1025,6 +1037,7 @@ function TimelineMinimap({
                     onEdit={onAnnotationEdit}
                     onReopen={onAnnotationReopen}
                     onResolve={onAnnotationResolve}
+                    pending={annotationBodyPending}
                   />
                 </div>
               </div>

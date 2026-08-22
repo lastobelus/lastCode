@@ -1658,6 +1658,51 @@ code {
   color: var(--muted-foreground);
 }
 
+/* Annotation previews sit inside the sidebar's compact thread hover. Match
+   that surface instead of inheriting conversation-scale Markdown headings. */
+.chat-markdown.thread-annotation-compact {
+  color: color-mix(in oklab, var(--accent-foreground) 75%, transparent);
+  font-size: var(--text-xs);
+  line-height: var(--text-xs--line-height);
+}
+
+.chat-markdown.thread-annotation-compact h1,
+.chat-markdown.thread-annotation-compact h2,
+.chat-markdown.thread-annotation-compact h3,
+.chat-markdown.thread-annotation-compact h4,
+.chat-markdown.thread-annotation-compact h5,
+.chat-markdown.thread-annotation-compact h6 {
+  margin: 0.5rem 0 0.25rem;
+  color: var(--accent-foreground);
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.chat-markdown.thread-annotation-compact h1 {
+  font-weight: 600;
+}
+
+.chat-markdown.thread-annotation-compact h2,
+.chat-markdown.thread-annotation-compact h3,
+.chat-markdown.thread-annotation-compact h4,
+.chat-markdown.thread-annotation-compact h5,
+.chat-markdown.thread-annotation-compact h6 {
+  font-weight: 500;
+}
+
+.chat-markdown.thread-annotation-compact p,
+.chat-markdown.thread-annotation-compact ul,
+.chat-markdown.thread-annotation-compact ol,
+.chat-markdown.thread-annotation-compact blockquote,
+.chat-markdown.thread-annotation-compact pre,
+.chat-markdown.thread-annotation-compact .chat-markdown-table-container {
+  margin: 0.375rem 0;
+}
+
+.chat-markdown.thread-annotation-compact > :first-child {
+  margin-top: 0;
+}
+
 .chat-markdown ul {
   /* Reset for nested uls under a widened ol — --list-gutter is an inherited
      custom property, so without this a task-list under a 3+ digit ordered
