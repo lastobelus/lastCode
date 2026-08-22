@@ -46,6 +46,7 @@
     "lastcode:checkpoints": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoints.mjs",
     "lastcode:build": "mise exec node@24.13.1 -- node scripts/lastcode-build.mjs",
     "lastcode:install": "mise exec node@24.13.1 -- node scripts/lastcode-install.mjs",
+    "lastcode:intel-stage": "mise exec node@24.13.1 -- node scripts/lastcode-intel-stage.mjs",
     "lastcode:setup": "mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs",
     "lastcode:checkpoint:service": "mise exec node@24.13.1 -- node scripts/lastcode-nightly-service.ts",
     "lastcode:build:mac:arm64": "mise exec node@24.13.1 -- node scripts/lastcode-build-mac.ts --arch arm64",
