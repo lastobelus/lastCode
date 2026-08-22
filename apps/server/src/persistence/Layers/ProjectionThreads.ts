@@ -14,12 +14,17 @@ import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection, ThreadLinkedPullRequest } from "@t3tools/contracts";
+import {
+  ModelSelection,
+  ThreadAnnotation,
+  ThreadLinkedPullRequest,
+} from "@t3tools/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -54,6 +59,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pin_order_key,
           title_regeneration_request_id,
           title_regeneration_started_at,
+          annotation_json,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -83,6 +90,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.pinOrderKey ?? null},
           ${row.titleRegenerationRequestId ?? null},
           ${row.titleRegenerationStartedAt ?? null},
+          ${row.annotation === null ? null : JSON.stringify(row.annotation)},
+          ${row.latestUserMessageId},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
@@ -112,6 +121,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pin_order_key = excluded.pin_order_key,
           title_regeneration_request_id = excluded.title_regeneration_request_id,
           title_regeneration_started_at = excluded.title_regeneration_started_at,
+          annotation_json = excluded.annotation_json,
+          latest_user_message_id = excluded.latest_user_message_id,
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
@@ -148,6 +159,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -186,6 +199,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
