@@ -1672,6 +1672,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const runtimeEnvironment = options?.environment ?? process.env;
         const threadTool =
           hostProcessPlatform === "win32"
             ? null
@@ -1680,7 +1681,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               : yield* materializeCodexThreadTool({
                   stateDir: serverConfig.stateDir,
                   baseDir: serverConfig.baseDir,
-                  platform: hostProcessPlatform,
+                  ...(runtimeEnvironment.ELECTRON_RUN_AS_NODE !== undefined
+                    ? {
+                        electronRunAsNode: runtimeEnvironment.ELECTRON_RUN_AS_NODE,
+                      }
+                    : {}),
                 }).pipe(
                   Effect.provideService(FileSystem.FileSystem, fileSystem),
                   Effect.provideService(Path.Path, path),
@@ -1695,10 +1700,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ),
                 );
         const codexEnvironment = {
-          ...(options?.environment ?? process.env),
-          ...(threadTool
-            ? { PATH: `${threadTool.binDir}:${(options?.environment ?? process.env).PATH ?? ""}` }
-            : {}),
+          ...runtimeEnvironment,
+          ...(threadTool ? { PATH: `${threadTool.binDir}:${runtimeEnvironment.PATH ?? ""}` } : {}),
           T3CODE_THREAD_ID: input.threadId,
           T3CODE_HOME: serverConfig.baseDir,
         };

@@ -144,11 +144,12 @@ Branch: `lastcode/codex-thread-read`
    ID.
 4. Make the wrapper pin its owning home explicitly on every invocation. For an ordinary
    Node-hosted server it executes that server's runtime and bundled CLI entry with
-   `--base-dir <owning-home>`. For packaged macOS LastCode it executes the LastCode
-   binary with `ELECTRON_RUN_AS_NODE=1`, the bundled server CLI entry, and the same
-   explicit base directory. The wrapper contains invocation details only and delegates
-   all behavior to `t3 thread`. Windows hosts are out of scope for the POSIX wrapper;
-   Codex still receives LastCode identity variables there, but no thread command is added to PATH.
+   `--base-dir <owning-home>`. For packaged POSIX LastCode it executes the LastCode
+   binary while preserving inherited `ELECTRON_RUN_AS_NODE=1`, the bundled server CLI
+   entry, and the same explicit base directory. The wrapper contains invocation details
+   only and delegates all behavior to `t3 thread`. Windows hosts are out of scope for the
+   POSIX wrapper; Codex still receives LastCode identity variables there, but no thread
+   command is added to PATH.
 5. Add bounded `list` and `read` commands over the existing shell and thread-detail
    snapshots. `read` accepts an exact or unambiguous thread-ID prefix and returns
    a small deterministic candidate subset plus original-count truncation metadata when
@@ -161,8 +162,9 @@ Branch: `lastcode/codex-thread-read`
 7. For offline transcript reads, call the bounded thread-detail projection query
    directly rather than the command read model, which intentionally omits hydrated
    thread bodies. Compose only the SQLite persistence and projection snapshot-query
-   layers; offline inspection must not start the writable orchestration engine or its
-   projectors alongside a live server.
+   layers through a read-only database client that skips WAL setup and migrations;
+   offline inspection must not start the writable orchestration engine or its projectors
+   alongside a live server.
 8. Preserve lifecycle visibility for active snoozed, settled, pending-input, and
    working threads. Do not mutate those states. Archived and deleted threads are out
    of scope and return not found.

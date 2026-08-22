@@ -20,7 +20,7 @@ and `originalThreadCount`.
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Its JSON reports when text or activity counts were truncated.
 
-The bundled thread command is currently available on POSIX Node hosts and packaged macOS.
+The bundled thread command is currently available on POSIX Node and packaged Electron hosts.
 Windows Codex sessions still receive LastCode thread and home identity, but do not receive a
 `lastcode-thread` launcher.
 

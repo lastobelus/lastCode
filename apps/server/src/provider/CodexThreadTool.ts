@@ -13,7 +13,7 @@ export interface CodexThreadToolInvocation {
   readonly cliEntryPath: string;
   readonly baseDir: string;
   readonly stateDir: string;
-  readonly packagedMacos: boolean;
+  readonly electronRunAsNode: boolean;
 }
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -25,7 +25,7 @@ export function renderCodexThreadToolWrapper(input: CodexThreadToolInvocation): 
     "thread",
   ].join(" ");
   const pinnedFlags = `--base-dir ${shellQuote(input.baseDir)} --state-dir ${shellQuote(input.stateDir)}`;
-  return `#!/bin/sh\n${input.packagedMacos ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}case "$1" in\n  current|list|read) command="$1"; shift; exec ${executable} "$command" ${pinnedFlags} "$@" ;;\n  ""|-h|--help|help) exec ${executable} --help ;;\n  *) echo "lastcode-thread: unsupported command '$1'" >&2; exit 64 ;;\nesac\n`;
+  return `#!/bin/sh\n${input.electronRunAsNode ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}case "$1" in\n  current|list|read) command="$1"; shift; exec ${executable} "$command" ${pinnedFlags} "$@" ;;\n  ""|-h|--help|help) exec ${executable} --help ;;\n  *) echo "lastcode-thread: unsupported command '$1'" >&2; exit 64 ;;\nesac\n`;
 }
 
 export const materializeCodexThreadTool = Effect.fn("materializeCodexThreadTool")(
@@ -34,7 +34,6 @@ export const materializeCodexThreadTool = Effect.fn("materializeCodexThreadTool"
     readonly baseDir: string;
     readonly executablePath?: string;
     readonly cliEntryPath?: string;
-    readonly platform: NodeJS.Platform;
     readonly electronRunAsNode?: string;
   }) {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -58,9 +57,7 @@ export const materializeCodexThreadTool = Effect.fn("materializeCodexThreadTool"
           cliEntryPath,
           baseDir: input.baseDir,
           stateDir: input.stateDir,
-          packagedMacos:
-            input.platform === "darwin" &&
-            (input.electronRunAsNode ?? process.env.ELECTRON_RUN_AS_NODE) === "1",
+          electronRunAsNode: (input.electronRunAsNode ?? process.env.ELECTRON_RUN_AS_NODE) === "1",
         }),
       );
       yield* fileSystem.chmod(wrapperPath, 0o755);

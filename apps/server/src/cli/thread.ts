@@ -30,7 +30,7 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import * as ThreadActionResume from "../orchestration/ThreadActionResume.ts";
 import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../orchestration/ThreadPlanProgress.ts";
-import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
+import { layerReadOnlyConfig as SqlitePersistenceLayerReadOnly } from "../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -451,7 +451,7 @@ export const ThreadCliOfflineRuntimeLive = Layer.mergeAll(
     Layer.provide(ThreadActionResume.layer),
     Layer.provide(ThreadPlanProgress.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
-    Layer.provideMerge(SqlitePersistenceLayerLive),
+    Layer.provideMerge(SqlitePersistenceLayerReadOnly),
   ),
 );
 
@@ -484,45 +484,57 @@ export const withReadSession = <A, E, R>(
   );
 
 const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
-  auth: EnvironmentAuth.EnvironmentAuth["Service"],
   config: ServerConfig.ServerConfig["Service"],
+  minimumLogLevel: ServerConfig.ServerConfig["Service"]["logLevel"],
   run: (source: ThreadReadSource) => Effect.Effect<unknown, ThreadCliError>,
 ) {
   const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
   if (Option.isNone(runtimeState)) return Option.none<unknown>();
+  const client = yield* makeLiveClient(runtimeState.value.origin);
+  const descriptorResult = yield* Effect.result(
+    client.metadata.descriptor().pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+  );
+  if (descriptorResult._tag === "Failure") return Option.none<unknown>();
   const attempted = yield* Effect.result(
-    withReadSession(auth, (token) =>
-      Effect.gen(function* () {
-        const client = yield* makeLiveClient(runtimeState.value.origin);
-        const headers = { authorization: `Bearer ${token}` };
-        const sourceResult = yield* Effect.result(
-          Effect.all([
-            client.metadata.descriptor(),
-            client.orchestration.shellSnapshot({ headers }),
-          ]).pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
-        );
-        if (sourceResult._tag === "Failure") {
-          return { kind: "unavailable" as const };
-        }
-        const [descriptor, shell] = sourceResult.success;
-        const output = yield* Effect.result(
-          run({
-            descriptor,
-            home: config.baseDir,
-            shell,
-            getThread: (threadId, turnLimit) =>
-              client.orchestration
-                .threadSnapshot({ params: { threadId }, payload: { turnLimit }, headers })
-                .pipe(
-                  Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
-                  Effect.mapError(
-                    (cause) => new ThreadCliError({ operation: "live detail read", cause }),
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      return yield* withReadSession(auth, (token) =>
+        Effect.gen(function* () {
+          const headers = { authorization: `Bearer ${token}` };
+          const sourceResult = yield* Effect.result(
+            client.orchestration
+              .shellSnapshot({ headers })
+              .pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+          );
+          if (sourceResult._tag === "Failure") {
+            return { kind: "unavailable" as const };
+          }
+          const output = yield* Effect.result(
+            run({
+              descriptor: descriptorResult.success,
+              home: config.baseDir,
+              shell: sourceResult.success,
+              getThread: (threadId, turnLimit) =>
+                client.orchestration
+                  .threadSnapshot({ params: { threadId }, payload: { turnLimit }, headers })
+                  .pipe(
+                    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+                    Effect.mapError(
+                      (cause) => new ThreadCliError({ operation: "live detail read", cause }),
+                    ),
                   ),
-                ),
-          }),
-        );
-        return { kind: "ran" as const, output };
-      }).pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+            }),
+          );
+          return { kind: "ran" as const, output };
+        }).pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+      );
+    }).pipe(
+      Effect.provide(
+        EnvironmentAuth.runtimeLayer.pipe(
+          Layer.provide(ServerConfig.layer(config)),
+          Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+        ),
+      ),
     ),
   );
   if (attempted._tag === "Success" && attempted.success.kind === "ran") {
@@ -540,8 +552,9 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   const minimumLogLevel = config.logLevel;
   return yield* Effect.gen(function* () {
-    const auth = yield* EnvironmentAuth.EnvironmentAuth;
-    const live = yield* tryRunLiveThreadRead(auth, config, run);
+    const live = yield* tryRunLiveThreadRead(config, minimumLogLevel, run).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    );
     if (Option.isSome(live)) {
       return yield* Console.log(yield* encodeJson(live.value));
     }
@@ -588,15 +601,7 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
       const output = yield* run(source);
       yield* Console.log(yield* encodeJson(output));
     }).pipe(Effect.provide(offlineLayer));
-  }).pipe(
-    Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
-        Layer.provideMerge(FetchHttpClient.layer),
-        Layer.provide(ServerConfig.layer(config)),
-        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-      ),
-    ),
-  );
+  });
 });
 
 const jsonFlag = Flag.boolean("json").pipe(

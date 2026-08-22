@@ -3,6 +3,7 @@ import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -24,6 +25,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as CliError from "effect/unstable/cli/CliError";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
@@ -605,6 +607,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       NodeFS.writeFileSync(config.environmentIdPath, "env-thread-offline\n");
       yield* Effect.gen(function* () {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
         yield* engine.dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-thread-offline-create"),
@@ -618,19 +621,24 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           worktreePath: null,
           createdAt: DateTime.formatIso(yield* DateTime.now),
         });
+        // Leave the applied schema intact but make the latest migration appear pending.
+        // A setup-enabled fallback would try to run it; the inspection layer must not.
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 40`;
       }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
 
       const unavailableRuntime = {
         version: 1 as const,
         pid: process.pid,
-        port: 0,
-        origin: "http://127.0.0.1:0",
+        port: 1,
+        origin: "http://127.0.0.1:1",
         startedAt: "2026-08-21T00:00:00.000Z",
       };
       yield* persistServerRuntimeState({
         path: config.serverRuntimeStatePath,
         state: unavailableRuntime,
       });
+      const databaseStatBefore = NodeFS.statSync(config.dbPath);
+      NodeFS.chmodSync(config.dbPath, 0o444);
 
       const { output } = yield* captureStdout(
         runCli(["thread", "read", "thread-offline", "--turn-limit", "1", "--base-dir", baseDir]),
@@ -643,6 +651,20 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         config.serverRuntimeStatePath,
       );
       assert.deepStrictEqual(preservedRuntime, Option.some(unavailableRuntime));
+      const databaseStatAfter = NodeFS.statSync(config.dbPath);
+      assert.equal(databaseStatAfter.size, databaseStatBefore.size);
+      assert.equal(databaseStatAfter.mtimeMs, databaseStatBefore.mtimeMs);
+      const verificationDb = new NodeSqlite.DatabaseSync(config.dbPath, { readOnly: true });
+      try {
+        assert.strictEqual(
+          verificationDb
+            .prepare("SELECT migration_id FROM effect_sql_migrations WHERE migration_id = 40")
+            .get(),
+          undefined,
+        );
+      } finally {
+        verificationDb.close();
+      }
     }),
   );
 
@@ -651,13 +673,22 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       const baseDir = NodeFS.mkdtempSync(
         NodePath.join(NodeOS.tmpdir(), "t3-thread-read-only-runtime-"),
       );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-read-only-runtime-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
       const config = yield* makeCliTestServerConfig(baseDir);
       yield* Effect.gen(function* () {
         const engine = yield* Effect.serviceOption(OrchestrationEngine.OrchestrationEngineService);
         const query = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
+        const sql = yield* SqlClient.SqlClient;
+        const writeAttempt = yield* Effect.result(
+          sql`CREATE TABLE thread_cli_must_remain_read_only (id INTEGER)`,
+        );
 
         assert.isTrue(Option.isNone(engine));
         assert.isTrue(Option.isSome(query));
+        assert.strictEqual(writeAttempt._tag, "Failure");
       }).pipe(
         Effect.provide(
           ThreadCliOfflineRuntimeLive.pipe(

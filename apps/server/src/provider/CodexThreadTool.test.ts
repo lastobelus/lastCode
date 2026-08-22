@@ -19,24 +19,24 @@ it("renders an ordinary Node-hosted wrapper pinned to its owning home", () => {
       cliEntryPath: "/opt/t3/dist/bin.mjs",
       baseDir: "/srv/lastcode home",
       stateDir: "/srv/lastcode home/userdata",
-      packagedMacos: false,
+      electronRunAsNode: false,
     }),
     "#!/bin/sh\ncase \"$1\" in\n  current|list|read) command=\"$1\"; shift; exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread \"$command\" --base-dir '/srv/lastcode home' --state-dir '/srv/lastcode home/userdata' \"$@\" ;;\n  \"\"|-h|--help|help) exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread --help ;;\n  *) echo \"lastcode-thread: unsupported command '$1'\" >&2; exit 64 ;;\nesac\n",
   );
 });
 
-it("renders a packaged macOS wrapper through the LastCode executable", () => {
+it("renders a packaged POSIX Electron wrapper with Node mode preserved", () => {
   const wrapper = renderCodexThreadToolWrapper({
-    executablePath: "/Applications/LastCode.app/Contents/MacOS/LastCode",
-    cliEntryPath: "/Applications/LastCode.app/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
-    baseDir: "/Users/me/.lastcode",
-    stateDir: "/Users/me/.lastcode/dev",
-    packagedMacos: true,
+    executablePath: "/opt/LastCode/lastcode",
+    cliEntryPath: "/opt/LastCode/resources/app.asar/apps/server/dist/bin.mjs",
+    baseDir: "/home/me/.lastcode",
+    stateDir: "/home/me/.lastcode/dev",
+    electronRunAsNode: true,
   });
   assert.match(wrapper, /^#!\/bin\/sh\nexport ELECTRON_RUN_AS_NODE=1\n/);
   assert.match(
     wrapper,
-    /thread "\$command" --base-dir '\/Users\/me\/\.lastcode' --state-dir '\/Users\/me\/\.lastcode\/dev'/,
+    /thread "\$command" --base-dir '\/home\/me\/\.lastcode' --state-dir '\/home\/me\/\.lastcode\/dev'/,
   );
 });
 
@@ -50,11 +50,34 @@ it.effect("materializes an executable wrapper under the active state directory",
       baseDir,
       executablePath: "/usr/bin/node",
       cliEntryPath: "/app/bin.mjs",
-      platform: "linux",
+      electronRunAsNode: "0",
     });
     const stat = yield* Effect.promise(() => NodeFSP.stat(result.wrapperPath));
+    const wrapper = yield* fileSystem.readFileString(result.wrapperPath);
     assert.strictEqual(result.wrapperPath, NodePath.join(stateDir, "bin", "lastcode-thread"));
     assert.ok((stat.mode & 0o111) !== 0);
+    assert.isFalse(wrapper.includes("ELECTRON_RUN_AS_NODE"));
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
+);
+
+it.effect("preserves inherited Electron Node mode in a Linux wrapper", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "lastcode-thread-linux-electron-",
+    });
+    const result = yield* materializeCodexThreadTool({
+      stateDir: NodePath.join(baseDir, "userdata"),
+      baseDir,
+      executablePath: "/opt/LastCode/lastcode",
+      cliEntryPath: "/opt/LastCode/resources/app.asar/apps/server/dist/bin.mjs",
+      electronRunAsNode: "1",
+    });
+
+    assert.match(
+      yield* fileSystem.readFileString(result.wrapperPath),
+      /^#!\/bin\/sh\nexport ELECTRON_RUN_AS_NODE=1\n/,
+    );
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
 );
 
@@ -73,7 +96,7 @@ it.effect("routes pinned flags through each real thread leaf parser", () =>
         NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
         "../bin.ts",
       ),
-      platform: "linux",
+      electronRunAsNode: "0",
     });
     for (const command of ["current", "list", "read"] as const) {
       const output = yield* Effect.tryPromise(
