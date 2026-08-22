@@ -91,7 +91,7 @@ function parseManifest(directory, checkpointTag, lastCodeCommit) {
   if (artifacts.filter((artifact) => artifact.path.endsWith(".dmg")).length !== 1) {
     fail("Build manifest must list exactly one DMG.");
   }
-  return artifacts;
+  return { artifacts, manifest };
 }
 
 function parseChecksums(directory) {
@@ -187,7 +187,11 @@ export function validateIntelReleaseDirectory(input) {
   if (!SHA1_PATTERN.test(input.lastCodeCommit)) {
     fail("Expected LastCode commit must be a full lowercase SHA-1.");
   }
-  const artifacts = parseManifest(input.directory, input.checkpointTag, input.lastCodeCommit);
+  const { artifacts, manifest } = parseManifest(
+    input.directory,
+    input.checkpointTag,
+    input.lastCodeCommit,
+  );
   const checksums = parseChecksums(input.directory);
   assertExactNames(
     checksums.keys(),
@@ -236,9 +240,16 @@ export function validateIntelReleaseDirectory(input) {
       localAssets,
     );
   }
+  const dmg = artifacts.find((artifact) => artifact.path.endsWith(".dmg"));
+  const version = input.checkpointTag.replace(/^lastcode\/(?:checkpoint|revision)\/v/u, "");
   return {
     assetNames: localAssets.map((asset) => asset.name).toSorted(),
-    dmgName: artifacts.find((artifact) => artifact.path.endsWith(".dmg")).path,
+    buildTag: manifest.buildTag,
+    checkpointTag: input.checkpointTag,
+    dmgName: dmg.path,
+    dmgSha256: dmg.sha256,
+    lastCodeCommit: input.lastCodeCommit,
+    version,
   };
 }
 
