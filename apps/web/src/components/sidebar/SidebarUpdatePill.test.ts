@@ -4,7 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   keyReleaseNoteGroups,
   resolveReleaseNoteHeading,
+  resolveSidebarUpdateButtonToneClassName,
+  SidebarLocalBuildFailureTooltip,
   SidebarUpdateReleaseNotesContent,
+  shouldNativelyDisableSidebarUpdateButton,
 } from "./SidebarUpdatePill.tsx";
 
 describe("SidebarUpdatePill release notes", () => {
@@ -79,5 +82,68 @@ describe("SidebarUpdatePill release notes", () => {
     expect(markup).toContain('<li class="list-disc break-words">local change</li>');
     expect(markup).toContain('<p class="break-words">2 more LastCode changes</p>');
     expect(markup).not.toContain('<li class="list-disc break-words">2 more LastCode changes</li>');
+  });
+});
+
+describe("SidebarUpdatePill local failure", () => {
+  it("uses a destructive button tone without changing the ordinary update tone", () => {
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: true,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-destructive/12");
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-update-surface");
+  });
+
+  it("keeps active local progress hoverable while preserving native hosted disabling", () => {
+    expect(
+      shouldNativelyDisableSidebarUpdateButton({
+        disabled: true,
+        isActionPending: true,
+        isLocalBuildInProgress: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldNativelyDisableSidebarUpdateButton({
+        disabled: true,
+        isActionPending: true,
+        isLocalBuildInProgress: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("renders persistent failure context and an accessible copy action", () => {
+    const markup = renderToStaticMarkup(
+      SidebarLocalBuildFailureTooltip({
+        failure: {
+          checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",
+          phase: "Building DMG",
+          percent: 94,
+          errorKind: "packaging",
+          currentVersion: "1.2.2",
+          targetVersion: "1.2.3-nightly.4",
+          logPath: "/Users/test/.lastcode/local-updates/build.log",
+          error: "hdiutil \u001B[31mfailed\u001B[0m\0",
+        },
+        isCopied: false,
+        onCopy: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Local build failed");
+    expect(markup).toContain("Building DMG · 94% est.");
+    expect(markup).toContain("hdiutil failed");
+    expect(markup).not.toContain("\u001B");
+    expect(markup).not.toContain("\0");
+    expect(markup).toContain("Copy details");
+    expect(markup).toContain('aria-label="Copy local build failure details"');
+    expect(markup).toContain("text-destructive-foreground");
   });
 });
