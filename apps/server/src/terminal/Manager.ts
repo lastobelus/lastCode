@@ -150,6 +150,7 @@ export class TerminalManager extends Context.Service<
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+      startIfNeeded?: boolean,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /**
@@ -203,6 +204,12 @@ export class TerminalManager extends Context.Service<
     readonly subscribeMetadata: (
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
+
+    /** Read current terminal metadata without subscribing to runtime events. */
+    readonly metadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
+
+    /** Refresh subprocess activity, then read current terminal metadata. */
+    readonly refreshMetadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
   }
 >()("t3/terminal/Manager/TerminalManager") {}
 
@@ -2316,7 +2323,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const open: TerminalManager["Service"]["open"] = (input) =>
     withThreadLock(input.threadId, openLocked(input));
 
-  const openOrAttachForStream = (input: TerminalAttachInput) =>
+  const openOrAttachForStream = (input: TerminalAttachInput, startIfNeeded = true) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -2324,7 +2331,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const existing = yield* getSession(input.threadId, terminalId);
 
         if (Option.isNone(existing)) {
-          if (!input.cwd) {
+          if (!input.cwd || !startIfNeeded) {
             return yield* new TerminalSessionLookupError({
               threadId: input.threadId,
               terminalId,
@@ -2342,7 +2349,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const targetCols = input.cols ?? session.cols;
         const targetRows = input.rows ?? session.rows;
 
-        if (!session.process && input.cwd && input.restartIfNotRunning === true) {
+        if (!session.process && input.cwd && input.restartIfNotRunning === true && startIfNeeded) {
           return yield* openLocked({
             ...input,
             terminalId,
@@ -2396,7 +2403,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       };
     });
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) => {
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    startIfNeeded,
+  ) => {
     let unsubscribe: (() => void) | null = null;
 
     return Effect.gen(function* () {
@@ -2417,7 +2428,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return attachEvent ? listener(attachEvent) : Effect.void;
       });
 
-      const initialSnapshot = yield* openOrAttachForStream(input);
+      const initialSnapshot = yield* openOrAttachForStream(input, startIfNeeded);
 
       yield* listener({
         type: "snapshot",
@@ -2716,6 +2727,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     close,
     subscribe,
     subscribeMetadata,
+    metadata: readAllTerminalMetadata(),
+    refreshMetadata: pollSubprocessActivity().pipe(Effect.andThen(readAllTerminalMetadata())),
   });
 });
 

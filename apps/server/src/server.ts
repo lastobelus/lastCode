@@ -110,6 +110,7 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -430,7 +431,7 @@ const RuntimeCoreDependenciesLive = Layer.merge(
   ActionResume.layer.pipe(Layer.provide(RuntimeCoreDependenciesBaseLive)),
 );
 
-const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
+const RuntimeDependenciesWithoutDrainAdmissionLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
@@ -441,6 +442,11 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+);
+
+const RuntimeDependenciesLive = Layer.merge(
+  RuntimeDependenciesWithoutDrainAdmissionLive,
+  UpdateDrainAdmission.layer.pipe(Layer.provide(RuntimeDependenciesWithoutDrainAdmissionLive)),
 );
 
 const commandReadinessLayer = HttpRouter.middleware(

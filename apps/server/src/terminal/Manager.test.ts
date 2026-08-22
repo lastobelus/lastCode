@@ -311,6 +311,7 @@ it.layer(
           rows: 40,
         },
         (event) => Ref.update(attachEvents, (events) => [...events, event]),
+        false,
       );
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
 
@@ -320,6 +321,22 @@ it.layer(
       assert.equal(snapshot.snapshot.threadId, "thread-1");
       assert.equal(snapshot.snapshot.terminalId, DEFAULT_TERMINAL_ID);
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  it.effect("refuses to create a missing terminal for read-only attach", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const result = yield* manager
+        .attachStream(openInput(), () => Effect.void, false)
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        result._tag === "Failure" ? result.failure._tag : null,
+        "TerminalSessionLookupError",
+      );
+      expect(ptyAdapter.spawnInputs).toHaveLength(0);
     }),
   );
 
