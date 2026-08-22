@@ -1,7 +1,13 @@
 import {
+  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  CommandId,
   EnvironmentHttpApi,
   EnvironmentId,
+  MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  TrimmedNonEmptyString,
+  type ClientOrchestrationCommand,
   type ExecutionEnvironmentDescriptor,
   type OrchestrationProjectShell,
   type OrchestrationShellSnapshot,
@@ -11,6 +17,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -137,9 +144,60 @@ export const ThreadReadResult = Schema.Struct({
   activitiesTruncated: Schema.Boolean,
   originalActivityCount: Schema.optional(Schema.Number),
 });
+export const ThreadSendAcceptedResult = Schema.Struct({
+  kind: Schema.Literal("accepted"),
+  ...ThreadIdentity.fields,
+  messageId: Schema.String,
+});
 const decodeThreadCurrentResult = Schema.decodeUnknownEffect(ThreadCurrentResult);
 const decodeThreadListResult = Schema.decodeUnknownEffect(ThreadListResult);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(ThreadReadResult);
+const decodeThreadSendAcceptedResult = Schema.decodeUnknownEffect(ThreadSendAcceptedResult);
+const decodeThreadSendMessage = Schema.decodeUnknownEffect(
+  TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+);
+
+export class ThreadSendTargetError extends Schema.TaggedErrorClass<ThreadSendTargetError>()(
+  "ThreadSendTargetError",
+  {
+    reason: Schema.Literals(["not-found", "ambiguous"]),
+    identifier: Schema.String,
+    candidates: Schema.optional(Schema.Array(Schema.String)),
+    candidatesTruncated: Schema.optional(Schema.Boolean),
+    originalCandidateCount: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    if (this.reason === "not-found") {
+      return this.identifier.length === 0
+        ? "A non-blank LastCode thread id or prefix is required."
+        : `LastCode thread '${this.identifier}' was not found.`;
+    }
+    const candidates = this.candidates ?? [];
+    const suffix = this.candidatesTruncated
+      ? ` (showing ${candidates.length} of ${this.originalCandidateCount})`
+      : "";
+    return `LastCode thread prefix '${this.identifier}' is ambiguous: ${candidates.join(", ")}${suffix}.`;
+  }
+}
+
+export class ThreadSendMessageError extends Schema.TaggedErrorClass<ThreadSendMessageError>()(
+  "ThreadSendMessageError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `--message must contain text and be at most ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS} characters.`;
+  }
+}
+
+export class ThreadSendServerUnavailableError extends Schema.TaggedErrorClass<ThreadSendServerUnavailableError>()(
+  "ThreadSendServerUnavailableError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "The owning LastCode server is not available; thread send has no offline fallback.";
+  }
+}
 
 export type ThreadTargetResolution =
   | { readonly kind: "resolved"; readonly thread: OrchestrationThreadShell }
@@ -386,6 +444,65 @@ export interface ThreadReadSource {
   ) => Effect.Effect<OrchestrationThreadDetailSnapshot, ThreadCliError>;
 }
 
+export interface ThreadSendSource {
+  readonly descriptor: ExecutionEnvironmentDescriptor;
+  readonly shell: OrchestrationShellSnapshot;
+  readonly dispatch: (
+    command: Extract<ClientOrchestrationCommand, { readonly type: "thread.turn.start" }>,
+  ) => Effect.Effect<unknown, ThreadCliError>;
+}
+
+export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
+  source: ThreadSendSource,
+  input: {
+    readonly identifier: string;
+    readonly message: string;
+    readonly commandId: CommandId;
+    readonly messageId: MessageId;
+    readonly createdAt: string;
+  },
+) {
+  const resolution = resolveThreadTarget(source.shell.threads, input.identifier);
+  if (resolution.kind !== "resolved") {
+    return yield* new ThreadSendTargetError({
+      reason: resolution.kind,
+      identifier: resolution.identifier,
+      ...(resolution.kind === "ambiguous"
+        ? {
+            candidates: resolution.candidates,
+            ...(resolution.candidatesTruncated ? { candidatesTruncated: true } : {}),
+            ...(resolution.originalCandidateCount !== undefined
+              ? { originalCandidateCount: resolution.originalCandidateCount }
+              : {}),
+          }
+        : {}),
+    });
+  }
+  const message = yield* decodeThreadSendMessage(input.message).pipe(
+    Effect.mapError((cause) => new ThreadSendMessageError({ cause })),
+  );
+  yield* source.dispatch({
+    type: "thread.turn.start",
+    commandId: input.commandId,
+    threadId: resolution.thread.id,
+    message: {
+      messageId: input.messageId,
+      role: "user",
+      text: message,
+      attachments: [],
+    },
+    runtimeMode: resolution.thread.runtimeMode,
+    interactionMode: resolution.thread.interactionMode,
+    createdAt: input.createdAt,
+  });
+  return yield* decodeThreadSendAcceptedResult({
+    kind: "accepted",
+    environmentId: source.descriptor.environmentId,
+    threadId: resolution.thread.id,
+    messageId: input.messageId,
+  });
+});
+
 export const currentThreadOutput = Effect.fn("currentThreadOutput")(function* (
   source: ThreadReadSource,
   context: { readonly threadId?: string; readonly home?: string } = {
@@ -542,6 +659,19 @@ export const withReadSession = <A, E, R>(
     ({ sessionId }) => auth.revokeSession(sessionId).pipe(Effect.ignore({ log: true })),
   );
 
+export const withSendSession = <A, E, R>(
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  run: (token: string) => Effect.Effect<A, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    auth.issueSession({
+      scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      label: "lastcode thread cli",
+    }),
+    ({ token }) => run(token),
+    ({ sessionId }) => auth.revokeSession(sessionId).pipe(Effect.ignore({ log: true })),
+  );
+
 const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
   config: ServerConfig.ServerConfig["Service"],
   minimumLogLevel: ServerConfig.ServerConfig["Service"]["logLevel"],
@@ -663,6 +793,91 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
   });
 });
 
+const runThreadSend = Effect.fn("runThreadSend")(function* (
+  flags: CliAuthLocationFlags,
+  identifier: string,
+  message: string,
+) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveThreadInspectionConfig(flags, logLevel);
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isNone(runtimeState)) {
+    return yield* new ThreadSendServerUnavailableError({
+      cause: new Error("The active home has no recorded server runtime."),
+    });
+  }
+  const client = yield* makeLiveClient(runtimeState.value.origin);
+  const descriptor = yield* client.metadata.descriptor().pipe(
+    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+    Effect.mapError((cause) => new ThreadSendServerUnavailableError({ cause })),
+  );
+  const minimumLogLevel = config.logLevel;
+
+  return yield* Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const output = yield* withSendSession(auth, (token) =>
+      Effect.gen(function* () {
+        const headers = { authorization: `Bearer ${token}` };
+        const shell = yield* client.orchestration.shellSnapshot({ headers }).pipe(
+          Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+          Effect.mapError(
+            (cause) => new ThreadCliError({ operation: "live send target lookup", cause }),
+          ),
+        );
+        const crypto = yield* Crypto.Crypto;
+        const commandId = CommandId.make(
+          yield* crypto.randomUUIDv4.pipe(
+            Effect.mapError(
+              (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+            ),
+          ),
+        );
+        const messageId = MessageId.make(
+          yield* crypto.randomUUIDv4.pipe(
+            Effect.mapError(
+              (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+            ),
+          ),
+        );
+        return yield* sendThreadOutput(
+          {
+            descriptor,
+            shell,
+            dispatch: (command) =>
+              client.orchestration
+                .dispatch({
+                  headers,
+                  payload: command,
+                } as Parameters<typeof client.orchestration.dispatch>[0])
+                .pipe(
+                  Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+                  Effect.asVoid,
+                  Effect.mapError(
+                    (cause) => new ThreadCliError({ operation: "live send dispatch", cause }),
+                  ),
+                ),
+          },
+          {
+            identifier,
+            message,
+            commandId,
+            messageId,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          },
+        );
+      }),
+    );
+    yield* Console.log(yield* encodeJson(output));
+  }).pipe(
+    Effect.provide(
+      EnvironmentAuth.runtimeLayer.pipe(
+        Layer.provide(ServerConfig.layer(config)),
+        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+      ),
+    ),
+  );
+});
+
 const jsonFlag = Flag.boolean("json").pipe(
   Flag.withDescription("Print stable JSON output."),
   Flag.withDefault(false),
@@ -735,7 +950,23 @@ const readCommand = Command.make("read", {
   ),
 );
 
+const sendCommand = Command.make("send", {
+  ...threadLocationFlags,
+  json: jsonFlag,
+  thread: Argument.string("thread").pipe(
+    Argument.withDescription("Exact LastCode thread id or unambiguous id prefix."),
+  ),
+  message: Flag.string("message").pipe(
+    Flag.withDescription("User-directed message to send to the target thread."),
+  ),
+}).pipe(
+  Command.withDescription("Send a user-directed message to one live thread."),
+  Command.withHandler((flags) =>
+    runThreadSend(flags, flags.thread, flags.message).pipe(Effect.provide(FetchHttpClient.layer)),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
-  Command.withDescription("Inspect LastCode threads."),
-  Command.withSubcommands([currentCommand, listCommand, readCommand]),
+  Command.withDescription("Inspect and message LastCode threads."),
+  Command.withSubcommands([currentCommand, listCommand, readCommand, sendCommand]),
 );
