@@ -501,6 +501,45 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("injects LastCode identity without a transient AppImage wrapper", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: {
+            APPIMAGE: "/tmp/.mount_LastCode/LastCode.AppImage",
+            APPDIR: "/tmp/.mount_LastCode",
+            PATH: "/usr/bin",
+          },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-appimage-tool-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(Layer.succeed(HostProcessPlatform, "linux")),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("lastcode-appimage-thread"),
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.environment?.T3CODE_THREAD_ID, "lastcode-appimage-thread");
+      NodeAssert.equal(runtime.options.environment?.T3CODE_HOME, config.baseDir);
+      NodeAssert.equal(runtime.options.environment?.PATH, "/usr/bin");
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("maps codex model options for the adapter's bound custom instance id", () => {
     const customInstanceId = ProviderInstanceId.make("codex_personal");
     const customRuntimeFactory = makeRuntimeFactory();

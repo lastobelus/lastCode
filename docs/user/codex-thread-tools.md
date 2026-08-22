@@ -20,9 +20,10 @@ and `originalThreadCount`.
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Its JSON reports when text or activity counts were truncated.
 
-The bundled thread command is currently available on POSIX Node and packaged Electron hosts.
-Windows Codex sessions still receive LastCode thread and home identity, but do not receive a
-`lastcode-thread` launcher.
+The bundled thread command is currently available on POSIX Node hosts and packaged macOS.
+Windows and packaged Linux AppImage Codex sessions still receive LastCode thread and home
+identity, but do not receive a `lastcode-thread` launcher. Windows has no POSIX launcher;
+AppImage executable and resource paths are transient mount paths.
 
 To inspect a different host, first choose that host with an existing SSH alias and invoke the
 wrapper stored in its LastCode home:

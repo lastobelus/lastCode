@@ -18,6 +18,18 @@ export interface CodexThreadToolInvocation {
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
+export function canExposeCodexThreadTool(
+  platform: NodeJS.Platform,
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const isAppImage =
+    platform === "linux" &&
+    [environment.APPIMAGE, environment.APPDIR].some(
+      (value) => value !== undefined && value.trim().length > 0,
+    );
+  return platform !== "win32" && !isAppImage;
+}
+
 export function renderCodexThreadToolWrapper(input: CodexThreadToolInvocation): string {
   const executable = [
     shellQuote(input.executablePath),

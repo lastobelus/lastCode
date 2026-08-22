@@ -56,7 +56,7 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import { materializeCodexThreadTool } from "../CodexThreadTool.ts";
+import { canExposeCodexThreadTool, materializeCodexThreadTool } from "../CodexThreadTool.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
@@ -1673,32 +1673,31 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeEnvironment = options?.environment ?? process.env;
-        const threadTool =
-          hostProcessPlatform === "win32"
-            ? null
-            : options?.makeRuntime
-              ? { binDir: path.join(serverConfig.stateDir, "bin") }
-              : yield* materializeCodexThreadTool({
-                  stateDir: serverConfig.stateDir,
-                  baseDir: serverConfig.baseDir,
-                  ...(runtimeEnvironment.ELECTRON_RUN_AS_NODE !== undefined
-                    ? {
-                        electronRunAsNode: runtimeEnvironment.ELECTRON_RUN_AS_NODE,
-                      }
-                    : {}),
-                }).pipe(
-                  Effect.provideService(FileSystem.FileSystem, fileSystem),
-                  Effect.provideService(Path.Path, path),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderAdapterProcessError({
-                        provider: PROVIDER,
-                        threadId: input.threadId,
-                        detail: "Failed to prepare the LastCode thread command.",
-                        cause,
-                      }),
-                  ),
-                );
+        const threadTool = !canExposeCodexThreadTool(hostProcessPlatform, runtimeEnvironment)
+          ? null
+          : options?.makeRuntime
+            ? { binDir: path.join(serverConfig.stateDir, "bin") }
+            : yield* materializeCodexThreadTool({
+                stateDir: serverConfig.stateDir,
+                baseDir: serverConfig.baseDir,
+                ...(runtimeEnvironment.ELECTRON_RUN_AS_NODE !== undefined
+                  ? {
+                      electronRunAsNode: runtimeEnvironment.ELECTRON_RUN_AS_NODE,
+                    }
+                  : {}),
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      detail: "Failed to prepare the LastCode thread command.",
+                      cause,
+                    }),
+                ),
+              );
         const codexEnvironment = {
           ...runtimeEnvironment,
           ...(threadTool ? { PATH: `${threadTool.binDir}:${runtimeEnvironment.PATH ?? ""}` } : {}),

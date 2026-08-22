@@ -10,7 +10,29 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
-import { materializeCodexThreadTool, renderCodexThreadToolWrapper } from "./CodexThreadTool.ts";
+import {
+  canExposeCodexThreadTool,
+  materializeCodexThreadTool,
+  renderCodexThreadToolWrapper,
+} from "./CodexThreadTool.ts";
+
+it("exposes persistent wrappers only on supported host environments", () => {
+  assert.isTrue(canExposeCodexThreadTool("linux", { PATH: "/usr/bin" }));
+  assert.isTrue(
+    canExposeCodexThreadTool("darwin", {
+      ELECTRON_RUN_AS_NODE: "1",
+      PATH: "/usr/bin",
+    }),
+  );
+  assert.isFalse(
+    canExposeCodexThreadTool("linux", {
+      APPIMAGE: "/tmp/.mount_LastCode/LastCode.AppImage",
+    }),
+  );
+  assert.isFalse(canExposeCodexThreadTool("linux", { APPDIR: "/tmp/.mount_LastCode" }));
+  assert.isTrue(canExposeCodexThreadTool("linux", { APPIMAGE: "", APPDIR: "  " }));
+  assert.isFalse(canExposeCodexThreadTool("win32", {}));
+});
 
 it("renders an ordinary Node-hosted wrapper pinned to its owning home", () => {
   assert.strictEqual(
