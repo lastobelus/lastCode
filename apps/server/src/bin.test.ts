@@ -1020,6 +1020,71 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             response: `${spilledResponse}${responseTail}`,
             responseTruncated: false,
           });
+          const emptyMessageId = MessageId.make("message-completed-without-assistant");
+          const emptyTurnId = TurnId.make("turn-completed-without-assistant");
+          const emptyAt = DateTime.formatIso(yield* DateTime.now);
+          yield* engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-empty-response-start"),
+            threadId,
+            message: {
+              messageId: emptyMessageId,
+              role: "user",
+              text: "Complete without an assistant message.",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            trackRequestCorrelation: true,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-request.resolve",
+            commandId: CommandId.make("turn-request:empty-response"),
+            threadId,
+            messageId: emptyMessageId,
+            outcome: { kind: "started", turnId: emptyTurnId },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-empty-response-running"),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: emptyTurnId,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-empty-response-complete"),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          assert.deepStrictEqual(
+            yield* engine.getTurnRequestWaitState({ threadId, messageId: emptyMessageId }),
+            {
+              kind: "terminal",
+              state: "completed",
+              turnId: emptyTurnId,
+              response: "",
+            },
+          );
           const trackedTurnId = TurnId.make("turn-live-wait");
           const trackedMessageId = MessageId.make("message-live-wait-request");
           const createdAt = DateTime.formatIso(yield* DateTime.now);
