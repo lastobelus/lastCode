@@ -707,8 +707,9 @@ describe("ProviderCommandReactor", () => {
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
     );
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await waitFor(() => harness.turnRequestResolutionDispatchAttempts === 1);
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.turnRequestResolutionDispatchAttempts).toBe(1);
     const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
     expect(thread?.session?.status).not.toBe("error");
   });
