@@ -191,6 +191,7 @@ export function ThreadAnnotationHoverPopover(props: {
   threadRef: ScopedThreadRef;
   cwd?: string | undefined;
   rowActive: boolean;
+  scalePercent: number;
   trigger: ReactNode;
   onEdit: () => void;
   onResolve: () => void;
@@ -204,7 +205,10 @@ export function ThreadAnnotationHoverPopover(props: {
   }, []);
   const scheduleClose = useCallback(() => {
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = window.setTimeout(() => setOpen(false), 120);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setOpen(false);
+    }, 120);
   }, []);
 
   useEffect(() => {
@@ -237,7 +241,10 @@ export function ThreadAnnotationHoverPopover(props: {
       <PopoverPopup
         align="end"
         className="w-80 border border-yellow-300/70 bg-yellow-100/95 dark:border-yellow-700/50 dark:bg-yellow-950/90"
+        finalFocus={false}
+        initialFocus={false}
         side="right"
+        style={{ zoom: props.scalePercent / 100 }}
         onMouseEnter={keepOpen}
         onMouseLeave={scheduleClose}
         onFocus={keepOpen}

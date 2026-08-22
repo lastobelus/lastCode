@@ -320,6 +320,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   projectCwd: string | null;
+  legacySidebarScale: LegacySidebarScale;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -389,6 +390,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     openPrLink,
     onEditAnnotation,
     onResolveAnnotation,
+    legacySidebarScale,
     thread,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -894,6 +896,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                       onEdit={() => onEditAnnotation(thread)}
                       onResolve={() => onResolveAnnotation(thread)}
                       rowActive={annotationRowActive}
+                      scalePercent={legacySidebarScale}
                       threadRef={threadRef}
                       trigger={
                         <span
@@ -926,6 +929,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                     onEdit={() => onEditAnnotation(thread)}
                     onResolve={() => onResolveAnnotation(thread)}
                     rowActive={annotationRowActive}
+                    scalePercent={legacySidebarScale}
                     threadRef={threadRef}
                     trigger={
                       <span
@@ -1090,6 +1094,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               key={threadKey}
               thread={thread}
               projectCwd={projectCwd}
+              legacySidebarScale={legacySidebarScale}
               orderedProjectThreadKeys={orderedProjectThreadKeys}
               isActive={activeRouteThreadKey === threadKey}
               openPullRequestsInRightPanel={openPullRequestsInRightPanel}
