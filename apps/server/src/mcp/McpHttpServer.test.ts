@@ -1,7 +1,15 @@
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  PreviewTabId,
+  ProviderInstanceId,
+  ThreadId,
+  UpdateDrainAdmissionError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -11,6 +19,8 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { ActionResume } from "../actionResume/ActionResume.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -37,6 +47,51 @@ const client = McpSchema.McpServerClient.of({
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
+);
+
+it.effect("rejects MCP action launch while update drain admission is closed", () =>
+  Effect.gen(function* () {
+    let launched = false;
+    const maintenance = new UpdateDrainAdmissionError({
+      reason: "update_draining",
+      requestId: UpdateDrainRequestId.make("mcp-drain"),
+      targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+      message: "LastCode is draining for an update.",
+    });
+    const layer = McpHttpServer.ActionResumeToolkitRegistrationLive.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(
+        Layer.mock(ActionResume)({
+          runProjectActionAndResume: () =>
+            Effect.sync(() => {
+              launched = true;
+              throw new Error("action launch should not run");
+            }),
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.mock(UpdateDrainAdmission)({
+          admit: () => Effect.fail(maintenance),
+        }),
+      ),
+    );
+
+    const result = yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      return yield* server
+        .callTool({ name: "run_project_action_and_resume", arguments: { actionId: "qa" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocation,
+            capabilities: new Set(["action-resume"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    }).pipe(Effect.provide(layer));
+
+    expect(result.isError).toBe(true);
+    expect(launched).toBe(false);
+  }),
 );
 
 it("normalizes empty successful notification responses to accepted", () => {
