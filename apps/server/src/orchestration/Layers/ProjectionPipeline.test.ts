@@ -2511,6 +2511,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+      const threadRows = yield* sql<{ readonly latestUserMessageId: string | null }>`
+        SELECT latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-revert'
+      `;
+      assert.equal(threadRows[0]?.latestUserMessageId, null);
     }),
   );
 });
