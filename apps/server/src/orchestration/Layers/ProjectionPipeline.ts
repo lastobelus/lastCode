@@ -34,6 +34,7 @@ import {
   type ProjectionTurn,
   ProjectionTurnRepository,
 } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRequestCorrelationRepository } from "../../persistence/Services/ProjectionTurnRequestCorrelations.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
@@ -43,6 +44,7 @@ import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionTurnRequestCorrelationRepositoryLive } from "../../persistence/Layers/ProjectionTurnRequestCorrelations.ts";
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -480,6 +482,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
+    const projectionTurnRequestCorrelationRepository =
+      yield* ProjectionTurnRequestCorrelationRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
 
     const fileSystem = yield* FileSystem.FileSystem;
@@ -1176,12 +1180,38 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.turn-start-requested": {
+          if (event.payload.trackRequestCorrelation === true) {
+            yield* projectionTurnRequestCorrelationRepository.insertPending({
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestedAt: event.payload.createdAt,
+            });
+          }
           yield* projectionTurnRepository.replacePendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
             sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
             sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
             requestedAt: event.payload.createdAt,
+          });
+          return;
+        }
+
+        case "thread.turn-request-resolved": {
+          const outcome = event.payload.outcome;
+          yield* projectionTurnRequestCorrelationRepository.resolve({
+            threadId: event.payload.threadId,
+            messageId: event.payload.messageId,
+            turnId: outcome.kind === "started" ? outcome.turnId : null,
+            state: outcome.kind === "started" ? "started" : outcome.state,
+            resolvedAt: outcome.kind === "started" ? event.occurredAt : outcome.completedAt,
+          });
+          return;
+        }
+
+        case "thread.deleted": {
+          yield* projectionTurnRequestCorrelationRepository.deleteByThreadId({
+            threadId: event.payload.threadId,
           });
           return;
         }
@@ -1770,6 +1800,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
+  Layer.provideMerge(ProjectionTurnRequestCorrelationRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
   Layer.provideMerge(ProjectionStateRepositoryLive),
 );

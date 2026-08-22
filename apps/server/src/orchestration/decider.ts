@@ -1123,6 +1123,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.trackRequestCorrelation === true ? { trackRequestCorrelation: true } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1301,6 +1302,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.turn-request.resolve": {
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-request-resolved",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          outcome: command.outcome,
         },
       };
     }

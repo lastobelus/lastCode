@@ -12,17 +12,21 @@ import {
   EnvironmentId,
   EnvironmentMetadataHttpApi,
   EnvironmentOrchestrationHttpApi,
+  MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -55,6 +59,7 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import { ServerEnvironment } from "./environment/ServerEnvironment.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 const isThreadSendMessageError = Schema.is(ThreadSendMessageError);
@@ -78,7 +83,8 @@ const captureStdout = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     const output =
       (yield* TestConsole.logLines).findLast((line): line is string => typeof line === "string") ??
       "";
-    return { result, output };
+    const errorOutput = (yield* TestConsole.errorLines).join("\n");
+    return { result, output, errorOutput };
   }).pipe(Effect.provide(Layer.mergeAll(CliRuntimeLayer, TestConsole.layer)));
 
 const makeCliTestServerConfig = (baseDir: string) =>
@@ -149,7 +155,22 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
       ),
     );
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-      Layer.provide(Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer)),
+      Layer.provide(
+        Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer).pipe(
+          Layer.provide(
+            Layer.succeed(ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(EnvironmentId.make("env-thread-live")),
+              getDescriptor: Effect.succeed({
+                environmentId: EnvironmentId.make("env-thread-live"),
+                label: "CLI integration",
+                platform: { os: "linux" as const, arch: "x64" as const },
+                serverVersion: "test",
+                capabilities: { repositoryIdentity: true },
+              }),
+            }),
+          ),
+        ),
+      ),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
@@ -857,6 +878,265 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             assert.equal(sent?.role, "user");
             assert.equal(sent?.text, "Report the current status.");
           }
+          const trackedEvents = yield* engine.subscribeDomainEvents;
+          const composedTurnId = TurnId.make("turn-composed-wait");
+          const responder = yield* trackedEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "thread.turn-start-requested" &&
+                event.payload.trackRequestCorrelation === true,
+            ),
+            Stream.runHead,
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.die("tracked request stream ended"),
+                onSome: (event) => {
+                  if (event.type !== "thread.turn-start-requested") {
+                    return Effect.die("unexpected tracked request event");
+                  }
+                  const responseAt = event.payload.createdAt;
+                  return Effect.gen(function* () {
+                    yield* engine.dispatch({
+                      type: "thread.turn-request.resolve",
+                      commandId: CommandId.make(`turn-request:${event.eventId}`),
+                      threadId,
+                      messageId: event.payload.messageId,
+                      outcome: { kind: "started", turnId: composedTurnId },
+                      createdAt: responseAt,
+                    });
+                    yield* engine.dispatch({
+                      type: "thread.session.set",
+                      commandId: CommandId.make("cmd-composed-wait-running"),
+                      threadId,
+                      session: {
+                        threadId,
+                        status: "running",
+                        providerName: "codex",
+                        runtimeMode: "full-access",
+                        activeTurnId: composedTurnId,
+                        lastError: null,
+                        updatedAt: responseAt,
+                      },
+                      createdAt: responseAt,
+                    });
+                    yield* engine.dispatch({
+                      type: "thread.session.set",
+                      commandId: CommandId.make("cmd-composed-wait-complete"),
+                      threadId,
+                      session: {
+                        threadId,
+                        status: "ready",
+                        providerName: "codex",
+                        runtimeMode: "full-access",
+                        activeTurnId: null,
+                        lastError: null,
+                        updatedAt: responseAt,
+                      },
+                      createdAt: responseAt,
+                    });
+                    assert.deepStrictEqual(
+                      yield* engine.getTurnRequestWaitState({
+                        threadId,
+                        messageId: event.payload.messageId,
+                      }),
+                      { kind: "pending" },
+                    );
+                    yield* engine.dispatch({
+                      type: "thread.message.assistant.delta",
+                      commandId: CommandId.make("cmd-composed-wait-answer"),
+                      threadId,
+                      messageId: MessageId.make("message-composed-wait-answer"),
+                      delta: "Composed exact answer",
+                      turnId: composedTurnId,
+                      createdAt: responseAt,
+                    });
+                    yield* engine.dispatch({
+                      type: "thread.message.assistant.complete",
+                      commandId: CommandId.make("cmd-composed-wait-answer-complete"),
+                      threadId,
+                      messageId: MessageId.make("message-composed-wait-answer"),
+                      turnId: composedTurnId,
+                      createdAt: responseAt,
+                    });
+                    return event.payload.messageId;
+                  });
+                },
+              }),
+            ),
+            Effect.forkChild,
+          );
+          const composed = yield* captureStdout(
+            runCliWithRuntime([
+              "thread",
+              "send",
+              threadId,
+              "--message",
+              "Compose and wait.",
+              "--wait",
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          const composedMessageId = yield* Fiber.join(responder);
+          const recoveryLine = composed.errorOutput
+            .split("\n")
+            .find((line) => line.startsWith("LASTCODE_WAIT_HANDLE="));
+          assert.isDefined(recoveryLine);
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - exact recovery framing under test.
+          assert.deepStrictEqual(JSON.parse(recoveryLine!.slice("LASTCODE_WAIT_HANDLE=".length)), {
+            kind: "wait-handle",
+            environmentId: "env-thread-live",
+            threadId,
+            messageId: composedMessageId,
+          });
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - exact CLI JSON framing under test.
+          const composedResult = JSON.parse(composed.output) as {
+            readonly kind: string;
+            readonly environmentId: string;
+            readonly threadId: string;
+            readonly messageId: string;
+            readonly turnId: string;
+            readonly response: string;
+            readonly responseTruncated: boolean;
+          };
+          assert.deepStrictEqual(composedResult, {
+            kind: "completed",
+            environmentId: "env-thread-live",
+            threadId,
+            messageId: composedMessageId,
+            turnId: composedTurnId,
+            response: "Composed exact answer",
+            responseTruncated: false,
+          });
+          const trackedTurnId = TurnId.make("turn-live-wait");
+          const trackedMessageId = MessageId.make("message-live-wait-request");
+          const createdAt = DateTime.formatIso(yield* DateTime.now);
+          yield* engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-live-wait-request"),
+            threadId,
+            message: {
+              messageId: trackedMessageId,
+              role: "user",
+              text: "Wait for this exact turn.",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            trackRequestCorrelation: true,
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-request.resolve",
+            commandId: CommandId.make("turn-request:live-wait"),
+            threadId,
+            messageId: trackedMessageId,
+            outcome: { kind: "started", turnId: trackedTurnId },
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-live-wait-running"),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: trackedTurnId,
+              lastError: null,
+              updatedAt: createdAt,
+            },
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: CommandId.make("cmd-live-wait-answer"),
+            threadId,
+            messageId: MessageId.make("message-live-wait-answer"),
+            delta: "Exact tracked answer",
+            turnId: trackedTurnId,
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make("cmd-live-wait-answer-complete"),
+            threadId,
+            messageId: MessageId.make("message-live-wait-answer"),
+            turnId: trackedTurnId,
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-live-wait-complete"),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: createdAt,
+            },
+            createdAt,
+          });
+          const recoveryHandle = {
+            kind: "wait-handle" as const,
+            environmentId: "env-thread-live",
+            threadId,
+            messageId: trackedMessageId,
+          };
+          const resumed = yield* captureStdout(
+            runCliWithRuntime([
+              "thread",
+              "wait",
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - exact CLI JSON framing under test.
+              JSON.stringify(recoveryHandle),
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - exact CLI JSON framing under test.
+          const completed = JSON.parse(resumed.output) as {
+            readonly kind: string;
+            readonly turnId: string;
+            readonly response: string;
+          };
+          assert.strictEqual(completed.kind, "completed");
+          assert.strictEqual(completed.turnId, trackedTurnId);
+          assert.strictEqual(completed.response, "Exact tracked answer");
+          const missingCorrelation = yield* Effect.result(
+            runCliWithRuntime([
+              "thread",
+              "wait",
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - exact CLI JSON framing under test.
+              JSON.stringify({
+                ...recoveryHandle,
+                messageId: "message-not-projected",
+              }),
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          const wrongEnvironment = yield* Effect.result(
+            runCliWithRuntime([
+              "thread",
+              "wait",
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - exact CLI JSON framing under test.
+              JSON.stringify({
+                ...recoveryHandle,
+                environmentId: "another-environment",
+              }),
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          assert.strictEqual(missingCorrelation._tag, "Failure");
+          assert.strictEqual(wrongEnvironment._tag, "Failure");
+          assert.equal((yield* auth.listSessions()).length, beforeSessions.length);
           yield* engine.dispatch({
             type: "thread.create",
             commandId: CommandId.make("cmd-thread-send-live-rival"),
