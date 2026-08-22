@@ -110,3 +110,68 @@ tests("UpdateDrain", (it) => {
     }),
   );
 });
+
+it.layer(testLayer)("UpdateDrain request history", (it) => {
+  it.effect("never reuses a cancelled request id after later drains and restart", () =>
+    Effect.gen(function* () {
+      const drain = yield* UpdateDrain;
+      const repository = yield* UpdateDrainRepository;
+      const laterRequestId = UpdateDrainRequestId.make("update-2");
+      const laterTargetVersion = UpdateDrainTargetVersion.make("1.2.4");
+
+      yield* drain.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-1"),
+        requestId,
+        targetVersion,
+        createdAt: startedAt,
+      });
+      yield* drain.dispatch({
+        type: "update-drain.cancel",
+        commandId: CommandId.make("cancel-1"),
+        requestId,
+        createdAt: "2026-08-21T00:01:00.000Z",
+      });
+      yield* drain.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-2"),
+        requestId: laterRequestId,
+        targetVersion: laterTargetVersion,
+        createdAt: "2026-08-21T00:02:00.000Z",
+      });
+      yield* drain.dispatch({
+        type: "update-drain.cancel",
+        commandId: CommandId.make("cancel-2"),
+        requestId: laterRequestId,
+        createdAt: "2026-08-21T00:03:00.000Z",
+      });
+
+      const restored = yield* makeUpdateDrain().pipe(
+        Effect.provideService(UpdateDrainRepository, repository),
+      );
+      const staleStart = yield* Effect.result(
+        restored.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("start-1-again"),
+          requestId,
+          targetVersion,
+          createdAt: "2026-08-21T00:04:00.000Z",
+        }),
+      );
+
+      assert.equal(staleStart._tag, "Failure");
+      assert.equal(
+        staleStart._tag === "Failure" ? staleStart.failure.reason : null,
+        "request_already_cancelled",
+      );
+      assert.deepStrictEqual(yield* restored.status, {
+        sequence: 4,
+        intent: {
+          requestId: laterRequestId,
+          targetVersion: laterTargetVersion,
+          status: "cancelled",
+        },
+      });
+    }),
+  );
+});

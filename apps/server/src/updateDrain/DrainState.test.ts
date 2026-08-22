@@ -15,7 +15,7 @@ const targetVersion = UpdateDrainTargetVersion.make("1.2.3");
 describe("update drain decider and projector", () => {
   it.effect("starts and cancels one durable intent without blocker state", () =>
     Effect.gen(function* () {
-      const startedDraft = yield* decideUpdateDrainCommand(emptyUpdateDrainState, {
+      const startedDraft = yield* decideUpdateDrainCommand(emptyUpdateDrainState, new Set(), {
         type: "update-drain.start",
         commandId: CommandId.make("start-1"),
         requestId,
@@ -35,7 +35,7 @@ describe("update drain decider and projector", () => {
       });
       assert.ok(!("blockers" in draining));
 
-      const cancelledDraft = yield* decideUpdateDrainCommand(draining, {
+      const cancelledDraft = yield* decideUpdateDrainCommand(draining, new Set([requestId]), {
         type: "update-drain.cancel",
         commandId: CommandId.make("cancel-1"),
         requestId,
@@ -62,7 +62,7 @@ describe("update drain decider and projector", () => {
         intent: { requestId, targetVersion, status: "draining" as const },
       };
       const competing = yield* Effect.result(
-        decideUpdateDrainCommand(draining, {
+        decideUpdateDrainCommand(draining, new Set([requestId]), {
           type: "update-drain.start",
           commandId: CommandId.make("start-2"),
           requestId: UpdateDrainRequestId.make("update-2"),
@@ -71,7 +71,7 @@ describe("update drain decider and projector", () => {
         }),
       );
       const staleCancel = yield* Effect.result(
-        decideUpdateDrainCommand(draining, {
+        decideUpdateDrainCommand(draining, new Set([requestId]), {
           type: "update-drain.cancel",
           commandId: CommandId.make("cancel-2"),
           requestId: UpdateDrainRequestId.make("update-2"),
@@ -99,7 +99,7 @@ describe("update drain decider and projector", () => {
         intent: { requestId, targetVersion, status: "cancelled" as const },
       };
       const sameRequest = yield* Effect.result(
-        decideUpdateDrainCommand(cancelled, {
+        decideUpdateDrainCommand(cancelled, new Set([requestId]), {
           type: "update-drain.cancel",
           commandId: CommandId.make("cancel-again"),
           requestId,
@@ -107,7 +107,7 @@ describe("update drain decider and projector", () => {
         }),
       );
       const otherRequest = yield* Effect.result(
-        decideUpdateDrainCommand(cancelled, {
+        decideUpdateDrainCommand(cancelled, new Set([requestId]), {
           type: "update-drain.cancel",
           commandId: CommandId.make("cancel-stale"),
           requestId: UpdateDrainRequestId.make("update-2"),

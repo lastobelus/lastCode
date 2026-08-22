@@ -3,6 +3,7 @@ import {
   type UpdateDrainCommand,
   UpdateDrainError,
   type UpdateDrainEvent,
+  type UpdateDrainRequestId,
   type UpdateDrainState,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -38,6 +39,7 @@ function eventIdFor(command: UpdateDrainCommand) {
 
 export function decideUpdateDrainCommand(
   state: UpdateDrainState,
+  usedRequestIds: ReadonlySet<UpdateDrainRequestId>,
   command: UpdateDrainCommand,
 ): Effect.Effect<UpdateDrainEventDraft, UpdateDrainError> {
   if (command.type === "update-drain.start") {
@@ -49,7 +51,7 @@ export function decideUpdateDrainCommand(
         }),
       );
     }
-    if (state.intent?.requestId === command.requestId) {
+    if (usedRequestIds.has(command.requestId)) {
       return Effect.fail(
         new UpdateDrainError({
           reason: "request_already_cancelled",

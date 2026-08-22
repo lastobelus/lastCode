@@ -55,6 +55,7 @@ export const makeUpdateDrain = Effect.fn("makeUpdateDrain")(function* () {
   const mutex = yield* Semaphore.make(1);
   const events = yield* repository.readAllEvents().pipe(Effect.mapError(internalError));
   let currentState = events.reduce(projectUpdateDrainEvent, emptyUpdateDrainState);
+  const usedRequestIds = new Set(events.map((event) => event.requestId));
 
   const dispatchUnlocked = Effect.fn("UpdateDrain.dispatchUnlocked")(function* (
     command: UpdateDrainCommand,
@@ -78,7 +79,9 @@ export const makeUpdateDrain = Effect.fn("makeUpdateDrain")(function* () {
       });
     }
 
-    const decision = yield* Effect.result(decideUpdateDrainCommand(currentState, command));
+    const decision = yield* Effect.result(
+      decideUpdateDrainCommand(currentState, usedRequestIds, command),
+    );
     if (decision._tag === "Failure") {
       yield* repository
         .saveRejected({
@@ -112,6 +115,7 @@ export const makeUpdateDrain = Effect.fn("makeUpdateDrain")(function* () {
       })
       .pipe(Effect.mapError(internalError));
     currentState = projectUpdateDrainEvent(currentState, committed.event);
+    usedRequestIds.add(committed.event.requestId);
     return committed.receipt;
   });
 
