@@ -53,6 +53,8 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
     releaseNotes: [],
     omittedReleaseCount: 0,
     downloadPercent: 100,
+    localBuildProgress: null,
+    localBuildFailure: null,
     checkedAt: null,
     message: null,
     errorContext: null,
