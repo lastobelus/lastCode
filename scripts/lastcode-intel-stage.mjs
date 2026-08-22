@@ -81,26 +81,30 @@ function run(command, args, options = {}) {
   return result.stdout.trim();
 }
 
-function ghJson(args, label) {
-  return parseJson(run("gh", args), label);
+function ghJson(args, label, runCommand = run) {
+  return parseJson(runCommand("gh", args), label);
 }
 
-export function listIntelReleases(repository) {
-  const releases = ghJson(
-    [
-      "release",
-      "list",
-      "--repo",
-      repository,
-      "--limit",
-      "100",
-      "--json",
-      "tagName,isDraft,isImmutable,isPrerelease",
-    ],
+export function listIntelReleases(repository, options = {}) {
+  const pages = ghJson(
+    ["api", "--paginate", "--slurp", `repos/${repository}/releases?per_page=100`],
     "GitHub release list",
+    options.runCommand,
   );
-  if (!Array.isArray(releases)) fail("GitHub release list must be an array.");
-  return releases;
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    fail("GitHub paginated release list must be an array of pages.");
+  }
+  return pages.flatMap((page) =>
+    page.map((release) => {
+      if (!isRecord(release)) fail("GitHub release list contains an invalid release.");
+      return {
+        tagName: release.tag_name,
+        isDraft: release.draft,
+        isImmutable: release.immutable,
+        isPrerelease: release.prerelease,
+      };
+    }),
+  );
 }
 
 export function resolveRemoteTagCommit(repository, tag) {
@@ -124,58 +128,87 @@ export function resolveRemoteTagCommit(repository, tag) {
   fail(`Tag ${tag} contains too many nested annotated tags.`);
 }
 
-export function readPending(root) {
+function readPendingPointer(path) {
+  try {
+    return NodeFS.readFileSync(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+export function readPending(root, options = {}) {
   const path = NodePath.join(root, PENDING_NAME);
-  if (!NodeFS.existsSync(path)) return undefined;
-  const pending = parseJson(NodeFS.readFileSync(path, "utf8"), "pending Intel candidate");
-  if (
-    !isRecord(pending) ||
-    pending.schemaVersion !== 1 ||
-    typeof pending.candidateId !== "string" ||
-    NodePath.basename(pending.candidateId) !== pending.candidateId ||
-    !parseInstallableTag(pending.tag) ||
-    !SHA1_PATTERN.test(pending.commit ?? "") ||
-    typeof pending.version !== "string" ||
-    typeof pending.dmgName !== "string" ||
-    NodePath.basename(pending.dmgName) !== pending.dmgName ||
-    !/^[a-f0-9]{64}$/u.test(pending.dmgSha256 ?? "")
-  ) {
-    fail("Pending Intel candidate metadata is invalid.");
-  }
-  const parsedTag = parseInstallableTag(pending.tag);
-  if (parsedTag.version !== pending.version) {
-    fail("Pending Intel candidate version disagrees with its immutable tag.");
-  }
-  const candidateDirectory = NodePath.join(root, "candidates", pending.candidateId);
-  const assetsDirectory = NodePath.join(candidateDirectory, "assets");
-  const candidateMetadataPath = NodePath.join(candidateDirectory, "candidate.json");
-  const dmgPath = NodePath.join(assetsDirectory, pending.dmgName);
-  if (
-    !NodeFS.lstatSync(candidateDirectory, { throwIfNoEntry: false })?.isDirectory() ||
-    !NodeFS.lstatSync(assetsDirectory, { throwIfNoEntry: false })?.isDirectory() ||
-    !NodeFS.lstatSync(dmgPath, { throwIfNoEntry: false })?.isFile()
-  ) {
-    fail("Pending Intel candidate artifact is missing.");
-  }
-  const candidateMetadata = parseJson(
-    NodeFS.readFileSync(candidateMetadataPath, "utf8"),
-    "Intel candidate metadata",
-  );
-  for (const key of [
-    "schemaVersion",
-    "candidateId",
-    "commit",
-    "dmgName",
-    "dmgSha256",
-    "stagedAt",
-    "tag",
-    "version",
-  ]) {
-    if (candidateMetadata?.[key] !== pending[key]) {
-      fail("Pending pointer disagrees with its Intel candidate metadata.");
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rawPointer = readPendingPointer(path);
+    if (rawPointer === undefined) return undefined;
+    try {
+      const pending = parseJson(rawPointer, "pending Intel candidate");
+      if (
+        !isRecord(pending) ||
+        pending.schemaVersion !== 1 ||
+        typeof pending.candidateId !== "string" ||
+        NodePath.basename(pending.candidateId) !== pending.candidateId ||
+        !parseInstallableTag(pending.tag) ||
+        !SHA1_PATTERN.test(pending.commit ?? "") ||
+        typeof pending.version !== "string" ||
+        typeof pending.dmgName !== "string" ||
+        NodePath.basename(pending.dmgName) !== pending.dmgName ||
+        !/^[a-f0-9]{64}$/u.test(pending.dmgSha256 ?? "")
+      ) {
+        fail("Pending Intel candidate metadata is invalid.");
+      }
+      const parsedTag = parseInstallableTag(pending.tag);
+      if (parsedTag.version !== pending.version) {
+        fail("Pending Intel candidate version disagrees with its immutable tag.");
+      }
+      options.afterPointerRead?.({ attempt, pending });
+      const candidateDirectory = NodePath.join(root, "candidates", pending.candidateId);
+      const assetsDirectory = NodePath.join(candidateDirectory, "assets");
+      const candidateMetadataPath = NodePath.join(candidateDirectory, "candidate.json");
+      const dmgPath = NodePath.join(assetsDirectory, pending.dmgName);
+      if (
+        !NodeFS.lstatSync(candidateDirectory, { throwIfNoEntry: false })?.isDirectory() ||
+        !NodeFS.lstatSync(assetsDirectory, { throwIfNoEntry: false })?.isDirectory() ||
+        !NodeFS.lstatSync(dmgPath, { throwIfNoEntry: false })?.isFile()
+      ) {
+        fail("Pending Intel candidate artifact is missing.");
+      }
+      const candidateMetadata = parseJson(
+        NodeFS.readFileSync(candidateMetadataPath, "utf8"),
+        "Intel candidate metadata",
+      );
+      for (const key of [
+        "schemaVersion",
+        "candidateId",
+        "commit",
+        "dmgName",
+        "dmgSha256",
+        "stagedAt",
+        "tag",
+        "version",
+      ]) {
+        if (candidateMetadata?.[key] !== pending[key]) {
+          fail("Pending pointer disagrees with its Intel candidate metadata.");
+        }
+      }
+      if (readPendingPointer(path) !== rawPointer) continue;
+      return { ...pending, candidateDirectory, dmgPath };
+    } catch (error) {
+      if (readPendingPointer(path) !== rawPointer) continue;
+      throw error;
     }
   }
-  return { ...pending, candidateDirectory, dmgPath };
+  fail("Pending Intel candidate changed repeatedly while it was being inspected.");
+}
+
+function syncDirectory(path) {
+  const descriptor = NodeFS.openSync(path, "r");
+  try {
+    NodeFS.fsyncSync(descriptor);
+  } finally {
+    NodeFS.closeSync(descriptor);
+  }
 }
 
 function writeJsonAtomically(path, value) {
@@ -193,12 +226,7 @@ function writeJsonAtomically(path, value) {
     NodeFS.rmSync(temporary, { force: true });
     throw error;
   }
-  const directoryDescriptor = NodeFS.openSync(NodePath.dirname(path), "r");
-  try {
-    NodeFS.fsyncSync(directoryDescriptor);
-  } finally {
-    NodeFS.closeSync(directoryDescriptor);
-  }
+  syncDirectory(NodePath.dirname(path));
 }
 
 function cleanupUnreferencedCandidates(root, pendingId) {
@@ -212,12 +240,7 @@ function cleanupUnreferencedCandidates(root, pendingId) {
 
 function clearPending(root) {
   NodeFS.rmSync(NodePath.join(root, PENDING_NAME), { force: true });
-  const rootDescriptor = NodeFS.openSync(root, "r");
-  try {
-    NodeFS.fsyncSync(rootDescriptor);
-  } finally {
-    NodeFS.closeSync(rootDescriptor);
-  }
+  syncDirectory(root);
   cleanupUnreferencedCandidates(root, undefined);
 }
 
@@ -351,6 +374,8 @@ async function stageIntelUpdateLocked(
     NodeFS.rmSync(releaseJsonPath, { force: true });
     NodeFS.renameSync(incomplete, candidateDirectory);
     candidateMoved = true;
+    const syncPublishedDirectory = dependencies.syncDirectory ?? syncDirectory;
+    syncPublishedDirectory(candidatesDirectory);
     const metadata = {
       schemaVersion: 1,
       candidateId: identifier,

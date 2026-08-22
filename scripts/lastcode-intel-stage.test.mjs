@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   compareInstallables,
+  listIntelReleases,
   parseInstallableTag,
   parseStageOptions,
   readPending,
@@ -126,6 +127,36 @@ describe("LastCode Intel staging", () => {
     expect(result).toMatchObject({ status: "up-to-date", pending: undefined });
   });
 
+  it("discovers eligible releases beyond the first GitHub API page", () => {
+    const tag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+    let invocation;
+    const releases = listIntelReleases("lastobelus/lastCode", {
+      runCommand: (command, args) => {
+        invocation = { args, command };
+        return JSON.stringify([
+          Array.from({ length: 100 }, (_, index) => ({
+            tag_name: `unrelated-${index}`,
+            draft: false,
+            immutable: true,
+            prerelease: true,
+          })),
+          [{ tag_name: tag, draft: false, immutable: true, prerelease: true }],
+        ]);
+      },
+    });
+
+    expect(invocation).toEqual({
+      command: "gh",
+      args: ["api", "--paginate", "--slurp", "repos/lastobelus/lastCode/releases?per_page=100"],
+    });
+    expect(releases.at(-1)).toEqual({
+      tagName: tag,
+      isDraft: false,
+      isImmutable: true,
+      isPrerelease: true,
+    });
+  });
+
   it("stages one exact validated candidate with a safe inspection contract", async () => {
     const root = temporaryDirectory();
     const tag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
@@ -193,6 +224,65 @@ describe("LastCode Intel staging", () => {
     );
     expect(readPending(root)).toMatchObject({ commit: newerCommit, tag: newerTag });
     expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toHaveLength(1);
+  });
+
+  it("keeps status coherent when supersession removes the prior candidate", async () => {
+    const root = temporaryDirectory();
+    const replacementRoot = temporaryDirectory();
+    const oldTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    const newTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(oldTag, "a".repeat(40)),
+    );
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: replacementRoot },
+      dependencies(newTag, "b".repeat(40)),
+    );
+    const oldPending = readPending(root);
+    const newPending = readPending(replacementRoot);
+    NodeFS.cpSync(
+      newPending.candidateDirectory,
+      NodePath.join(root, "candidates", newPending.candidateId),
+      { recursive: true },
+    );
+    const newPointer = NodeFS.readFileSync(NodePath.join(replacementRoot, "pending.json"), "utf8");
+    let superseded = false;
+
+    const observed = readPending(root, {
+      afterPointerRead: ({ attempt }) => {
+        if (attempt !== 0 || superseded) return;
+        superseded = true;
+        NodeFS.writeFileSync(NodePath.join(root, "pending.json"), newPointer);
+        NodeFS.rmSync(oldPending.candidateDirectory, { force: true, recursive: true });
+      },
+    });
+
+    expect(observed).toMatchObject({ candidateId: newPending.candidateId, tag: newTag });
+  });
+
+  it("does not publish a candidate whose parent directory could not be synced", async () => {
+    const root = temporaryDirectory();
+    const oldTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(oldTag, "a".repeat(40)),
+    );
+    const oldPending = readPending(root);
+    const newTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+
+    await expect(
+      stageIntelUpdate(
+        { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+        dependencies(newTag, "b".repeat(40), {
+          syncDirectory: () => {
+            throw new Error("injected directory sync failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected directory sync failure");
+    expect(readPending(root)).toMatchObject({ candidateId: oldPending.candidateId, tag: oldTag });
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([oldPending.candidateId]);
   });
 
   it("clears a pending candidate after the installed app catches up", async () => {
