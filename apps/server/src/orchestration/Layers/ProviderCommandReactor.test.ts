@@ -68,6 +68,7 @@ import {
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -120,6 +121,7 @@ describe("ProviderCommandReactor", () => {
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
+    | ProjectionTurnRepository
     | SqlClient.SqlClient,
     unknown
   > | null = null;
@@ -179,6 +181,7 @@ describe("ProviderCommandReactor", () => {
     readonly compactThreadEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly createSecondThread?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -487,6 +490,7 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const projectionTurns = await runtime.runPromise(Effect.service(ProjectionTurnRepository));
     const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
 
     await Effect.runPromise(
@@ -532,7 +536,7 @@ describe("ProviderCommandReactor", () => {
         }),
       );
     }
-    if (input?.titleRegenerationBeforeStart === "two") {
+    if (input?.titleRegenerationBeforeStart === "two" || input?.createSecondThread) {
       await Effect.runPromise(
         engine.dispatch({
           type: "thread.create",
@@ -595,6 +599,7 @@ describe("ProviderCommandReactor", () => {
           }),
         ),
       tryHandlePromptCommand,
+      pendingTurnStarts: () => Effect.runPromise(projectionTurns.listPendingTurnStarts()),
       startSession,
       sendTurn,
       compactThread,
@@ -1180,6 +1185,68 @@ describe("ProviderCommandReactor", () => {
       expect(runningThread?.session?.status).toBe("running");
     }),
   );
+
+  effectIt.effect("clears a queued pending start after its thread is deleted", () =>
+    Effect.gen(function* () {
+      const releaseFirstStart = yield* Deferred.make<void>();
+      let startCount = 0;
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          createSecondThread: true,
+          startSessionEffect: (session) => {
+            startCount += 1;
+            return startCount === 1
+              ? Deferred.await(releaseFirstStart).pipe(Effect.as(session))
+              : Effect.succeed(session);
+          },
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-busy-thread"),
+        threadId: ThreadId.make("thread-2"),
+        message: {
+          messageId: asMessageId("user-message-busy-thread"),
+          role: "user",
+          text: "keep the provider worker busy",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-deleted-thread"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-deleted-thread"),
+          role: "user",
+          text: "delete before the worker reaches this turn",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("cmd-delete-thread-with-queued-turn"),
+        threadId: ThreadId.make("thread-1"),
+      });
+
+      yield* Deferred.succeed(releaseFirstStart, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      const pendingStarts = yield* Effect.promise(() => harness.pendingTurnStarts());
+      expect(pendingStarts.some((pending) => pending.threadId === "thread-1")).toBe(false);
+    }),
+  );
+
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
       const releaseStart = yield* Deferred.make<void>();
@@ -3851,7 +3918,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond-stale"),
