@@ -89,11 +89,17 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import {
   readThreadShell,
+  readEnvironmentSupportsThreadAnnotations,
   useProject,
   useProjects,
   useThreadShells,
   useThreadShellsForProjectRefs,
 } from "../state/entities";
+import {
+  runThreadAnnotationBodySave,
+  ThreadAnnotationEditorDialog,
+  ThreadAnnotationHoverPopover,
+} from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -203,7 +209,7 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
-import { primaryServerKeybindingsAtom } from "../state/server";
+import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import {
   derivePhysicalProjectKey,
   deriveProjectGroupingOverrideKey,
@@ -211,6 +217,14 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
+import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
+import {
+  deriveProviderInstanceEntries,
+  shouldShowInstanceBadge,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
+import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
+import { SidebarThreadHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
@@ -316,6 +330,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   projectCwd: string | null;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -354,6 +369,9 @@ interface SidebarThreadRowProps {
     prUrl: string,
     threadRef?: ScopedThreadRef,
   ) => boolean;
+  onEditAnnotation: (thread: SidebarThreadSummary) => void;
+  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
+  onResolveAnnotation: (thread: SidebarThreadSummary) => void;
 }
 
 export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
@@ -381,6 +399,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     cancelRename,
     attemptArchiveThread,
     openPrLink,
+    onEditAnnotation,
+    onSaveAnnotationBody,
+    onResolveAnnotation,
+    providerEntriesByEnvironmentId,
     thread,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -475,16 +497,53 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
+  const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
+  const branchMismatch = resolveLocalCheckoutBranchMismatch({
+    effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
+    activeWorktreePath: thread.worktreePath,
+    activeThreadBranch: thread.branch,
+    currentGitBranch: gitStatus.data?.refName ?? null,
+  });
+  const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+  const environmentProviderEntries = providerEntriesByEnvironmentId.get(thread.environmentId);
+  const providerEntry = environmentProviderEntries?.get(modelInstanceId) ?? null;
+  const showInstanceBadge =
+    providerEntry !== null &&
+    shouldShowInstanceBadge(providerEntry, environmentProviderEntries?.values() ?? []);
+  const selectedModel = providerEntry?.models.find(
+    (model) => model.slug === thread.modelSelection.model,
+  );
+  const modelLabel = selectedModel
+    ? getTriggerDisplayModelLabel(selectedModel)
+    : thread.modelSelection.model;
+  const threadHoverDetails = (
+    <SidebarThreadHoverContent
+      branchMismatch={branchMismatch}
+      environmentLabel={threadEnvironmentLabel}
+      modelInstanceId={modelInstanceId}
+      modelLabel={modelLabel}
+      projectCwd={threadProjectCwd ?? props.projectCwd}
+      projectFaviconPath={threadProject?.faviconPath ?? null}
+      projectTitle={threadProject?.title ?? null}
+      providerEntry={providerEntry}
+      showInstanceBadge={showInstanceBadge}
+      terminalProcessCount={runningTerminalIds.length}
+      terminalStatus={terminalStatus}
+      thread={thread}
+    />
+  );
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
     : !isThreadRunning
       ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "pointer-events-none";
+  const [annotationRowActive, setAnnotationRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
   }, [setConfirmingArchiveThreadKey, threadKey]);
   const handleMouseLeave = useCallback(() => {
     clearConfirmingArchive();
+    setAnnotationRowActive(false);
   }, [clearConfirmingArchive]);
   const handleBlurCapture = useCallback(
     (event: React.FocusEvent<HTMLLIElement>) => {
@@ -494,6 +553,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           return;
         }
         clearConfirmingArchive();
+        setAnnotationRowActive(false);
       });
     },
     [clearConfirmingArchive],
@@ -686,6 +746,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     <SidebarMenuSubItem
       className="w-full"
       data-thread-item
+      onFocusCapture={() => setAnnotationRowActive(true)}
+      onMouseEnter={() => setAnnotationRowActive(true)}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -738,6 +800,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               onClick={handleRenameInputClick}
               onDoubleClick={handleRenameInputClick}
             />
+          ) : hasActiveAnnotation ? (
+            <span
+              className="min-w-0 flex-1 truncate text-sm"
+              data-testid={`thread-title-${thread.id}`}
+            >
+              {thread.title}
+            </span>
           ) : (
             <Tooltip>
               <TooltipTrigger
@@ -750,8 +819,14 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   </span>
                 }
               />
-              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
-                {thread.title}
+              <TooltipPopup
+                align="start"
+                className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+                side="right"
+                sideOffset={4}
+                variant="glass"
+              >
+                {threadHoverDetails}
               </TooltipPopup>
             </Tooltip>
           )}
@@ -873,19 +948,63 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   </Tooltip>
                 )}
                 {jumpLabel ? (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
+                  hasActiveAnnotation && thread.annotation ? (
+                    <ThreadAnnotationHoverPopover
+                      annotation={thread.annotation}
+                      cwd={gitCwd ?? undefined}
+                      onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
+                      onEdit={() => onEditAnnotation(thread)}
+                      onResolve={() => onResolveAnnotation(thread)}
+                      rowActive={annotationRowActive}
+                      threadDetails={threadHoverDetails}
+                      threadRef={threadRef}
+                      trigger={
                         <span
-                          aria-label={jumpLabel}
-                          className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
-                        />
+                          aria-label={`${jumpLabel}; annotated`}
+                          className="inline-flex h-5 items-center rounded-full border border-dotted border-yellow-500/65 bg-accent/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-accent-foreground shadow-sm"
+                        >
+                          {jumpLabel}
+                        </span>
                       }
-                    >
-                      {jumpLabel}
-                    </TooltipTrigger>
-                    <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
-                  </Tooltip>
+                    />
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-label={jumpLabel}
+                            className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+                          />
+                        }
+                      >
+                        {jumpLabel}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
+                    </Tooltip>
+                  )
+                ) : hasActiveAnnotation && thread.annotation ? (
+                  <ThreadAnnotationHoverPopover
+                    annotation={thread.annotation}
+                    cwd={gitCwd ?? undefined}
+                    onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
+                    onEdit={() => onEditAnnotation(thread)}
+                    onResolve={() => onResolveAnnotation(thread)}
+                    rowActive={annotationRowActive}
+                    threadDetails={threadHoverDetails}
+                    threadRef={threadRef}
+                    trigger={
+                      <span
+                        className={`border-b border-dotted border-yellow-500/65 text-[10px] tabular-nums ${
+                          isHighlighted ? "text-foreground" : "text-secondary-label"
+                        }`}
+                        data-legacy-sidebar-unscaled-content
+                      >
+                        {formatRelativeTimeLabel(
+                          thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
+                        )}
+                      </span>
+                    }
+                  />
                 ) : (
                   <span
                     className={`text-[10px] tabular-nums ${
@@ -910,6 +1029,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 interface SidebarProjectThreadListProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -958,6 +1078,9 @@ interface SidebarProjectThreadListProps {
     prUrl: string,
     threadRef?: ScopedThreadRef,
   ) => boolean;
+  onEditAnnotation: (thread: SidebarThreadSummary) => void;
+  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
+  onResolveAnnotation: (thread: SidebarThreadSummary) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
 }
@@ -968,6 +1091,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     legacySidebarScale,
     scaleStyle,
+    providerEntriesByEnvironmentId,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -1001,6 +1125,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     cancelRename,
     attemptArchiveThread,
     openPrLink,
+    onEditAnnotation,
+    onSaveAnnotationBody,
+    onResolveAnnotation,
     expandThreadListForProject,
     collapseThreadListForProject,
   } = props;
@@ -1032,6 +1159,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               key={threadKey}
               thread={thread}
               projectCwd={projectCwd}
+              providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
               orderedProjectThreadKeys={orderedProjectThreadKeys}
               isActive={activeRouteThreadKey === threadKey}
               openPullRequestsInRightPanel={openPullRequestsInRightPanel}
@@ -1055,6 +1183,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               cancelRename={cancelRename}
               attemptArchiveThread={attemptArchiveThread}
               openPrLink={openPrLink}
+              onEditAnnotation={onEditAnnotation}
+              onSaveAnnotationBody={onSaveAnnotationBody}
+              onResolveAnnotation={onResolveAnnotation}
             />
           );
         })}
@@ -1099,6 +1230,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1122,6 +1254,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     legacySidebarScale,
     scaleStyle,
+    providerEntriesByEnvironmentId,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
@@ -1157,6 +1290,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     reportFailure: false,
   });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const upsertThreadAnnotation = useAtomCommand(threadEnvironment.upsertAnnotation, {
+    reportFailure: false,
+  });
+  const resolveThreadAnnotation = useAtomCommand(threadEnvironment.resolveAnnotation, {
     reportFailure: false,
   });
   const updateSettings = useUpdateClientSettings();
@@ -1247,6 +1386,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
   const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
+  const [annotationEditorTarget, setAnnotationEditorTarget] = useState<SidebarThreadSummary | null>(
+    null,
+  );
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
   );
@@ -1760,6 +1902,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ) => {
       if (isSidebarNestedLinkClick(event.target)) return;
       const isMac = isMacPlatform(navigator.platform);
+      if (
+        isContextMenuPointerDown({
+          button: event.button,
+          ctrlKey: event.ctrlKey,
+          isMac,
+        })
+      ) {
+        event.preventDefault();
+        return;
+      }
       const isModClick = isMac ? event.metaKey : event.ctrlKey;
       const isShiftClick = event.shiftKey;
       const threadKey = scopedThreadKey(threadRef);
@@ -2024,6 +2176,61 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     renamingInputRef.current = null;
   }, []);
 
+  const saveAnnotationBody = useCallback(
+    async (target: SidebarThreadSummary, body: string): Promise<boolean> => {
+      return runThreadAnnotationBodySave(
+        scopeThreadRef(target.environmentId, target.id),
+        async () => {
+          const result = await upsertThreadAnnotation({
+            environmentId: target.environmentId,
+            input: { threadId: target.id, body },
+          });
+          if (result._tag === "Success") return true;
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Failed to save annotation",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
+          return false;
+        },
+      );
+    },
+    [upsertThreadAnnotation],
+  );
+
+  const saveAnnotation = useCallback(
+    async (body: string): Promise<boolean> => {
+      if (!annotationEditorTarget) return false;
+      return saveAnnotationBody(annotationEditorTarget, body);
+    },
+    [annotationEditorTarget, saveAnnotationBody],
+  );
+
+  const resolveAnnotation = useCallback(
+    async (thread: SidebarThreadSummary) => {
+      const result = await resolveThreadAnnotation({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to resolve annotation",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [resolveThreadAnnotation],
+  );
+
   const startThreadRename = useCallback((threadKey: string, title: string) => {
     setRenamingThreadKey(threadKey);
     setRenamingTitle(title);
@@ -2164,12 +2371,18 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
+      const supportsThreadAnnotations = readEnvironmentSupportsThreadAnnotations(
+        thread.environmentId,
+      );
       const clicked = await api.contextMenu.show(
         [
           ...(thread.branch
             ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
             : []),
           { id: "rename", label: "Rename thread" },
+          ...(supportsThreadAnnotations && thread.latestUserMessageAt !== null
+            ? [{ id: "annotate", label: "Annotate thread…" }]
+            : []),
           { id: "mark-unread", label: "Mark unread" },
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
@@ -2204,6 +2417,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (clicked === "rename") {
         startThreadRename(threadKey, thread.title);
+        return;
+      }
+
+      if (clicked === "annotate") {
+        setAnnotationEditorTarget(thread);
         return;
       }
 
@@ -2386,6 +2604,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarProjectThreadList
         legacySidebarScale={legacySidebarScale}
         scaleStyle={scaleStyle}
+        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -2419,8 +2638,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         cancelRename={cancelRename}
         attemptArchiveThread={attemptArchiveThread}
         openPrLink={openPrLink}
+        onEditAnnotation={setAnnotationEditorTarget}
+        onSaveAnnotationBody={saveAnnotationBody}
+        onResolveAnnotation={(thread) => void resolveAnnotation(thread)}
         expandThreadListForProject={expandThreadListForProject}
         collapseThreadListForProject={collapseThreadListForProject}
+      />
+
+      <ThreadAnnotationEditorDialog
+        annotation={annotationEditorTarget?.annotation ?? null}
+        open={annotationEditorTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setAnnotationEditorTarget(null);
+        }}
+        onSave={saveAnnotation}
       />
 
       <Dialog
@@ -2829,6 +3060,7 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   legacySidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -2939,6 +3171,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     legacySidebarScale,
     projectTreeScaleStyle,
+    providerEntriesByEnvironmentId,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3067,6 +3300,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         legacySidebarScale={legacySidebarScale}
                         scaleStyle={projectTreeScaleStyle}
+                        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3102,6 +3336,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 legacySidebarScale={legacySidebarScale}
                 scaleStyle={projectTreeScaleStyle}
+                providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3152,6 +3387,7 @@ export default function LegacySidebar() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
+  const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const scaleStyle = useMemo(
     () => legacySidebarScaleStyle(legacySidebarScale),
     [legacySidebarScale],
@@ -3198,6 +3434,23 @@ export default function LegacySidebar() {
   const terminalFocused = useTerminalFocus();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const providerEntriesByEnvironmentId = useMemo(() => {
+    const entriesByEnvironmentId = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
+    for (const environment of environments) {
+      const environmentProviders =
+        environment.serverConfig?.providers ??
+        (environment.environmentId === primaryEnvironmentId ? serverProviders : []);
+      entriesByEnvironmentId.set(
+        environment.environmentId,
+        new Map(
+          deriveProviderInstanceEntries(environmentProviders).map(
+            (entry) => [entry.instanceId as string, entry] as const,
+          ),
+        ),
+      );
+    }
+    return entriesByEnvironmentId;
+  }, [environments, primaryEnvironmentId, serverProviders]);
   const environmentLabelById = useMemo(
     () =>
       new Map(
@@ -3819,6 +4072,7 @@ export default function LegacySidebar() {
         projectsLength={projects.length}
         legacySidebarScale={legacySidebarScale}
         projectTreeScaleStyle={scaleStyle}
+        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
       />
       <SidebarChromeFooter />
     </>
