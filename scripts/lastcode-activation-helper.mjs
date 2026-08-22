@@ -664,9 +664,10 @@ export async function runActivationTransaction(input) {
     makeActivationJournalStore(input.journalPath, {
       applicationsDir: input.expectedApplicationsDir ?? "/Applications",
     });
-  const journal = store.read();
-  const release = await (input.acquireTransactionLock ?? acquireActivationLock)(journal);
+  const initialJournal = store.read();
+  const release = await (input.acquireTransactionLock ?? acquireActivationLock)(initialJournal);
   try {
+    const journal = store.read();
     const executor = input.executor ?? makeDefaultActivationExecutor();
     if (journal.state !== "prepared" || journal.attempted) {
       const result = await recover(store, journal, executor, input.hooks);

@@ -314,6 +314,44 @@ describe("LastCode one-owner activation helper", () => {
     expectCandidateSelection(fixture.paths);
   });
 
+  it("re-reads a terminal journal after waiting for activation ownership", async () => {
+    const fixture = createFixture();
+    const fake = makeExecutor();
+    const fileStore = makeActivationJournalStore(fixture.paths.journalPath, {
+      applicationsDir: fixture.applicationsDir,
+    });
+    fileStore.write({
+      ...fileStore.read(),
+      attempted: true,
+      state: "trial",
+      updatedAt: new Date().toISOString(),
+    });
+    let reads = 0;
+    const store = {
+      read: () => {
+        const journal = fileStore.read();
+        reads += 1;
+        if (reads === 1) {
+          fileStore.write({
+            ...journal,
+            state: "rolled-back",
+            rollbackReason: "The active helper completed rollback.",
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        return journal;
+      },
+      write: fileStore.write,
+    };
+
+    const result = await run(fixture, fake, { store });
+
+    expect(result.state).toBe("rolled-back");
+    expect(reads).toBe(2);
+    expect(fake.calls.stop).toBe(0);
+    expect(fake.calls.startPrior).toBe(0);
+  });
+
   it("restores the SQLite main file and both sidecars", async () => {
     const fixture = createFixture();
     const fake = makeExecutor({
