@@ -1007,10 +1007,7 @@ function TimelineMinimap({
         </div>
         {annotationIsEarlier && annotation && threadRef ? (
           <div
-            className={cn(
-              "absolute left-3",
-              hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
-            )}
+            className="pointer-events-auto absolute left-3"
             data-thread-annotation-overflow
             onMouseEnter={() => setOverflowAnnotationOpen(true)}
             onMouseLeave={() => setOverflowAnnotationOpen(false)}

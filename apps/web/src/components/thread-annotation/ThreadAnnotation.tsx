@@ -82,9 +82,12 @@ export function ThreadAnnotationEditorDialog(props: {
   const [body, setBody] = useState("");
   const [saving, setSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (!props.open) return;
+    const justOpened = props.open && !wasOpenRef.current;
+    wasOpenRef.current = props.open;
+    if (!justOpened) return;
     setBody(props.annotation?.body ?? "");
     setSaving(false);
   }, [props.annotation?.body, props.open]);

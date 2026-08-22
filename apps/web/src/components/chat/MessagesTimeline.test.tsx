@@ -277,6 +277,7 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("data-thread-annotation-overflow");
     expect(markup).toContain('aria-label="Annotation attached to an earlier message"');
+    expect(markup).toContain('class="pointer-events-auto absolute left-3"');
     expect(markup).not.toContain("data-thread-annotation-marker");
   });
 

@@ -329,7 +329,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   projectCwd: string | null;
-  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -401,7 +401,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     onEditAnnotation,
     onSaveAnnotationBody,
     onResolveAnnotation,
-    providerEntryByInstanceId,
+    providerEntriesByEnvironmentId,
     thread,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -504,10 +504,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     currentGitBranch: gitStatus.data?.refName ?? null,
   });
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
-  const providerEntry = providerEntryByInstanceId.get(modelInstanceId) ?? null;
+  const environmentProviderEntries = providerEntriesByEnvironmentId.get(thread.environmentId);
+  const providerEntry = environmentProviderEntries?.get(modelInstanceId) ?? null;
   const showInstanceBadge =
     providerEntry !== null &&
-    shouldShowInstanceBadge(providerEntry, providerEntryByInstanceId.values());
+    shouldShowInstanceBadge(providerEntry, environmentProviderEntries?.values() ?? []);
   const selectedModel = providerEntry?.models.find(
     (model) => model.slug === thread.modelSelection.model,
   );
@@ -1027,7 +1028,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 interface SidebarProjectThreadListProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
-  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -1089,7 +1090,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     legacySidebarScale,
     scaleStyle,
-    providerEntryByInstanceId,
+    providerEntriesByEnvironmentId,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -1157,7 +1158,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               key={threadKey}
               thread={thread}
               projectCwd={projectCwd}
-              providerEntryByInstanceId={providerEntryByInstanceId}
+              providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
               orderedProjectThreadKeys={orderedProjectThreadKeys}
               isActive={activeRouteThreadKey === threadKey}
               openPullRequestsInRightPanel={openPullRequestsInRightPanel}
@@ -1228,7 +1229,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
-  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1252,7 +1253,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     legacySidebarScale,
     scaleStyle,
-    providerEntryByInstanceId,
+    providerEntriesByEnvironmentId,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
@@ -2602,7 +2603,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarProjectThreadList
         legacySidebarScale={legacySidebarScale}
         scaleStyle={scaleStyle}
-        providerEntryByInstanceId={providerEntryByInstanceId}
+        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -3058,7 +3059,7 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   legacySidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
-  providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -3169,7 +3170,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     legacySidebarScale,
     projectTreeScaleStyle,
-    providerEntryByInstanceId,
+    providerEntriesByEnvironmentId,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3298,7 +3299,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         legacySidebarScale={legacySidebarScale}
                         scaleStyle={projectTreeScaleStyle}
-                        providerEntryByInstanceId={providerEntryByInstanceId}
+                        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3334,7 +3335,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 legacySidebarScale={legacySidebarScale}
                 scaleStyle={projectTreeScaleStyle}
-                providerEntryByInstanceId={providerEntryByInstanceId}
+                providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3386,15 +3387,6 @@ export default function LegacySidebar() {
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
-  const providerEntryByInstanceId = useMemo(
-    () =>
-      new Map(
-        deriveProviderInstanceEntries(serverProviders).map(
-          (entry) => [entry.instanceId as string, entry] as const,
-        ),
-      ),
-    [serverProviders],
-  );
   const scaleStyle = useMemo(
     () => legacySidebarScaleStyle(legacySidebarScale),
     [legacySidebarScale],
@@ -3440,6 +3432,23 @@ export default function LegacySidebar() {
   const shortcutModifiers = useShortcutModifierState();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const providerEntriesByEnvironmentId = useMemo(() => {
+    const entriesByEnvironmentId = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
+    for (const environment of environments) {
+      const environmentProviders =
+        environment.serverConfig?.providers ??
+        (environment.environmentId === primaryEnvironmentId ? serverProviders : []);
+      entriesByEnvironmentId.set(
+        environment.environmentId,
+        new Map(
+          deriveProviderInstanceEntries(environmentProviders).map(
+            (entry) => [entry.instanceId as string, entry] as const,
+          ),
+        ),
+      );
+    }
+    return entriesByEnvironmentId;
+  }, [environments, primaryEnvironmentId, serverProviders]);
   const environmentLabelById = useMemo(
     () =>
       new Map(
@@ -4061,7 +4070,7 @@ export default function LegacySidebar() {
         projectsLength={projects.length}
         legacySidebarScale={legacySidebarScale}
         projectTreeScaleStyle={scaleStyle}
-        providerEntryByInstanceId={providerEntryByInstanceId}
+        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
       />
       <SidebarChromeFooter />
     </>
