@@ -10,7 +10,8 @@ lastcode-thread read <thread-id-or-unique-prefix> --turn-limit 5 --json
 ```
 
 Thread IDs are resolved locally. An exact ID always wins; a prefix must identify exactly one
-active thread. Archived and deleted threads are not included.
+active thread. Ambiguous JSON responses include a small sorted candidate list and report when
+additional matches were omitted. Archived and deleted threads are not included.
 
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Its JSON reports when text or activity counts were truncated.

@@ -11,6 +11,7 @@ import {
 import {
   THREAD_TRANSCRIPT_MAX_CHARS,
   THREAD_ACTIVITY_MAX_RESULTS,
+  THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS,
   boundThreadPresentation,
   boundTranscriptMessages,
   currentThreadOutput,
@@ -105,6 +106,23 @@ it("fails closed with candidates for ambiguous prefixes and reports not found", 
   assert.deepStrictEqual(resolveThreadTarget([shellThread("aaa-1")], "   "), {
     kind: "not-found",
     identifier: "",
+  });
+});
+
+it("caps ambiguous candidates deterministically and reports the original count", () => {
+  const threads = Array.from({ length: THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS + 5 }, (_, index) =>
+    shellThread(`shared-${String(index).padStart(2, "0")}`),
+  ).toReversed();
+  const result = resolveThreadTarget(threads, "shared-");
+  assert.deepStrictEqual(result, {
+    kind: "ambiguous",
+    identifier: "shared-",
+    candidates: Array.from(
+      { length: THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS },
+      (_, index) => `shared-${String(index).padStart(2, "0")}`,
+    ),
+    candidatesTruncated: true,
+    originalCandidateCount: THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS + 5,
   });
 });
 

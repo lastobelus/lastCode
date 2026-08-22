@@ -38,6 +38,7 @@ import { type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 export const THREAD_READ_DEFAULT_TURN_LIMIT = 5;
 export const THREAD_READ_MAX_TURN_LIMIT = 20;
 export const THREAD_LIST_MAX_RESULTS = 50;
+export const THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS = 20;
 export const THREAD_TRANSCRIPT_MAX_CHARS = 64_000;
 export const THREAD_ACTIVITY_MAX_RESULTS = 200;
 
@@ -139,7 +140,13 @@ const decodeThreadReadResult = Schema.decodeUnknownEffect(ThreadReadResult);
 
 export type ThreadTargetResolution =
   | { readonly kind: "resolved"; readonly thread: OrchestrationThreadShell }
-  | { readonly kind: "ambiguous"; readonly identifier: string; readonly candidates: string[] }
+  | {
+      readonly kind: "ambiguous";
+      readonly identifier: string;
+      readonly candidates: string[];
+      readonly candidatesTruncated?: boolean;
+      readonly originalCandidateCount?: number;
+    }
   | { readonly kind: "not-found"; readonly identifier: string };
 
 export function resolveThreadTarget(
@@ -153,7 +160,19 @@ export function resolveThreadTarget(
   const matches = threads.filter((thread) => thread.id.startsWith(normalized));
   if (matches.length === 1) return { kind: "resolved", thread: matches[0]! };
   if (matches.length > 1) {
-    return { kind: "ambiguous", identifier: normalized, candidates: matches.map(({ id }) => id) };
+    const candidates = matches
+      .map(({ id }) => id)
+      .toSorted()
+      .slice(0, THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS);
+    const candidatesTruncated = matches.length > candidates.length;
+    return {
+      kind: "ambiguous",
+      identifier: normalized,
+      candidates,
+      ...(candidatesTruncated
+        ? { candidatesTruncated: true, originalCandidateCount: matches.length }
+        : {}),
+    };
   }
   return { kind: "not-found", identifier: normalized };
 }

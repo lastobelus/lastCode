@@ -151,7 +151,8 @@ Branch: `lastcode/codex-thread-read`
    Codex still receives LastCode identity variables there, but no thread command is added to PATH.
 5. Add bounded `list` and `read` commands over the existing shell and thread-detail
    snapshots. `read` accepts an exact or unambiguous thread-ID prefix and returns
-   candidates when resolution is ambiguous.
+   a small deterministic candidate subset plus original-count truncation metadata when
+   resolution is ambiguous.
 6. Default `read` to a small recent-turn window and impose a conservative maximum.
    Include thread status, project/workspace/branch, recent turns, and transcript
    content needed to answer “what is this thread up to?” without dumping the full
