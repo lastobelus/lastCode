@@ -8,3 +8,7 @@ On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New
 worktree** is selected, each background thread creates its own worktree.
+
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
