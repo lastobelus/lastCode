@@ -753,10 +753,12 @@ describe("ProviderRuntimeIngestion", () => {
       payload: { providerThreadId: "codex-native-lifecycle" },
       createdAt: "2026-01-01T00:00:01.000Z",
     });
-    await waitForThread(
-      harness.readShell as never,
-      (thread) => thread.session?.providerThreadId === "codex-native-lifecycle",
+    await harness.drain();
+    const shellAfterThreadStarted = await harness.readShell();
+    const threadAfterThreadStarted = shellAfterThreadStarted.threads.find(
+      (thread) => thread.id === ThreadId.make("thread-1"),
     );
+    expect(threadAfterThreadStarted?.session?.providerThreadId).toBe("codex-native-lifecycle");
     harness.emit({
       type: "turn.started",
       eventId: asEventId("evt-native-turn-started"),
@@ -765,12 +767,13 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-native-lifecycle"),
       createdAt: "2026-01-01T00:00:02.000Z",
     });
-    await waitForThread(
-      harness.readShell as never,
-      (thread) =>
-        thread.session?.status === "running" &&
-        thread.session.providerThreadId === "codex-native-lifecycle",
+    await harness.drain();
+    const shellAfterTurnStarted = await harness.readShell();
+    const threadAfterTurnStarted = shellAfterTurnStarted.threads.find(
+      (thread) => thread.id === ThreadId.make("thread-1"),
     );
+    expect(threadAfterTurnStarted?.session?.status).toBe("running");
+    expect(threadAfterTurnStarted?.session?.providerThreadId).toBe("codex-native-lifecycle");
   });
 
   it("accepts claude turn lifecycle when seeded thread id is a synthetic placeholder", async () => {
