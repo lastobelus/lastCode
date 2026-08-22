@@ -136,7 +136,7 @@ export function LastCodeSettingsPanel() {
       <SettingsSection title="LastCode" icon={<MoonStarIcon className="size-5" />}>
         <SettingsRow
           {...searchableSetting("local-nightlies")}
-          description="Show local LastCode checkpoints and revisions as app updates. The first sidebar click runs full local CI, builds a DMG and updater ZIP, and stages the update; the second restarts and installs it."
+          description="Show local LastCode checkpoints and revisions as app updates. The first sidebar click runs full local CI and builds and validates a DMG; the second restarts and installs it."
           status={status}
           control={
             <Switch
