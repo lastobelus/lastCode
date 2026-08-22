@@ -33,6 +33,7 @@ import {
   OrchestrationProjectionPipelineLive,
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import { makeTurnRequestWaitQuery } from "./TurnRequestWaitQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -1519,6 +1520,43 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      const trackedMessageId = MessageId.make("message-turn-superseded");
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-ts-requested"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-requested"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-requested"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          trackRequestCorrelation: true,
+          createdAt: now,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.turn-request-resolved",
+        eventId: EventId.make("evt-ts-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-resolved"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          outcome: { kind: "started", turnId: oldTurnId },
+        },
+      });
+
       const appendRunningSessionSet = (eventId: string, turnId: TurnId, updatedAt: string) =>
         eventStore.append({
           type: "thread.session-set",
@@ -1562,9 +1600,17 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         ORDER BY requested_at
       `;
       assert.deepEqual(rows, [
-        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:30.000Z" },
+        { turnId: oldTurnId, state: "interrupted", completedAt: "2026-01-01T00:00:30.000Z" },
         { turnId: newTurnId, state: "running", completedAt: null },
       ]);
+      assert.deepEqual(
+        yield* makeTurnRequestWaitQuery(sql).getState({ threadId, messageId: trackedMessageId }),
+        {
+          kind: "terminal",
+          state: "interrupted",
+          turnId: oldTurnId,
+        },
+      );
     }),
   );
 
