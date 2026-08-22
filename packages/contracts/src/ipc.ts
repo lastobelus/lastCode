@@ -198,6 +198,41 @@ export const DesktopRuntimeInfoSchema = Schema.Struct({
   runningUnderArm64Translation: Schema.Boolean,
 });
 
+export const DesktopLocalBuildErrorKindSchema = Schema.Literals(["build", "packaging"]);
+export type DesktopLocalBuildErrorKind = typeof DesktopLocalBuildErrorKindSchema.Type;
+const DesktopLocalBuildPercentSchema = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: 99 }),
+);
+
+export interface DesktopLocalBuildProgress {
+  checkpointTag: string;
+  phase: string;
+  percent: number;
+  errorKind: DesktopLocalBuildErrorKind;
+}
+
+export const DesktopLocalBuildProgressSchema = Schema.Struct({
+  checkpointTag: Schema.String,
+  phase: Schema.String,
+  percent: DesktopLocalBuildPercentSchema,
+  errorKind: DesktopLocalBuildErrorKindSchema,
+});
+
+export interface DesktopLocalBuildFailure extends DesktopLocalBuildProgress {
+  currentVersion: string;
+  targetVersion: string;
+  logPath: string;
+  error: string;
+}
+
+export const DesktopLocalBuildFailureSchema = Schema.Struct({
+  ...DesktopLocalBuildProgressSchema.fields,
+  currentVersion: Schema.String,
+  targetVersion: Schema.String,
+  logPath: Schema.String,
+  error: Schema.String,
+});
+
 export interface DesktopUpdateState {
   enabled: boolean;
   source: DesktopUpdateSource;
@@ -211,6 +246,8 @@ export interface DesktopUpdateState {
   downloadedVersion: string | null;
   releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>;
   downloadPercent: number | null;
+  localBuildProgress: DesktopLocalBuildProgress | null;
+  localBuildFailure: DesktopLocalBuildFailure | null;
   checkedAt: string | null;
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
@@ -244,6 +281,8 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   downloadedVersion: Schema.NullOr(Schema.String),
   releaseNotes: Schema.Array(DesktopUpdateReleaseNoteSchema),
   downloadPercent: Schema.NullOr(Schema.Number),
+  localBuildProgress: Schema.NullOr(DesktopLocalBuildProgressSchema),
+  localBuildFailure: Schema.NullOr(DesktopLocalBuildFailureSchema),
   checkedAt: Schema.NullOr(Schema.String),
   message: Schema.NullOr(Schema.String),
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
