@@ -887,19 +887,38 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   </Tooltip>
                 )}
                 {jumpLabel ? (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
+                  hasActiveAnnotation && thread.annotation ? (
+                    <ThreadAnnotationHoverPopover
+                      annotation={thread.annotation}
+                      cwd={gitCwd ?? undefined}
+                      onEdit={() => onEditAnnotation(thread)}
+                      onResolve={() => onResolveAnnotation(thread)}
+                      rowActive={annotationRowActive}
+                      threadRef={threadRef}
+                      trigger={
                         <span
-                          aria-label={jumpLabel}
-                          className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
-                        />
+                          aria-label={`${jumpLabel}; annotated`}
+                          className="inline-flex h-5 items-center rounded-full border border-dotted border-yellow-500/65 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+                        >
+                          {jumpLabel}
+                        </span>
                       }
-                    >
-                      {jumpLabel}
-                    </TooltipTrigger>
-                    <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
-                  </Tooltip>
+                    />
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-label={jumpLabel}
+                            className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+                          />
+                        }
+                      >
+                        {jumpLabel}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
+                    </Tooltip>
+                  )
                 ) : hasActiveAnnotation && thread.annotation ? (
                   <ThreadAnnotationHoverPopover
                     annotation={thread.annotation}
