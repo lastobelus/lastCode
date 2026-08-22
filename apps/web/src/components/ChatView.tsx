@@ -4189,6 +4189,8 @@ function ChatViewContent(props: ChatViewProps) {
   const supportsThreadAnnotations =
     serverConfig?.environment.capabilities.threadAnnotations === true;
   const threadAnnotation = activeThread?.annotation ?? null;
+  const canAnnotateThread =
+    isServerThread && supportsThreadAnnotations && activeThread?.latestUserMessageId != null;
   const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
   const [annotationMutationPending, setAnnotationMutationPending] = useState(false);
   const [dismissedAnnotationKey, setDismissedAnnotationKey] = useState<string | null>(null);
@@ -4213,7 +4215,7 @@ function ChatViewContent(props: ChatViewProps) {
 
   const saveThreadAnnotation = useCallback(
     async (body: string): Promise<boolean> => {
-      if (!isServerThread || !activeThread || !supportsThreadAnnotations) return false;
+      if (!activeThread || !canAnnotateThread) return false;
       setAnnotationMutationPending(true);
       const result = await upsertThreadAnnotation({
         environmentId: activeThread.environmentId,
@@ -4226,18 +4228,12 @@ function ChatViewContent(props: ChatViewProps) {
       }
       return false;
     },
-    [
-      activeThread,
-      isServerThread,
-      reportAnnotationFailure,
-      supportsThreadAnnotations,
-      upsertThreadAnnotation,
-    ],
+    [activeThread, canAnnotateThread, reportAnnotationFailure, upsertThreadAnnotation],
   );
 
   const changeThreadAnnotationResolution = useCallback(
     async (next: "resolve" | "reopen") => {
-      if (!isServerThread || !activeThread || !supportsThreadAnnotations) return;
+      if (!activeThread || !canAnnotateThread) return;
       setAnnotationMutationPending(true);
       const command = next === "resolve" ? resolveThreadAnnotation : reopenThreadAnnotation;
       const result = await command({
@@ -4251,11 +4247,10 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [
       activeThread,
-      isServerThread,
+      canAnnotateThread,
       reopenThreadAnnotation,
       reportAnnotationFailure,
       resolveThreadAnnotation,
-      supportsThreadAnnotations,
     ],
   );
   const nowMinute = useNowMinute();
@@ -5179,14 +5174,18 @@ function ChatViewContent(props: ChatViewProps) {
         ? parseThreadAnnotationSlashCommand(promptRef.current)
         : null;
     if (annotationSlashCommand) {
-      if (!isServerThread || !supportsThreadAnnotations) {
+      if (!canAnnotateThread) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: isServerThread ? "Annotations unavailable" : "Send a message first",
-            description: isServerThread
-              ? "This environment needs a newer LastCode server to annotate threads."
-              : "Annotations can be added after this draft becomes a thread.",
+            title:
+              isServerThread && !supportsThreadAnnotations
+                ? "Annotations unavailable"
+                : "Send a message first",
+            description:
+              isServerThread && !supportsThreadAnnotations
+                ? "This environment needs a newer LastCode server to annotate threads."
+                : "Annotations can be added after the thread has its first message.",
           }),
         );
         return;
@@ -6735,7 +6734,7 @@ function ChatViewContent(props: ChatViewProps) {
                             keybindings={keybindings}
                             terminalOpen={Boolean(terminalUiState.terminalOpen)}
                             gitCwd={gitCwd}
-                            threadAnnotationsSupported={isServerThread && supportsThreadAnnotations}
+                            threadAnnotationsSupported={canAnnotateThread}
                             promptRef={promptRef}
                             composerImagesRef={composerImagesRef}
                             composerTerminalContextsRef={composerTerminalContextsRef}

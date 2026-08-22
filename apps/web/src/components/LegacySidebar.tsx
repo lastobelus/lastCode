@@ -2296,7 +2296,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
             : []),
           { id: "rename", label: "Rename thread" },
-          ...(supportsThreadAnnotations ? [{ id: "annotate", label: "Annotate thread…" }] : []),
+          ...(supportsThreadAnnotations && thread.latestUserMessageAt !== null
+            ? [{ id: "annotate", label: "Annotate thread…" }]
+            : []),
           { id: "mark-unread", label: "Mark unread" },
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
