@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  MessageId,
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -26,6 +31,7 @@ import {
   ThreadSettledPayload,
   ThreadPinnedPayload,
   ThreadPinReorderedPayload,
+  ThreadAnnotationChangedPayload,
   ThreadSnoozedPayload,
   ThreadUnpinnedPayload,
   ThreadUnarchivedPayload,
@@ -171,6 +177,17 @@ function retainThreadMessagesAfterRevert(
   }
 
   return messages.filter((message) => retainedMessageIds.has(message.id));
+}
+
+function latestUserMessageId(messages: ReadonlyArray<OrchestrationMessage>): MessageId | null {
+  return (
+    messages
+      .filter((message) => message.role === "user")
+      .toSorted(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+      )[0]?.id ?? null
+  );
 }
 
 function retainThreadActivitiesAfterRevert(
@@ -335,6 +352,7 @@ export function projectEvent(
             unsettledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
+            annotation: null,
             deletedAt: null,
             messages: [],
             activities: [],
@@ -483,6 +501,23 @@ export function projectEvent(
         })),
       );
 
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+      return decodeForEvent(
+        ThreadAnnotationChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            annotation: payload.annotation,
+          }),
+        })),
+      );
+
     case "thread.meta-updated":
       return decodeForEvent(ThreadMetaUpdatedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
@@ -588,6 +623,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             messages: cappedMessages,
+            latestUserMessageId: latestUserMessageId(cappedMessages),
             updatedAt: event.occurredAt,
           }),
         };
@@ -809,6 +845,7 @@ export function projectEvent(
             threads: updateThread(nextBase.threads, payload.threadId, {
               checkpoints,
               messages,
+              latestUserMessageId: latestUserMessageId(messages),
               proposedPlans,
               activities,
               latestTurn,
