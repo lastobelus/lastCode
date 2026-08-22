@@ -9,6 +9,9 @@ import {
   reduceDesktopUpdateStateOnDownloadProgress,
   reduceDesktopUpdateStateOnDownloadStart,
   reduceDesktopUpdateStateOnInstallFailure,
+  reduceDesktopUpdateStateOnLocalBuildFailure,
+  reduceDesktopUpdateStateOnLocalBuildProgress,
+  reduceDesktopUpdateStateOnLocalBuildStart,
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
@@ -71,6 +74,43 @@ describe("updateMachine", () => {
     expect(state.availableVersion).toBe("1.1.0");
     expect(state.errorContext).toBe("download");
     expect(state.canRetry).toBe(true);
+  });
+
+  it("keeps local progress separate from hosted byte progress and durable on failure", () => {
+    const available = {
+      ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "nightly"),
+      enabled: true,
+      source: "lastcode-local" as const,
+      status: "available" as const,
+      availableVersion: "1.1.0-nightly.1",
+    };
+    const started = reduceDesktopUpdateStateOnLocalBuildStart(available, {
+      checkpointTag: "lastcode/checkpoint/v1.1.0-nightly.1",
+      phase: "Preparing",
+      percent: 0,
+      errorKind: "build",
+    });
+    const progressed = reduceDesktopUpdateStateOnLocalBuildProgress(started, {
+      checkpointTag: "lastcode/checkpoint/v1.1.0-nightly.1",
+      phase: "Building DMG",
+      percent: 94,
+      errorKind: "packaging",
+    });
+    const failure = {
+      ...progressed.localBuildProgress!,
+      currentVersion: "1.0.0",
+      targetVersion: "1.1.0-nightly.1",
+      logPath: "/tmp/build.log",
+      error: "dmg failed",
+    };
+    const failed = reduceDesktopUpdateStateOnLocalBuildFailure(progressed, failure);
+
+    expect(started.downloadPercent).toBeNull();
+    expect(progressed.downloadPercent).toBeNull();
+    expect(failed.status).toBe("error");
+    expect(failed.localBuildProgress).toEqual(progressed.localBuildProgress);
+    expect(failed.localBuildFailure).toEqual(failure);
+    expect(failed.canRetry).toBe(true);
   });
 
   it("transitions to downloaded and then preserves install retry state", () => {
