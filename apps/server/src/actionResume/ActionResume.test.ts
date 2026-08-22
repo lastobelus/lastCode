@@ -311,6 +311,15 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       outcome: "succeeded",
       delivery: "pending",
     });
+
+    admissionClosed = false;
+    yield* service.retryPendingFollowUps;
+    yield* service.retryPendingFollowUps;
+    assert.equal(dispatched.filter((command) => command.type === "thread.turn.start").length, 2);
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "succeeded",
+      delivery: "delivered",
+    });
   }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
 });
 

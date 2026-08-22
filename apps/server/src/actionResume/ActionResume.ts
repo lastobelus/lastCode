@@ -75,6 +75,7 @@ export class ActionResume extends Context.Service<
     readonly cancelByArchive: (threadId: ThreadId) => Effect.Effect<void>;
     readonly resumeInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
     readonly discardInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
+    readonly retryPendingFollowUps: Effect.Effect<void>;
     readonly countRunning: Effect.Effect<number>;
   }
 >()("t3/actionResume/ActionResume") {}
@@ -386,6 +387,14 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const retryPendingFollowUps = Effect.suspend(() =>
+    Effect.forEach(
+      registry.listLatest().filter((state) => state.delivery === "pending"),
+      (state) => deliverPending(state.threadId),
+      { concurrency: 1, discard: true },
+    ),
+  );
 
   const finishUnlocked = Effect.fn("ActionResume.finishUnlocked")(function* (
     input: FinishActionInput,
@@ -780,6 +789,7 @@ const make = Effect.gen(function* () {
       resumeInterruptedImpl(threadId).pipe(mapActionResumeError("resume the interrupted Action")),
     discardInterrupted: (threadId) =>
       discardInterruptedImpl(threadId).pipe(mapActionResumeError("discard the interrupted Action")),
+    retryPendingFollowUps,
     countRunning: Effect.sync(() => registry.countRunning()),
   });
 });

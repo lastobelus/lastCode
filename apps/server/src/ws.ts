@@ -1738,6 +1738,13 @@ const makeWsRpcLayer = (
                 ...input,
                 createdAt,
               }),
+            ).pipe(
+              Effect.tap(() =>
+                Option.match(actionResume, {
+                  onNone: () => Effect.void,
+                  onSome: (service) => service.retryPendingFollowUps,
+                }),
+              ),
             ),
             { "rpc.aggregate": "update-drain" },
           ),
