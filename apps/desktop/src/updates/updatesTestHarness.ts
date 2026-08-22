@@ -44,6 +44,7 @@ export interface UpdatesHarnessOptions {
     currentVersion: string,
   ) => Effect.Effect<LastCodeLocalUpdates.LastCodeLocalUpdateInspection>;
   readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+  readonly localBuildEffect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["build"];
   readonly localPrepareInstall?: (
     args: Parameters<LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["prepareInstall"]>[0],
   ) => Effect.Effect<
@@ -269,10 +270,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
         : options.localInspection
           ? Effect.succeed(options.localInspection)
           : Effect.die("unexpected local update inspection"),
-    build: () =>
-      options.localBuild
-        ? Effect.succeed(options.localBuild)
-        : Effect.die("unexpected local update build"),
+    build: (checkpointTag, onProgress) =>
+      options.localBuildEffect
+        ? options.localBuildEffect(checkpointTag, onProgress)
+        : options.localBuild
+          ? Effect.succeed(options.localBuild)
+          : Effect.die("unexpected local update build"),
     prepareInstall: (args) => {
       localInstallArgs.push(args);
       installEvents.push("prepare-install");

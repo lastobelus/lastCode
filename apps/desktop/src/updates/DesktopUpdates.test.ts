@@ -269,10 +269,72 @@ describe("DesktopUpdates", () => {
         const downloaded = yield* updates.getState;
         assert.equal(downloaded.status, "downloaded");
         assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089.1");
-        assert.deepEqual(harness.feedUrls(), [
-          { provider: "generic", url: "http://localhost:4141" },
-        ]);
+        assert.deepEqual(harness.feedUrls(), []);
         assert.deepEqual(harness.installEvents(), []);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("preserves typed local build diagnostics after progress", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const targetVersion = "1.2.4-nightly.20260814.1089.1";
+    const buildError = "packaging failed: disk image is invalid";
+    let buildAttempts = 0;
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: targetVersion,
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuildEffect: (_checkpointTag, onProgress) =>
+        Effect.gen(function* () {
+          buildAttempts += 1;
+          if (onProgress) {
+            yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
+          }
+          if (buildAttempts === 1) {
+            return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+              operation: "build",
+              message: buildError,
+            });
+          }
+          return {
+            schemaVersion: 1,
+            status: "built",
+            checkpointTag,
+            outputDir: "/tmp/lastcode-local-build",
+            manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+            dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+            dmgSha256: "a".repeat(64),
+          };
+        }),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "error");
+        assert.equal(failed.message, buildError);
+        assert.equal(failed.localBuildProgress?.phase, "Building DMG");
+        assert.equal(failed.localBuildFailure?.errorKind, "packaging");
+
+        const retry = yield* updates.download;
+        assert.isTrue(retry.accepted);
+        assert.isTrue(retry.completed);
+        assert.equal(buildAttempts, 2);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
