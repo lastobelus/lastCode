@@ -7,6 +7,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 
+import { acquirePortableLock } from "./lastcode-lock.mjs";
+
 export const LASTCODE_APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 export const LASTCODE_SERVER_LABEL = "codes.lastobelus.lastcode.server";
 export const LASTCODE_ACTIVATION_STATES = [
@@ -399,6 +401,14 @@ export function makeDefaultActivationExecutor() {
   };
 }
 
+function acquireActivationLock(journal) {
+  return acquirePortableLock(
+    NodePath.join(journal.paths.baseDir, "runtime"),
+    "activation.lock",
+    "update activation",
+  );
+}
+
 function publishDatabaseSnapshot(journal) {
   const { paths } = journal;
   NodeFS.mkdirSync(paths.snapshotDir, { recursive: true, mode: 0o700 });
@@ -655,11 +665,18 @@ export async function runActivationTransaction(input) {
       applicationsDir: input.expectedApplicationsDir ?? "/Applications",
     });
   const journal = store.read();
-  const executor = input.executor ?? makeDefaultActivationExecutor();
-  if (journal.state !== "prepared" || journal.attempted) {
-    return recover(store, journal, executor, input.hooks);
+  const release = await (input.acquireTransactionLock ?? acquireActivationLock)(journal);
+  try {
+    const executor = input.executor ?? makeDefaultActivationExecutor();
+    if (journal.state !== "prepared" || journal.attempted) {
+      const result = await recover(store, journal, executor, input.hooks);
+      return result;
+    }
+    const result = await executePrepared(store, journal, executor, input);
+    return result;
+  } finally {
+    await release();
   }
-  return executePrepared(store, journal, executor, input);
 }
 
 async function main(argv) {

@@ -131,6 +131,7 @@ function run(fixture, fake, options = {}) {
     journalPath: fixture.journal.paths.journalPath,
     expectedApplicationsDir: fixture.applicationsDir,
     executor: fake.executor,
+    acquireTransactionLock: () => () => undefined,
     timeoutMs: 0,
     validateTrialPlist: validateFixtureTrialPlist,
     ...options,
@@ -265,6 +266,52 @@ describe("LastCode one-owner activation helper", () => {
     expect(fileStore.read().state).toBe("trial");
     expect((await run(writeFailureFixture, writeFailureFake, { store })).state).toBe("committed");
     expectCandidateSelection(writeFailureFixture.paths);
+  });
+
+  it("rejects a live retry until the running helper releases activation ownership", async () => {
+    const fixture = createFixture();
+    const fake = makeExecutor();
+    let locked = false;
+    let releases = 0;
+    const acquireTransactionLock = () => {
+      if (locked) throw new Error("Another LastCode update activation is already running.");
+      locked = true;
+      return () => {
+        locked = false;
+        releases += 1;
+      };
+    };
+    let resumePoll;
+    const pollRelease = new Promise((resolve) => {
+      resumePoll = resolve;
+    });
+    let markWaiting;
+    const waiting = new Promise((resolve) => {
+      markWaiting = resolve;
+    });
+    const first = run(fixture, fake, {
+      acquireTransactionLock,
+      now: () => 0,
+      pollMs: 1,
+      timeoutMs: 100,
+      wait: () => {
+        markWaiting();
+        return pollRelease;
+      },
+    });
+    await waiting;
+
+    await expect(run(fixture, fake, { acquireTransactionLock })).rejects.toThrow(
+      "Another LastCode update activation is already running.",
+    );
+    expect(makeActivationJournalStore(fixture.paths.journalPath).read().state).toBe("trial");
+    expect(fake.calls.stop).toBe(1);
+
+    commitRecord(fixture.journal);
+    resumePoll();
+    expect((await first).state).toBe("committed");
+    expect(releases).toBe(1);
+    expectCandidateSelection(fixture.paths);
   });
 
   it("restores the SQLite main file and both sidecars", async () => {

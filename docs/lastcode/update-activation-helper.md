@@ -20,10 +20,13 @@ and carry exact trial-mode, request-ID, and target-digest environment values.
 
 The external journal has five coarse states: `prepared`, `backup-ready`,
 `trial`, `committed`, and `rolled-back`. Activation stops the LaunchAgent,
+acquires one process-lifetime macOS lock shared by every activation request,
 acquires the now-free owner lease, snapshots `state.sqlite` plus existing WAL
 and SHM sidecars, and publishes a completion sentinel. It then renames the old
 app and plist aside, installs the candidate selection, releases the lease, and
-starts the candidate in trial mode.
+starts the candidate in trial mode. A concurrent helper fails without treating
+the live transaction as crash recovery; process death releases the lock so a
+later invocation can recover the journal.
 
 The candidate commits only by atomically publishing `commit.json` with exactly
 the prepared request ID and target digest. A bounded timeout, mismatched record,
