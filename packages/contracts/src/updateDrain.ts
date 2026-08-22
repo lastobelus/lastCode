@@ -25,7 +25,12 @@ export const UpdateActivationTargetDigest = Schema.String.check(
 ).pipe(Schema.brand("UpdateActivationTargetDigest"));
 export type UpdateActivationTargetDigest = typeof UpdateActivationTargetDigest.Type;
 
-export const UpdateDrainIntentStatus = Schema.Literals(["draining", "cancelled", "claimed"]);
+export const UpdateDrainIntentStatus = Schema.Literals([
+  "draining",
+  "cancelled",
+  "claimed",
+  "completed",
+]);
 export type UpdateDrainIntentStatus = typeof UpdateDrainIntentStatus.Type;
 
 export const UpdateDrainIntent = Schema.Struct({
@@ -106,10 +111,17 @@ export const UpdateDrainClaimCommand = Schema.Struct({
 });
 export type UpdateDrainClaimCommand = typeof UpdateDrainClaimCommand.Type;
 
+export const UpdateDrainCompleteCommand = Schema.Struct({
+  ...UpdateDrainCommandBase,
+  type: Schema.Literal("update-drain.complete"),
+});
+export type UpdateDrainCompleteCommand = typeof UpdateDrainCompleteCommand.Type;
+
 export const UpdateDrainCommand = Schema.Union([
   UpdateDrainStartCommand,
   UpdateDrainCancelCommand,
   UpdateDrainClaimCommand,
+  UpdateDrainCompleteCommand,
 ]);
 export type UpdateDrainCommand = typeof UpdateDrainCommand.Type;
 
@@ -143,10 +155,18 @@ export const UpdateDrainClaimedEvent = Schema.Struct({
 });
 export type UpdateDrainClaimedEvent = typeof UpdateDrainClaimedEvent.Type;
 
+export const UpdateDrainCompletedEvent = Schema.Struct({
+  ...UpdateDrainEventBase,
+  type: Schema.Literal("update-drain.completed"),
+  status: Schema.Literal("completed"),
+});
+export type UpdateDrainCompletedEvent = typeof UpdateDrainCompletedEvent.Type;
+
 export const UpdateDrainEvent = Schema.Union([
   UpdateDrainStartedEvent,
   UpdateDrainCancelledEvent,
   UpdateDrainClaimedEvent,
+  UpdateDrainCompletedEvent,
 ]);
 export type UpdateDrainEvent = typeof UpdateDrainEvent.Type;
 
@@ -165,7 +185,12 @@ export type UpdateDrainFailureReason = typeof UpdateDrainFailureReason.Type;
 export const UpdateDrainCommandReceipt = Schema.Struct({
   commandId: CommandId,
   requestId: UpdateDrainRequestId,
-  commandType: Schema.Literals(["update-drain.start", "update-drain.cancel", "update-drain.claim"]),
+  commandType: Schema.Literals([
+    "update-drain.start",
+    "update-drain.cancel",
+    "update-drain.claim",
+    "update-drain.complete",
+  ]),
   targetVersion: Schema.NullOr(UpdateDrainTargetVersion),
   acceptedAt: IsoDateTime,
   resultSequence: NonNegativeInt,

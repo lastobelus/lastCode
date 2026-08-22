@@ -149,11 +149,11 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       (pending) => pendingTurnStartKey(pending.threadId, pending.messageId),
     ),
   );
-  let activationCommit = activation?.existingCommit;
+  let activationCommit: UpdateActivationCommitResult | undefined;
 
   const admissionIsClosed = (durable: UpdateDrainState): boolean => {
     if (activation !== undefined) return activationCommit === undefined;
-    return durable.intent !== null && durable.intent.status !== "cancelled";
+    return durable.intent?.status === "draining" || durable.intent?.status === "claimed";
   };
 
   const rejectClosedAdmission = (
@@ -306,6 +306,60 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       }),
     );
 
+  const completeActivation = Effect.fn("UpdateDrainAdmission.completeActivation")(function* (
+    record: UpdateActivationCommitResult,
+  ) {
+    const durable = yield* drain.status.pipe(
+      Effect.mapError(
+        () =>
+          new UpdateActivationCommitError({
+            reason: "drain_not_claimed",
+            message: "Failed to verify the durable update drain activation claim.",
+          }),
+      ),
+    );
+    if (durable.intent?.status === "completed") {
+      if (durable.intent.requestId === record.requestId) return;
+      return yield* new UpdateActivationCommitError({
+        reason: "request_mismatch",
+        message: `Activation request '${record.requestId}' does not match completed request '${durable.intent.requestId}'.`,
+      });
+    }
+    if (durable.intent?.requestId !== record.requestId) {
+      return yield* new UpdateActivationCommitError({
+        reason: "request_mismatch",
+        message: `Activation request '${record.requestId}' does not match the durable update drain.`,
+      });
+    }
+    if (durable.intent.status !== "claimed") {
+      return yield* new UpdateActivationCommitError({
+        reason: "drain_not_claimed",
+        message: `Durable update drain '${record.requestId}' is not claimed for activation.`,
+      });
+    }
+    yield* drain
+      .dispatch({
+        type: "update-drain.complete",
+        commandId: CommandId.make(`update-drain:complete:${record.requestId}`),
+        requestId: record.requestId,
+        createdAt: DateTime.formatIso(yield* DateTime.now),
+      })
+      .pipe(
+        Effect.mapError(
+          () =>
+            new UpdateActivationCommitError({
+              reason: "drain_not_claimed",
+              message: `Failed to durably complete update drain '${record.requestId}'.`,
+            }),
+        ),
+      );
+  });
+
+  if (activation?.existingCommit !== undefined) {
+    yield* completeActivation(activation.existingCommit);
+    activationCommit = activation.existingCommit;
+  }
+
   const commitUpdateActivation: UpdateDrainAdmissionShape["commitUpdateActivation"] = (input) =>
     mutex.withPermits(1)(
       Effect.gen(function* () {
@@ -354,6 +408,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
           status: "committed",
         };
         yield* activation.persistCommit(record);
+        yield* completeActivation(record);
         activationCommit = record;
         return record;
       }),

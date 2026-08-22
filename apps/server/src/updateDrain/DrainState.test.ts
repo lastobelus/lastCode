@@ -125,4 +125,54 @@ describe("update drain decider and projector", () => {
       );
     }),
   );
+
+  it.effect("completes only the matching claim and permits the next drain", () =>
+    Effect.gen(function* () {
+      const claimed = {
+        sequence: 2,
+        intent: { requestId, targetVersion, status: "claimed" as const },
+      };
+      const wrongRequest = yield* Effect.result(
+        decideUpdateDrainCommand(claimed, new Set([requestId]), {
+          type: "update-drain.complete",
+          commandId: CommandId.make("complete-wrong"),
+          requestId: UpdateDrainRequestId.make("update-2"),
+          createdAt: requestedAt,
+        }),
+      );
+      assert.equal(
+        wrongRequest._tag === "Failure" ? wrongRequest.failure.reason : null,
+        "request_mismatch",
+      );
+
+      const completedDraft = yield* decideUpdateDrainCommand(claimed, new Set([requestId]), {
+        type: "update-drain.complete",
+        commandId: CommandId.make("complete-1"),
+        requestId,
+        createdAt: requestedAt,
+      });
+      assert.equal(completedDraft.type, "update-drain.completed");
+      if (completedDraft.type !== "update-drain.completed") return;
+      const completed = projectUpdateDrainEvent(claimed, { ...completedDraft, sequence: 3 });
+
+      const cancel = yield* Effect.result(
+        decideUpdateDrainCommand(completed, new Set([requestId]), {
+          type: "update-drain.cancel",
+          commandId: CommandId.make("cancel-completed"),
+          requestId,
+          createdAt: requestedAt,
+        }),
+      );
+      assert.equal(cancel._tag === "Failure" ? cancel.failure.reason : null, "no_active_drain");
+
+      const next = yield* decideUpdateDrainCommand(completed, new Set([requestId]), {
+        type: "update-drain.start",
+        commandId: CommandId.make("start-next"),
+        requestId: UpdateDrainRequestId.make("update-2"),
+        targetVersion: UpdateDrainTargetVersion.make("1.2.4"),
+        createdAt: requestedAt,
+      });
+      assert.equal(next.type, "update-drain.started");
+    }),
+  );
 });

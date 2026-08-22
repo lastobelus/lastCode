@@ -79,7 +79,11 @@ export function decideUpdateDrainCommand(
   }
 
   if (command.type === "update-drain.claim") {
-    if (state.intent === null || state.intent.status === "cancelled") {
+    if (
+      state.intent === null ||
+      state.intent.status === "cancelled" ||
+      state.intent.status === "completed"
+    ) {
       return Effect.fail(
         new UpdateDrainError({
           reason: "no_active_drain",
@@ -114,7 +118,55 @@ export function decideUpdateDrainCommand(
     });
   }
 
+  if (command.type === "update-drain.complete") {
+    if (
+      state.intent === null ||
+      state.intent.status === "cancelled" ||
+      state.intent.status === "completed"
+    ) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "no_active_drain",
+          message: "There is no claimed update drain to complete.",
+        }),
+      );
+    }
+    if (state.intent.requestId !== command.requestId) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "request_mismatch",
+          message: `Update drain '${command.requestId}' does not match active request '${state.intent.requestId}'.`,
+        }),
+      );
+    }
+    if (state.intent.status !== "claimed") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "activation_claimed",
+          message: `Update drain '${command.requestId}' has not been claimed for activation.`,
+        }),
+      );
+    }
+    return Effect.succeed({
+      type: "update-drain.completed",
+      eventId: eventIdFor(command),
+      commandId: command.commandId,
+      occurredAt: command.createdAt,
+      requestId: command.requestId,
+      targetVersion: state.intent.targetVersion,
+      status: "completed",
+    });
+  }
+
   if (state.intent === null) {
+    return Effect.fail(
+      new UpdateDrainError({
+        reason: "no_active_drain",
+        message: "There is no active update drain to cancel.",
+      }),
+    );
+  }
+  if (state.intent.status === "completed") {
     return Effect.fail(
       new UpdateDrainError({
         reason: "no_active_drain",

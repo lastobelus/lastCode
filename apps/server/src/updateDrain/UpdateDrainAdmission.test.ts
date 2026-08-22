@@ -27,7 +27,7 @@ import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTu
 import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
-import { layer as updateDrainLayer } from "./UpdateDrain.ts";
+import { UpdateDrain, layer as updateDrainLayer } from "./UpdateDrain.ts";
 import {
   makeUpdateDrainAdmission,
   persistUpdateActivationCommit,
@@ -364,7 +364,12 @@ it.effect("keeps a trial closed until the exact activation commit is durable", (
 
       const committed = yield* admission.commitUpdateActivation({ requestId, targetDigest });
       assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
-      assert.equal((yield* admission.status).admission, "open");
+      assert.deepStrictEqual(yield* admission.status, {
+        sequence: 3,
+        intent: { requestId, targetVersion, status: "completed" },
+        admission: "open",
+        blockers: [],
+      });
 
       let workRan = false;
       yield* admission.admit(
@@ -390,6 +395,85 @@ it.effect("keeps a trial closed until the exact activation commit is durable", (
         committed,
       );
       assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("finishes a claimed drain from an existing durable commit before opening", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const targetDigest = UpdateActivationTargetDigest.make("e".repeat(64));
+    const record = {
+      requestId,
+      schemaVersion: 1,
+      status: "committed",
+      targetDigest,
+    } as const;
+
+    yield* Effect.gen(function* () {
+      const initial = yield* makeUpdateDrainAdmission();
+      yield* initial.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("restart-start"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+      yield* initial.claimActivation({ requestId });
+
+      const restarted = yield* makeUpdateDrainAdmission({
+        trial: { requestId, targetDigest },
+        existingCommit: record,
+        persistCommit: () => Effect.die("existing commit must not be rewritten"),
+      });
+      assert.deepStrictEqual(yield* restarted.status, {
+        sequence: 3,
+        intent: { requestId, targetVersion, status: "completed" },
+        admission: "open",
+        blockers: [],
+      });
+      assert.deepStrictEqual(
+        yield* restarted.commitUpdateActivation({ requestId, targetDigest }),
+        record,
+      );
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("persists the commit before durable completion and admission reopening", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const targetDigest = UpdateActivationTargetDigest.make("f".repeat(64));
+    const timeline = yield* Ref.make<ReadonlyArray<string>>([]);
+    const append = (value: string) => Ref.update(timeline, (values) => [...values, value]);
+
+    yield* Effect.gen(function* () {
+      const drain = yield* UpdateDrain;
+      const admission = yield* makeUpdateDrainAdmission({
+        trial: { requestId, targetDigest },
+        persistCommit: () =>
+          Effect.gen(function* () {
+            assert.equal((yield* Effect.orDie(drain.status)).intent?.status, "claimed");
+            yield* append("commit-file-durable");
+          }),
+      });
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("ordered-start"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+      yield* admission.claimActivation({ requestId });
+      yield* admission.commitUpdateActivation({ requestId, targetDigest });
+      assert.equal((yield* drain.status).intent?.status, "completed");
+      yield* append("drain-completed");
+      yield* admission.admit("thread-turn", append("admission-open"));
+      assert.deepStrictEqual(yield* Ref.get(timeline), [
+        "commit-file-durable",
+        "drain-completed",
+        "admission-open",
+      ]);
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );

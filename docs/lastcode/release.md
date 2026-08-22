@@ -240,7 +240,9 @@ keeps work admission closed. An administrative client commits the trial through
 `server.commitUpdateActivation` with the same request and digest. The server
 accepts that call only while the matching durable drain is claimed, atomically
 writes the helper's exact `runtime/activation/<requestId>/commit.json` record,
-and then opens work admission.
+durably completes that drain request, and then opens work admission. A restart
+between the file write and drain transition finishes the matching completion
+idempotently before admission opens; a later update uses a new drain request.
 Repeating the exact call returns the original commit result without rewriting
 the record. Full package identity remains in the staging descriptor and helper
 journal; neither it nor a second update identifier is copied into the database.
