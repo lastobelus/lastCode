@@ -229,6 +229,15 @@ export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId):
   );
 }
 
+/** Whether the environment supports persistent thread annotations. Missing is
+    unsupported so clients do not send annotation commands to older servers. */
+export function readEnvironmentSupportsThreadAnnotations(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadAnnotations === true
+  );
+}
+
 export function readEnvironmentThreadRefs(
   environmentId: EnvironmentId,
 ): ReadonlyArray<ScopedThreadRef> {

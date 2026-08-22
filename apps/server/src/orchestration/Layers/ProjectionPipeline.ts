@@ -587,9 +587,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [latestUserMessageAt, proposedPlans, activities, pendingApprovalCount] =
+      const [latestUserMessage, proposedPlans, activities, pendingApprovalCount] =
         yield* Effect.all([
-          projectionThreadMessageRepository.getLatestUserMessageAt({ threadId }),
+          projectionThreadMessageRepository.getLatestUserMessage({ threadId }),
           projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
           projectionThreadActivityRepository.listUserInputLifecycleByThreadId({ threadId }),
           projectionPendingApprovalRepository.countPendingByThreadId({ threadId }),
@@ -603,7 +603,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       yield* projectionThreadRepository.upsert({
         ...existingRow.value,
-        latestUserMessageAt,
+        latestUserMessageId: latestUserMessage?.messageId ?? null,
+        latestUserMessageAt: latestUserMessage?.createdAt ?? null,
         pendingApprovalCount,
         pendingUserInputCount,
         hasActionableProposedPlan: hasActionableProposedPlan ? 1 : 0,

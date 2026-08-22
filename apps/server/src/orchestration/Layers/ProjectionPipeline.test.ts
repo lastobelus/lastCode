@@ -8,6 +8,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadAnnotation,
   TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -18,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
@@ -42,6 +44,10 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+
+const decodeThreadAnnotationJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ThreadAnnotation),
+);
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(
@@ -176,12 +182,34 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         payload: {
           threadId: ThreadId.make("thread-1"),
           messageId: MessageId.make("message-1"),
-          role: "assistant",
+          role: "user",
           text: "hello",
           turnId: null,
           streaming: false,
           createdAt: now,
           updatedAt: now,
+        },
+      });
+
+      yield* eventStore.append({
+        type: "thread.annotation-upserted",
+        eventId: EventId.make("evt-annotation"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:01:00.000Z",
+        commandId: CommandId.make("cmd-annotation"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-annotation"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: MessageId.make("message-1"),
+            createdAt: "2026-01-01T00:01:00.000Z",
+            updatedAt: "2026-01-01T00:01:00.000Z",
+            resolvedAt: null,
+          },
         },
       });
 
@@ -213,6 +241,20 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.deepEqual(messageRows, [{ messageId: "message-1", text: "hello" }]);
 
+      const annotationRows = yield* sql<{
+        readonly annotation: string | null;
+        readonly latestUserMessageId: string | null;
+      }>`
+        SELECT
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      const annotation = yield* decodeThreadAnnotationJson(annotationRows[0]?.annotation);
+      assert.equal(annotation.body, "# Follow up");
+      assert.equal(annotationRows[0]?.latestUserMessageId, "message-1");
+
       const stateRows = yield* sql<{
         readonly projector: string;
         readonly lastAppliedSequence: number;
@@ -225,7 +267,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.equal(stateRows.length, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
       for (const row of stateRows) {
-        assert.equal(row.lastAppliedSequence, 3);
+        assert.equal(row.lastAppliedSequence, 4);
       }
 
       yield* sql`CREATE TABLE thread_shell_updates (count INTEGER NOT NULL)`;
@@ -3374,6 +3416,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+      const threadRows = yield* sql<{ readonly latestUserMessageId: string | null }>`
+        SELECT latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-revert'
+      `;
+      assert.equal(threadRows[0]?.latestUserMessageId, null);
     }),
   );
 });
