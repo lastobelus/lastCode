@@ -225,7 +225,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   };
   const setUpdateChannelError = options.setUpdateChannelError;
   const settingsLayer =
-    setUpdateChannelError || options.beforeSetUpdateChannel || options.localNightliesEnabled
+    setUpdateChannelError ||
+    options.beforeSetUpdateChannel ||
+    options.localNightliesEnabled !== undefined
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
