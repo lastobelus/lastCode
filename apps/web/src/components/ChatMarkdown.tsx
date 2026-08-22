@@ -2365,6 +2365,7 @@ function useChatMarkdownState({
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
+      taskListDisabled,
       onUseArtifactTemplate,
       openChangeRequestLink,
       openDeferredMarkdownLink,
@@ -2391,6 +2392,7 @@ function useChatMarkdownState({
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
+      taskListDisabled,
       onUseArtifactTemplate,
       openChangeRequestLink,
       openDeferredMarkdownLink,
@@ -2474,7 +2476,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   input: function MarkdownInput({ node: _node, type, checked, disabled: _disabled, ...props }) {
-    const { onTaskListChange } = use(ChatMarkdownRendererContext);
+    const { onTaskListChange, taskListDisabled } = use(ChatMarkdownRendererContext);
     if (type !== "checkbox" || !onTaskListChange) {
       return (
         <input
@@ -2493,6 +2495,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         name="markdown-task"
         aria-label="Toggle task"
         checked={checked}
+        disabled={taskListDisabled}
         onChange={(event) => {
           const markerOffset = Number(event.currentTarget.closest("li")?.dataset.taskMarkerOffset);
           if (!Number.isSafeInteger(markerOffset)) return;

@@ -42,6 +42,9 @@ export type UnsnoozeThreadInput = CommandInput<"thread.unsnooze">;
 export type PinThreadInput = CommandInput<"thread.pin">;
 export type UnpinThreadInput = CommandInput<"thread.unpin">;
 export type ReorderPinnedThreadInput = CommandInput<"thread.pin.reorder">;
+export type UpsertThreadAnnotationInput = CommandInput<"thread.annotation.upsert">;
+export type ResolveThreadAnnotationInput = CommandInput<"thread.annotation.resolve">;
+export type ReopenThreadAnnotationInput = CommandInput<"thread.annotation.reopen">;
 export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
@@ -229,6 +232,33 @@ export const reorderPinnedThread: (input: ReorderPinnedThreadInput) => CommandEf
     commandId: yield* commandId(input),
   });
 });
+
+export const upsertThreadAnnotation: (input: UpsertThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.upsertThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.upsert",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const resolveThreadAnnotation: (input: ResolveThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.resolveThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.resolve",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const reopenThreadAnnotation: (input: ReopenThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.reopenThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.reopen",
+      commandId: yield* commandId(input),
+    });
+  });
 
 export const updateThreadMetadata: (input: UpdateThreadMetadataInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.updateThreadMetadata",
