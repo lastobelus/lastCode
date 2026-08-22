@@ -13,7 +13,7 @@ import {
   TriangleAlertIcon,
   WrapTextIcon,
 } from "lucide-react";
-import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -120,6 +120,13 @@ interface ChatMarkdownProps {
   lineBreaks?: boolean;
   /** Parse sanitized raw HTML instead of displaying its source text. */
   parseRawHtml?: boolean;
+}
+
+export function resolveChatMarkdownEnvironmentId(
+  activeEnvironmentId: EnvironmentId | null,
+  threadRef: ScopedThreadRef | undefined,
+): EnvironmentId | null {
+  return threadRef?.environmentId ?? activeEnvironmentId;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -1377,7 +1384,8 @@ function ChatMarkdown({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(threadRef?.environmentId ?? null);
-  const environmentId = useActiveEnvironmentId();
+  const activeEnvironmentId = useActiveEnvironmentId();
+  const environmentId = resolveChatMarkdownEnvironmentId(activeEnvironmentId, threadRef);
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
     environmentId,
