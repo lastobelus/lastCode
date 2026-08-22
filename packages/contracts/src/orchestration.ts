@@ -440,6 +440,26 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+export const THREAD_ANNOTATION_MAX_BODY_CHARS = 20_000;
+
+/**
+ * A user-authored Markdown note attached to one thread. The anchor is the
+ * user-message marker that was newest when the note was last changed;
+ * subsequent messages do not move it. Resolution is retained so the minimap
+ * can keep showing completed notes while other surfaces hide them.
+ */
+export const ThreadAnnotation = Schema.Struct({
+  body: Schema.String.check(
+    Schema.isMaxLength(THREAD_ANNOTATION_MAX_BODY_CHARS),
+    Schema.makeFilter((value) => value.trim().length > 0 || "annotation body cannot be empty"),
+  ),
+  anchorMessageId: MessageId,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  resolvedAt: Schema.NullOr(IsoDateTime),
+});
+export type ThreadAnnotation = typeof ThreadAnnotation.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -476,6 +496,12 @@ export const OrchestrationThread = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // Optional on the wire so pre-annotation clients and cached snapshots keep
+  // decoding during rollout. A missing value is equivalent to null.
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  // Command decisions use this projected marker to anchor annotations without
+  // hydrating message bodies and attachments for every thread.
+  latestUserMessageId: Schema.optional(Schema.NullOr(MessageId)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -534,6 +560,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -833,6 +860,25 @@ const ThreadPinReorderCommand = Schema.Struct({
   orderKey: TrimmedNonEmptyString,
 });
 
+const ThreadAnnotationUpsertCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.upsert"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  body: ThreadAnnotation.fields.body,
+});
+
+const ThreadAnnotationResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadAnnotationReopenCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.reopen"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
 const ThreadMetaUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.meta.update"),
   commandId: CommandId,
@@ -997,6 +1043,9 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadPinCommand,
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
+  ThreadAnnotationUpsertCommand,
+  ThreadAnnotationResolveCommand,
+  ThreadAnnotationReopenCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -1025,6 +1074,9 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadPinCommand,
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
+  ThreadAnnotationUpsertCommand,
+  ThreadAnnotationResolveCommand,
+  ThreadAnnotationReopenCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -1143,6 +1195,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.pinned",
   "thread.unpinned",
   "thread.pin-reordered",
+  "thread.annotation-upserted",
+  "thread.annotation-resolved",
+  "thread.annotation-reopened",
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
@@ -1273,6 +1328,11 @@ export const ThreadPinReorderedPayload = Schema.Struct({
   threadId: ThreadId,
   orderKey: TrimmedNonEmptyString,
   updatedAt: IsoDateTime,
+});
+
+export const ThreadAnnotationChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  annotation: ThreadAnnotation,
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
@@ -1483,6 +1543,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pin-reordered"),
     payload: ThreadPinReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-upserted"),
+    payload: ThreadAnnotationChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-resolved"),
+    payload: ThreadAnnotationChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-reopened"),
+    payload: ThreadAnnotationChangedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
