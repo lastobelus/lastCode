@@ -2,6 +2,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  type OrchestrationEvent,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -24,6 +26,36 @@ import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
 
 const THREAD_WAIT_RESPONSE_MAX_CHARS = 64_000;
+
+export const readThreadWaitUntilTerminal = (
+  threadId: ThreadId,
+  latest: TurnRequestWaitState,
+  events: Stream.Stream<OrchestrationEvent>,
+  readState: Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError>,
+): Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError> => {
+  const changes = events.pipe(
+    Stream.filter(
+      (event) =>
+        event.aggregateKind === "thread" &&
+        event.aggregateId === threadId &&
+        (event.type === "thread.turn-request-resolved" ||
+          event.type === "thread.turn-assistant-finalized" ||
+          event.type === "thread.turn-interrupt-requested" ||
+          event.type === "thread.session-set" ||
+          event.type === "thread.deleted"),
+    ),
+  );
+  const readUntilTerminal = (
+    state: TurnRequestWaitState,
+  ): Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError> =>
+    state.kind === "pending"
+      ? changes.pipe(
+          Stream.runHead,
+          Effect.flatMap(() => readState.pipe(Effect.flatMap(readUntilTerminal))),
+        )
+      : Effect.succeed(state);
+  return readUntilTerminal(latest);
+};
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -123,44 +155,20 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             return yield* failEnvironmentInvalidRequest("wrong_environment");
           }
 
-          const relevantEvents = (yield* orchestrationEngine.subscribeDomainEvents).pipe(
-            Stream.filter(
-              (event) =>
-                event.aggregateKind === "thread" &&
-                event.aggregateId === handle.threadId &&
-                (event.type === "thread.turn-request-resolved" ||
-                  event.type === "thread.turn-assistant-finalized" ||
-                  event.type === "thread.turn-interrupt-requested" ||
-                  event.type === "thread.session-set" ||
-                  event.type === "thread.message-sent" ||
-                  event.type === "thread.deleted"),
-            ),
-          );
-          const subscription = {
-            latest: yield* orchestrationEngine
-              .getTurnRequestWaitState(handle)
-              .pipe(
-                Effect.catch((cause) =>
-                  failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
-                ),
+          const events = yield* orchestrationEngine.subscribeDomainEvents;
+          const latest = yield* orchestrationEngine
+            .getTurnRequestWaitState(handle)
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
               ),
-            changes: relevantEvents,
-          };
-
-          const readUntilTerminal = (
-            state: TurnRequestWaitState,
-          ): Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError> =>
-            state.kind === "pending"
-              ? subscription.changes.pipe(
-                  Stream.runHead,
-                  Effect.flatMap(() =>
-                    orchestrationEngine
-                      .getTurnRequestWaitState(handle)
-                      .pipe(Effect.flatMap(readUntilTerminal)),
-                  ),
-                )
-              : Effect.succeed(state);
-          const waited = yield* readUntilTerminal(subscription.latest).pipe(
+            );
+          const waited = yield* readThreadWaitUntilTerminal(
+            handle.threadId,
+            latest,
+            events,
+            orchestrationEngine.getTurnRequestWaitState(handle),
+          ).pipe(
             Effect.timeoutOption(`${args.payload.timeoutMs} millis`),
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
