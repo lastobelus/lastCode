@@ -165,14 +165,28 @@ it.effect("allows independent T3 homes to have separate owners", () => {
   ).pipe(Effect.ensuring(cleanup));
 });
 
+it.effect("allows dev and production state in one T3 home to have separate owners", () => {
+  const home = makeTemporaryDirectory();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- The lease is intentionally Darwin-only.
+      if (process.platform !== "darwin") return;
+      const production = yield* acquireScopedLease(NodePath.join(home, "userdata"));
+      const development = yield* acquireScopedLease(NodePath.join(home, "dev"));
+
+      assert.notEqual(production.endpoint, development.endpoint);
+    }),
+  ).pipe(Effect.ensuring(cleanup));
+});
+
 it.effect("fails before the server can construct persistence or listen", () => {
   const home = makeTemporaryDirectory();
   return Effect.scoped(
     Effect.gen(function* () {
       // oxlint-disable-next-line t3code/no-global-process-runtime -- The lease is intentionally Darwin-only.
       if (process.platform !== "darwin") return;
-      yield* acquireScopedLease(home);
       const config = makeServerConfig(home);
+      yield* acquireScopedLease(config.stateDir);
       const error = yield* Layer.build(makeServerLayer).pipe(
         Effect.provide(Layer.mergeAll(ServerConfig.layer(config), NodeServices.layer)),
         Effect.flip,

@@ -11,23 +11,23 @@ const DARWIN_O_NOFOLLOW = 0x100;
 export class ServerOwnerLeaseHeldError extends Schema.TaggedErrorClass<ServerOwnerLeaseHeldError>()(
   "ServerOwnerLeaseHeldError",
   {
-    baseDir: Schema.String,
+    stateDir: Schema.String,
   },
 ) {
   override get message() {
-    return `Another T3 Code server already owns ${this.baseDir}. Stop that server or choose a different --base-dir.`;
+    return `Another T3 Code server already owns ${this.stateDir}. Stop that server or choose a different --base-dir.`;
   }
 }
 
 export class ServerOwnerLeaseUnavailableError extends Schema.TaggedErrorClass<ServerOwnerLeaseUnavailableError>()(
   "ServerOwnerLeaseUnavailableError",
   {
-    baseDir: Schema.String,
+    stateDir: Schema.String,
     cause: Schema.Defect(),
   },
 ) {
   override get message() {
-    return `T3 Code could not acquire the server-owner lease for ${this.baseDir}.`;
+    return `T3 Code could not acquire the server-owner lease for ${this.stateDir}.`;
   }
 }
 
@@ -39,8 +39,8 @@ export interface ServerOwnerLease {
   readonly release: Effect.Effect<void>;
 }
 
-function canonicalizeBaseDir(baseDir: string): string {
-  const resolved = NodePath.resolve(baseDir);
+function canonicalizeStateDir(stateDir: string): string {
+  const resolved = NodePath.resolve(stateDir);
   try {
     return NodeFS.realpathSync(resolved);
   } catch {
@@ -48,8 +48,8 @@ function canonicalizeBaseDir(baseDir: string): string {
   }
 }
 
-export function getServerOwnerLeaseLockPath(baseDir: string): string {
-  return NodePath.join(canonicalizeBaseDir(baseDir), "server-owner.lock");
+export function getServerOwnerLeaseLockPath(stateDir: string): string {
+  return NodePath.join(canonicalizeStateDir(stateDir), "server-owner.lock");
 }
 
 function releaseServerOwnerLease(release: () => Promise<void>): Effect.Effect<void> {
@@ -72,13 +72,13 @@ function assertRegularLockPath(endpoint: string): void {
   }
 }
 
-function acquireDarwinServerOwnerLease(baseDir: string): ServerOwnerLease {
-  const endpoint = getServerOwnerLeaseLockPath(baseDir);
+function acquireDarwinServerOwnerLease(stateDir: string): ServerOwnerLease {
+  const endpoint = getServerOwnerLeaseLockPath(stateDir);
   NodeFS.mkdirSync(NodePath.dirname(endpoint), { recursive: true });
   try {
     assertRegularLockPath(endpoint);
   } catch (cause) {
-    throw new ServerOwnerLeaseUnavailableError({ baseDir, cause });
+    throw new ServerOwnerLeaseUnavailableError({ stateDir, cause });
   }
   const flags =
     NodeFS.constants.O_CREAT |
@@ -94,9 +94,9 @@ function acquireDarwinServerOwnerLease(baseDir: string): ServerOwnerLease {
       (cause as NodeJS.ErrnoException).code === "EAGAIN" ||
       (cause as NodeJS.ErrnoException).code === "EWOULDBLOCK"
     ) {
-      throw new ServerOwnerLeaseHeldError({ baseDir });
+      throw new ServerOwnerLeaseHeldError({ stateDir });
     }
-    throw new ServerOwnerLeaseUnavailableError({ baseDir, cause });
+    throw new ServerOwnerLeaseUnavailableError({ stateDir, cause });
   }
   try {
     if (!NodeFS.fstatSync(descriptor).isFile()) {
@@ -104,7 +104,7 @@ function acquireDarwinServerOwnerLease(baseDir: string): ServerOwnerLease {
     }
   } catch (cause) {
     NodeFS.closeSync(descriptor);
-    throw new ServerOwnerLeaseUnavailableError({ baseDir, cause });
+    throw new ServerOwnerLeaseUnavailableError({ stateDir, cause });
   }
   return {
     endpoint,
@@ -112,26 +112,26 @@ function acquireDarwinServerOwnerLease(baseDir: string): ServerOwnerLease {
   };
 }
 
-async function acquireServerOwnerLeasePromise(baseDir: string): Promise<ServerOwnerLease> {
+async function acquireServerOwnerLeasePromise(stateDir: string): Promise<ServerOwnerLease> {
   // This lease protects the LastCode macOS service boundary. Other platforms
   // retain their established server startup behavior until they have an equally
   // kernel-backed primitive; they must not use a stale-path or PID-file fallback.
   // oxlint-disable-next-line t3code/no-global-process-runtime -- O_EXLOCK is Darwin-specific and has no portable Node abstraction.
   if (process.platform !== "darwin") return { endpoint: "unmanaged", release: Effect.void };
-  return acquireDarwinServerOwnerLease(baseDir);
+  return acquireDarwinServerOwnerLease(stateDir);
 }
 
 export const acquireServerOwnerLease = Effect.fn("acquireServerOwnerLease")(function* (
-  baseDir: string,
+  stateDir: string,
 ): Effect.fn.Return<
   ServerOwnerLease,
   ServerOwnerLeaseHeldError | ServerOwnerLeaseUnavailableError
 > {
   return yield* Effect.tryPromise({
-    try: () => acquireServerOwnerLeasePromise(baseDir),
+    try: () => acquireServerOwnerLeasePromise(stateDir),
     catch: (cause) =>
       isServerOwnerLeaseHeldError(cause) || isServerOwnerLeaseUnavailableError(cause)
         ? cause
-        : new ServerOwnerLeaseUnavailableError({ baseDir, cause }),
+        : new ServerOwnerLeaseUnavailableError({ stateDir, cause }),
   });
 });

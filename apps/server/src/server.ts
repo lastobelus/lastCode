@@ -482,7 +482,7 @@ export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     yield* Effect.acquireRelease(
-      ServerOwnerLease.acquireServerOwnerLease(config.baseDir),
+      ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
       (lease) => lease.release,
     );
     const activation = yield* Deferred.make<void>();
