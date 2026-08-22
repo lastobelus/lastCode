@@ -198,20 +198,34 @@ export function ThreadAnnotationHoverPopover(props: {
 }) {
   const [open, setOpen] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
+  const openRef = useRef(false);
+  const rowActiveRef = useRef(props.rowActive);
+  const popupHoveredRef = useRef(false);
+  const popupFocusedRef = useRef(false);
+  const setPopoverOpen = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) {
+      popupHoveredRef.current = false;
+      popupFocusedRef.current = false;
+    }
+    openRef.current = nextOpen;
+    setOpen(nextOpen);
+  }, []);
   const keepOpen = useCallback(() => {
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = null;
-    setOpen(true);
-  }, []);
+    setPopoverOpen(true);
+  }, [setPopoverOpen]);
   const scheduleClose = useCallback(() => {
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
-      setOpen(false);
+      if (rowActiveRef.current || popupHoveredRef.current || popupFocusedRef.current) return;
+      setPopoverOpen(false);
     }, 120);
-  }, []);
+  }, [setPopoverOpen]);
 
   useEffect(() => {
+    rowActiveRef.current = props.rowActive;
     if (props.rowActive) {
       keepOpen();
     } else {
@@ -227,12 +241,8 @@ export function ThreadAnnotationHoverPopover(props: {
   );
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={setPopoverOpen}>
       <PopoverTrigger
-        onMouseEnter={keepOpen}
-        onMouseLeave={scheduleClose}
-        onFocus={keepOpen}
-        onBlur={scheduleClose}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
       >
@@ -245,10 +255,24 @@ export function ThreadAnnotationHoverPopover(props: {
         initialFocus={false}
         side="right"
         style={{ zoom: props.scalePercent / 100 }}
-        onMouseEnter={keepOpen}
-        onMouseLeave={scheduleClose}
-        onFocus={keepOpen}
-        onBlur={scheduleClose}
+        onMouseEnter={() => {
+          if (!openRef.current && !rowActiveRef.current) return;
+          popupHoveredRef.current = true;
+          keepOpen();
+        }}
+        onMouseLeave={() => {
+          popupHoveredRef.current = false;
+          scheduleClose();
+        }}
+        onFocusCapture={() => {
+          popupFocusedRef.current = true;
+          keepOpen();
+        }}
+        onBlurCapture={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          popupFocusedRef.current = false;
+          scheduleClose();
+        }}
       >
         <ThreadAnnotationBody
           annotation={props.annotation}
@@ -260,12 +284,12 @@ export function ThreadAnnotationHoverPopover(props: {
           <ThreadAnnotationActions
             annotation={props.annotation}
             onEdit={() => {
-              setOpen(false);
+              setPopoverOpen(false);
               props.onEdit();
             }}
             onReopen={() => undefined}
             onResolve={() => {
-              setOpen(false);
+              setPopoverOpen(false);
               props.onResolve();
             }}
           />
