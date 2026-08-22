@@ -27,6 +27,7 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import * as ThreadActionResume from "../orchestration/ThreadActionResume.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ActionResume from "./ActionResume.ts";
 
 const threadId = ThreadId.make("thread-action-resume");
@@ -114,6 +115,8 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   const timeline: string[] = [];
   let terminalStatus: "running" | "exited" = "running";
   let failWrite = false;
+  let admissionClosed = false;
+  const admittedKinds: string[] = [];
   let terminalListener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
 
   const dependencies = Layer.mergeAll(
@@ -169,6 +172,14 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       } as never,
     ]),
     ThreadActionResume.layer,
+    Layer.mock(UpdateDrainAdmission)({
+      admit: (kind, effect) =>
+        Effect.sync(() => admittedKinds.push(kind)).pipe(
+          Effect.andThen(
+            admissionClosed ? Effect.die("update drain is closed in this test") : effect,
+          ),
+        ),
+    }),
     NodeServices.layer,
   );
 
@@ -280,6 +291,35 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       .pipe(Effect.flip);
     assert.equal(earlyExit.reason, "launch_failed");
     assert.equal(registry.getLatest(threadId)?.runId, failedState?.runId);
+
+    terminalStatus = "running";
+    const blocked = yield* service.runProjectActionAndResume(
+      { threadId, providerInstanceId },
+      "qa",
+    );
+    admissionClosed = true;
+    yield* terminalListener!({
+      type: "exited",
+      threadId,
+      terminalId: blocked.terminalId,
+      exitCode: 0,
+      exitSignal: null,
+    });
+    assert.equal(dispatched.filter((command) => command.type === "thread.turn.start").length, 1);
+    assert.equal(admittedKinds.at(-1), "thread-turn");
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "succeeded",
+      delivery: "pending",
+    });
+
+    admissionClosed = false;
+    yield* service.retryPendingFollowUps;
+    yield* service.retryPendingFollowUps;
+    assert.equal(dispatched.filter((command) => command.type === "thread.turn.start").length, 2);
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "succeeded",
+      delivery: "delivered",
+    });
   }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
 });
 
@@ -420,6 +460,9 @@ it.effect("requires an explicit resume after a running Action is found on startu
         } as never,
       ]),
       ThreadActionResume.layer,
+      Layer.mock(UpdateDrainAdmission)({
+        admit: (_kind, effect) => effect,
+      }),
       NodeServices.layer,
     );
 
