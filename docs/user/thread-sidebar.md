@@ -53,6 +53,20 @@ The main sidebar, right panel, and terminal drawer open and close immediately by
 The duration can be set up to 400 ms. Clicking the preview replays all three panel transitions; at
 0 ms, it snaps between the same open and closed states.
 
+## Thread annotations in LastCode
+
+A thread can have one Markdown annotation for notes, headings, lists, task lists, and tags. In the
+legacy sidebar, open a thread's context menu and choose **Annotate thread…**. An active annotation
+adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
+the note without opening the thread.
+
+Opening an annotated thread shows the active note as a pale-yellow card above the composer. You
+can dismiss the card for the current visit without deleting or resolving the note. The
+conversation minimap marks the message that was newest when the annotation was created or last
+changed. Editing, resolving, or reopening the annotation moves that marker to the newest message.
+Resolved annotations disappear from the sidebar and composer but remain available from their
+yellow minimap marker, where they can be edited or reopened.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in

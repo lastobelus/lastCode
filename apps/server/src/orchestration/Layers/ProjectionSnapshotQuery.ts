@@ -26,6 +26,7 @@ import {
   ProjectId,
   ThreadLinkedPullRequest,
   ThreadId,
+  ThreadAnnotation,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -99,6 +100,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -486,6 +488,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -524,6 +528,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -564,6 +570,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1024,6 +1032,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1304,7 +1314,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             'thread.activity-appended',
             'thread.turn-diff-completed',
             'thread.reverted',
-            'thread.session-set'
+            'thread.session-set',
+            'thread.annotation-upserted',
+            'thread.annotation-resolved',
+            'thread.annotation-reopened'
           )
       `,
   });
@@ -1921,6 +1934,7 @@ pending_approval_requests AS (
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2133,6 +2147,8 @@ pending_approval_requests AS (
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...(row.annotation !== null ? { annotation: row.annotation } : {}),
+                  latestUserMessageId: row.latestUserMessageId,
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2273,6 +2289,7 @@ pending_approval_requests AS (
                       pinnedAt: row.pinnedAt,
                       pinOrderKey: row.pinOrderKey ?? null,
                       titleRegeneration: mapTitleRegeneration(row),
+                      ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
                       hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2423,6 +2440,7 @@ pending_approval_requests AS (
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                   session: sessionByThread.get(row.threadId) ?? null,
                   latestUserMessageAt: row.latestUserMessageAt,
                   hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2724,6 +2742,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        ...(threadRow.value.annotation !== null ? { annotation: threadRow.value.annotation } : {}),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -2963,6 +2982,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        ...(threadRow.value.annotation !== null ? { annotation: threadRow.value.annotation } : {}),
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {
