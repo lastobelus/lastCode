@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -18,7 +19,9 @@ import * as Ref from "effect/Ref";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
 import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { layer as updateDrainLayer } from "./UpdateDrain.ts";
 import { makeUpdateDrainAdmission } from "./UpdateDrainAdmission.ts";
@@ -105,6 +108,7 @@ const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* 
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
   const dependencies = Layer.mergeAll(
     durableLayer,
+    ProjectionTurnRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
     Layer.mock(ProjectionSnapshotQuery)({ getShellSnapshot: () => Ref.get(shell) }),
     Layer.mock(TerminalManager)({
       metadata: Effect.succeed([]),
@@ -161,6 +165,37 @@ it.effect("orders work admission before closing the drain", () =>
   }),
 );
 
+it.effect("ignores pending starts left behind by a previous server lifetime", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+
+    yield* Effect.gen(function* () {
+      const projectionTurns = yield* ProjectionTurnRepository;
+      yield* projectionTurns.replacePendingTurnStart({
+        threadId,
+        messageId: MessageId.make("message-stale-pending-turn"),
+        sourceProposedPlanThreadId: null,
+        sourceProposedPlanId: null,
+        requestedAt: now,
+      });
+      const admission = yield* makeUpdateDrainAdmission();
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-after-restart"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+
+      assert.deepStrictEqual((yield* admission.status).blockers, []);
+      assert.equal(
+        (yield* admission.claimActivation({ requestId })).commandType,
+        "update-drain.claim",
+      );
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
 it.effect("reports only execution blockers and atomically claims when they clear", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness();
@@ -201,6 +236,50 @@ it.effect("reports only execution blockers and atomically claims when they clear
 
       const blockedWrite = yield* Effect.result(admission.admit("terminal-write", Effect.void));
       assert.equal(blockedWrite._tag, "Failure");
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("keeps accepted provider starts blocking until they reach the session projection", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission();
+      const projectionTurns = yield* ProjectionTurnRepository;
+      yield* projectionTurns.replacePendingTurnStart({
+        threadId,
+        messageId: MessageId.make("message-pending-turn"),
+        sourceProposedPlanThreadId: null,
+        sourceProposedPlanId: null,
+        requestedAt: now,
+      });
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-pending-turn"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+
+      assert.deepStrictEqual((yield* admission.status).blockers, [
+        {
+          type: "thread-turn",
+          threadId,
+          turnId: null,
+          status: "starting",
+        },
+      ]);
+      assert.equal(
+        (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+        "Failure",
+      );
+
+      yield* projectionTurns.deletePendingTurnStartByThreadId({ threadId });
+      assert.equal(
+        (yield* admission.claimActivation({ requestId })).commandType,
+        "update-drain.claim",
+      );
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );

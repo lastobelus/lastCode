@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrain } from "./UpdateDrain.ts";
 
@@ -63,21 +64,41 @@ function internalError(_cause: unknown) {
   });
 }
 
+function pendingTurnStartKey(threadId: string, messageId: string) {
+  return `${threadId}\u0000${messageId}`;
+}
+
 export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* () {
   const drain = yield* UpdateDrain;
   const projections = yield* ProjectionSnapshotQuery;
+  const projectionTurns = yield* ProjectionTurnRepository;
   const terminals = yield* TerminalManager;
   const mutex = yield* Semaphore.make(1);
+  // The provider event stream is hot, so accepted starts from a previous
+  // server lifetime cannot be resumed. Keep their exact identities out of the
+  // live blocker set; a new start replaces the row with a new message id.
+  const stalePendingTurnStartKeys = new Set(
+    (yield* projectionTurns.listPendingTurnStarts().pipe(Effect.mapError(internalError))).map(
+      (pending) => pendingTurnStartKey(pending.threadId, pending.messageId),
+    ),
+  );
 
   const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
+    // Read pending starts first. If one transitions while the shell snapshot is
+    // read, that newer snapshot contains the starting/running provider state.
+    const pendingTurnStarts = yield* projectionTurns
+      .listPendingTurnStarts()
+      .pipe(Effect.mapError(internalError));
     const [shell, terminalState] = yield* Effect.all([
       projections.getShellSnapshot().pipe(Effect.mapError(internalError)),
       terminals.refreshMetadata,
     ]);
     const blockers: UpdateDrainBlocker[] = [];
+    const blockedTurnThreadIds = new Set<string>();
 
     for (const thread of shell.threads) {
       if (thread.latestTurn?.state === "running") {
+        blockedTurnThreadIds.add(thread.id);
         blockers.push({
           type: "thread-turn",
           threadId: thread.id,
@@ -85,6 +106,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
           status: "running",
         });
       } else if (thread.session?.status === "starting" || thread.session?.status === "running") {
+        blockedTurnThreadIds.add(thread.id);
         blockers.push({
           type: "thread-turn",
           threadId: thread.id,
@@ -100,6 +122,20 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
           status: thread.backgroundLiveness,
         });
       }
+    }
+
+    for (const pending of pendingTurnStarts) {
+      const pendingThreadId = pending.threadId;
+      if (stalePendingTurnStartKeys.has(pendingTurnStartKey(pendingThreadId, pending.messageId))) {
+        continue;
+      }
+      if (blockedTurnThreadIds.has(pendingThreadId)) continue;
+      blockers.push({
+        type: "thread-turn",
+        threadId: pendingThreadId,
+        turnId: null,
+        status: "starting",
+      });
     }
 
     for (const terminal of terminalState) {
