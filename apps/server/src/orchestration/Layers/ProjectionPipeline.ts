@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  type MessageId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -593,12 +594,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       ]);
 
       let latestUserMessageAt: string | null = null;
+      let latestUserMessageId: MessageId | null = null;
       for (const message of messages) {
         if (
           message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
+          (latestUserMessageAt === null ||
+            message.createdAt > latestUserMessageAt ||
+            (message.createdAt === latestUserMessageAt &&
+              (latestUserMessageId === null || message.messageId > latestUserMessageId)))
         ) {
           latestUserMessageAt = message.createdAt;
+          latestUserMessageId = message.messageId;
         }
       }
 
@@ -613,6 +619,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       yield* projectionThreadRepository.upsert({
         ...existingRow.value,
+        latestUserMessageId,
         latestUserMessageAt,
         pendingApprovalCount,
         pendingUserInputCount,
@@ -647,6 +654,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pinOrderKey: null,
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
+            annotation: null,
+            latestUserMessageId: null,
             latestUserMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
@@ -796,6 +805,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...existingRow.value,
             pinOrderKey: event.payload.orderKey,
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.annotation-upserted":
+        case "thread.annotation-resolved":
+        case "thread.annotation-reopened": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            annotation: event.payload.annotation,
           });
           return;
         }

@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -23,7 +23,10 @@ vi.mock("~/lib/openPullRequestLink", () => ({
   useOpenChangeRequestLink: () => vi.fn(),
 }));
 
-import ChatMarkdown, { orderedListGutterStyle } from "./ChatMarkdown";
+import ChatMarkdown, {
+  orderedListGutterStyle,
+  resolveChatMarkdownEnvironmentId,
+} from "./ChatMarkdown";
 
 describe("orderedListGutterStyle", () => {
   it("leaves the default gutter alone for single-digit lists", () => {
@@ -65,7 +68,6 @@ describe("orderedListGutterStyle", () => {
     expect(orderedListGutterStyle(0, 100)).toEqual({ "--list-gutter": "4ch" });
   });
 });
-
 describe("ChatMarkdown Windows file links", () => {
   it.each([true, false])("preserves drive paths with parseRawHtml=%s", (parseRawHtml) => {
     const html = renderToStaticMarkup(
@@ -157,5 +159,27 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+describe("resolveChatMarkdownEnvironmentId", () => {
+  it("uses the supplied thread environment for cross-environment markdown actions", () => {
+    const activeEnvironmentId = EnvironmentId.make("environment-a");
+    const threadEnvironmentId = EnvironmentId.make("environment-b");
+
+    expect(
+      resolveChatMarkdownEnvironmentId(activeEnvironmentId, {
+        environmentId: threadEnvironmentId,
+        threadId: ThreadId.make("thread-b"),
+      }),
+    ).toBe(threadEnvironmentId);
+  });
+
+  it("falls back to the active environment without a thread reference", () => {
+    const activeEnvironmentId = EnvironmentId.make("environment-a");
+
+    expect(resolveChatMarkdownEnvironmentId(activeEnvironmentId, undefined)).toBe(
+      activeEnvironmentId,
+    );
   });
 });
