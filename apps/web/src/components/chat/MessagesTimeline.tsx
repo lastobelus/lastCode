@@ -832,6 +832,8 @@ function TimelineMinimap({
     <div
       className={cn(
         "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        annotation !== null &&
+          "[@media(pointer:coarse)]:block [@media(pointer:coarse)]:opacity-100",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
@@ -846,7 +848,9 @@ function TimelineMinimap({
             "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            hitStripWidth > 0 || annotation !== null
+              ? "pointer-events-auto"
+              : "pointer-events-none",
           )}
           onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -895,7 +899,10 @@ function TimelineMinimap({
           }}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
-            width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
+            width: resolveTimelineMinimapInteractiveWidth(
+              Math.max(hitStripWidth, annotation === null ? 0 : 14),
+              activeItem !== null,
+            ),
           }}
           role="group"
           tabIndex={0}
@@ -931,10 +938,16 @@ function TimelineMinimap({
                 style={{ top }}
               >
                 {annotation?.anchorMessageId === item.messageId ? (
-                  <span
+                  <button
                     aria-label="Thread annotation"
-                    className="absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
+                    className="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
                     data-thread-annotation-marker
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setActiveIndex(index);
+                    }}
+                    onFocus={() => setActiveIndex(index)}
                   />
                 ) : null}
               </span>

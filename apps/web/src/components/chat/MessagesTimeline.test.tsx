@@ -255,6 +255,8 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('data-testid="timeline-minimap"');
     expect(markup).toContain("data-thread-annotation-marker");
+    expect(markup).toContain("[@media(pointer:coarse)]:block");
+    expect(markup).toContain("[@media(pointer:coarse)]:opacity-100");
     expect(markup).not.toContain("data-thread-annotation-overflow");
   });
 
