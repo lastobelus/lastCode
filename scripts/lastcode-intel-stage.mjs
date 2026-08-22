@@ -211,6 +211,24 @@ function syncDirectory(path) {
   }
 }
 
+function syncTree(path) {
+  for (const entry of NodeFS.readdirSync(path, { withFileTypes: true })) {
+    const entryPath = NodePath.join(path, entry.name);
+    if (entry.isDirectory()) {
+      syncTree(entryPath);
+      continue;
+    }
+    if (!entry.isFile()) fail(`Cannot make unsupported staged entry durable: ${entry.name}.`);
+    const descriptor = NodeFS.openSync(entryPath, "r");
+    try {
+      NodeFS.fsyncSync(descriptor);
+    } finally {
+      NodeFS.closeSync(descriptor);
+    }
+  }
+  syncDirectory(path);
+}
+
 function writeJsonAtomically(path, value) {
   const temporary = `${path}.tmp-${process.pid}-${NodeCrypto.randomUUID()}`;
   try {
@@ -234,6 +252,14 @@ function cleanupUnreferencedCandidates(root, pendingId) {
   for (const entry of NodeFS.readdirSync(candidates, { withFileTypes: true })) {
     if (entry.isDirectory() && entry.name !== pendingId) {
       NodeFS.rmSync(NodePath.join(candidates, entry.name), { force: true, recursive: true });
+    }
+  }
+}
+
+function cleanupIncompleteCandidates(root) {
+  for (const entry of NodeFS.readdirSync(root, { withFileTypes: true })) {
+    if (entry.name.startsWith(".incomplete-")) {
+      NodeFS.rmSync(NodePath.join(root, entry.name), { force: true, recursive: true });
     }
   }
 }
@@ -298,6 +324,7 @@ async function stageIntelUpdateLocked(
   root,
   candidatesDirectory,
 ) {
+  cleanupIncompleteCandidates(root);
   let pending = readPending(root);
   const currentVersion = options.currentVersion ?? readInstalledVersion(options.appPath);
   const current = parseInstalledVersion(currentVersion);
@@ -372,6 +399,8 @@ async function stageIntelUpdateLocked(
       fail(`Tag ${target.tag} changed while its release was being validated.`);
     }
     NodeFS.rmSync(releaseJsonPath, { force: true });
+    const syncCandidateTree = dependencies.syncCandidateTree ?? syncTree;
+    syncCandidateTree(incomplete);
     NodeFS.renameSync(incomplete, candidateDirectory);
     candidateMoved = true;
     const syncPublishedDirectory = dependencies.syncDirectory ?? syncDirectory;

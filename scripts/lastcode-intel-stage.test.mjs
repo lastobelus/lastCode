@@ -285,6 +285,59 @@ describe("LastCode Intel staging", () => {
     expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([oldPending.candidateId]);
   });
 
+  it("does not publish a candidate whose downloaded asset tree could not be synced", async () => {
+    const root = temporaryDirectory();
+    const oldTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(oldTag, "a".repeat(40)),
+    );
+    const oldPending = readPending(root);
+    const newTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+
+    await expect(
+      stageIntelUpdate(
+        { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+        dependencies(newTag, "b".repeat(40), {
+          syncCandidateTree: () => {
+            throw new Error("injected asset tree sync failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected asset tree sync failure");
+    expect(readPending(root)).toMatchObject({ candidateId: oldPending.candidateId, tag: oldTag });
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([oldPending.candidateId]);
+  });
+
+  it("removes stale incomplete downloads while holding the staging lock", async () => {
+    const root = temporaryDirectory();
+    const incomplete = NodePath.join(root, ".incomplete-interrupted", "assets");
+    NodeFS.mkdirSync(incomplete, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(incomplete, "partial.dmg"), "partial download");
+    let locked = false;
+    const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+
+    const result = await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260821.7", homeDirectory: root },
+      dependencies(tag, "a".repeat(40), {
+        acquireLock: () => {
+          locked = true;
+          return () => {
+            locked = false;
+          };
+        },
+        listReleases: async () => {
+          expect(locked).toBe(true);
+          expect(NodeFS.existsSync(NodePath.dirname(incomplete))).toBe(false);
+          return [];
+        },
+      }),
+    );
+
+    expect(result.status).toBe("up-to-date");
+    expect(locked).toBe(false);
+  });
+
   it("clears a pending candidate after the installed app catches up", async () => {
     const root = temporaryDirectory();
     const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
