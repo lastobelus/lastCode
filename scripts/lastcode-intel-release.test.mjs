@@ -6,7 +6,9 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  parseImmutableReleaseOptions,
   parseIntelReleaseOptions,
+  validateImmutableReleaseRepository,
   validateIntelReleaseDirectory,
 } from "./lastcode-intel-release.mjs";
 
@@ -122,16 +124,58 @@ describe("immutable Intel release validation", () => {
     expect(workflow.match(/persist-credentials: false/g)).toHaveLength(3);
 
     const artifactDownload = publishJob.indexOf("- name: Download isolated build assets");
+    const buildPolicy = buildJob.indexOf("- name: Require immutable GitHub Releases");
+    const targetCheckoutIndex = buildJob.indexOf("- name: Checkout exact installable");
+    const publisherPolicy = publishJob.indexOf("- name: Require immutable GitHub Releases");
     const artifactValidation = publishJob.indexOf("- name: Validate isolated build assets");
     const tagFetch = publishJob.indexOf("git fetch --force --no-tags origin");
     const tagComparison = publishJob.indexOf('if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]');
     const releaseCreate = publishJob.indexOf('gh release create "$INSTALLABLE_TAG"');
+    const finalPolicyCheck = publishJob.lastIndexOf(
+      '"repos/${GITHUB_REPOSITORY}/immutable-releases"',
+      releaseCreate,
+    );
+    expect(buildPolicy).toBeGreaterThan(-1);
+    expect(targetCheckoutIndex).toBeGreaterThan(buildPolicy);
+    expect(publisherPolicy).toBeGreaterThan(-1);
+    expect(artifactDownload).toBeGreaterThan(publisherPolicy);
     expect(artifactDownload).toBeGreaterThan(-1);
     expect(artifactValidation).toBeGreaterThan(artifactDownload);
     expect(tagFetch).toBeGreaterThan(-1);
     expect(tagComparison).toBeGreaterThan(tagFetch);
     expect(releaseCreate).toBeGreaterThan(artifactValidation);
     expect(releaseCreate).toBeGreaterThan(tagComparison);
+    expect(finalPolicyCheck).toBeGreaterThan(tagComparison);
+    expect(releaseCreate).toBeGreaterThan(finalPolicyCheck);
+  });
+
+  it("requires GitHub's immutable release policy", () => {
+    const settingsPath = NodePath.join(
+      NodeOS.tmpdir(),
+      `lastcode-immutable-releases-${NodeCrypto.randomUUID()}.json`,
+    );
+    temporaryDirectories.push(settingsPath);
+
+    writeJson(settingsPath, { enabled: true, enforced_by_owner: false });
+    expect(() => validateImmutableReleaseRepository(settingsPath)).not.toThrow();
+
+    for (const settings of [{ enabled: false }, {}, { enabled: "true" }]) {
+      writeJson(settingsPath, settings);
+      expect(() => validateImmutableReleaseRepository(settingsPath)).toThrow(
+        "immutable releases must be enabled",
+      );
+    }
+
+    expect(
+      parseImmutableReleaseOptions([
+        "validate-repository",
+        "--repository-json",
+        "/tmp/repository.json",
+      ]),
+    ).toBe("/tmp/repository.json");
+    expect(() => parseImmutableReleaseOptions(["validate-repository"])).toThrow(
+      "Expected --repository-json PATH",
+    );
   });
 
   it("accepts a complete local build and matching prerelease", () => {

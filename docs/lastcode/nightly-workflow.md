@@ -376,6 +376,7 @@ only when that build record should be published to the fork.
 
 Configure the fork so that:
 
+- immutable releases are enabled under repository **Settings → Releases**;
 - checkpoint, revision, and build tags cannot be modified or deleted;
 - only the owner or automation identity can force-push `lastcode/main`;
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and

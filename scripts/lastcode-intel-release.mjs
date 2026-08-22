@@ -241,6 +241,21 @@ export function validateIntelReleaseDirectory(input) {
   };
 }
 
+export function validateImmutableReleaseRepository(repositoryJsonPath) {
+  const repository = readJson(repositoryJsonPath, "immutable release settings");
+  if (!isRecord(repository) || repository.enabled !== true) {
+    fail("GitHub immutable releases must be enabled before validating or publishing Intel assets.");
+  }
+}
+
+export function parseImmutableReleaseOptions(argv) {
+  if (argv[0] !== "validate-repository") fail("Expected 'validate-repository'.");
+  if (argv.length !== 3 || argv[1] !== "--repository-json" || !argv[2]) {
+    fail("Expected --repository-json PATH.");
+  }
+  return NodePath.resolve(argv[2]);
+}
+
 export function parseIntelReleaseOptions(argv) {
   if (argv[0] !== "validate") fail("Expected 'validate'.");
   const options = {};
@@ -264,6 +279,11 @@ export function parseIntelReleaseOptions(argv) {
 }
 
 function main(argv) {
+  if (argv[0] === "validate-repository") {
+    validateImmutableReleaseRepository(parseImmutableReleaseOptions(argv));
+    process.stdout.write("Validated GitHub immutable release policy.\n");
+    return;
+  }
   const result = validateIntelReleaseDirectory(parseIntelReleaseOptions(argv));
   process.stdout.write(
     `Validated immutable Intel release assets: ${result.assetNames.join(", ")}\n`,
