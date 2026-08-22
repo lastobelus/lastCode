@@ -43,7 +43,7 @@ it("renders an ordinary Node-hosted wrapper pinned to its owning home", () => {
       stateDir: "/srv/lastcode home/userdata",
       electronRunAsNode: false,
     }),
-    "#!/bin/sh\ncase \"$1\" in\n  current|list|read) command=\"$1\"; shift; exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread \"$command\" --base-dir '/srv/lastcode home' --state-dir '/srv/lastcode home/userdata' \"$@\" ;;\n  \"\"|-h|--help|help) exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread --help ;;\n  *) echo \"lastcode-thread: unsupported command '$1'\" >&2; exit 64 ;;\nesac\n",
+    "#!/bin/sh\ncase \"$1\" in\n  current|list|read|send) command=\"$1\"; shift; exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread \"$command\" --base-dir '/srv/lastcode home' --state-dir '/srv/lastcode home/userdata' \"$@\" ;;\n  \"\"|-h|--help|help) exec '/opt/node/bin/node' '/opt/t3/dist/bin.mjs' thread --help ;;\n  *) echo \"lastcode-thread: unsupported command '$1'\" >&2; exit 64 ;;\nesac\n",
   );
 });
 
@@ -191,7 +191,7 @@ it.effect("routes pinned flags through each real thread leaf parser", () =>
       ),
       electronRunAsNode: "0",
     });
-    for (const command of ["current", "list", "read"] as const) {
+    for (const command of ["current", "list", "read", "send"] as const) {
       const output = yield* Effect.tryPromise(
         () =>
           new Promise<string>((resolve, reject) => {
@@ -203,10 +203,10 @@ it.effect("routes pinned flags through each real thread leaf parser", () =>
       );
       assert.match(output, new RegExp(`t3 thread ${command}`));
     }
-    const unsupported = NodeChildProcess.spawnSync(result.wrapperPath, ["send"], {
+    const unsupported = NodeChildProcess.spawnSync(result.wrapperPath, ["wait"], {
       encoding: "utf8",
     });
     assert.strictEqual(unsupported.status, 64);
-    assert.match(unsupported.stderr, /unsupported command 'send'/);
+    assert.match(unsupported.stderr, /unsupported command 'wait'/);
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
 );

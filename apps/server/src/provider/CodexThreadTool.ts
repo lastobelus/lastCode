@@ -37,7 +37,7 @@ export function renderCodexThreadToolWrapper(input: CodexThreadToolInvocation): 
     "thread",
   ].join(" ");
   const pinnedFlags = `--base-dir ${shellQuote(input.baseDir)} --state-dir ${shellQuote(input.stateDir)}`;
-  return `#!/bin/sh\n${input.electronRunAsNode ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}case "$1" in\n  current|list|read) command="$1"; shift; exec ${executable} "$command" ${pinnedFlags} "$@" ;;\n  ""|-h|--help|help) exec ${executable} --help ;;\n  *) echo "lastcode-thread: unsupported command '$1'" >&2; exit 64 ;;\nesac\n`;
+  return `#!/bin/sh\n${input.electronRunAsNode ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}case "$1" in\n  current|list|read|send) command="$1"; shift; exec ${executable} "$command" ${pinnedFlags} "$@" ;;\n  ""|-h|--help|help) exec ${executable} --help ;;\n  *) echo "lastcode-thread: unsupported command '$1'" >&2; exit 64 ;;\nesac\n`;
 }
 
 export const materializeCodexThreadTool = Effect.fn("materializeCodexThreadTool")(
