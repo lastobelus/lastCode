@@ -187,20 +187,76 @@ export function validateThreadTurnLimit(value: number): number {
   return value;
 }
 
+const requestIdForActivity = (activity: OrchestrationThread["activities"][number]) => {
+  if (typeof activity.payload !== "object" || activity.payload === null) return null;
+  const requestId = (activity.payload as Record<string, unknown>).requestId;
+  return typeof requestId === "string" ? requestId : null;
+};
+
+const isStaleRequestFailure = (activity: OrchestrationThread["activities"][number]) => {
+  if (
+    activity.kind !== "provider.approval.respond.failed" &&
+    activity.kind !== "provider.user-input.respond.failed"
+  ) {
+    return false;
+  }
+  if (typeof activity.payload !== "object" || activity.payload === null) return false;
+  const detail = (activity.payload as Record<string, unknown>).detail;
+  if (typeof detail !== "string") return false;
+  const normalized = detail.toLowerCase();
+  return (
+    normalized.includes("stale pending approval request") ||
+    normalized.includes("unknown pending approval request") ||
+    normalized.includes("unknown pending permission request") ||
+    normalized.includes("stale pending user-input request") ||
+    normalized.includes("unknown pending user-input request") ||
+    normalized.includes("unknown pending user input request") ||
+    normalized.includes("unknown pending codex user input request")
+  );
+};
+
+const pinnedRequestActivityIndexes = (activities: OrchestrationThread["activities"]) => {
+  const openRequests = new Map<string, number>();
+  for (const [index, activity] of activities.entries()) {
+    const requestId = requestIdForActivity(activity);
+    if (requestId === null) continue;
+    if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
+      openRequests.set(requestId, index);
+    } else if (
+      activity.kind === "approval.resolved" ||
+      activity.kind === "user-input.resolved" ||
+      isStaleRequestFailure(activity)
+    ) {
+      openRequests.delete(requestId);
+    }
+  }
+  return new Set(openRequests.values());
+};
+
 export function boundThreadPresentation(
   messages: OrchestrationThread["messages"],
   activities: OrchestrationThread["activities"],
 ) {
+  const pinnedActivityIndexes = pinnedRequestActivityIndexes(activities);
+  const rankedActivities = activities
+    .map((activity, index) => ({ index, createdAt: activity.createdAt }))
+    .toSorted(
+      (left, right) => right.createdAt.localeCompare(left.createdAt) || right.index - left.index,
+    );
+  const rankedPinnedActivities = rankedActivities.filter(({ index }) =>
+    pinnedActivityIndexes.has(index),
+  );
   const selectedActivityIndexes = new Set(
-    activities
-      .map((activity, index) => ({ index, createdAt: activity.createdAt }))
-      .toSorted(
-        (left, right) => right.createdAt.localeCompare(left.createdAt) || right.index - left.index,
-      )
+    [
+      ...rankedPinnedActivities,
+      ...rankedActivities.filter(({ index }) => !pinnedActivityIndexes.has(index)),
+    ]
       .slice(0, THREAD_ACTIVITY_MAX_RESULTS)
       .map(({ index }) => index),
   );
-  const selectedActivities = activities.filter((_, index) => selectedActivityIndexes.has(index));
+  const selectedActivities = activities
+    .map((activity, originalIndex) => ({ activity, originalIndex }))
+    .filter(({ originalIndex }) => selectedActivityIndexes.has(originalIndex));
   const originalTextChars =
     messages.reduce((total, message) => total + message.text.length, 0) +
     activities.reduce((total, activity) => total + activity.summary.length, 0);
@@ -213,15 +269,18 @@ export function boundThreadPresentation(
       index,
       timestamp: message.updatedAt,
       length: message.text.length,
+      pinned: false,
     })),
-    ...selectedActivities.map((activity, index) => ({
+    ...selectedActivities.map(({ activity, originalIndex }, index) => ({
       kind: "activity" as const,
       index,
       timestamp: activity.createdAt,
       length: activity.summary.length,
+      pinned: pinnedActivityIndexes.has(originalIndex),
     })),
   ].toSorted(
     (left, right) =>
+      Number(right.pinned) - Number(left.pinned) ||
       right.timestamp.localeCompare(left.timestamp) ||
       (left.kind === right.kind ? right.index - left.index : left.kind === "activity" ? -1 : 1),
   );
@@ -235,7 +294,7 @@ export function boundThreadPresentation(
     ...message,
     text: message.text.slice(message.text.length - messageChars[index]!),
   }));
-  const boundedActivities = selectedActivities.map((activity, index) => ({
+  const boundedActivities = selectedActivities.map(({ activity }, index) => ({
     ...activity,
     summary: activity.summary.slice(activity.summary.length - activityChars[index]!),
   }));

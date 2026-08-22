@@ -18,7 +18,9 @@ a deterministic tie-breaker. When more exist, its JSON includes `threadsTruncate
 and `originalThreadCount`.
 
 `read` bounds recent message text and activity summaries to one 64,000-character output
-budget and caps activity records. Its JSON reports when text or activity counts were truncated.
+budget and caps activity records. Unresolved approval and user-input requests are retained,
+with remaining activity slots filled by the newest activity. Its JSON reports when text or
+activity counts were truncated.
 
 The bundled thread command is currently available on POSIX Node hosts and packaged macOS.
 Windows and packaged Linux AppImage Codex sessions still receive LastCode thread and home

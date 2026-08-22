@@ -83,8 +83,11 @@ provider turn and resulting assistant response. It never interprets an arbitrary
 turn as the answer.
 
 `read` and successful `wait` CLI output use a 64,000-character presentation budget.
-For `read`, message text and activity summaries share that single newest-first budget,
-and activity records also have a conservative recent-record cap. JSON includes
+For `read`, message text and activity summaries share that budget. Unresolved approval and
+user-input request explanations are retained first, then the newest content fills the remaining
+text budget. Activity records also have a conservative cap: unresolved requests are pinned
+first and the remaining slots contain the newest activity, all in their original deterministic
+order. JSON includes
 `textTruncated` and `originalTextChars` when selected text exceeds the budget, plus
 additive activity-count truncation metadata when the record cap applies; metadata and
 identifiers are never truncated. The live server may hydrate its existing bounded-turn detail

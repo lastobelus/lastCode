@@ -38,6 +38,20 @@ const activity = (id: string, summary: string, createdAt: string) =>
     createdAt,
   }) as OrchestrationThread["activities"][number];
 
+const requestActivity = (
+  id: string,
+  kind: "approval.requested" | "approval.resolved" | "user-input.requested" | "user-input.resolved",
+  requestId: string,
+  summary: string,
+  createdAt: string,
+) =>
+  ({
+    ...activity(id, summary, createdAt),
+    kind,
+    tone: "approval",
+    payload: { requestId },
+  }) as OrchestrationThread["activities"][number];
+
 const runnerSource = () => {
   const rawThread = {
     id: ThreadId.make("thread-runner"),
@@ -371,6 +385,95 @@ it("caps activity records to the most recent entries while retaining their origi
   assert.strictEqual(result.originalActivityCount, activities.length);
   assert.strictEqual(result.textTruncated, true);
   assert.strictEqual(result.originalTextChars, activities.length);
+});
+
+it("retains an old unresolved request before filling the activity cap with recent entries", () => {
+  const pending = requestActivity(
+    "approval-pending",
+    "approval.requested",
+    "request-pending",
+    "Approval required",
+    "2025-12-31T00:00:00.000Z",
+  );
+  const pendingInput = requestActivity(
+    "user-input-pending",
+    "user-input.requested",
+    "input-pending",
+    "Input required",
+    "2025-12-31T00:30:00.000Z",
+  );
+  const resolvedRequest = requestActivity(
+    "user-input-closed",
+    "user-input.requested",
+    "request-closed",
+    "Input required",
+    "2025-12-31T01:00:00.000Z",
+  );
+  const resolution = requestActivity(
+    "user-input-resolution",
+    "user-input.resolved",
+    "request-closed",
+    "Input received",
+    "2025-12-31T02:00:00.000Z",
+  );
+  const recent = Array.from({ length: THREAD_ACTIVITY_MAX_RESULTS + 5 }, (_, index) =>
+    activity(
+      `activity-${index}`,
+      "x",
+      `2026-01-${String(Math.floor(index / 24) + 1).padStart(2, "0")}T${String(index % 24).padStart(2, "0")}:00:00.000Z`,
+    ),
+  );
+
+  const result = boundThreadPresentation(
+    [],
+    [pending, pendingInput, resolvedRequest, resolution, ...recent],
+  );
+
+  assert.strictEqual(result.activities.length, THREAD_ACTIVITY_MAX_RESULTS);
+  assert.strictEqual(result.activities[0]?.id, pending.id);
+  assert.strictEqual(result.activities[1]?.id, pendingInput.id);
+  assert.strictEqual(result.activities[2]?.id, "activity-7");
+  assert.strictEqual(result.activities.at(-1)?.id, `activity-${recent.length - 1}`);
+  assert.strictEqual(
+    result.activities.some(({ id }) => id === resolvedRequest.id),
+    false,
+  );
+  assert.strictEqual(
+    result.activities.some(({ id }) => id === resolution.id),
+    false,
+  );
+  assert.strictEqual(result.activitiesTruncated, true);
+  assert.strictEqual(result.originalActivityCount, recent.length + 4);
+});
+
+it("reserves presentation text for an old unresolved request explanation", () => {
+  const pending = requestActivity(
+    "approval-pending",
+    "approval.requested",
+    "request-pending",
+    "Approval required",
+    "2025-12-31T00:00:00.000Z",
+  );
+  const recent = activity(
+    "activity-new",
+    "n".repeat(THREAD_TRANSCRIPT_MAX_CHARS),
+    "2026-01-01T00:00:00.000Z",
+  );
+
+  const result = boundThreadPresentation([], [pending, recent]);
+
+  assert.strictEqual(result.activities[0]?.summary, pending.summary);
+  assert.strictEqual(
+    result.activities[1]?.summary.length,
+    THREAD_TRANSCRIPT_MAX_CHARS - pending.summary.length,
+  );
+  assert.match(result.activities[1]?.summary ?? "", /^n+$/);
+  assert.strictEqual(
+    result.activities.reduce((total, item) => total + item.summary.length, 0),
+    THREAD_TRANSCRIPT_MAX_CHARS,
+  );
+  assert.strictEqual(result.textTruncated, true);
+  assert.strictEqual(result.activitiesTruncated, false);
 });
 
 it("shares one text budget across messages and activities, favoring newer content", () => {
