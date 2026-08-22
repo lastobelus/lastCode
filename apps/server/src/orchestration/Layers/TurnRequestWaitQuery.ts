@@ -16,6 +16,7 @@ const WaitRow = Schema.Struct({
   correlationState: Schema.Literals(["pending", "started", "error", "interrupted"]),
   turnId: Schema.NullOr(TurnId),
   turnState: Schema.NullOr(Schema.Literals(["running", "completed", "error", "interrupted"])),
+  assistantMessageId: Schema.NullOr(MessageId),
   response: Schema.NullOr(Schema.String),
 });
 
@@ -25,7 +26,8 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
     Result: WaitRow,
     execute: ({ threadId, messageId }) => sql`
       SELECT correlations.state AS "correlationState", correlations.turn_id AS "turnId",
-        turns.state AS "turnState", messages.text AS "response"
+        turns.state AS "turnState", turns.assistant_message_id AS "assistantMessageId",
+        messages.text AS "response"
       FROM projection_turn_request_correlations AS correlations
       LEFT JOIN projection_turns AS turns
         ON turns.thread_id = correlations.thread_id AND turns.turn_id = correlations.turn_id
@@ -51,11 +53,14 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       }
       if (value.turnId !== null && value.turnState !== null && value.turnState !== "running") {
         if (value.turnState === "completed") {
+          if (value.assistantMessageId === null || value.response === null) {
+            return { kind: "pending" } as const;
+          }
           return {
             kind: "terminal",
             state: "completed",
             turnId: value.turnId,
-            response: value.response ?? "",
+            response: value.response,
           } as const;
         }
         return {

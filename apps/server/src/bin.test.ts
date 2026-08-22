@@ -920,6 +920,28 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
                       createdAt: responseAt,
                     });
                     yield* engine.dispatch({
+                      type: "thread.session.set",
+                      commandId: CommandId.make("cmd-composed-wait-complete"),
+                      threadId,
+                      session: {
+                        threadId,
+                        status: "ready",
+                        providerName: "codex",
+                        runtimeMode: "full-access",
+                        activeTurnId: null,
+                        lastError: null,
+                        updatedAt: responseAt,
+                      },
+                      createdAt: responseAt,
+                    });
+                    assert.deepStrictEqual(
+                      yield* engine.getTurnRequestWaitState({
+                        threadId,
+                        messageId: event.payload.messageId,
+                      }),
+                      { kind: "pending" },
+                    );
+                    yield* engine.dispatch({
                       type: "thread.message.assistant.delta",
                       commandId: CommandId.make("cmd-composed-wait-answer"),
                       threadId,
@@ -934,21 +956,6 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
                       threadId,
                       messageId: MessageId.make("message-composed-wait-answer"),
                       turnId: composedTurnId,
-                      createdAt: responseAt,
-                    });
-                    yield* engine.dispatch({
-                      type: "thread.session.set",
-                      commandId: CommandId.make("cmd-composed-wait-complete"),
-                      threadId,
-                      session: {
-                        threadId,
-                        status: "ready",
-                        providerName: "codex",
-                        runtimeMode: "full-access",
-                        activeTurnId: null,
-                        lastError: null,
-                        updatedAt: responseAt,
-                      },
                       createdAt: responseAt,
                     });
                     return event.payload.messageId;
