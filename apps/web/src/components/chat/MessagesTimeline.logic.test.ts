@@ -542,6 +542,7 @@ describe("deriveMessagesTimelineRows", () => {
         kind: "working",
         id: "working-indicator-row",
         createdAt: "2026-01-01T00:01:00Z",
+        showThinking: true,
       },
     ]);
   });
