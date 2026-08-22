@@ -16,7 +16,7 @@ layer("ProjectionThreadMessageRepository", (it) => {
     Effect.gen(function* () {
       const repository = yield* ProjectionThreadMessageRepository;
       const threadId = ThreadId.make("thread-latest-user-message");
-      assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
+      assert.isNull(yield* repository.getLatestUserMessage({ threadId }));
 
       yield* repository.upsert({
         messageId: MessageId.make("import:codex:latest-user-message:000000"),
@@ -58,12 +58,12 @@ layer("ProjectionThreadMessageRepository", (it) => {
         updatedAt: "2026-02-28T19:05:05.000Z",
       });
 
-      assert.strictEqual(
-        yield* repository.getLatestUserMessageAt({ threadId }),
-        "2026-02-28T19:05:02.000Z",
-      );
+      assert.deepStrictEqual(yield* repository.getLatestUserMessage({ threadId }), {
+        messageId: "latest-user-message-0",
+        createdAt: "2026-02-28T19:05:02.000Z",
+      });
       yield* repository.deleteByThreadId({ threadId });
-      assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
+      assert.isNull(yield* repository.getLatestUserMessage({ threadId }));
     }),
   );
 
