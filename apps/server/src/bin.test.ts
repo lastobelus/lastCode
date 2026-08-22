@@ -1078,11 +1078,114 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           });
           assert.deepStrictEqual(
             yield* engine.getTurnRequestWaitState({ threadId, messageId: emptyMessageId }),
+            { kind: "pending" },
+          );
+          yield* engine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: CommandId.make("cmd-empty-response-assistant-finalized"),
+            threadId,
+            turnId: emptyTurnId,
+            createdAt: emptyAt,
+          });
+          assert.deepStrictEqual(
+            yield* engine.getTurnRequestWaitState({ threadId, messageId: emptyMessageId }),
             {
               kind: "terminal",
               state: "completed",
               turnId: emptyTurnId,
               response: "",
+            },
+          );
+          const bufferedMessageId = MessageId.make("message-short-buffered-request");
+          const bufferedTurnId = TurnId.make("turn-short-buffered-response");
+          yield* engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-short-buffered-start"),
+            threadId,
+            message: {
+              messageId: bufferedMessageId,
+              role: "user",
+              text: "Return a short buffered answer.",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            trackRequestCorrelation: true,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-request.resolve",
+            commandId: CommandId.make("turn-request:short-buffered"),
+            threadId,
+            messageId: bufferedMessageId,
+            outcome: { kind: "started", turnId: bufferedTurnId },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-short-buffered-running"),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: bufferedTurnId,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-short-buffered-complete"),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          assert.deepStrictEqual(
+            yield* engine.getTurnRequestWaitState({ threadId, messageId: bufferedMessageId }),
+            { kind: "pending" },
+          );
+          yield* engine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: CommandId.make("cmd-short-buffered-delta"),
+            threadId,
+            messageId: MessageId.make("message-short-buffered-answer"),
+            delta: "short complete answer",
+            turnId: bufferedTurnId,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make("cmd-short-buffered-message-complete"),
+            threadId,
+            messageId: MessageId.make("message-short-buffered-answer"),
+            turnId: bufferedTurnId,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: CommandId.make("cmd-short-buffered-assistant-finalized"),
+            threadId,
+            turnId: bufferedTurnId,
+            createdAt: emptyAt,
+          });
+          assert.deepStrictEqual(
+            yield* engine.getTurnRequestWaitState({ threadId, messageId: bufferedMessageId }),
+            {
+              kind: "terminal",
+              state: "completed",
+              turnId: bufferedTurnId,
+              response: "short complete answer",
             },
           );
           const trackedTurnId = TurnId.make("turn-live-wait");

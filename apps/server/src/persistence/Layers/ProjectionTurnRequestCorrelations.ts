@@ -44,15 +44,35 @@ const make = Effect.gen(function* () {
   const get: ProjectionTurnRequestCorrelationRepositoryShape["get"] = (input) =>
     getRow(input).pipe(Effect.mapError(toPersistenceSqlError("turnCorrelation.get")));
 
+  const markAssistantFinalized: ProjectionTurnRequestCorrelationRepositoryShape["markAssistantFinalized"] =
+    (input) =>
+      sql`
+        INSERT INTO projection_turn_assistant_finalizations (thread_id, turn_id, finalized_at)
+        VALUES (${input.threadId}, ${input.turnId}, ${input.finalizedAt})
+        ON CONFLICT (thread_id, turn_id) DO NOTHING
+      `.pipe(
+        Effect.asVoid,
+        Effect.mapError(toPersistenceSqlError("turnCorrelation.markAssistantFinalized")),
+      );
+
   const deleteByThreadId: ProjectionTurnRequestCorrelationRepositoryShape["deleteByThreadId"] = ({
     threadId,
   }) =>
-    sql`DELETE FROM projection_turn_request_correlations WHERE thread_id = ${threadId}`.pipe(
-      Effect.asVoid,
-      Effect.mapError(toPersistenceSqlError("turnCorrelation.deleteByThreadId")),
-    );
+    sql
+      .withTransaction(
+        sql`DELETE FROM projection_turn_request_correlations WHERE thread_id = ${threadId}`.pipe(
+          Effect.flatMap(
+            () =>
+              sql`DELETE FROM projection_turn_assistant_finalizations WHERE thread_id = ${threadId}`,
+          ),
+        ),
+      )
+      .pipe(
+        Effect.asVoid,
+        Effect.mapError(toPersistenceSqlError("turnCorrelation.deleteByThreadId")),
+      );
 
-  return { insertPending, resolve, get, deleteByThreadId };
+  return { insertPending, resolve, markAssistantFinalized, get, deleteByThreadId };
 });
 
 export const ProjectionTurnRequestCorrelationRepositoryLive = Layer.effect(

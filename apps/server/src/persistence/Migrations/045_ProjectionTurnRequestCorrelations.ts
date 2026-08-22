@@ -14,4 +14,12 @@ export default Effect.gen(function* () {
       PRIMARY KEY (thread_id, message_id)
     )
   `;
+  yield* sql`
+    CREATE TABLE IF NOT EXISTS projection_turn_assistant_finalizations (
+      thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      finalized_at TEXT NOT NULL,
+      PRIMARY KEY (thread_id, turn_id)
+    )
+  `;
 });

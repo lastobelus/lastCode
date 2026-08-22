@@ -1209,6 +1209,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.turn-assistant-finalized": {
+          yield* projectionTurnRequestCorrelationRepository.markAssistantFinalized({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+            finalizedAt: event.payload.finalizedAt,
+          });
+          return;
+        }
+
         case "thread.deleted": {
           yield* projectionTurnRequestCorrelationRepository.deleteByThreadId({
             threadId: event.payload.threadId,

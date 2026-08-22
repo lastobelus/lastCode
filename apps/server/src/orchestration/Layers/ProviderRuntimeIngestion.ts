@@ -1873,6 +1873,14 @@ const make = Effect.gen(function* () {
             turnId,
             updatedAt: now,
           });
+
+          yield* orchestrationEngine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: yield* providerCommandId(event, "turn-assistant-finalize"),
+            threadId: thread.id,
+            turnId,
+            createdAt: now,
+          });
         }
       }
 

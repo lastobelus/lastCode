@@ -26,6 +26,11 @@ export interface ProjectionTurnRequestCorrelationRepositoryShape {
       "threadId" | "messageId" | "turnId" | "state" | "resolvedAt"
     >,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly markAssistantFinalized: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly finalizedAt: IsoDateTime;
+  }) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly get: (input: {
     readonly threadId: ThreadId;
     readonly messageId: MessageId;

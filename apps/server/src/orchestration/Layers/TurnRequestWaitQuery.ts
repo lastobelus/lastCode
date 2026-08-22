@@ -19,6 +19,7 @@ const WaitRow = Schema.Struct({
   assistantMessageId: Schema.NullOr(MessageId),
   response: Schema.NullOr(Schema.String),
   responseStreaming: Schema.NullOr(Schema.Number),
+  assistantFinalizedAt: Schema.NullOr(Schema.String),
 });
 
 export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
@@ -28,12 +29,16 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
     execute: ({ threadId, messageId }) => sql`
       SELECT correlations.state AS "correlationState", correlations.turn_id AS "turnId",
         turns.state AS "turnState", turns.assistant_message_id AS "assistantMessageId",
-        messages.text AS "response", messages.is_streaming AS "responseStreaming"
+        messages.text AS "response", messages.is_streaming AS "responseStreaming",
+        finalizations.finalized_at AS "assistantFinalizedAt"
       FROM projection_turn_request_correlations AS correlations
       LEFT JOIN projection_turns AS turns
         ON turns.thread_id = correlations.thread_id AND turns.turn_id = correlations.turn_id
       LEFT JOIN projection_thread_messages AS messages
         ON messages.message_id = turns.assistant_message_id
+      LEFT JOIN projection_turn_assistant_finalizations AS finalizations
+        ON finalizations.thread_id = correlations.thread_id
+          AND finalizations.turn_id = correlations.turn_id
       WHERE correlations.thread_id = ${threadId} AND correlations.message_id = ${messageId}
       LIMIT 1
     `,
@@ -55,6 +60,9 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       if (value.turnId !== null && value.turnState !== null && value.turnState !== "running") {
         if (value.turnState === "completed") {
           if (value.assistantMessageId === null) {
+            if (value.assistantFinalizedAt === null) {
+              return { kind: "pending" } as const;
+            }
             return {
               kind: "terminal",
               state: "completed",

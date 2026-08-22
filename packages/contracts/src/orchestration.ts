@@ -1185,6 +1185,14 @@ const ThreadTurnRequestResolveCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadTurnAssistantFinalizeCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-assistant.finalize"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  turnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1195,6 +1203,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
   ThreadTurnRequestResolveCommand,
+  ThreadTurnAssistantFinalizeCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1228,6 +1237,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.message-sent",
   "thread.turn-start-requested",
   "thread.turn-request-resolved",
+  "thread.turn-assistant-finalized",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
@@ -1420,6 +1430,12 @@ export const ThreadTurnRequestResolvedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   outcome: ThreadTurnRequestOutcome,
+});
+
+export const ThreadTurnAssistantFinalizedPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  finalizedAt: IsoDateTime,
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
@@ -1633,6 +1649,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.turn-request-resolved"),
     payload: ThreadTurnRequestResolvedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-assistant-finalized"),
+    payload: ThreadTurnAssistantFinalizedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

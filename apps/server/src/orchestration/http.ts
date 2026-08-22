@@ -129,6 +129,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 event.aggregateKind === "thread" &&
                 event.aggregateId === handle.threadId &&
                 (event.type === "thread.turn-request-resolved" ||
+                  event.type === "thread.turn-assistant-finalized" ||
                   event.type === "thread.turn-interrupt-requested" ||
                   event.type === "thread.session-set" ||
                   event.type === "thread.message-sent" ||

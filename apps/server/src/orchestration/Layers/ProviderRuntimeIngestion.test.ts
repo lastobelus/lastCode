@@ -2637,6 +2637,7 @@ describe("ProviderRuntimeIngestion", () => {
             message.id === "assistant:item-complete-dedup" && !message.streaming,
         ),
     );
+    await harness.drain();
 
     const events = await Effect.runPromise(
       Stream.runCollect(harness.engine.readEvents(0)).pipe(
@@ -2653,6 +2654,19 @@ describe("ProviderRuntimeIngestion", () => {
       );
     });
     expect(completionEvents).toHaveLength(1);
+    const completionIndex = events.findIndex(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "assistant:item-complete-dedup" &&
+        event.payload.streaming === false,
+    );
+    const finalizedIndex = events.findIndex(
+      (event) =>
+        event.type === "thread.turn-assistant-finalized" &&
+        event.payload.turnId === "turn-complete-dedup",
+    );
+    expect(completionIndex).toBeGreaterThanOrEqual(0);
+    expect(finalizedIndex).toBeGreaterThan(completionIndex);
   });
 
   it("maps canonical request events into approval activities with requestKind", async () => {
