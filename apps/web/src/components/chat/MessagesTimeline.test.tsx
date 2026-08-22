@@ -325,6 +325,66 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Worked for 8.0s");
   });
 
+  it("keeps an annotation visible in the minimap with only one loaded marker", () => {
+    const entry = buildUserTimelineEntry("Annotated prompt");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "# Follow up",
+          anchorMessageId: entry.message.id,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: null,
+        }}
+        timelineEntries={[entry]}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-minimap"');
+    expect(markup).toContain("data-thread-annotation-marker");
+    expect(markup).toContain("[@media(pointer:coarse)]:block");
+    expect(markup).toContain("[@media(pointer:coarse)]:opacity-100");
+    expect(markup).not.toContain("data-thread-annotation-overflow");
+  });
+
+  it("uses an honest earlier-message marker when the anchor is outside loaded history", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "Resolved note",
+          anchorMessageId: MessageId.make("older-message"),
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: MESSAGE_CREATED_AT,
+        }}
+        timelineEntries={[buildUserTimelineEntry("Loaded prompt")]}
+      />,
+    );
+
+    expect(markup).toContain("data-thread-annotation-overflow");
+    expect(markup).toContain('aria-label="Annotation attached to an earlier message"');
+    expect(markup).toContain('class="pointer-events-auto absolute left-3"');
+    expect(markup).not.toContain("data-thread-annotation-marker");
+  });
+
+  it("uses the larger leading inset only when the top fade is enabled", () => {
+    const timelineEntries = [buildUserTimelineEntry("Hello")];
+
+    const compactMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} />,
+    );
+    const fadedMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} topFadeEnabled />,
+    );
+
+    expect(compactMarkup).toContain('class="h-3 sm:h-4"');
+    expect(compactMarkup).not.toContain("topbar-scroll-fade");
+    expect(fadedMarkup).toContain('class="h-[var(--workspace-titlebar-scroll-fade-height)]"');
+    expect(fadedMarkup).toContain("topbar-scroll-fade");
+  });
+
   it("keeps assistant changed-files headers sticky below the thread header", () => {
     const assistantMessageId = MessageId.make("message-assistant-with-files");
     const turnId = TurnId.make("turn-with-files");
