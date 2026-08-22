@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStreamPromises from "node:stream/promises";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -120,7 +121,8 @@ async function createPackagedApp(root: string) {
     NodePath.join(asarSource, "apps", "server", "dist", "bin.mjs"),
     "console.log('LastCode server');\n",
   );
-  await createPackage(asarSource, NodePath.join(resourcesPath, "app.asar"));
+  const archive = await createPackage(asarSource, NodePath.join(resourcesPath, "app.asar"));
+  await NodeStreamPromises.finished(archive);
   return appPath;
 }
 
