@@ -113,6 +113,38 @@ tests("UpdateDrain", (it) => {
   );
 });
 
+it.layer(testLayer)("UpdateDrain activation claim", (it) => {
+  it.effect("restores an activation claim and replays its receipt after restart", () =>
+    Effect.gen(function* () {
+      const drain = yield* UpdateDrain;
+      const repository = yield* UpdateDrainRepository;
+      yield* drain.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("claim-start"),
+        requestId,
+        targetVersion,
+        createdAt: startedAt,
+      });
+      const claimCommand = {
+        type: "update-drain.claim" as const,
+        commandId: CommandId.make(`update-drain:claim:${requestId}`),
+        requestId,
+        createdAt: "2026-08-21T00:01:00.000Z",
+      };
+      const claimed = yield* drain.dispatch(claimCommand);
+
+      const restored = yield* makeUpdateDrain().pipe(
+        Effect.provideService(UpdateDrainRepository, repository),
+      );
+      assert.deepStrictEqual(yield* restored.status, {
+        sequence: 2,
+        intent: { requestId, targetVersion, status: "claimed" },
+      });
+      assert.deepStrictEqual(yield* restored.dispatch(claimCommand), claimed);
+    }),
+  );
+});
+
 it.layer(testLayer)("UpdateDrain request history", (it) => {
   it.effect("never reuses a cancelled request id after later drains and restart", () =>
     Effect.gen(function* () {
