@@ -364,6 +364,8 @@ export async function validateDmgArtifact(dmgPath, options = {}) {
   const runCommand = options.runCommand ?? run;
   const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-validate-"));
   let attached = false;
+  let result;
+  let validationError;
   try {
     runCommand("hdiutil", [
       "attach",
@@ -381,11 +383,30 @@ export async function validateDmgArtifact(dmgPath, options = {}) {
       runCommand,
       signaturePolicy: options.signaturePolicy,
     });
-    return { appPath: "LastCode.app", sha256: actualSha256, version };
-  } finally {
-    if (attached) runCommand("hdiutil", ["detach", mountPoint]);
-    NodeFS.rmSync(mountPoint, { force: true, recursive: true });
+    result = { appPath: "LastCode.app", sha256: actualSha256, version };
+  } catch (error) {
+    validationError = error;
   }
+  let cleanupError;
+  if (attached) {
+    try {
+      runCommand("hdiutil", ["detach", mountPoint]);
+    } catch (error) {
+      try {
+        runCommand("hdiutil", ["detach", "-force", mountPoint]);
+      } catch {
+        cleanupError = error;
+      }
+    }
+  }
+  try {
+    NodeFS.rmSync(mountPoint, { force: true, recursive: true });
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (validationError) throw validationError;
+  if (cleanupError) throw cleanupError;
+  return result;
 }
 
 async function waitForProcessExit(pid, timeoutMs = 30_000) {

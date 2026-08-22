@@ -226,6 +226,37 @@ describe("LastCode userland install command", () => {
     ).rejects.toThrow("DMG checksum mismatch");
   });
 
+  it("removes validation mounts and preserves the primary error when detach fails", async () => {
+    const root = temporaryDirectory();
+    const dmgPath = NodePath.join(root, "LastCode.dmg");
+    NodeFS.writeFileSync(dmgPath, "invalid mounted app");
+    const commands = [];
+    let mountPoint;
+    const runCommand = (command, args) => {
+      commands.push([command, args]);
+      if (command === "hdiutil" && args[0] === "attach") {
+        mountPoint = args[4];
+        NodeFS.mkdirSync(NodePath.join(mountPoint, "LastCode.app"));
+        return "";
+      }
+      if (command === "hdiutil") throw new Error("injected detach failure");
+      if (command === "/usr/libexec/PlistBuddy" && args[1] === "Print:CFBundleIdentifier") {
+        return "com.example.untrusted";
+      }
+      throw new Error(`Unexpected ${command}`);
+    };
+
+    await expect(
+      validateDmgArtifact(dmgPath, { allowNonDarwin: true, runCommand }),
+    ).rejects.toThrow("Expected bundle codes.lastobelus.lastcode");
+    expect(NodeFS.existsSync(mountPoint)).toBe(false);
+    expect(commands.filter(([command]) => command === "hdiutil").map(([, args]) => args)).toEqual([
+      ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmgPath],
+      ["detach", mountPoint],
+      ["detach", "-force", mountPoint],
+    ]);
+  });
+
   it("requests quit without waiting for an AppleEvent response", async () => {
     let checks = 0;
     const commands = [];
