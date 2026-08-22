@@ -34,7 +34,7 @@ import { layerReadOnlyConfig as SqlitePersistenceLayerReadOnly } from "../persis
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { type CliAuthLocationFlags, resolveThreadInspectionConfig } from "./config.ts";
 
 export const THREAD_READ_DEFAULT_TURN_LIMIT = 5;
 export const THREAD_READ_MAX_TURN_LIMIT = 20;
@@ -549,7 +549,7 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
   run: (source: ThreadReadSource) => Effect.Effect<unknown, ThreadCliError>,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
-  const config = yield* resolveCliAuthConfig(flags, logLevel);
+  const config = yield* resolveThreadInspectionConfig(flags, logLevel);
   const minimumLogLevel = config.logLevel;
   return yield* Effect.gen(function* () {
     const live = yield* tryRunLiveThreadRead(config, minimumLogLevel, run).pipe(

@@ -596,15 +596,16 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
 
   it.effect("falls back to bounded SQLite reads without clearing the runtime record", () =>
     Effect.gen(function* () {
-      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-"));
+      const seedBaseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-seed-"),
+      );
       const workspaceRoot = NodeFS.mkdtempSync(
         NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-workspace-"),
       );
-      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
-      const snapshot = yield* readPersistedSnapshot(baseDir);
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", seedBaseDir]);
+      const snapshot = yield* readPersistedSnapshot(seedBaseDir);
       const project = snapshot.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
-      const config = yield* makeCliTestServerConfig(baseDir);
-      NodeFS.writeFileSync(config.environmentIdPath, "env-thread-offline\n");
+      const seedConfig = yield* makeCliTestServerConfig(seedBaseDir);
       yield* Effect.gen(function* () {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
         const sql = yield* SqlClient.SqlClient;
@@ -624,7 +625,18 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         // Leave the applied schema intact but make the latest migration appear pending.
         // A setup-enabled fallback would try to run it; the inspection layer must not.
         yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 40`;
-      }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(seedConfig)));
+
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-"));
+      const config = yield* makeCliTestServerConfig(baseDir);
+      NodeFS.mkdirSync(config.stateDir);
+      const seedDatabase = new NodeSqlite.DatabaseSync(seedConfig.dbPath);
+      try {
+        seedDatabase.exec(`VACUUM INTO '${config.dbPath.replaceAll("'", "''")}'`);
+      } finally {
+        seedDatabase.close();
+      }
+      NodeFS.writeFileSync(config.environmentIdPath, "env-thread-offline\n");
 
       const unavailableRuntime = {
         version: 1 as const,
@@ -637,8 +649,14 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         path: config.serverRuntimeStatePath,
         state: unavailableRuntime,
       });
+      const baseEntriesBefore = NodeFS.readdirSync(baseDir).toSorted();
+      const stateEntriesBefore = NodeFS.readdirSync(config.stateDir).toSorted();
+      for (const name of stateEntriesBefore) {
+        NodeFS.chmodSync(NodePath.join(config.stateDir, name), 0o444);
+      }
+      NodeFS.chmodSync(config.stateDir, 0o555);
+      NodeFS.chmodSync(baseDir, 0o555);
       const databaseStatBefore = NodeFS.statSync(config.dbPath);
-      NodeFS.chmodSync(config.dbPath, 0o444);
 
       const { output } = yield* captureStdout(
         runCli(["thread", "read", "thread-offline", "--turn-limit", "1", "--base-dir", baseDir]),
@@ -654,6 +672,8 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       const databaseStatAfter = NodeFS.statSync(config.dbPath);
       assert.equal(databaseStatAfter.size, databaseStatBefore.size);
       assert.equal(databaseStatAfter.mtimeMs, databaseStatBefore.mtimeMs);
+      assert.deepStrictEqual(NodeFS.readdirSync(baseDir).toSorted(), baseEntriesBefore);
+      assert.deepStrictEqual(NodeFS.readdirSync(config.stateDir).toSorted(), stateEntriesBefore);
       const verificationDb = new NodeSqlite.DatabaseSync(config.dbPath, { readOnly: true });
       try {
         assert.strictEqual(
@@ -664,6 +684,11 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         );
       } finally {
         verificationDb.close();
+      }
+      NodeFS.chmodSync(baseDir, 0o755);
+      NodeFS.chmodSync(config.stateDir, 0o755);
+      for (const name of stateEntriesBefore) {
+        NodeFS.chmodSync(NodePath.join(config.stateDir, name), 0o644);
       }
     }),
   );

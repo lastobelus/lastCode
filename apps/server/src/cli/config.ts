@@ -220,6 +220,7 @@ export const resolveServerConfig = (
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly activeStateDir?: Option.Option<string>;
+    readonly provisionPaths?: boolean;
   },
 ) =>
   Effect.gen(function* () {
@@ -288,7 +289,8 @@ export const resolveServerConfig = (
     );
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
-    yield* fs.makeDirectory(cwd, { recursive: true });
+    const provisionPaths = options?.provisionPaths ?? true;
+    if (provisionPaths) yield* fs.makeDirectory(cwd, { recursive: true });
     const requestedStateDir = yield* Option.match(options?.activeStateDir ?? Option.none(), {
       onNone: () => Effect.void,
       onSome: (value) => Effect.map(expandHomePath(value.trim()), path.resolve),
@@ -313,12 +315,12 @@ export const resolveServerConfig = (
           : devUrl,
       { baseDirIsExplicit: requestedStateDir === undefined && Option.isSome(explicitBaseDir) },
     );
-    yield* ServerConfig.ensureServerDirectories(derivedPaths);
+    if (provisionPaths) yield* ServerConfig.ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
     );
     const serverTracePath = env.traceFile ?? derivedPaths.serverTracePath;
-    yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
+    if (provisionPaths) yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
     const startupPresentation = options?.startupPresentation ?? "browser";
     const isHeadlessStartup = startupPresentation === "headless";
     const noBrowser = Option.getOrElse(
@@ -419,28 +421,37 @@ export const resolveServerConfig = (
     return config;
   });
 
+const cliAuthServerFlags = (flags: CliAuthLocationFlags): CliServerFlags => ({
+  mode: Option.none(),
+  port: Option.none(),
+  host: Option.none(),
+  baseDir: flags.baseDir,
+  cwd: Option.none(),
+  devUrl: flags.devUrl ?? Option.none(),
+  noBrowser: Option.none(),
+  bootstrapFd: Option.none(),
+  autoBootstrapProjectFromCwd: Option.none(),
+  logWebSocketEvents: Option.none(),
+  tailscaleServeEnabled: Option.none(),
+  tailscaleServePort: Option.none(),
+});
+
 export const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
 ) =>
-  resolveServerConfig(
-    {
-      mode: Option.none(),
-      port: Option.none(),
-      host: Option.none(),
-      baseDir: flags.baseDir,
-      cwd: Option.none(),
-      devUrl: flags.devUrl ?? Option.none(),
-      noBrowser: Option.none(),
-      bootstrapFd: Option.none(),
-      autoBootstrapProjectFromCwd: Option.none(),
-      logWebSocketEvents: Option.none(),
-      tailscaleServeEnabled: Option.none(),
-      tailscaleServePort: Option.none(),
-    },
-    cliLogLevel,
-    { activeStateDir: flags.stateDir ?? Option.none() },
-  );
+  resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+  });
+
+export const resolveThreadInspectionConfig = (
+  flags: CliAuthLocationFlags,
+  cliLogLevel: Option.Option<LogLevel.LogLevel>,
+) =>
+  resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+    provisionPaths: false,
+  });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 
