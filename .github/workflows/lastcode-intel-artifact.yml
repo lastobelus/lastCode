@@ -138,7 +138,7 @@ jobs:
           mkdir -p "$release_dir"
           gh release view "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --json assets,isDraft,isPrerelease,tagName > "$release_json"
+            --json assets,isDraft,isImmutable,isPrerelease,tagName > "$release_json"
           gh release download "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$release_dir"
@@ -302,7 +302,7 @@ jobs:
           mkdir -p "$release_dir"
           gh release view "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --json assets,isDraft,isPrerelease,tagName > "$release_json"
+            --json assets,isDraft,isImmutable,isPrerelease,tagName > "$release_json"
           gh release download "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$release_dir"
@@ -357,7 +357,7 @@ jobs:
           mkdir -p "$verify_dir"
           gh release view "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --json assets,isDraft,isPrerelease,tagName > "$release_json"
+            --json assets,isDraft,isImmutable,isPrerelease,tagName > "$release_json"
           gh release download "$INSTALLABLE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$verify_dir"

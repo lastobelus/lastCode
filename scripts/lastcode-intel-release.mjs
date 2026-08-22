@@ -153,6 +153,7 @@ function validateReleaseMetadata(release, checkpointTag, localAssets) {
     fail(`Release tag mismatch: expected ${checkpointTag}, found ${String(release.tagName)}.`);
   }
   if (release.isDraft !== false) fail("Existing exact-tag release must not be a draft.");
+  if (release.isImmutable !== true) fail("Existing exact-tag release must be immutable.");
   if (release.isPrerelease !== true) fail("Existing exact-tag release must be a prerelease.");
   if (!Array.isArray(release.assets)) fail("Release metadata must include its assets.");
 

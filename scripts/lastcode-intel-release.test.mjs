@@ -73,6 +73,7 @@ function createFixture() {
   writeJson(releaseJsonPath, {
     tagName: checkpointTag,
     isDraft: false,
+    isImmutable: true,
     isPrerelease: true,
     assets: assetNames.map((name) => {
       const path = NodePath.join(directory, name);
@@ -122,6 +123,9 @@ describe("immutable Intel release validation", () => {
     expect(publishJob).toContain("actions/download-artifact");
     expect(publishJob).not.toContain("working-directory: target");
     expect(workflow.match(/persist-credentials: false/g)).toHaveLength(3);
+    expect(workflow.match(/--json assets,isDraft,isImmutable,isPrerelease,tagName/g)).toHaveLength(
+      3,
+    );
 
     const artifactDownload = publishJob.indexOf("- name: Download isolated build assets");
     const buildPolicy = buildJob.indexOf("- name: Require immutable GitHub Releases");
@@ -245,6 +249,8 @@ describe("immutable Intel release validation", () => {
     for (const mutate of [
       (release) => ({ ...release, tagName: `${checkpointTag}.wrong` }),
       (release) => ({ ...release, isDraft: true }),
+      (release) => ({ ...release, isImmutable: false }),
+      (release) => ({ ...release, isImmutable: undefined }),
       (release) => ({ ...release, isPrerelease: false }),
       (release) => ({ ...release, assets: release.assets.slice(1) }),
       (release) => ({
