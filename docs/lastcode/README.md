@@ -26,6 +26,8 @@ directories.
   checkpoint build, staging, installation, safety boundaries, and logs.
 - [Packaged server runtime foundation](packaged-server-runtime.md): immutable
   LastCode runtime validation and the headless LaunchAgent activation boundary.
+- [Remote update activation helper](update-activation-helper.md): the dormant,
+  one-owner crash-safe app, plist, and database selection transaction.
 - [Settings import](settings-import.md): the one-time, selective migration from
   T3 Code into an independent LastCode profile, including exclusions and backups.
 
