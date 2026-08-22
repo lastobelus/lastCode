@@ -191,7 +191,12 @@ describe("immutable Intel release validation", () => {
         "SHA256SUMS",
         "build-manifest.json",
       ],
+      buildTag: "lastcode/build/v1.2.3-nightly.20260821.7.2.1",
+      checkpointTag,
       dmgName: "LastCode-1.2.3-x64.dmg",
+      dmgSha256: fixture.artifacts[0].sha256,
+      lastCodeCommit: commit,
+      version: "1.2.3-nightly.20260821.7.2",
     });
     expect(validate(fixture, { releaseJsonPath: fixture.releaseJsonPath })).toBeDefined();
   });
