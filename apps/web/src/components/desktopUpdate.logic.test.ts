@@ -29,6 +29,8 @@ const baseState: DesktopUpdateState = {
   releaseNotes: [],
   omittedReleaseCount: 0,
   downloadPercent: null,
+  localBuildProgress: null,
+  localBuildFailure: null,
   checkedAt: null,
   message: null,
   errorContext: null,
