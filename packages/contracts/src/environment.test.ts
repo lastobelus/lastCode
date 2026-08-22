@@ -26,7 +26,6 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.pullRequests,
     ).toBe(true);
   });
-
   it("treats a missing attachment upload capability as unsupported", () => {
     expect(decodeDescriptor(descriptor).capabilities.attachmentUploads).toBeUndefined();
   });
@@ -37,6 +36,15 @@ describe("ExecutionEnvironmentDescriptor", () => {
         ...descriptor,
         capabilities: { ...descriptor.capabilities, attachmentUploads: true },
       }).capabilities.attachmentUploads,
+    ).toBe(true);
+  });
+  it("treats missing thread annotations as unsupported and preserves support", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadAnnotations).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadAnnotations: true },
+      }).capabilities.threadAnnotations,
     ).toBe(true);
   });
 });

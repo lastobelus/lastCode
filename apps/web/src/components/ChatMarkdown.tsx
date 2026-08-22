@@ -142,6 +142,7 @@ interface ChatMarkdownProps {
   /** Environment that owns non-thread markdown, such as a pull request panel. */
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  taskListDisabled?: boolean;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -179,7 +180,6 @@ export function shouldUseMarkdownFileBrowserPrimaryAction(input: {
       (!input.canOpenInEditor && !input.canOpenInPanel))
   );
 }
-
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
@@ -1631,6 +1631,7 @@ function ChatMarkdown({
   threadRef,
   environmentId: explicitEnvironmentId,
   onTaskListChange,
+  taskListDisabled = false,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
@@ -2004,6 +2005,7 @@ function ChatMarkdown({
             name="markdown-task"
             aria-label="Toggle task"
             checked={checked}
+            disabled={taskListDisabled}
             onChange={(event) => {
               const markerOffset = Number(
                 event.currentTarget.closest("li")?.dataset.taskMarkerOffset,
@@ -2227,6 +2229,7 @@ function ChatMarkdown({
     revealMarkdownFileInFileManager,
     revealInFileManagerLabel,
     skills,
+    taskListDisabled,
     text,
     threadRef,
     updateThreadPullRequestLink,
