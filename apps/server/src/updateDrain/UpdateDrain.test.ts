@@ -1,6 +1,8 @@
 import { CommandId, UpdateDrainRequestId, UpdateDrainTargetVersion } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -171,6 +173,46 @@ it.layer(testLayer)("UpdateDrain request history", (it) => {
           targetVersion: laterTargetVersion,
           status: "cancelled",
         },
+      });
+    }),
+  );
+});
+
+it.layer(repositoryLayer)("UpdateDrain interruption safety", (it) => {
+  it.effect("projects an accepted event before honoring interruption", () =>
+    Effect.gen(function* () {
+      const repository = yield* UpdateDrainRepository;
+      const committed = yield* Deferred.make<void>();
+      const releaseCommit = yield* Deferred.make<void>();
+      const interruptedRepository = UpdateDrainRepository.of({
+        ...repository,
+        commitAccepted: (input) =>
+          repository.commitAccepted(input).pipe(
+            Effect.tap(() => Deferred.succeed(committed, undefined)),
+            Effect.tap(() => Deferred.await(releaseCommit)),
+          ),
+      });
+      const drain = yield* makeUpdateDrain().pipe(
+        Effect.provideService(UpdateDrainRepository, interruptedRepository),
+      );
+
+      const dispatchFiber = yield* drain
+        .dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("interrupted-start"),
+          requestId,
+          targetVersion,
+          createdAt: startedAt,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(committed);
+      dispatchFiber.interruptUnsafe();
+      yield* Deferred.succeed(releaseCommit, undefined);
+      yield* Fiber.await(dispatchFiber);
+
+      assert.deepStrictEqual(yield* drain.status, {
+        sequence: 1,
+        intent: { requestId, targetVersion, status: "draining" },
       });
     }),
   );

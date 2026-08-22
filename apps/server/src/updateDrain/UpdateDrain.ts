@@ -99,23 +99,28 @@ export const makeUpdateDrain = Effect.fn("makeUpdateDrain")(function* () {
       return yield* decision.failure;
     }
 
-    const committed = yield* repository
-      .commitAccepted({
-        event: decision.success,
-        receipt: {
-          commandId: command.commandId,
-          requestId: command.requestId,
-          commandType: command.type,
-          targetVersion: commandTargetVersion(command),
-          acceptedAt: command.createdAt,
-          status: "accepted",
-          errorReason: null,
-          error: null,
-        },
-      })
-      .pipe(Effect.mapError(internalError));
-    currentState = projectUpdateDrainEvent(currentState, committed.event);
-    usedRequestIds.add(committed.event.requestId);
+    const committed = yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const committed = yield* repository
+          .commitAccepted({
+            event: decision.success,
+            receipt: {
+              commandId: command.commandId,
+              requestId: command.requestId,
+              commandType: command.type,
+              targetVersion: commandTargetVersion(command),
+              acceptedAt: command.createdAt,
+              status: "accepted",
+              errorReason: null,
+              error: null,
+            },
+          })
+          .pipe(Effect.mapError(internalError));
+        currentState = projectUpdateDrainEvent(currentState, committed.event);
+        usedRequestIds.add(committed.event.requestId);
+        return committed;
+      }),
+    );
     return committed.receipt;
   });
 
