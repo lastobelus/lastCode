@@ -4190,7 +4190,9 @@ function ChatViewContent(props: ChatViewProps) {
     serverConfig?.environment.capabilities.threadAnnotations === true;
   const threadAnnotation = activeThread?.annotation ?? null;
   const canAnnotateThread =
-    isServerThread && supportsThreadAnnotations && activeThread?.latestUserMessageId != null;
+    isServerThread &&
+    supportsThreadAnnotations &&
+    activeThread?.messages.some((message) => message.role === "user") === true;
   const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
   const [annotationMutationPending, setAnnotationMutationPending] = useState(false);
   const [dismissedAnnotationKey, setDismissedAnnotationKey] = useState<string | null>(null);
