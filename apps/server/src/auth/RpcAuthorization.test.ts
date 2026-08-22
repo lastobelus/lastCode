@@ -40,6 +40,9 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverCancelUpdateDrain)).toBe(
       AuthOrchestrationOperateScope,
     );
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverClaimUpdateActivation)).toBe(
+      AuthOrchestrationOperateScope,
+    );
   });
 
   it("allows relay status reads without granting relay installation access", () => {
