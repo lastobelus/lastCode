@@ -326,6 +326,7 @@ async function stageIntelUpdateLocked(
 ) {
   cleanupIncompleteCandidates(root);
   let pending = readPending(root);
+  cleanupUnreferencedCandidates(root, pending?.candidateId);
   const currentVersion = options.currentVersion ?? readInstalledVersion(options.appPath);
   const current = parseInstalledVersion(currentVersion);
   if (!current) fail(`Installed version '${currentVersion}' is not a LastCode nightly.`);

@@ -338,6 +338,22 @@ describe("LastCode Intel staging", () => {
     expect(locked).toBe(false);
   });
 
+  it("removes an unreferenced candidate left before pointer publication", async () => {
+    const root = temporaryDirectory();
+    const orphan = NodePath.join(root, "candidates", "orphaned-after-rename", "assets");
+    NodeFS.mkdirSync(orphan, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(orphan, "complete-but-unpublished.dmg"), "orphan");
+    const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+
+    const result = await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260821.7", homeDirectory: root },
+      dependencies(tag, "a".repeat(40), { listReleases: async () => [] }),
+    );
+
+    expect(result.status).toBe("up-to-date");
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([]);
+  });
+
   it("clears a pending candidate after the installed app catches up", async () => {
     const root = temporaryDirectory();
     const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
