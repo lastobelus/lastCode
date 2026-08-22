@@ -8,6 +8,7 @@ import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
+  ApprovalRequestId,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
@@ -30,6 +31,7 @@ import {
   ResolvedKeybindingRule,
   ThreadId,
   UpdateDrainRequestId,
+  UpdateDrainAdmissionError,
   UpdateDrainTargetVersion,
   WS_METHODS,
   WsRpcGroup,
@@ -157,6 +159,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import * as Data from "effect/Data";
 
@@ -429,6 +432,7 @@ const buildAppUnderTest = (options?: {
     desktopTelemetryReceiver?: Partial<
       DesktopTelemetryReceiver.DesktopTelemetryReceiver["Service"]
     >;
+    updateDrainAdmission?: Partial<UpdateDrainAdmission.UpdateDrainAdmission["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -621,6 +625,35 @@ const buildAppUnderTest = (options?: {
       Layer.provide(UpdateDrainRepositoryLive),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const updateDrainAdmissionLayer = Layer.effect(
+      UpdateDrainAdmission.UpdateDrainAdmission,
+      Effect.gen(function* () {
+        const drain = yield* UpdateDrain.UpdateDrain;
+        return UpdateDrainAdmission.UpdateDrainAdmission.of({
+          dispatch: drain.dispatch,
+          claimActivation: (input) =>
+            drain.dispatch({
+              type: "update-drain.claim",
+              commandId: CommandId.make(`update-drain:claim:${input.requestId}`),
+              requestId: input.requestId,
+              createdAt: DateTime.formatIso(TEST_EPOCH),
+            }),
+          admit: (_kind, effect) => effect,
+          admitOrElse: (_kind, effect) => effect,
+          status: drain.status.pipe(
+            Effect.map((state) => ({
+              ...state,
+              admission:
+                state.intent !== null && state.intent.status !== "cancelled"
+                  ? ("closed" as const)
+                  : ("open" as const),
+              blockers: [],
+            })),
+          ),
+          ...options?.layers?.updateDrainAdmission,
+        });
+      }),
+    ).pipe(Layer.provide(updateDrainLayer));
 
     const servedRoutesLayer = HttpRouter.serve(
       makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
@@ -850,6 +883,7 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      Layer.provide(updateDrainAdmissionLayer),
       Layer.provide(updateDrainLayer),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
@@ -4618,6 +4652,170 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         targetVersion,
         status: "cancelled",
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("closes work creation while drain controls remain operable", () =>
+    Effect.gen(function* () {
+      const requestId = UpdateDrainRequestId.make("rpc-update-draining");
+      const targetVersion = UpdateDrainTargetVersion.make("0.0.36-nightly.1");
+      const maintenance = new UpdateDrainAdmissionError({
+        reason: "update_draining",
+        requestId,
+        targetVersion,
+        message: "LastCode is draining for an update.",
+      });
+      const terminalSnapshot = {
+        threadId: defaultThreadId,
+        terminalId: "existing",
+        cwd: "/tmp/project",
+        worktreePath: null,
+        status: "running" as const,
+        pid: 123,
+        history: "ready\n",
+        exitCode: null,
+        exitSignal: null,
+        label: "Existing",
+        updatedAt: "2026-08-21T00:00:00.000Z",
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          updateDrainAdmission: {
+            admit: () => Effect.fail(maintenance),
+            admitOrElse: (_kind, _effect, whenClosed) => whenClosed,
+          },
+          terminalManager: {
+            attachStream: (_input, listener) =>
+              listener({ type: "snapshot", snapshot: terminalSnapshot }).pipe(
+                Effect.as(() => undefined),
+              ),
+            close: () => Effect.void,
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const results = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const blocked = yield* Effect.all([
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("blocked-turn"),
+                threadId: defaultThreadId,
+                message: {
+                  messageId: MessageId.make("blocked-message"),
+                  role: "user",
+                  text: "wait for maintenance",
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdAt: "2026-08-21T00:00:00.000Z",
+              }).pipe(Effect.result),
+              client[WS_METHODS.terminalOpen]({
+                threadId: defaultThreadId,
+                terminalId: "new",
+                cwd: "/tmp/project",
+              }).pipe(Effect.result),
+              client[WS_METHODS.terminalWrite]({
+                threadId: defaultThreadId,
+                terminalId: "existing",
+                data: "make test\n",
+              }).pipe(Effect.result),
+              client[WS_METHODS.terminalRestart]({
+                threadId: defaultThreadId,
+                terminalId: "existing",
+                cwd: "/tmp/project",
+                cols: 120,
+                rows: 40,
+              }).pipe(Effect.result),
+              client[WS_METHODS.gitPreparePullRequestThread]({
+                cwd: "/tmp/project",
+                reference: "1",
+                mode: "worktree",
+                threadId: defaultThreadId,
+              }).pipe(Effect.result),
+            ]);
+
+            const attached = yield* client[WS_METHODS.terminalAttach]({
+              threadId: defaultThreadId,
+              terminalId: "existing",
+            }).pipe(Stream.runHead);
+            yield* client[WS_METHODS.terminalClose]({
+              threadId: defaultThreadId,
+              terminalId: "existing",
+            });
+            const controls = yield* Effect.all([
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.interrupt",
+                commandId: CommandId.make("interrupt-during-drain"),
+                threadId: defaultThreadId,
+                createdAt: "2026-08-21T00:00:01.000Z",
+              }),
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.approval.respond",
+                commandId: CommandId.make("approval-during-drain"),
+                threadId: defaultThreadId,
+                requestId: ApprovalRequestId.make("approval-1"),
+                decision: "decline",
+                createdAt: "2026-08-21T00:00:02.000Z",
+              }),
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.user-input.respond",
+                commandId: CommandId.make("input-during-drain"),
+                threadId: defaultThreadId,
+                requestId: ApprovalRequestId.make("input-1"),
+                answers: { answer: "stop" },
+                createdAt: "2026-08-21T00:00:03.000Z",
+              }),
+            ]);
+            return { blocked, attached, controls };
+          }),
+        ),
+      );
+
+      assert.ok(results.blocked.every((result) => result._tag === "Failure"));
+      assert.ok(
+        results.blocked.every(
+          (result) =>
+            result._tag === "Failure" && result.failure._tag === "UpdateDrainAdmissionError",
+        ),
+      );
+      assert.isTrue(Option.isSome(results.attached));
+      assert.equal(results.controls.length, 3);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes an activation claim using the drain request id", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const requestId = UpdateDrainRequestId.make("rpc-update-claim");
+      const targetVersion = UpdateDrainTargetVersion.make("0.0.36-nightly.2");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[WS_METHODS.serverStartUpdateDrain]({
+              commandId: CommandId.make("rpc-update-claim-start"),
+              requestId,
+              targetVersion,
+            });
+            const claim = yield* client[WS_METHODS.serverClaimUpdateActivation]({ requestId });
+            const status = yield* client[WS_METHODS.serverGetUpdateDrainStatus]({});
+            return { claim, status };
+          }),
+        ),
+      );
+
+      assert.equal(result.claim.commandType, "update-drain.claim");
+      assert.deepStrictEqual(result.status.intent, {
+        requestId,
+        targetVersion,
+        status: "claimed",
+      });
+      assert.equal(result.status.admission, "closed");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
