@@ -211,3 +211,17 @@ dedicated worktree, and retains the validated DMG for the managed local
 installer. It does not stage the updater ZIP through Electron/Squirrel.
 Checkpoint scheduling remains independent:
 the daemon never builds merely because it found a new nightly or revision.
+
+## Remote update drain admission
+
+An active remote update drain closes only entry points that can create new
+execution: turn starts (including provider bootstrap or resume), terminal
+creation and restart, terminal writes, and interrupted Action resume. Existing
+read-only terminal attachment, terminal close, turn interruption, approvals,
+and user-input responses remain available so current work can settle.
+
+Drain status reports only current execution blockers: starting or running
+thread work, background agent work, and starting terminals or terminals with a
+running subprocess. When that list is empty, the activation claim is committed
+under the same server-lifetime admission lock. The claim survives a server
+restart and keeps admission closed for the future activation helper.
