@@ -426,12 +426,15 @@ const RuntimeCoreDependenciesBaseLive = ReactorLayerLive.pipe(
   ),
 );
 
-const RuntimeCoreDependenciesLive = Layer.merge(
-  RuntimeCoreDependenciesBaseLive,
-  ActionResume.layer.pipe(Layer.provide(RuntimeCoreDependenciesBaseLive)),
+const RuntimeCoreDependenciesWithDrainAdmissionLive = UpdateDrainAdmission.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesBaseLive),
 );
 
-const RuntimeDependenciesWithoutDrainAdmissionLive = RuntimeCoreDependenciesLive.pipe(
+const RuntimeCoreDependenciesLive = ActionResume.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesWithDrainAdmissionLive),
+);
+
+const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
@@ -442,11 +445,6 @@ const RuntimeDependenciesWithoutDrainAdmissionLive = RuntimeCoreDependenciesLive
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
-);
-
-const RuntimeDependenciesLive = Layer.merge(
-  RuntimeDependenciesWithoutDrainAdmissionLive,
-  UpdateDrainAdmission.layer.pipe(Layer.provide(RuntimeDependenciesWithoutDrainAdmissionLive)),
 );
 
 const commandReadinessLayer = HttpRouter.middleware(

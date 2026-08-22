@@ -37,6 +37,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadActionResumeService } from "../orchestration/ThreadActionResume.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 
 export const ACTION_RESUME_ACTIVITY_KIND = "action.resume.lifecycle";
 
@@ -262,6 +263,7 @@ const make = Effect.gen(function* () {
   const registry = yield* ThreadActionResumeService;
   const terminals = yield* TerminalManager.TerminalManager;
   const providers = yield* ProviderRegistry;
+  const admission = yield* UpdateDrainAdmission;
   const mutex = yield* Semaphore.make(1);
   const decodeState = Schema.decodeUnknownEffect(ActionResumeState);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
@@ -376,7 +378,7 @@ const make = Effect.gen(function* () {
     mutex.withPermits(1)(deliverPendingUnlocked(threadId));
 
   const deliverPending = (threadId: ThreadId) =>
-    attemptDeliverPending(threadId).pipe(
+    admission.admit("thread-turn", attemptDeliverPending(threadId)).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Action follow-up delivery failed; it remains pending", {
           threadId,
