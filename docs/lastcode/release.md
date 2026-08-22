@@ -207,6 +207,7 @@ the same Serve port simultaneously.
 The default-off local updater is documented in
 [Local Nightly Updates](local-nightly-updates.md). It discovers immutable
 checkpoint and LastCode revision tags, builds a selected tag in a separate
-dedicated worktree, and stages the generated updater ZIP through Electron's
-existing macOS install machinery. Checkpoint scheduling remains independent:
+dedicated worktree, and retains the validated DMG for the managed local
+installer. It does not stage the updater ZIP through Electron/Squirrel.
+Checkpoint scheduling remains independent:
 the daemon never builds merely because it found a new nightly or revision.
