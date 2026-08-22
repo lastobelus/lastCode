@@ -169,19 +169,60 @@ it("keeps pending-input, working, snoozed, settled, and active lifecycle states 
       ...overrides,
     }) as OrchestrationThreadShell;
   assert.strictEqual(
-    threadLifecycle(lifecycleThread({ hasPendingUserInput: true })),
+    threadLifecycle(lifecycleThread({ hasPendingUserInput: true }), {
+      now: "2026-06-01T00:00:00.000Z",
+    }),
     "pending-input",
   );
   assert.strictEqual(
-    threadLifecycle(lifecycleThread({ session: { status: "running" } as never })),
+    threadLifecycle(lifecycleThread({ session: { status: "running" } as never }), {
+      now: "2026-06-01T00:00:00.000Z",
+    }),
     "working",
   );
   assert.strictEqual(
-    threadLifecycle(lifecycleThread({ snoozedUntil: "2026-12-01T00:00:00.000Z" as never })),
+    threadLifecycle(lifecycleThread({ snoozedUntil: "2026-12-01T00:00:00.000Z" as never }), {
+      now: "2026-06-01T00:00:00.000Z",
+    }),
     "snoozed",
   );
-  assert.strictEqual(threadLifecycle(lifecycleThread({ settledOverride: "settled" })), "settled");
-  assert.strictEqual(threadLifecycle(lifecycleThread({})), "active");
+  assert.strictEqual(
+    threadLifecycle(lifecycleThread({ settledOverride: "settled" }), {
+      now: "2026-06-01T00:00:00.000Z",
+    }),
+    "settled",
+  );
+  assert.strictEqual(
+    threadLifecycle(lifecycleThread({}), { now: "2026-06-01T00:00:00.000Z" }),
+    "active",
+  );
+});
+
+it("treats only future snoozes as snoozed while preserving higher-priority lifecycle states", () => {
+  const base = {
+    hasPendingUserInput: false,
+    hasPendingApprovals: false,
+    latestTurn: null,
+    session: null,
+    backgroundLiveness: null,
+    snoozedUntil: "2026-06-02T00:00:00.000Z",
+    settledOverride: null,
+    settledAt: null,
+  } as unknown as OrchestrationThreadShell;
+  const now = "2026-06-01T00:00:00.000Z";
+  assert.strictEqual(threadLifecycle(base, { now }), "snoozed");
+  assert.strictEqual(
+    threadLifecycle({ ...base, snoozedUntil: "2026-05-31T00:00:00.000Z" } as never, { now }),
+    "active",
+  );
+  assert.strictEqual(
+    threadLifecycle({ ...base, hasPendingApprovals: true } as never, { now }),
+    "pending-input",
+  );
+  assert.strictEqual(
+    threadLifecycle({ ...base, session: { status: "running" } } as never, { now }),
+    "working",
+  );
 });
 
 it("keeps recent transcript text within the presentation budget without dropping metadata", () => {

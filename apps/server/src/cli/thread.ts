@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -251,7 +252,10 @@ export function boundThreadPresentation(
 export const boundTranscriptMessages = (messages: OrchestrationThread["messages"]) =>
   boundThreadPresentation(messages, []);
 
-export function threadLifecycle(thread: OrchestrationThreadShell): string {
+export function threadLifecycle(
+  thread: OrchestrationThreadShell,
+  options: { readonly now: string },
+): string {
   if (thread.hasPendingUserInput || thread.hasPendingApprovals) return "pending-input";
   if (
     thread.latestTurn?.state === "running" ||
@@ -261,7 +265,11 @@ export function threadLifecycle(thread: OrchestrationThreadShell): string {
   ) {
     return "working";
   }
-  if (thread.snoozedUntil !== null && thread.snoozedUntil !== undefined) return "snoozed";
+  if (thread.snoozedUntil !== null && thread.snoozedUntil !== undefined) {
+    const wakeAt = Date.parse(thread.snoozedUntil);
+    const now = Date.parse(options.now);
+    if (!Number.isNaN(wakeAt) && !Number.isNaN(now) && wakeAt > now) return "snoozed";
+  }
   if (thread.settledOverride === "settled" || thread.settledAt !== null) return "settled";
   return "active";
 }
@@ -348,8 +356,11 @@ export const currentThreadOutput = Effect.fn("currentThreadOutput")(function* (
   });
 });
 
-export const listThreadsOutput = (source: ThreadReadSource) =>
-  decodeThreadListResult({
+export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
+  source: ThreadReadSource,
+) {
+  const now = DateTime.formatIso(yield* DateTime.now);
+  return yield* decodeThreadListResult({
     kind: "list",
     environmentId: source.descriptor.environmentId,
     threads: source.shell.threads
@@ -361,7 +372,7 @@ export const listThreadsOutput = (source: ThreadReadSource) =>
           environmentId: source.descriptor.environmentId,
           threadId: thread.id,
           title: thread.title,
-          lifecycle: threadLifecycle(thread),
+          lifecycle: threadLifecycle(thread, { now }),
           project: projectOutput(project),
           workspace: workspaceOutput(project, thread),
           provider: providerOutput(thread),
@@ -369,6 +380,7 @@ export const listThreadsOutput = (source: ThreadReadSource) =>
         };
       }),
   });
+});
 
 export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
   source: ThreadReadSource,
@@ -380,6 +392,7 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
     return { ...resolution, environmentId: source.descriptor.environmentId };
   }
   const turnLimit = validateThreadTurnLimit(turnLimitInput);
+  const now = DateTime.formatIso(yield* DateTime.now);
   const detail = yield* source.getThread(resolution.thread.id, turnLimit);
   const project = projectForThread(source.shell, resolution.thread);
   const presentation = boundThreadPresentation(detail.thread.messages, detail.thread.activities);
@@ -388,7 +401,7 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
     environmentId: source.descriptor.environmentId,
     threadId: resolution.thread.id,
     title: resolution.thread.title,
-    lifecycle: threadLifecycle(resolution.thread),
+    lifecycle: threadLifecycle(resolution.thread, { now }),
     project: projectOutput(project),
     workspace: workspaceOutput(project, resolution.thread),
     provider: providerOutput(resolution.thread),
