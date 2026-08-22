@@ -285,6 +285,36 @@ describe("LastCode Intel staging", () => {
     expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([oldPending.candidateId]);
   });
 
+  it("preserves a published candidate when the pointer directory sync fails", async () => {
+    const root = temporaryDirectory();
+    const oldTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(oldTag, "a".repeat(40)),
+    );
+    const newTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+    const newCommit = "b".repeat(40);
+
+    await expect(
+      stageIntelUpdate(
+        { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+        dependencies(newTag, newCommit, {
+          syncPendingDirectory: () => {
+            throw new Error("injected pending directory sync failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected pending directory sync failure");
+    expect(readPending(root)).toMatchObject({ commit: newCommit, tag: newTag });
+
+    const result = await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(newTag, newCommit),
+    );
+    expect(result.status).toBe("pending");
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toHaveLength(1);
+  });
+
   it("does not publish a candidate whose downloaded asset tree could not be synced", async () => {
     const root = temporaryDirectory();
     const oldTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";

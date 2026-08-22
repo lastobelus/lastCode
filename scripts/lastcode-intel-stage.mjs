@@ -229,7 +229,7 @@ function syncTree(path) {
   syncDirectory(path);
 }
 
-function writeJsonAtomically(path, value) {
+function writeJsonAtomically(path, value, options = {}) {
   const temporary = `${path}.tmp-${process.pid}-${NodeCrypto.randomUUID()}`;
   try {
     const descriptor = NodeFS.openSync(temporary, "wx", 0o600);
@@ -240,11 +240,13 @@ function writeJsonAtomically(path, value) {
       NodeFS.closeSync(descriptor);
     }
     NodeFS.renameSync(temporary, path);
+    options.afterRename?.();
   } catch (error) {
     NodeFS.rmSync(temporary, { force: true });
     throw error;
   }
-  syncDirectory(NodePath.dirname(path));
+  const syncParentDirectory = options.syncParentDirectory ?? syncDirectory;
+  syncParentDirectory(NodePath.dirname(path));
 }
 
 function cleanupUnreferencedCandidates(root, pendingId) {
@@ -418,8 +420,12 @@ async function stageIntelUpdateLocked(
     };
     writeJsonAtomically(NodePath.join(candidateDirectory, "candidate.json"), metadata);
     await dependencies.beforeCommit?.(metadata);
-    writeJsonAtomically(NodePath.join(root, PENDING_NAME), metadata);
-    pointerCommitted = true;
+    writeJsonAtomically(NodePath.join(root, PENDING_NAME), metadata, {
+      afterRename: () => {
+        pointerCommitted = true;
+      },
+      syncParentDirectory: dependencies.syncPendingDirectory,
+    });
     cleanupUnreferencedCandidates(root, identifier);
     return { schemaVersion: 1, status: "staged", pending: readPending(root) };
   } catch (error) {
