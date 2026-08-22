@@ -2,8 +2,12 @@ import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "annotate";
 export type ComposerSubmissionIntent = "foreground" | "background";
+
+export type ThreadAnnotationSlashCommand =
+  | { readonly kind: "open-editor" }
+  | { readonly kind: "save"; readonly body: string };
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -270,7 +274,7 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
 
 export function parseStandaloneComposerSlashCommand(
   text: string,
-): Exclude<ComposerSlashCommand, "model"> | null {
+): Extract<ComposerSlashCommand, "plan" | "default"> | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
@@ -278,6 +282,15 @@ export function parseStandaloneComposerSlashCommand(
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
   return "default";
+}
+
+export function parseThreadAnnotationSlashCommand(
+  text: string,
+): ThreadAnnotationSlashCommand | null {
+  const match = /^\/annotate(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!match) return null;
+  const body = match[1]?.trim() ?? "";
+  return body ? { kind: "save", body } : { kind: "open-editor" };
 }
 
 export function replaceTextRange(
