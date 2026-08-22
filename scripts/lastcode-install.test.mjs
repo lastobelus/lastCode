@@ -1,4 +1,5 @@
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -20,6 +21,8 @@ import {
   renderLauncher,
   temporaryAppPaths,
   uninstallCommand,
+  validateAppBundle,
+  validateDmgArtifact,
 } from "./lastcode-install.mjs";
 
 const temporaryDirectories = [];
@@ -136,6 +139,122 @@ describe("LastCode userland install command", () => {
       backup: "/Applications/.LastCode.previous-42.app",
       staging: "/Applications/.LastCode.install-42.app",
     });
+  });
+
+  it("validates certificate-free bundle, version, and exact executable architecture", () => {
+    const root = temporaryDirectory();
+    const appPath = NodePath.join(root, "LastCode.app");
+    NodeFS.mkdirSync(appPath);
+    const runCommand = (command, args) => {
+      if (command === "/usr/libexec/PlistBuddy") {
+        if (args[1] === "Print:CFBundleIdentifier") return "codes.lastobelus.lastcode";
+        if (args[1] === "Print:CFBundleShortVersionString") {
+          return "1.2.3-nightly.20260821.7.2";
+        }
+        if (args[1] === "Print:CFBundleExecutable") return "LastCode";
+      }
+      if (command === "codesign" && args[0] === "-d") {
+        return "Signature=adhoc\nTeamIdentifier=not set";
+      }
+      if (command === "codesign") return "";
+      if (command === "lipo") return "x86_64";
+      throw new Error(`Unexpected ${command}`);
+    };
+    expect(
+      validateAppBundle(appPath, {
+        expectedArchitecture: "x86_64",
+        expectedVersion: "1.2.3-nightly.20260821.7.2",
+        runCommand,
+        signaturePolicy: "adhoc",
+      }),
+    ).toBe("1.2.3-nightly.20260821.7.2");
+    expect(() =>
+      validateAppBundle(appPath, {
+        expectedArchitecture: "arm64",
+        runCommand,
+        signaturePolicy: "adhoc",
+      }),
+    ).toThrow("Expected arm64");
+  });
+
+  it("mounts DMGs readonly and binds validation to the expected hash", async () => {
+    const root = temporaryDirectory();
+    const dmgPath = NodePath.join(root, "LastCode.dmg");
+    NodeFS.writeFileSync(dmgPath, "validated dmg");
+    const expectedSha256 = NodeCrypto.createHash("sha256")
+      .update(NodeFS.readFileSync(dmgPath))
+      .digest("hex");
+    const commands = [];
+    const runCommand = (command, args) => {
+      commands.push([command, args]);
+      if (command === "hdiutil" && args[0] === "attach") {
+        NodeFS.mkdirSync(NodePath.join(args[4], "LastCode.app"));
+        return "";
+      }
+      if (command === "hdiutil") return "";
+      if (command === "/usr/libexec/PlistBuddy") {
+        if (args[1] === "Print:CFBundleIdentifier") return "codes.lastobelus.lastcode";
+        if (args[1] === "Print:CFBundleShortVersionString") return "1.2.3-nightly.1";
+        if (args[1] === "Print:CFBundleExecutable") return "LastCode";
+      }
+      if (command === "codesign" && args[0] === "-d") {
+        return "Signature=adhoc\nTeamIdentifier=not set";
+      }
+      if (command === "codesign") return "";
+      if (command === "lipo") return "x86_64";
+      throw new Error(`Unexpected ${command}`);
+    };
+
+    await expect(
+      validateDmgArtifact(dmgPath, {
+        allowNonDarwin: true,
+        expectedArchitecture: "x86_64",
+        expectedSha256,
+        expectedVersion: "1.2.3-nightly.1",
+        runCommand,
+        signaturePolicy: "adhoc",
+      }),
+    ).resolves.toMatchObject({ sha256: expectedSha256, version: "1.2.3-nightly.1" });
+    expect(commands[0][0]).toBe("hdiutil");
+    expect(commands[0][1]).toContain("-readonly");
+    await expect(
+      validateDmgArtifact(dmgPath, {
+        allowNonDarwin: true,
+        expectedSha256: "b".repeat(64),
+        runCommand,
+      }),
+    ).rejects.toThrow("DMG checksum mismatch");
+  });
+
+  it("removes validation mounts and preserves the primary error when detach fails", async () => {
+    const root = temporaryDirectory();
+    const dmgPath = NodePath.join(root, "LastCode.dmg");
+    NodeFS.writeFileSync(dmgPath, "invalid mounted app");
+    const commands = [];
+    let mountPoint;
+    const runCommand = (command, args) => {
+      commands.push([command, args]);
+      if (command === "hdiutil" && args[0] === "attach") {
+        mountPoint = args[4];
+        NodeFS.mkdirSync(NodePath.join(mountPoint, "LastCode.app"));
+        return "";
+      }
+      if (command === "hdiutil") throw new Error("injected detach failure");
+      if (command === "/usr/libexec/PlistBuddy" && args[1] === "Print:CFBundleIdentifier") {
+        return "com.example.untrusted";
+      }
+      throw new Error(`Unexpected ${command}`);
+    };
+
+    await expect(
+      validateDmgArtifact(dmgPath, { allowNonDarwin: true, runCommand }),
+    ).rejects.toThrow("Expected bundle codes.lastobelus.lastcode");
+    expect(NodeFS.existsSync(mountPoint)).toBe(false);
+    expect(commands.filter(([command]) => command === "hdiutil").map(([, args]) => args)).toEqual([
+      ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmgPath],
+      ["detach", mountPoint],
+      ["detach", "-force", mountPoint],
+    ]);
   });
 
   it("requests quit without waiting for an AppleEvent response", async () => {
