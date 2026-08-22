@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
-import { orderedListGutterStyle } from "./ChatMarkdown";
+import { orderedListGutterStyle, resolveChatMarkdownEnvironmentId } from "./ChatMarkdown";
 
 describe("orderedListGutterStyle", () => {
   it("leaves the default gutter alone for single-digit lists", () => {
@@ -32,5 +33,27 @@ describe("orderedListGutterStyle", () => {
 
   it("treats a missing/zero item count as a single item", () => {
     expect(orderedListGutterStyle(0, undefined)).toBeUndefined();
+  });
+});
+
+describe("resolveChatMarkdownEnvironmentId", () => {
+  it("uses the supplied thread environment for cross-environment markdown actions", () => {
+    const activeEnvironmentId = EnvironmentId.make("environment-a");
+    const threadEnvironmentId = EnvironmentId.make("environment-b");
+
+    expect(
+      resolveChatMarkdownEnvironmentId(activeEnvironmentId, {
+        environmentId: threadEnvironmentId,
+        threadId: ThreadId.make("thread-b"),
+      }),
+    ).toBe(threadEnvironmentId);
+  });
+
+  it("falls back to the active environment without a thread reference", () => {
+    const activeEnvironmentId = EnvironmentId.make("environment-a");
+
+    expect(resolveChatMarkdownEnvironmentId(activeEnvironmentId, undefined)).toBe(
+      activeEnvironmentId,
+    );
   });
 });
