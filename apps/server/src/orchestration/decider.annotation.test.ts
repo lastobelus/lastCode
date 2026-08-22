@@ -144,6 +144,53 @@ it.layer(NodeServices.layer)("thread annotation decider", (it) => {
     }),
   );
 
+  it.effect("keeps an existing anchor when a revert removes every user message", () =>
+    Effect.gen(function* () {
+      const editedEvent = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.annotation.upsert",
+          commandId: CommandId.make("cmd-edit-after-empty-revert"),
+          threadId: ThreadId.make("thread-1"),
+          body: "Edited after revert",
+        },
+        readModel: makeReadModel(existingAnnotation, null),
+      });
+      const edited = Array.isArray(editedEvent) ? editedEvent[0] : editedEvent;
+      expect(edited?.type).toBe("thread.annotation-upserted");
+      if (edited?.type !== "thread.annotation-upserted") return;
+      expect(edited.payload.annotation.anchorMessageId).toBe(existingAnnotation.anchorMessageId);
+
+      const resolvedEvent = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.annotation.resolve",
+          commandId: CommandId.make("cmd-resolve-after-empty-revert"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        readModel: makeReadModel(edited.payload.annotation, null),
+      });
+      const resolved = Array.isArray(resolvedEvent) ? resolvedEvent[0] : resolvedEvent;
+      expect(resolved?.type).toBe("thread.annotation-resolved");
+      if (resolved?.type !== "thread.annotation-resolved") return;
+      expect(resolved.payload.annotation.anchorMessageId).toBe(existingAnnotation.anchorMessageId);
+
+      const reopenedEvent = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.annotation.reopen",
+          commandId: CommandId.make("cmd-reopen-after-empty-revert"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        readModel: makeReadModel(resolved.payload.annotation, null),
+      });
+      const reopened = Array.isArray(reopenedEvent) ? reopenedEvent[0] : reopenedEvent;
+      expect(reopened?.type).toBe("thread.annotation-reopened");
+      if (reopened?.type === "thread.annotation-reopened") {
+        expect(reopened.payload.annotation.anchorMessageId).toBe(
+          existingAnnotation.anchorMessageId,
+        );
+      }
+    }),
+  );
+
   it.effect("resolve and reopen move the anchor and timestamp without changing the body", () =>
     Effect.gen(function* () {
       const resolvedEvent = yield* decideOrchestrationCommand({

@@ -154,6 +154,10 @@ function latestUserMessageId(thread: OrchestrationReadModel["threads"][number]) 
   );
 }
 
+function nextAnnotationAnchorMessageId(thread: OrchestrationReadModel["threads"][number]) {
+  return latestUserMessageId(thread) ?? thread.annotation?.anchorMessageId;
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -823,7 +827,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      const anchorMessageId = latestUserMessageId(thread);
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
       if (anchorMessageId === undefined) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -864,7 +868,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `thread ${command.threadId} has no annotation to resolve`,
         });
       }
-      const anchorMessageId = latestUserMessageId(thread);
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
       if (anchorMessageId === undefined) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -904,7 +908,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `thread ${command.threadId} has no annotation to reopen`,
         });
       }
-      const anchorMessageId = latestUserMessageId(thread);
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
       if (anchorMessageId === undefined) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,

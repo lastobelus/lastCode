@@ -914,7 +914,6 @@ function TimelineMinimap({
               resolvedActiveIndex === null ? null : Math.abs(index - resolvedActiveIndex);
             return (
               <span
-                aria-hidden="true"
                 className={cn(
                   "pointer-events-none absolute left-0 h-0.5 -translate-y-1/2 rounded-full bg-muted-foreground/35 transition-[background-color,width] duration-150 data-[in-view=true]:bg-foreground/90",
                   activeDistance === 0
