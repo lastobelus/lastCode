@@ -44,9 +44,7 @@ runtime repeats identity, signature, preflight, payload checksum, and sentinel v
 payload files and directories are synced before the descriptor and sentinel. A directory,
 descriptor, or sentinel by itself is not a runnable candidate. The separately managed,
 content-addressed LastCode supervisor is also copied, synced, and validated without placing it
-inside any candidate directory. Its published file is read-only; changing it requires an explicit
-permission change and causes the content-address validation to fail before a new service plan can
-be rendered.
+inside any candidate directory. Its published file is mode `0400` inside a mode `0500` directory.
 
 The implementation lives in
 `scripts/lib/lastcode-packaged-server-runtime.ts`. It deliberately has no npm install path and no
@@ -61,8 +59,9 @@ runtime value. Its contract is:
   the upstream T3 Code service label;
 - `LimitLoadToSessionType=Aqua`, `RunAtLoad`, and `KeepAlive`, so availability remains scoped to a
   signed-in graphical user session;
-- an independently managed Node executable running the content-addressed LastCode supervisor,
-  both outside the versioned candidate; the supervisor revalidates the descriptor, sentinel,
+- an independently managed Node executable running a fixed inline bootstrap from the LaunchAgent;
+  the bootstrap hashes the external content-addressed supervisor against its pinned SHA-256 and
+  imports only the verified bytes, then the supervisor revalidates the descriptor, sentinel,
   signature, embedded identity, and payload at every login or KeepAlive restart before it starts
   the candidate Electron executable with `ELECTRON_RUN_AS_NODE=1` and the packaged server's
   `--no-browser` command, so no renderer or GPU process is needed;
@@ -71,14 +70,15 @@ runtime value. Its contract is:
 - loopback binding at `127.0.0.1`; and
 - one stable log at `~/.lastcode/userdata/logs/packaged-server-service.log`.
 
-The candidate executable and server entry do not appear in the plist. The supervisor receives only
-the validated descriptor path, and the LaunchAgent pins its SHA-256 plus the exact version, tag,
-build tag, and commit. Candidate bytes therefore cannot execute before their restart-time
-preflight or be replaced by another self-consistent descriptor. The plist contains only fixed
-runtime identity, paths, and a bounded provider-discovery `PATH`; it also clears ambient
-`NODE_OPTIONS` and `NODE_PATH`. It does not serialize the invoking shell environment, credentials,
-tokens, or other secrets. Startup and server failures therefore reach the stable log without
-putting credentials in the LaunchAgent definition.
+The candidate executable and server entry do not appear in the plist. The supervisor path, its
+expected hash, and the validated candidate descriptor path are data arguments after Node's fixed
+inline bootstrap. The LaunchAgent also pins the descriptor SHA-256 plus the exact version, tag,
+build tag, and commit. Neither supervisor nor candidate bytes can execute before their respective
+integrity checks. The plist contains only fixed runtime identity, paths, and a bounded
+provider-discovery `PATH`; it also clears ambient `NODE_OPTIONS` and `NODE_PATH`. It does not
+serialize the invoking shell environment, credentials, tokens, or other secrets. Startup and
+server failures therefore reach the stable log without putting credentials in the LaunchAgent
+definition.
 
 ## Activation boundary
 
@@ -96,11 +96,11 @@ Keeping activation separate makes it possible to add rollback and single-owner c
 without weakening the invariant that the current service stays up while its replacement is being
 prepared.
 
-The external Node executable and supervisor are the LaunchAgent's trust root: they necessarily run
-before code can verify the candidate. The activation owner must source the Node executable from
-the independently pinned service runtime and install the prepared supervisor from trusted LastCode
-code. Candidate validation does not claim to defend against an actor that can replace this trust
-root or rewrite the LaunchAgent itself.
+The external Node executable and LaunchAgent plist are the trust root. The activation owner must
+source Node from the independently pinned service runtime and install the prepared supervisor from
+trusted LastCode code. The plist bootstrap detects later supervisor replacement before importing
+it. Candidate validation does not claim to defend against an actor that can replace Node or rewrite
+the LaunchAgent itself.
 
 ## Remaining acceptance work
 

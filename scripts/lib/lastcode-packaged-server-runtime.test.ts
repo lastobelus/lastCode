@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { createPackage } from "@electron/asar";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -17,6 +18,7 @@ import {
 import {
   createPackagedServerServicePlan,
   LASTCODE_PACKAGED_SERVER_SERVICE_LABEL,
+  packagedServerProgramArguments,
   renderPackagedServerLaunchAgent,
 } from "./lastcode-packaged-server-service.ts";
 import {
@@ -53,6 +55,25 @@ function temporaryDirectory() {
   );
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function programArgumentsFromPlist(plist: string): ReadonlyArray<string> {
+  const result = NodeChildProcess.spawnSync(
+    "/usr/bin/plutil",
+    ["-convert", "json", "-o", "-", "-"],
+    { encoding: "utf8", input: plist },
+  );
+  if (result.status !== 0) {
+    throw new Error(`Could not decode rendered LaunchAgent: ${result.stderr}`);
+  }
+  const parsed = JSON.parse(result.stdout) as { readonly ProgramArguments?: unknown };
+  if (
+    !Array.isArray(parsed.ProgramArguments) ||
+    !parsed.ProgramArguments.every((argument) => typeof argument === "string")
+  ) {
+    throw new Error("Rendered LaunchAgent has invalid ProgramArguments.");
+  }
+  return parsed.ProgramArguments;
 }
 
 function writeBuildManifest(root: string, overrides: Record<string, unknown> = {}) {
@@ -270,7 +291,7 @@ describe("LastCode packaged server LaunchAgent candidate", () => {
       inspection: inspection(),
     });
     const supervisor = preparePackagedServerSupervisor({ runtimeRoot });
-    const nodePath = "/Library/LastCode/runtime/node/bin/node";
+    const nodePath = NodeFS.realpathSync(process.execPath);
     const plan = createPackagedServerServicePlan({
       homeDir: "/Users/Last & Code",
       nodePath,
@@ -278,6 +299,8 @@ describe("LastCode packaged server LaunchAgent candidate", () => {
       runtime,
     });
     const plist = renderPackagedServerLaunchAgent(plan);
+    const programArguments = packagedServerProgramArguments(plan);
+    expect(programArgumentsFromPlist(plist)).toEqual(programArguments);
 
     expect(LASTCODE_PACKAGED_SERVER_SERVICE_LABEL).not.toBe("codes.lastobelus.lastcode");
     expect(LASTCODE_PACKAGED_SERVER_SERVICE_LABEL).not.toBe("com.t3tools.t3code.service");
@@ -296,7 +319,16 @@ describe("LastCode packaged server LaunchAgent candidate", () => {
     expect(NodePath.relative(runtime.versionDir, nodePath)).toMatch(/^\.\./);
     expect(NodePath.relative(runtime.versionDir, supervisor.path)).toMatch(/^\.\./);
     expect(NodeFS.statSync(supervisor.path).mode & 0o777).toBe(0o400);
-    expect(plist.indexOf(nodePath)).toBeLessThan(plist.indexOf(supervisor.path));
+    expect(programArguments).toMatchObject([
+      nodePath,
+      "--no-global-search-paths",
+      "-e",
+      expect.stringContaining('createHash("sha256")'),
+      plan.supervisor.path,
+      supervisor.sha256,
+      runtime.descriptorPath,
+    ]);
+    expect(plist.indexOf(nodePath)).toBeLessThan(plist.indexOf(plan.supervisor.path));
     expect(plist).not.toContain(runtime.executablePath);
     expect(plist).not.toContain(runtime.serverEntryPath);
     expect(plist).toContain("<string>/Users/Last &amp; Code/.lastcode</string>");
@@ -331,6 +363,47 @@ describe("LastCode packaged server LaunchAgent candidate", () => {
     );
   });
 
+  it("refuses a tampered supervisor at the actual launch bootstrap boundary", async () => {
+    const root = temporaryDirectory();
+    const runtimeRoot = NodePath.join(root, "runtime", "packaged-server");
+    const markerPath = NodePath.join(root, "tampered-supervisor-executed");
+    const sourcePath = NodePath.join(root, "supervisor.mjs");
+    NodeFS.writeFileSync(
+      sourcePath,
+      `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(markerPath)}, "executed");\n`,
+    );
+    const supervisor = preparePackagedServerSupervisor({ runtimeRoot, sourcePath });
+    const runtime = preparePackagedServerRuntime({
+      buildManifestPath: writeBuildManifest(root),
+      sourceAppPath: await createPackagedApp(root),
+      runtimeRoot,
+      inspection: inspection(),
+    });
+    const plan = createPackagedServerServicePlan({
+      homeDir: NodeOS.homedir(),
+      nodePath: process.execPath,
+      supervisor,
+      runtime,
+    });
+    const programArguments = programArgumentsFromPlist(renderPackagedServerLaunchAgent(plan));
+    NodeFS.chmodSync(supervisor.path, 0o600);
+    NodeFS.writeFileSync(
+      supervisor.path,
+      `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(markerPath)}, "tampered");\n`,
+    );
+    NodeFS.chmodSync(supervisor.path, 0o400);
+
+    const [command, ...args] = programArguments;
+    if (command === undefined) throw new Error("Rendered LaunchAgent has no command.");
+    const result = NodeChildProcess.spawnSync(command, args, {
+      encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: "", NODE_PATH: "" },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Packaged supervisor integrity check failed");
+    expect(NodeFS.existsSync(markerPath)).toBe(false);
+  });
+
   it("rejects a managed launcher that is inside the candidate", async () => {
     const root = temporaryDirectory();
     const runtimeRoot = NodePath.join(root, "runtime", "packaged-server");
@@ -346,6 +419,29 @@ describe("LastCode packaged server LaunchAgent candidate", () => {
       createPackagedServerServicePlan({
         homeDir: "/Users/lastcode",
         nodePath: runtime.executablePath,
+        supervisor,
+        runtime,
+      }),
+    ).toThrow("Node executable must be an absolute path outside the candidate");
+  });
+
+  it("rejects an external Node path that resolves into the candidate", async () => {
+    const root = temporaryDirectory();
+    const runtimeRoot = NodePath.join(root, "runtime", "packaged-server");
+    const runtime = preparePackagedServerRuntime({
+      buildManifestPath: writeBuildManifest(root),
+      sourceAppPath: await createPackagedApp(root),
+      runtimeRoot,
+      inspection: inspection(),
+    });
+    const supervisor = preparePackagedServerSupervisor({ runtimeRoot });
+    const nodeSymlink = NodePath.join(root, "managed-node");
+    NodeFS.symlinkSync(runtime.executablePath, nodeSymlink);
+
+    expect(() =>
+      createPackagedServerServicePlan({
+        homeDir: "/Users/lastcode",
+        nodePath: nodeSymlink,
         supervisor,
         runtime,
       }),

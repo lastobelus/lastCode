@@ -283,8 +283,9 @@ async function supervise(descriptorPath) {
 }
 
 const isMain =
-  process.argv[1] !== undefined &&
-  NodePath.resolve(process.argv[1]) === NodeURL.fileURLToPath(import.meta.url);
+  process.env.LASTCODE_PACKAGED_SUPERVISOR_BOOTSTRAP === "1" ||
+  (process.argv[1] !== undefined &&
+    NodePath.resolve(process.argv[1]) === NodeURL.fileURLToPath(import.meta.url));
 if (isMain) {
   const descriptorPath = process.argv[2];
   if (!descriptorPath) {

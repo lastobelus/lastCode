@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // LastCode managed module: packaged server service
 
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import type { ValidatedPackagedServerRuntime } from "./lastcode-packaged-server-runtime.ts";
@@ -9,6 +10,29 @@ import type { ValidatedPackagedServerSupervisor } from "./lastcode-packaged-serv
 export const LASTCODE_PACKAGED_SERVER_SERVICE_LABEL = "codes.lastobelus.lastcode.server" as const;
 export const LASTCODE_PACKAGED_SERVER_SERVICE_PLIST =
   `${LASTCODE_PACKAGED_SERVER_SERVICE_LABEL}.plist` as const;
+
+const LASTCODE_PACKAGED_SERVER_BOOTSTRAP = `
+void (async () => {
+  const crypto = require("node:crypto");
+  const fs = require("node:fs");
+  const [supervisorPath, expectedSha256, descriptorPath] = process.argv.slice(1);
+  if (!supervisorPath || !/^[a-f0-9]{64}$/.test(expectedSha256 ?? "") || !descriptorPath) {
+    throw new Error("Invalid packaged supervisor bootstrap arguments.");
+  }
+  const supervisorSource = fs.readFileSync(supervisorPath);
+  const actualSha256 = crypto.createHash("sha256").update(supervisorSource).digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    throw new Error("Packaged supervisor integrity check failed.");
+  }
+  process.argv.splice(1, process.argv.length - 1, supervisorPath, descriptorPath);
+  process.env.LASTCODE_PACKAGED_SUPERVISOR_BOOTSTRAP = "1";
+  await import(\`data:text/javascript;base64,\${supervisorSource.toString("base64")}\`);
+})().catch((cause) => {
+  const error = cause instanceof Error ? cause : new Error(String(cause));
+  process.stderr.write(\`[lastcode-server-bootstrap] \${error.message}\\n\`);
+  process.exitCode = 1;
+});
+`.trim();
 
 export interface PackagedServerServicePlan {
   readonly label: typeof LASTCODE_PACKAGED_SERVER_SERVICE_LABEL;
@@ -33,9 +57,10 @@ export function createPackagedServerServicePlan(input: {
   readonly runtime: ValidatedPackagedServerRuntime;
 }): PackagedServerServicePlan {
   const baseDir = input.baseDir ?? NodePath.join(input.homeDir, ".lastcode");
-  const candidateDir = NodePath.resolve(input.runtime.versionDir);
+  const canonicalCandidateDir = NodeFS.realpathSync(input.runtime.versionDir);
   const isInsideCandidate = (path: string) => {
-    const relative = NodePath.relative(candidateDir, NodePath.resolve(path));
+    const canonicalPath = NodePath.toNamespacedPath(path);
+    const relative = NodePath.relative(canonicalCandidateDir, canonicalPath);
     return (
       relative === "" ||
       (relative !== ".." &&
@@ -43,10 +68,24 @@ export function createPackagedServerServicePlan(input: {
         !NodePath.isAbsolute(relative))
     );
   };
-  if (!NodePath.isAbsolute(input.nodePath) || isInsideCandidate(input.nodePath)) {
+  if (!NodePath.isAbsolute(input.nodePath)) {
     throw new Error("The managed Node executable must be an absolute path outside the candidate.");
   }
-  if (!NodePath.isAbsolute(input.supervisor.path) || isInsideCandidate(input.supervisor.path)) {
+  if (!NodePath.isAbsolute(input.supervisor.path)) {
+    throw new Error("The managed LastCode supervisor must be outside the candidate.");
+  }
+  let canonicalNodePath: string;
+  let canonicalSupervisorPath: string;
+  try {
+    canonicalNodePath = NodeFS.realpathSync(input.nodePath);
+    canonicalSupervisorPath = NodeFS.realpathSync(input.supervisor.path);
+  } catch (cause) {
+    throw new Error("Could not resolve the managed LastCode launcher paths.", { cause });
+  }
+  if (isInsideCandidate(canonicalNodePath)) {
+    throw new Error("The managed Node executable must be an absolute path outside the candidate.");
+  }
+  if (isInsideCandidate(canonicalSupervisorPath)) {
     throw new Error("The managed LastCode supervisor must be outside the candidate.");
   }
   return {
@@ -60,10 +99,22 @@ export function createPackagedServerServicePlan(input: {
     logPath: NodePath.join(baseDir, "userdata", "logs", "packaged-server-service.log"),
     homeDir: input.homeDir,
     baseDir,
-    nodePath: input.nodePath,
-    supervisor: input.supervisor,
+    nodePath: canonicalNodePath,
+    supervisor: { ...input.supervisor, path: canonicalSupervisorPath },
     runtime: input.runtime,
   };
+}
+
+export function packagedServerProgramArguments(plan: PackagedServerServicePlan) {
+  return [
+    plan.nodePath,
+    "--no-global-search-paths",
+    "-e",
+    LASTCODE_PACKAGED_SERVER_BOOTSTRAP,
+    plan.supervisor.path,
+    plan.supervisor.sha256,
+    plan.runtime.descriptorPath,
+  ] as const;
 }
 
 /**
@@ -82,9 +133,8 @@ export function renderPackagedServerLaunchAgent(plan: PackagedServerServicePlan)
     "/sbin",
   ].join(":");
   const descriptor = plan.runtime.descriptor;
+  const programArguments = packagedServerProgramArguments(plan);
   const values = {
-    node: escapePlistText(plan.nodePath),
-    supervisor: escapePlistText(plan.supervisor.path),
     homeDir: escapePlistText(plan.homeDir),
     baseDir: escapePlistText(plan.baseDir),
     runtimeDescriptor: escapePlistText(plan.runtime.descriptorPath),
@@ -105,9 +155,7 @@ export function renderPackagedServerLaunchAgent(plan: PackagedServerServicePlan)
     `  <string>${LASTCODE_PACKAGED_SERVER_SERVICE_LABEL}</string>`,
     `  <key>ProgramArguments</key>`,
     `  <array>`,
-    `    <string>${values.node}</string>`,
-    `    <string>${values.supervisor}</string>`,
-    `    <string>${values.runtimeDescriptor}</string>`,
+    ...programArguments.map((argument) => `    <string>${escapePlistText(argument)}</string>`),
     `  </array>`,
     `  <key>EnvironmentVariables</key>`,
     `  <dict>`,
