@@ -25,8 +25,11 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
-import { OrchestrationLayerLive } from "../orchestration/runtimeLayer.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layers/ProjectionSnapshotQuery.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadActionResume from "../orchestration/ThreadActionResume.ts";
+import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
+import * as ThreadPlanProgress from "../orchestration/ThreadPlanProgress.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import {
@@ -87,6 +90,8 @@ export const ThreadCurrentResult = Schema.Struct({
 export const ThreadListResult = Schema.Struct({
   kind: Schema.Literal("list"),
   environmentId: Schema.String,
+  threadsTruncated: Schema.optional(Schema.Boolean),
+  originalThreadCount: Schema.optional(Schema.Number),
   threads: Schema.Array(
     Schema.Struct({
       ...ThreadIdentity.fields,
@@ -371,25 +376,30 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   source: ThreadReadSource,
 ) {
   const now = DateTime.formatIso(yield* DateTime.now);
+  const sortedThreads = source.shell.threads.toSorted(
+    (left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
+  );
+  const threadsTruncated = sortedThreads.length > THREAD_LIST_MAX_RESULTS;
   return yield* decodeThreadListResult({
     kind: "list",
     environmentId: source.descriptor.environmentId,
-    threads: source.shell.threads
-      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, THREAD_LIST_MAX_RESULTS)
-      .map((thread) => {
-        const project = projectForThread(source.shell, thread);
-        return {
-          environmentId: source.descriptor.environmentId,
-          threadId: thread.id,
-          title: thread.title,
-          lifecycle: threadLifecycle(thread, { now }),
-          project: projectOutput(project),
-          workspace: workspaceOutput(project, thread),
-          provider: providerOutput(thread),
-          updatedAt: thread.updatedAt,
-        };
-      }),
+    ...(threadsTruncated
+      ? { threadsTruncated: true, originalThreadCount: sortedThreads.length }
+      : {}),
+    threads: sortedThreads.slice(0, THREAD_LIST_MAX_RESULTS).map((thread) => {
+      const project = projectForThread(source.shell, thread);
+      return {
+        environmentId: source.descriptor.environmentId,
+        threadId: thread.id,
+        title: thread.title,
+        lifecycle: threadLifecycle(thread, { now }),
+        project: projectOutput(project),
+        workspace: workspaceOutput(project, thread),
+        provider: providerOutput(thread),
+        updatedAt: thread.updatedAt,
+      };
+    }),
   });
 });
 
@@ -437,9 +447,12 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
   });
 });
 
-const ThreadCliRuntimeLive = Layer.mergeAll(
+export const ThreadCliOfflineRuntimeLive = Layer.mergeAll(
   WorkspacePaths.layer,
-  OrchestrationLayerLive.pipe(
+  OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provide(ThreadActionResume.layer),
+    Layer.provide(ThreadPlanProgress.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(SqlitePersistenceLayerLive),
   ),
@@ -537,7 +550,7 @@ const runThreadRead = Effect.fn("runThreadRead")(function* (
       return yield* Console.log(yield* encodeJson(live.value));
     }
 
-    const offlineLayer = ThreadCliRuntimeLive.pipe(
+    const offlineLayer = ThreadCliOfflineRuntimeLive.pipe(
       Layer.provide(ServerConfig.layer(config)),
       Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
     );

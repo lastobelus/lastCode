@@ -19,6 +19,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -28,6 +29,7 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
 
 import { cli, makeCli } from "./bin.ts";
+import { ThreadCliOfflineRuntimeLive } from "./cli/thread.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -624,6 +626,29 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
       assert.equal(result.kind, "read");
       assert.equal(result.threadId, "thread-offline-bounded");
+    }),
+  );
+
+  it.effect("keeps the offline thread runtime read-only", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-read-only-runtime-"),
+      );
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* Effect.gen(function* () {
+        const engine = yield* Effect.serviceOption(OrchestrationEngine.OrchestrationEngineService);
+        const query = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
+
+        assert.isTrue(Option.isNone(engine));
+        assert.isTrue(Option.isSome(query));
+      }).pipe(
+        Effect.provide(
+          ThreadCliOfflineRuntimeLive.pipe(
+            Layer.provide(ServerConfig.layer(config)),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      );
     }),
   );
 

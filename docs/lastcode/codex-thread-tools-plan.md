@@ -152,14 +152,17 @@ Branch: `lastcode/codex-thread-read`
 5. Add bounded `list` and `read` commands over the existing shell and thread-detail
    snapshots. `read` accepts an exact or unambiguous thread-ID prefix and returns
    a small deterministic candidate subset plus original-count truncation metadata when
-   resolution is ambiguous.
+   resolution is ambiguous. `list` returns at most 50 deterministically ordered threads
+   and reports truncation plus the original thread count when that bound is exceeded.
 6. Default `read` to a small recent-turn window and impose a conservative maximum.
    Include thread status, project/workspace/branch, recent turns, and transcript
    content needed to answer “what is this thread up to?” without dumping the full
    database.
 7. For offline transcript reads, call the bounded thread-detail projection query
    directly rather than the command read model, which intentionally omits hydrated
-   thread bodies.
+   thread bodies. Compose only the SQLite persistence and projection snapshot-query
+   layers; offline inspection must not start the writable orchestration engine or its
+   projectors alongside a live server.
 8. Preserve lifecycle visibility for active snoozed, settled, pending-input, and
    working threads. Do not mutate those states. Archived and deleted threads are out
    of scope and return not found.

@@ -13,6 +13,10 @@ Thread IDs are resolved locally. An exact ID always wins; a prefix must identify
 active thread. Ambiguous JSON responses include a small sorted candidate list and report when
 additional matches were omitted. Archived and deleted threads are not included.
 
+`list` returns at most the 50 most recently updated active threads, with thread ID as
+a deterministic tie-breaker. When more exist, its JSON includes `threadsTruncated: true`
+and `originalThreadCount`.
+
 `read` bounds recent message text and activity summaries to one 64,000-character output
 budget and caps activity records. Its JSON reports when text or activity counts were truncated.
 

@@ -12,6 +12,8 @@ import {
   THREAD_TRANSCRIPT_MAX_CHARS,
   THREAD_ACTIVITY_MAX_RESULTS,
   THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS,
+  THREAD_LIST_MAX_RESULTS,
+  type ThreadReadSource,
   boundThreadPresentation,
   boundTranscriptMessages,
   currentThreadOutput,
@@ -76,7 +78,7 @@ const runnerSource = () => {
           thread: { ...rawThread, messages: [], activities: [], latestTurn: null },
         } as never);
       },
-    } as never,
+    } as unknown as ThreadReadSource,
   };
 };
 
@@ -149,9 +151,38 @@ it.effect("runs current, list, and bounded read outputs and rejects missing curr
     assert.strictEqual(current.threadId, "thread-runner");
     assert.strictEqual(list.kind, "list");
     assert.strictEqual(list.threads[0]?.threadId, "thread-runner");
+    assert.isFalse("threadsTruncated" in list);
+    assert.isFalse("originalThreadCount" in list);
     assert.strictEqual(read.kind, "read");
     assert.deepStrictEqual(limits, [7]);
     assert.strictEqual(missing._tag, "Failure");
+  }),
+);
+
+it.effect("caps thread lists deterministically and reports truncation", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const originalThreadCount = THREAD_LIST_MAX_RESULTS + 5;
+    const threads = Array.from({ length: originalThreadCount }, (_, index) => ({
+      ...source.shell.threads[0]!,
+      id: ThreadId.make(`thread-${String(index).padStart(2, "0")}`),
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    })).toReversed();
+    const list = yield* listThreadsOutput({
+      ...source,
+      shell: { ...source.shell, threads },
+    });
+
+    assert.strictEqual(list.threads.length, THREAD_LIST_MAX_RESULTS);
+    assert.deepStrictEqual(
+      list.threads.map(({ threadId }) => threadId),
+      Array.from(
+        { length: THREAD_LIST_MAX_RESULTS },
+        (_, index) => `thread-${String(index).padStart(2, "0")}`,
+      ),
+    );
+    assert.strictEqual(list.threadsTruncated, true);
+    assert.strictEqual(list.originalThreadCount, originalThreadCount);
   }),
 );
 
