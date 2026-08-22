@@ -8,6 +8,7 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CheckpointRef,
   CommandId,
   EnvironmentId,
   EnvironmentMetadataHttpApi,
@@ -1100,6 +1101,103 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
               kind: "terminal",
               state: "completed",
               turnId: emptyTurnId,
+              response: "",
+            },
+          );
+          const checkpointMessageId = MessageId.make("message-checkpoint-only-request");
+          const checkpointTurnId = TurnId.make("turn-checkpoint-only-response");
+          yield* engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-checkpoint-only-start"),
+            threadId,
+            message: {
+              messageId: checkpointMessageId,
+              role: "user",
+              text: "Complete with tools only.",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            trackRequestCorrelation: true,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-request.resolve",
+            commandId: CommandId.make("turn-request:checkpoint-only"),
+            threadId,
+            messageId: checkpointMessageId,
+            outcome: { kind: "started", turnId: checkpointTurnId },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-checkpoint-only-running"),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: checkpointTurnId,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-checkpoint-only-complete"),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: emptyAt,
+            },
+            createdAt: emptyAt,
+          });
+          const syntheticAssistantMessageId = MessageId.make(`assistant:${checkpointTurnId}`);
+          yield* engine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: CommandId.make("cmd-checkpoint-only-diff-complete"),
+            threadId,
+            turnId: checkpointTurnId,
+            completedAt: emptyAt,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/checkpoint-only"),
+            status: "ready",
+            files: [],
+            assistantMessageId: syntheticAssistantMessageId,
+            checkpointTurnCount: 1,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: CommandId.make("cmd-checkpoint-only-assistant-finalized"),
+            threadId,
+            turnId: checkpointTurnId,
+            createdAt: emptyAt,
+          });
+          const checkpointDetail = yield* query.getThreadDetailSnapshot(threadId);
+          assert.isTrue(Option.isSome(checkpointDetail));
+          if (Option.isSome(checkpointDetail)) {
+            assert.isFalse(
+              checkpointDetail.value.thread.messages.some(
+                (message) => message.id === syntheticAssistantMessageId,
+              ),
+            );
+          }
+          assert.deepStrictEqual(
+            yield* engine.getTurnRequestWaitState({
+              threadId,
+              messageId: checkpointMessageId,
+            }),
+            {
+              kind: "terminal",
+              state: "completed",
+              turnId: checkpointTurnId,
               response: "",
             },
           );

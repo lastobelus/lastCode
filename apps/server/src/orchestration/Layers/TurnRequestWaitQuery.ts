@@ -70,7 +70,18 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
               response: "",
             } as const;
           }
-          if (value.response === null || value.responseStreaming !== 0) {
+          if (value.response === null) {
+            if (value.assistantMessageId !== MessageId.make(`assistant:${value.turnId}`)) {
+              return { kind: "pending" } as const;
+            }
+            return {
+              kind: "terminal",
+              state: "completed",
+              turnId: value.turnId,
+              response: "",
+            } as const;
+          }
+          if (value.responseStreaming !== 0) {
             return { kind: "pending" } as const;
           }
           return {
