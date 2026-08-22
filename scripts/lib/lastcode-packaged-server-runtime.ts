@@ -11,7 +11,7 @@ import * as Schema from "effect/Schema";
 import {
   parseLastCodeInstallableTag,
   versionFromLastCodeInstallableTag,
-} from "../lastcode-nightly.ts";
+} from "./lastcode-installable-tag.ts";
 
 export const LASTCODE_PACKAGED_RUNTIME_PRODUCT = "LastCode" as const;
 export const LASTCODE_PACKAGED_RUNTIME_ARCH = "x64" as const;

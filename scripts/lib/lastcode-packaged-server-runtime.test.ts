@@ -135,6 +135,18 @@ function inspection(overrides: Partial<PackagedAppInspection> = {}): PackagedApp
   };
 }
 
+it("keeps packaged server modules inside the desktop shared-script boundary", () => {
+  for (const file of [
+    "lastcode-installable-tag.ts",
+    "lastcode-packaged-server-runtime.ts",
+    "lastcode-packaged-server-service.ts",
+    "lastcode-packaged-server-supervisor.ts",
+  ]) {
+    const source = NodeFS.readFileSync(NodePath.join(import.meta.dirname, file), "utf8");
+    expect(source).not.toMatch(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)["']\.\.\//);
+  }
+});
+
 describe("LastCode packaged server runtime", () => {
   it("derives one exact x64 LastCode identity from the durable build manifest", () => {
     const root = temporaryDirectory();
