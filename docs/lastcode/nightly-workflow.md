@@ -309,9 +309,11 @@ full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
 local updater. During a build it shows the latest log line above a stage-weighted
 estimated progress bar; the complete output remains in
 `~/.lastcode/local-updates/build.log`. Completed builds are reused. Manual and
-in-app builds share a cross-process lock for the complete checkout, CI,
-packaging, and artifact-validation sequence; an overlapping request exits
-without touching the shared worktree.
+in-app builds share the same marker and weight model: the sidebar coalesces
+updates into a concise phase and forward-only `% est.`, while the command keeps
+its terminal presentation. They also share a cross-process lock for the complete
+checkout, CI, packaging, and artifact-validation sequence; an overlapping
+request exits without touching the shared worktree.
 
 Remove the optional userland commands with their reverse operations:
 
