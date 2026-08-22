@@ -61,6 +61,8 @@ import {
   type TerminalError,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
+  UpdateDrainAdmissionError,
+  UpdateDrainError,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -121,7 +123,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
-import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -139,6 +141,8 @@ import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
+const isUpdateDrainError = Schema.is(UpdateDrainError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -530,7 +534,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
-      const updateDrain = yield* UpdateDrain.UpdateDrain;
+      const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -1104,7 +1108,10 @@ const makeWsRpcLayer = (
 
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
-      ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
+      ): Effect.Effect<
+        { readonly sequence: number },
+        OrchestrationDispatchCommandError | UpdateDrainAdmissionError | UpdateDrainError
+      > => {
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
             ? dispatchBootstrapTurnStart(normalizedCommand)
@@ -1114,11 +1121,18 @@ const makeWsRpcLayer = (
                 ),
               );
 
+        const admittedEffect =
+          normalizedCommand.type === "thread.turn.start"
+            ? updateDrainAdmission.admit("thread-turn", dispatchEffect)
+            : dispatchEffect;
+
         return startup
-          .enqueueCommand(dispatchEffect)
+          .enqueueCommand(admittedEffect)
           .pipe(
             Effect.mapError((cause) =>
-              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+              isUpdateDrainAdmissionError(cause) || isUpdateDrainError(cause)
+                ? cause
+                : toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
             ),
           );
       };
@@ -1272,7 +1286,9 @@ const makeWsRpcLayer = (
               return result;
             }).pipe(
               Effect.mapError((cause) =>
-                isOrchestrationDispatchCommandError(cause)
+                isOrchestrationDispatchCommandError(cause) ||
+                isUpdateDrainAdmissionError(cause) ||
+                isUpdateDrainError(cause)
                   ? cause
                   : new OrchestrationDispatchCommandError({
                       message: "Failed to dispatch orchestration command",
@@ -1774,7 +1790,7 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverStartUpdateDrain,
             Effect.flatMap(nowIso, (createdAt) =>
-              updateDrain.dispatch({
+              updateDrainAdmission.dispatch({
                 type: "update-drain.start",
                 ...input,
                 createdAt,
@@ -1786,16 +1802,29 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverCancelUpdateDrain,
             Effect.flatMap(nowIso, (createdAt) =>
-              updateDrain.dispatch({
+              updateDrainAdmission.dispatch({
                 type: "update-drain.cancel",
                 ...input,
                 createdAt,
               }),
+            ).pipe(
+              Effect.tap(() =>
+                Option.match(actionResume, {
+                  onNone: () => Effect.void,
+                  onSome: (service) => service.retryPendingFollowUps,
+                }),
+              ),
             ),
             { "rpc.aggregate": "update-drain" },
           ),
+        [WS_METHODS.serverClaimUpdateActivation]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverClaimUpdateActivation,
+            updateDrainAdmission.claimActivation(input),
+            { "rpc.aggregate": "update-drain" },
+          ),
         [WS_METHODS.serverGetUpdateDrainStatus]: (_input) =>
-          observeRpcEffect(WS_METHODS.serverGetUpdateDrainStatus, updateDrain.status, {
+          observeRpcEffect(WS_METHODS.serverGetUpdateDrainStatus, updateDrainAdmission.status, {
             "rpc.aggregate": "update-drain",
           }),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>
@@ -2186,9 +2215,12 @@ const makeWsRpcLayer = (
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           observeRpcEffect(
             WS_METHODS.gitPreparePullRequestThread,
-            gitWorkflow
-              .preparePullRequestThread(input)
-              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            updateDrainAdmission.admit(
+              "setup-script",
+              gitWorkflow
+                .preparePullRequestThread(input)
+                .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            ),
             { "rpc.aggregate": "git" },
           ),
         [WS_METHODS.vcsListRefs]: (input) =>
@@ -2238,24 +2270,37 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "review" },
           ),
         [WS_METHODS.terminalOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalOpen,
+            updateDrainAdmission.admit("terminal-open", terminalManager.open(input)),
+            { "rpc.aggregate": "terminal" },
+          ),
         [WS_METHODS.terminalAttach]: (input) =>
           observeRpcStream(
             WS_METHODS.terminalAttach,
-            Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-              Effect.acquireRelease(
-                terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
-                (unsubscribe) => Effect.sync(unsubscribe),
-              ),
-            ),
+            Stream.callback<
+              TerminalAttachStreamEvent,
+              TerminalError | UpdateDrainAdmissionError | UpdateDrainError
+            >((queue) => {
+              const attach = (startIfNeeded: boolean) =>
+                Effect.acquireRelease(
+                  terminalManager.attachStream(
+                    input,
+                    (event) => Queue.offer(queue, event),
+                    startIfNeeded,
+                  ),
+                  (unsubscribe) => Effect.sync(unsubscribe),
+                );
+              return updateDrainAdmission.admitOrElse("terminal-open", attach(true), attach(false));
+            }),
             { "rpc.aggregate": "terminal" },
           ),
         [WS_METHODS.terminalWrite]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalWrite,
+            updateDrainAdmission.admit("terminal-write", terminalManager.write(input)),
+            { "rpc.aggregate": "terminal" },
+          ),
         [WS_METHODS.terminalResize]: (input) =>
           observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
             "rpc.aggregate": "terminal",
@@ -2265,9 +2310,11 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "terminal",
           }),
         [WS_METHODS.terminalRestart]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalRestart,
+            updateDrainAdmission.admit("terminal-restart", terminalManager.restart(input)),
+            { "rpc.aggregate": "terminal" },
+          ),
         [WS_METHODS.terminalClose]: (input) =>
           observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
             "rpc.aggregate": "terminal",
@@ -2275,16 +2322,19 @@ const makeWsRpcLayer = (
         [WS_METHODS.actionResumeResume]: (input) =>
           observeRpcEffect(
             WS_METHODS.actionResumeResume,
-            Option.match(actionResume, {
-              onNone: () =>
-                Effect.fail(
-                  new ActionResumeError({
-                    reason: "internal_error",
-                    message: "Action resume is unavailable in this server runtime.",
-                  }),
-                ),
-              onSome: (service) => service.resumeInterrupted(input.threadId),
-            }),
+            updateDrainAdmission.admit(
+              "action-resume",
+              Option.match(actionResume, {
+                onNone: () =>
+                  Effect.fail(
+                    new ActionResumeError({
+                      reason: "internal_error",
+                      message: "Action resume is unavailable in this server runtime.",
+                    }),
+                  ),
+                onSome: (service) => service.resumeInterrupted(input.threadId),
+              }),
+            ),
             { "rpc.aggregate": "action-resume" },
           ),
         [WS_METHODS.actionResumeDiscard]: (input) =>
