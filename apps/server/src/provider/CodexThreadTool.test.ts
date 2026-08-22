@@ -82,6 +82,77 @@ it.effect("materializes an executable wrapper under the active state directory",
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
 );
 
+it.effect("atomically publishes concurrent wrapper materializations", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "lastcode-thread-concurrent-",
+    });
+    const stateDir = NodePath.join(baseDir, "userdata");
+    const inputA = {
+      stateDir,
+      baseDir,
+      executablePath: "/opt/node-a/bin/node",
+      cliEntryPath: "/opt/t3-a/dist/bin.mjs",
+      electronRunAsNode: "0",
+    } as const;
+    const inputB = {
+      stateDir,
+      baseDir,
+      executablePath: "/opt/node-b/bin/node",
+      cliEntryPath: "/opt/t3-b/dist/bin.mjs",
+      electronRunAsNode: "1",
+    } as const;
+    const [result] = yield* Effect.all(
+      [materializeCodexThreadTool(inputA), materializeCodexThreadTool(inputB)],
+      { concurrency: "unbounded" },
+    );
+    const finalContents = yield* fileSystem.readFileString(result.wrapperPath);
+    const expectedContents = [
+      renderCodexThreadToolWrapper({
+        ...inputA,
+        electronRunAsNode: false,
+      }),
+      renderCodexThreadToolWrapper({
+        ...inputB,
+        electronRunAsNode: true,
+      }),
+    ];
+
+    assert.isTrue(expectedContents.includes(finalContents));
+    assert.deepStrictEqual(yield* fileSystem.readDirectory(result.binDir), ["lastcode-thread"]);
+    const stat = yield* Effect.promise(() => NodeFSP.stat(result.wrapperPath));
+    assert.ok((stat.mode & 0o111) !== 0);
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
+);
+
+it.effect("cleans its temporary sibling when atomic publication fails", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "lastcode-thread-publication-failure-",
+    });
+    const stateDir = NodePath.join(baseDir, "userdata");
+    const binDir = NodePath.join(stateDir, "bin");
+    const wrapperPath = NodePath.join(binDir, "lastcode-thread");
+    yield* fileSystem.makeDirectory(wrapperPath, { recursive: true });
+
+    const result = yield* Effect.result(
+      materializeCodexThreadTool({
+        stateDir,
+        baseDir,
+        executablePath: "/opt/node/bin/node",
+        cliEntryPath: "/opt/t3/dist/bin.mjs",
+        electronRunAsNode: "0",
+      }),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+    assert.deepStrictEqual(yield* fileSystem.readDirectory(binDir), ["lastcode-thread"]);
+    assert.isTrue((yield* fileSystem.stat(wrapperPath)).type === "Directory");
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer))),
+);
+
 it.effect("preserves inherited Electron Node mode in a Linux wrapper", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;

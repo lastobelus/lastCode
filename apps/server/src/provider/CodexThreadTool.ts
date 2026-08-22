@@ -60,20 +60,26 @@ export const materializeCodexThreadTool = Effect.fn("materializeCodexThreadTool"
 
     const binDir = path.join(input.stateDir, "bin");
     const wrapperPath = path.join(binDir, "lastcode-thread");
-    yield* Effect.gen(function* () {
-      yield* fileSystem.makeDirectory(binDir, { recursive: true });
-      yield* fileSystem.writeFileString(
-        wrapperPath,
-        renderCodexThreadToolWrapper({
-          executablePath,
-          cliEntryPath,
-          baseDir: input.baseDir,
-          stateDir: input.stateDir,
-          electronRunAsNode: (input.electronRunAsNode ?? process.env.ELECTRON_RUN_AS_NODE) === "1",
-        }),
-      );
-      yield* fileSystem.chmod(wrapperPath, 0o755);
-    }).pipe(Effect.mapError((cause) => new CodexThreadToolError({ cause })));
+    const wrapperContents = renderCodexThreadToolWrapper({
+      executablePath,
+      cliEntryPath,
+      baseDir: input.baseDir,
+      stateDir: input.stateDir,
+      electronRunAsNode: (input.electronRunAsNode ?? process.env.ELECTRON_RUN_AS_NODE) === "1",
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* fileSystem.makeDirectory(binDir, { recursive: true });
+        const temporaryPath = yield* fileSystem.makeTempFileScoped({
+          directory: binDir,
+          prefix: ".lastcode-thread.",
+          suffix: ".tmp",
+        });
+        yield* fileSystem.writeFileString(temporaryPath, wrapperContents);
+        yield* fileSystem.chmod(temporaryPath, 0o755);
+        yield* fileSystem.rename(temporaryPath, wrapperPath);
+      }),
+    ).pipe(Effect.mapError((cause) => new CodexThreadToolError({ cause })));
     return { binDir, wrapperPath } as const;
   },
 );
