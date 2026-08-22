@@ -152,8 +152,35 @@ deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
 immutable artifact.
 
-This workflow remains manual-only. Scheduling, target-host staging, and
-installation are separate rollout gates.
+This workflow remains manual-only. Scheduling and installation are separate
+rollout gates.
+
+### Intel target staging
+
+An Intel target can fetch the newest published immutable prerelease without
+stopping LastCode:
+
+```bash
+pnpm lastcode:intel-stage stage
+pnpm lastcode:intel-stage status
+```
+
+The staging command accepts only exact checkpoint or revision releases newer
+than the installed app. It resolves the tag through GitHub to a full commit,
+downloads the exact release asset set, and checks the x64/macOS manifest,
+release metadata, SHA-256, LastCode bundle ID and version, ad-hoc signature,
+and x86_64 main executable. A fully checked newer candidate atomically becomes
+the sole pending selection. A cross-process, kernel-released lock serializes
+checks and supersession; a mismatch, competing invocation, or interrupted check
+leaves the prior pending selection intact. Staging never closes admission, stops
+the app, or starts installation.
+
+State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
+credential-free handoff contract for later drain and activation work. It names
+the immutable tag and commit, expected version and DMG hash, and one candidate
+directory. GitHub credentials remain owned by `gh` and are not written into
+candidate metadata. `--home-dir`, `--repository`, and `--current-version` are
+available for isolated validation and recovery work.
 
 ## Runtime Identity
 
