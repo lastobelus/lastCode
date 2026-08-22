@@ -1,7 +1,8 @@
-import { TriangleAlertIcon } from "lucide-react";
-import type { DesktopUpdateReleaseNote } from "@t3tools/contracts";
+import { CheckIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
+import type { DesktopLocalBuildFailure, DesktopUpdateReleaseNote } from "@t3tools/contracts";
 import { useCallback, useEffect, useState } from "react";
 import { isElectron } from "../../env";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { cn } from "../../lib/utils";
 import { ensureLocalApi } from "../../localApi";
@@ -9,17 +10,22 @@ import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   canCheckForUpdate,
+  formatLocalBuildFailureError,
+  formatLocalBuildFailureDetails,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateProgressPercent,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
+  shouldHighlightDesktopUpdateError,
   shouldShowArm64IntelBuildWarning,
   shouldToastDesktopUpdateActionResult,
 } from "../desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "../desktopUpdate.toast";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
+import { Button } from "../ui/button";
 import { Separator } from "../ui/separator";
 import { SidebarMenuItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -54,6 +60,34 @@ function resolveSidebarUpdatePresentation({
     showUpdateDetails,
     showUpdateIconState: showUpdateDetails && !showCheckIcon,
   } as const;
+}
+
+export function resolveSidebarUpdateButtonToneClassName({
+  hasLocalBuildFailure,
+  showUpdateIconState,
+}: {
+  readonly hasLocalBuildFailure: boolean;
+  readonly showUpdateIconState: boolean;
+}): string {
+  if (hasLocalBuildFailure) {
+    return "bg-destructive/12 text-destructive ring-destructive/40 enabled:hover:bg-destructive/18";
+  }
+  if (showUpdateIconState) {
+    return "bg-update-surface text-update-foreground enabled:hover:bg-update/12";
+  }
+  return "text-[var(--sidebar-icon-color)] enabled:hover:bg-sidebar-row-hover enabled:hover:text-sidebar-foreground";
+}
+
+export function shouldNativelyDisableSidebarUpdateButton({
+  disabled,
+  isActionPending,
+  isLocalBuildInProgress,
+}: {
+  readonly disabled: boolean;
+  readonly isActionPending: boolean;
+  readonly isLocalBuildInProgress: boolean;
+}): boolean {
+  return (disabled || isActionPending) && !isLocalBuildInProgress;
 }
 
 function keyReleaseNoteItems(items: ReadonlyArray<string>) {
@@ -161,6 +195,49 @@ function SidebarUpdateReleaseNotesTooltip({
   );
 }
 
+export function SidebarLocalBuildFailureTooltip({
+  failure,
+  isCopied,
+  onCopy,
+}: {
+  readonly failure: DesktopLocalBuildFailure;
+  readonly isCopied: boolean;
+  readonly onCopy: () => void;
+}) {
+  return (
+    <div className="w-[min(22rem,calc(100vw-2rem))] space-y-3 p-1 text-left" role="alert">
+      <div>
+        <div className="text-sm leading-5 font-semibold text-destructive-foreground">
+          Local build failed
+        </div>
+        <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
+          {failure.phase} · {failure.percent}% est.
+        </div>
+      </div>
+      <p className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-4 text-popover-foreground/90">
+        {formatLocalBuildFailureError(failure.error)}
+      </p>
+      <div className="flex items-center justify-between gap-3 border-t border-destructive/20 pt-2">
+        <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+          {failure.targetVersion}
+        </span>
+        <Button
+          aria-label={
+            isCopied ? "Local build failure details copied" : "Copy local build failure details"
+          }
+          className="shrink-0"
+          onClick={onCopy}
+          size="compact"
+          variant="destructive-outline"
+        >
+          {isCopied ? <CheckIcon /> : <CopyIcon />}
+          {isCopied ? "Copied" : "Copy details"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function SidebarUpdateArchitectureWarning() {
   return isElectron ? <SidebarUpdateArchitectureWarningContent /> : null;
 }
@@ -191,6 +268,20 @@ function SidebarUpdateControl() {
   const [checkAnimationKey, setCheckAnimationKey] = useState(0);
   const [isCheckAnimationLatched, setIsCheckAnimationLatched] = useState(false);
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const { copyToClipboard, isCopied } = useCopyToClipboard({
+    target: "local build failure details",
+    timeout: 1_500,
+    onCopy: () => {
+      toastManager.add({ type: "success", title: "Build failure details copied" });
+    },
+    onError: (error) => {
+      toastManager.add({
+        type: "error",
+        title: "Could not copy build failure details",
+        description: error.message,
+      });
+    },
+  });
 
   useEffect(() => {
     if (prefersReducedMotion) {
@@ -224,6 +315,18 @@ function SidebarUpdateControl() {
     : showUpdateDetails
       ? isDesktopUpdateButtonDisabled(state)
       : !canCheckForUpdate(state);
+  const localBuildFailure =
+    state?.source === "lastcode-local" && shouldHighlightDesktopUpdateError(state)
+      ? state.localBuildFailure
+      : null;
+  const progressPercent = state ? getDesktopUpdateProgressPercent(state) : null;
+  const isLocalBuildInProgress =
+    state?.source === "lastcode-local" && state.status === "downloading";
+  const nativeDisabled = shouldNativelyDisableSidebarUpdateButton({
+    disabled,
+    isActionPending,
+    isLocalBuildInProgress,
+  });
 
   const handleAction = useCallback(async () => {
     const bridge = window.desktopBridge;
@@ -366,19 +469,20 @@ function SidebarUpdateControl() {
               type="button"
               aria-label={tooltip}
               aria-disabled={disabled || isActionPending || undefined}
-              disabled={disabled || isActionPending}
+              disabled={nativeDisabled}
               className={cn(
-                "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors enabled:cursor-pointer focus-visible:ring-2 disabled:cursor-not-allowed",
-                showUpdateIconState
-                  ? "bg-update-surface text-update-foreground enabled:hover:bg-update/12"
-                  : "text-[var(--sidebar-icon-color)] enabled:hover:bg-sidebar-row-hover enabled:hover:text-sidebar-foreground",
+                "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors enabled:cursor-pointer focus-visible:ring-2 aria-disabled:cursor-not-allowed disabled:cursor-not-allowed",
+                resolveSidebarUpdateButtonToneClassName({
+                  hasLocalBuildFailure: localBuildFailure !== null,
+                  showUpdateIconState,
+                }),
                 disabled && !showUpdateIconState && "opacity-60",
               )}
               onClick={handleAction}
             >
               <DesktopUpdateStatusIcon
                 key={showCheckIcon ? checkAnimationKey : iconStatus}
-                downloadPercent={state?.downloadPercent ?? null}
+                downloadPercent={progressPercent}
                 isCheckAnimating={showCheckIcon && !prefersReducedMotion}
                 onCheckAnimationIteration={handleCheckAnimationIteration}
                 status={iconStatus}
@@ -389,15 +493,16 @@ function SidebarUpdateControl() {
         <TooltipPopup
           align="center"
           className={
-            showUpdateDetails && state?.channel === "nightly" && state.releaseNotes.length > 0
+            localBuildFailure ||
+            (showUpdateDetails && state?.channel === "nightly" && state.releaseNotes.length > 0)
               ? // pointer-events-auto overrides the positioner's pointer-events-none so the
-                // release notes stay open (and scrollable) when the cursor moves into them.
+                // panel stays open when the cursor moves from the trigger into its controls.
                 "pointer-events-auto max-w-none text-balance"
               : undefined
           }
           side="top"
           style={
-            showUpdateDetails
+            showUpdateDetails && !localBuildFailure
               ? {
                   background:
                     "color-mix(in srgb, var(--update) 18%, color-mix(in srgb, var(--popover) var(--glass-opacity), transparent))",
@@ -407,7 +512,13 @@ function SidebarUpdateControl() {
           }
           variant={showUpdateDetails ? "glass" : "default"}
         >
-          {showUpdateDetails && state ? (
+          {localBuildFailure ? (
+            <SidebarLocalBuildFailureTooltip
+              failure={localBuildFailure}
+              isCopied={isCopied}
+              onCopy={() => copyToClipboard(formatLocalBuildFailureDetails(localBuildFailure))}
+            />
+          ) : showUpdateDetails && state ? (
             <SidebarUpdateReleaseNotesTooltip state={state} tooltip={tooltip} />
           ) : (
             tooltip
