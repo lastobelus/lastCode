@@ -65,7 +65,11 @@ picker.
    `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
    runs full checkpoint CI, and builds the selected tag's DMG plus updater ZIP.
    One build at a time owns this worktree, from checkout through final artifact
-   validation.
+   validation. While that work runs, the sidebar's circular indicator shows a
+   stage-weighted estimated percentage. Hover it to see the current concise
+   phase and `% est.`. The estimate follows real preparation, CI, and packaging
+   markers, moves forward only, and stays below 100% until the build becomes
+   installable.
    The build generates updater metadata for `lastobelus/lastCode` by default;
    a fork can set `LASTCODE_GITHUB_REPOSITORY=owner/repo` in its configured
    environment to select its own metadata source.
@@ -143,7 +147,16 @@ revision.
 ## Failure handling and logs
 
 A failed check or build leaves the current app installed and changes the
-sidebar button to a retry state. Build output is appended to:
+sidebar button to a persistent red retry state. Hovering a local build failure
+opens an interactive panel with the last phase, estimated percentage, and exact
+error. **Copy details** creates a bounded, control-sequence-sanitized summary
+with the installed and target versions, selected checkpoint, failure context,
+error, and expanded log path. It does not copy the build log or environment.
+Clipboard failures are shown in the app instead of being ignored. Starting a
+retry clears the visible failure and begins progress again for the selected
+build.
+
+Build output is appended to:
 
 ```text
 ~/.lastcode/local-updates/build.log
