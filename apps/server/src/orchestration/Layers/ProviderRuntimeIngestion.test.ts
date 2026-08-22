@@ -1632,13 +1632,12 @@ describe("ProviderRuntimeIngestion", () => {
       threadId,
       turnId: oldTurnId,
     });
-    await waitForThread(
-      harness.readModel,
-      (thread) =>
-        thread.session?.status === "running" && thread.session?.activeTurnId === oldTurnId,
-      2_000,
-      threadId,
+    await harness.drain();
+    const threadBeforeSteer = (await harness.readModel()).threads.find(
+      (thread) => thread.id === threadId,
     );
+    expect(threadBeforeSteer?.session?.status).toBe("running");
+    expect(threadBeforeSteer?.session?.activeTurnId).toBe(oldTurnId);
 
     // The steer: a user-requested turn start while the old turn still runs.
     await Effect.runPromise(
@@ -1678,16 +1677,13 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: newTurnId,
     });
 
-    const threadAfterSteer = await waitForThread(
-      harness.readModel,
-      (thread) =>
-        thread.session?.status === "running" && thread.session?.activeTurnId === newTurnId,
-      2_000,
-      threadId,
+    await harness.drain();
+    const threadAfterSteer = (await harness.readModel()).threads.find(
+      (thread) => thread.id === threadId,
     );
-    expect(threadAfterSteer.session?.activeTurnId).toBe(newTurnId);
-    expect(threadAfterSteer.latestTurn?.turnId).toBe(newTurnId);
-    expect(threadAfterSteer.latestTurn?.state).toBe("running");
+    expect(threadAfterSteer?.session?.activeTurnId).toBe(newTurnId);
+    expect(threadAfterSteer?.latestTurn?.turnId).toBe(newTurnId);
+    expect(threadAfterSteer?.latestTurn?.state).toBe("running");
   });
 
   it("does not mark the source proposed plan implemented for an unrelated turn.started when no thread active turn is tracked", async () => {
