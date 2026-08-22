@@ -5,6 +5,7 @@ import * as Path from "effect/Path";
 export const writeFileStringAtomically = (input: {
   readonly filePath: string;
   readonly contents: string;
+  readonly durable?: boolean | undefined;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -20,6 +21,14 @@ export const writeFileStringAtomically = (input: {
       const tempPath = path.join(tempDirectory, "contents.tmp");
 
       yield* fs.writeFileString(tempPath, input.contents);
+      if (input.durable === true) {
+        const temporaryFile = yield* fs.open(tempPath, { flag: "r" });
+        yield* temporaryFile.sync;
+      }
       yield* fs.rename(tempPath, input.filePath);
+      if (input.durable === true) {
+        const directory = yield* fs.open(targetDirectory, { flag: "r" });
+        yield* directory.sync;
+      }
     }),
   );

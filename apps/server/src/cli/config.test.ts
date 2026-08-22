@@ -183,6 +183,48 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("rejects an incomplete activation helper trial environment", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(
+        resolveServerConfig(
+          {
+            mode: Option.none(),
+            port: Option.none(),
+            host: Option.none(),
+            baseDir: Option.none(),
+            cwd: Option.none(),
+            devUrl: Option.none(),
+            noBrowser: Option.none(),
+            bootstrapFd: Option.none(),
+            autoBootstrapProjectFromCwd: Option.none(),
+            logWebSocketEvents: Option.none(),
+            tailscaleServeEnabled: Option.none(),
+            tailscaleServePort: Option.none(),
+          },
+          Option.none(),
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({
+                  env: {
+                    T3CODE_MODE: "desktop",
+                    T3CODE_PORT: "4002",
+                    LASTCODE_ACTIVATION_MODE: "trial",
+                    LASTCODE_ACTIVATION_REQUEST_ID: "trial-request-1",
+                  },
+                }),
+              ),
+              NetService.layer,
+            ),
+          ),
+        ),
+      );
+
+      expect(result._tag).toBe("Failure");
+    }),
+  );
+
   it.effect("uses CLI flags when provided", () =>
     Effect.gen(function* () {
       const { join } = yield* Path.Path;

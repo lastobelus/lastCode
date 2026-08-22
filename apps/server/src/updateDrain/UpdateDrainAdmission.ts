@@ -110,6 +110,7 @@ export const persistUpdateActivationCommit = Effect.fn("persistUpdateActivationC
   yield* writeFileStringAtomically({
     filePath,
     contents: `${encodeUpdateActivationCommit(record)}\n`,
+    durable: true,
   });
 });
 

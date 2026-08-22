@@ -7,6 +7,7 @@ import {
   UpdateDrainRequestId,
 } from "@t3tools/contracts";
 import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -145,17 +146,31 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   updateActivationTrial: Config.all({
-    mode: Config.schema(Schema.Literal("trial"), "LASTCODE_ACTIVATION_MODE"),
-    requestId: Config.schema(UpdateDrainRequestId, "LASTCODE_ACTIVATION_REQUEST_ID"),
-    targetDigest: Config.schema(UpdateActivationTargetDigest, "LASTCODE_ACTIVATION_TARGET_DIGEST"),
-  }).pipe(
-    Config.option,
-    Config.map(
-      Option.match({
-        onNone: () => undefined,
-        onSome: ({ requestId, targetDigest }) => ({ requestId, targetDigest }),
-      }),
+    mode: Config.schema(Schema.Literal("trial"), "LASTCODE_ACTIVATION_MODE").pipe(Config.option),
+    requestId: Config.schema(UpdateDrainRequestId, "LASTCODE_ACTIVATION_REQUEST_ID").pipe(
+      Config.option,
     ),
+    targetDigest: Config.schema(
+      UpdateActivationTargetDigest,
+      "LASTCODE_ACTIVATION_TARGET_DIGEST",
+    ).pipe(Config.option),
+  }).pipe(
+    Config.mapOrFail(({ mode, requestId, targetDigest }) => {
+      if (Option.isNone(mode) && Option.isNone(requestId) && Option.isNone(targetDigest)) {
+        return Effect.void;
+      }
+      if (Option.isSome(mode) && Option.isSome(requestId) && Option.isSome(targetDigest)) {
+        return Effect.succeed({ requestId: requestId.value, targetDigest: targetDigest.value });
+      }
+      return Effect.fail(
+        new Config.ConfigError(
+          new ConfigProvider.SourceError({
+            message: "LastCode activation trial environment is incomplete.",
+            cause: null,
+          }),
+        ),
+      );
+    }),
   ),
 });
 
