@@ -94,6 +94,30 @@ const validate = (fixture, overrides = {}) =>
   });
 
 describe("immutable Intel release validation", () => {
+  it("keeps target credentials read-only and revalidates the tag before publication", () => {
+    const workflow = NodeFS.readFileSync(
+      NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
+      "utf8",
+    );
+    const targetCheckout = workflow.slice(
+      workflow.indexOf("- name: Checkout exact installable"),
+      workflow.indexOf("- name: Validate immutable tag and commit"),
+    );
+    expect(targetCheckout).toContain("persist-credentials: false");
+
+    const publishStep = workflow.slice(
+      workflow.indexOf("- name: Publish immutable exact-tag assets"),
+    );
+    const tagFetch = publishStep.indexOf("git fetch --force --no-tags origin");
+    const tagComparison = publishStep.indexOf(
+      'if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]',
+    );
+    const releaseCreate = publishStep.indexOf('gh release create "$INSTALLABLE_TAG"');
+    expect(tagFetch).toBeGreaterThan(-1);
+    expect(tagComparison).toBeGreaterThan(tagFetch);
+    expect(releaseCreate).toBeGreaterThan(tagComparison);
+  });
+
   it("accepts a complete local build and matching prerelease", () => {
     const fixture = createFixture();
     expect(validate(fixture)).toEqual({

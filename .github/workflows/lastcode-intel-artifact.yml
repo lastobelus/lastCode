@@ -44,6 +44,7 @@ jobs:
         with:
           fetch-depth: 0
           path: target
+          persist-credentials: false
           ref: ${{ inputs.installable_commit }}
           sparse-checkout: |
             /*
@@ -191,6 +192,14 @@ jobs:
             --directory "$artifact_dir" \
             --tag "$INSTALLABLE_TAG" \
             --commit "$INSTALLABLE_COMMIT"
+
+          git fetch --force --no-tags origin \
+            "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}"
+          publish_commit="$(git rev-parse "${INSTALLABLE_TAG}^{commit}")"
+          if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]; then
+            echo "Tag moved during the build: expected $INSTALLABLE_COMMIT, resolved $publish_commit" >&2
+            exit 1
+          fi
 
           release_notes="$(printf '%s\n%s\n' \
             "Certificate-free LastCode macOS x64 artifacts for ${INSTALLABLE_TAG}." \
