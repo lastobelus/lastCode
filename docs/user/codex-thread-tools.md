@@ -9,6 +9,8 @@ lastcode-thread current --json
 lastcode-thread list --json
 lastcode-thread read <thread-id-or-unique-prefix> --turn-limit 5 --json
 lastcode-thread send <thread-id-or-unique-prefix> --message <text> --json
+lastcode-thread send <thread-id-or-unique-prefix> --message <text> --wait --timeout '10 minutes' --json
+lastcode-thread wait '<compact-json-wait-handle>' --timeout '10 minutes' --json
 ```
 
 Thread IDs are resolved locally. An exact ID always wins; a prefix must identify exactly one
@@ -31,6 +33,15 @@ confirms that LastCode persisted the request, not that the provider finished it.
 oversized messages, missing or ambiguous targets, authorization failures, and rejected dispatches
 fail without reporting acceptance.
 
+Add `--wait` when the caller needs the exact resulting turn rather than dispatch acceptance.
+LastCode emits one `LASTCODE_WAIT_HANDLE=<compact-json>` recovery line on stderr before the
+long wait, then prints one final JSON result on stdout. A completed result includes the exact
+turn ID and a response bounded to 64,000 characters. Timeouts do not interrupt the target;
+their nested `waitHandle` can be passed back to `lastcode-thread wait`. A
+`transport-unknown` or `dispatch-unknown` result also preserves that handle without claiming
+whether the request completed or, for dispatch, whether acceptance was observed. Plain `send`
+does not create wait state and its accepted JSON cannot be used as a wait handle.
+
 The bundled thread command is currently available on POSIX Node hosts and packaged macOS.
 Windows and packaged Linux AppImage Codex sessions still receive LastCode thread and home
 identity, but do not receive a `lastcode-thread` launcher. Windows has no POSIX launcher;
@@ -43,6 +54,7 @@ wrapper stored in its LastCode home:
 ssh <host> ~/.lastcode/userdata/bin/lastcode-thread list --json
 ssh <host> ~/.lastcode/userdata/bin/lastcode-thread read <thread-id> --json
 ssh <host> ~/.lastcode/userdata/bin/lastcode-thread send <thread-id> --message <text> --json
+ssh <host> ~/.lastcode/userdata/bin/lastcode-thread wait '<compact-json-wait-handle>' --json
 ```
 
 `~/.lastcode` is the default home. If that host uses a custom LastCode home, use its explicit

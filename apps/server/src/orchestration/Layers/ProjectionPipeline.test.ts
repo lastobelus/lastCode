@@ -2541,6 +2541,87 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
   },
 );
 
+it.layer(makeProjectionPipelinePrefixedTestLayer("t3-turn-correlation-test-"))(
+  "OrchestrationProjectionPipeline tracked correlations",
+  (it) => {
+    it.effect("tracks marked starts only and preserves the first projected resolution", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-correlation");
+        const now = "2026-08-22T00:00:00.000Z";
+        for (const [index, tracked] of [false, true].entries()) {
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-correlation-start-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-correlation-start-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-correlation-start-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-correlation-${index}`),
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              ...(tracked ? { trackRequestCorrelation: true as const } : {}),
+              createdAt: now,
+            },
+          });
+        }
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-1"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-1"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "started", turnId: TurnId.make("turn-correlation") },
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "terminal", state: "error", completedAt: now },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        const rows = yield* sql<{
+          readonly messageId: string;
+          readonly state: string;
+          readonly turnId: string | null;
+        }>`
+          SELECT message_id AS "messageId", state, turn_id AS "turnId"
+          FROM projection_turn_request_correlations
+        `;
+        assert.deepEqual(rows, [
+          { messageId: "message-correlation-1", state: "started", turnId: "turn-correlation" },
+        ]);
+      }),
+    );
+  },
+);
+
 it.effect("restores pending turn-start metadata across projection pipeline restart", () =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;

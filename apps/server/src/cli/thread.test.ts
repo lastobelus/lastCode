@@ -27,7 +27,9 @@ import {
   boundTranscriptMessages,
   currentThreadOutput,
   listThreadsOutput,
+  isAuthoritativeDispatchFailure,
   readThreadOutput,
+  retryAmbiguousTrackedDispatch,
   resolveThreadTarget,
   sendThreadOutput,
   threadLifecycle,
@@ -35,6 +37,31 @@ import {
   withReadSession,
   withSendSession,
 } from "./thread.ts";
+
+it.effect("does not retry an authoritative tracked dispatch rejection", () =>
+  Effect.gen(function* () {
+    assert.isTrue(
+      isAuthoritativeDispatchFailure({
+        _tag: "EnvironmentInternalError",
+        reason: "orchestration_dispatch_failed",
+      }),
+    );
+    let attempts = 0;
+    const result = yield* Effect.result(
+      retryAmbiguousTrackedDispatch(
+        Effect.sync(() => {
+          attempts += 1;
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(new ThreadCliError({ operation: "live send dispatch", cause: "rejected" })),
+          ),
+        ),
+      ),
+    );
+    assert.strictEqual(result._tag, "Failure");
+    assert.strictEqual(attempts, 1);
+  }),
+);
 
 const shellThread = (id: string) => ({ id: ThreadId.make(id) }) as OrchestrationThreadShell;
 
@@ -591,6 +618,30 @@ it.effect("prepares and dispatches an exact accepted send using the target threa
         createdAt: "2026-08-22T00:00:00.000Z",
       },
     ]);
+  }),
+);
+
+it.effect("marks only explicitly tracked sends for wait correlation", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const dispatched: unknown[] = [];
+    const sendSource: ThreadSendSource = {
+      descriptor: source.descriptor,
+      shell: source.shell,
+      dispatch: (command) => Effect.sync(() => dispatched.push(command)),
+    };
+    const input = {
+      identifier: "thread-runner",
+      message: "status",
+      commandId: CommandId.make("command-tracked"),
+      messageId: MessageId.make("message-tracked"),
+      createdAt: "2026-08-22T00:00:00.000Z",
+    };
+    yield* sendThreadOutput(sendSource, input);
+    yield* sendThreadOutput(sendSource, { ...input, trackRequestCorrelation: true });
+
+    assert.notProperty(dispatched[0] as object, "trackRequestCorrelation");
+    assert.deepInclude(dispatched[1] as object, { trackRequestCorrelation: true });
   }),
 );
 

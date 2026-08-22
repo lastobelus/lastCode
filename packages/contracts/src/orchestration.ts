@@ -914,6 +914,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -933,6 +934,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1111,6 +1113,25 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+export const ThreadTurnRequestOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("started"), turnId: TurnId }),
+  Schema.Struct({
+    kind: Schema.Literal("terminal"),
+    state: Schema.Literals(["error", "interrupted"]),
+    completedAt: IsoDateTime,
+  }),
+]);
+export type ThreadTurnRequestOutcome = typeof ThreadTurnRequestOutcome.Type;
+
+const ThreadTurnRequestResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-request.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  outcome: ThreadTurnRequestOutcome,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1120,6 +1141,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ThreadTurnRequestResolveCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1149,6 +1171,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.interaction-mode-set",
   "thread.message-sent",
   "thread.turn-start-requested",
+  "thread.turn-request-resolved",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
@@ -1328,7 +1351,14 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
+});
+
+export const ThreadTurnRequestResolvedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  outcome: ThreadTurnRequestOutcome,
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
@@ -1509,6 +1539,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.turn-start-requested"),
     payload: ThreadTurnStartRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-request-resolved"),
+    payload: ThreadTurnRequestResolvedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
