@@ -59,10 +59,10 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       }
       if (value.turnId !== null && value.turnState !== null && value.turnState !== "running") {
         if (value.turnState === "completed") {
+          if (value.assistantFinalizedAt === null) {
+            return { kind: "pending" } as const;
+          }
           if (value.assistantMessageId === null) {
-            if (value.assistantFinalizedAt === null) {
-              return { kind: "pending" } as const;
-            }
             return {
               kind: "terminal",
               state: "completed",

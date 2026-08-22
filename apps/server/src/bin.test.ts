@@ -969,6 +969,13 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
                       turnId: composedTurnId,
                       createdAt: responseAt,
                     });
+                    yield* engine.dispatch({
+                      type: "thread.turn-assistant.finalize",
+                      commandId: CommandId.make("cmd-composed-wait-assistant-finalized"),
+                      threadId,
+                      turnId: composedTurnId,
+                      createdAt: responseAt,
+                    });
                     return event.payload.messageId;
                   });
                 },
@@ -1137,6 +1144,23 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             createdAt: emptyAt,
           });
           yield* engine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: CommandId.make("cmd-short-buffered-commentary-delta"),
+            threadId,
+            messageId: MessageId.make("message-short-buffered-commentary"),
+            delta: "Earlier commentary segment",
+            turnId: bufferedTurnId,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make("cmd-short-buffered-commentary-complete"),
+            threadId,
+            messageId: MessageId.make("message-short-buffered-commentary"),
+            turnId: bufferedTurnId,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
             type: "thread.session.set",
             commandId: CommandId.make("cmd-short-buffered-complete"),
             threadId,
@@ -1259,6 +1283,13 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
               lastError: null,
               updatedAt: createdAt,
             },
+            createdAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: CommandId.make("cmd-live-wait-assistant-finalized"),
+            threadId,
+            turnId: trackedTurnId,
             createdAt,
           });
           const recoveryHandle = {
