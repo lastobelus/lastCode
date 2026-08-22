@@ -213,7 +213,9 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   };
   const setUpdateChannelError = options.setUpdateChannelError;
   const settingsLayer =
-    setUpdateChannelError || options.beforeSetUpdateChannel
+    setUpdateChannelError ||
+    options.beforeSetUpdateChannel ||
+    options.localNightliesEnabled !== undefined
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
@@ -1161,9 +1163,14 @@ describe("DesktopUpdates", () => {
       const installStarted = yield* Deferred.make<void>();
       const releaseInstall = yield* Deferred.make<void>();
       const harness = makeHarness({
-        stopBackend: Deferred.succeed(installStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(releaseInstall)),
-        ),
+        backends: [
+          {
+            desiredRunning: true,
+            stop: Deferred.succeed(installStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseInstall)),
+            ),
+          },
+        ],
       });
 
       yield* Effect.scoped(
