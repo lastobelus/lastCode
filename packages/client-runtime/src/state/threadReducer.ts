@@ -94,6 +94,7 @@ export function applyThreadDetailEvent(
           settledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
+          annotation: null,
           deletedAt: null,
           messages: [],
           proposedPlans: [],
@@ -198,6 +199,17 @@ export function applyThreadDetailEvent(
           ...thread,
           pinOrderKey: event.payload.orderKey,
           updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          annotation: event.payload.annotation,
         },
       };
 
