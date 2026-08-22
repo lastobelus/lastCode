@@ -75,6 +75,7 @@ describe("orchestration projector", () => {
     expect(next.threads).toEqual([
       {
         id: "thread-1",
+        annotation: null,
         projectId: "project-1",
         title: "demo",
         modelSelection: {
@@ -702,6 +703,7 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "activity-1", turnId: "turn-1" }]);
     expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
+    expect(thread?.latestUserMessageId).toBe("user-msg-1");
   });
 
   it("does not fallback-retain messages tied to removed turn IDs", async () => {
@@ -855,6 +857,7 @@ describe("orchestration projector", () => {
         turnId: message.turnId,
       })),
     ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
+    expect(thread?.latestUserMessageId).toBeNull();
   });
 
   it("caps message and checkpoint retention for long-lived threads", async () => {
