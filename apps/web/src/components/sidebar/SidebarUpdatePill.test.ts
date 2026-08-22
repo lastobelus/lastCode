@@ -7,6 +7,10 @@ import {
   resolveReleaseNoteHeading,
   SidebarUpdateReleaseNotes,
 } from "./SidebarUpdateReleaseNotes.tsx";
+import {
+  resolveSidebarUpdateButtonToneClassName,
+  SidebarLocalBuildFailurePopover,
+} from "./SidebarUpdatePill.tsx";
 
 describe("SidebarUpdatePill release notes", () => {
   it("prefers explicit local headings and preserves hosted fallbacks", () => {
@@ -108,5 +112,51 @@ describe("SidebarUpdatePill release notes", () => {
     expect(markup).toContain('<li class="list-disc break-words">local change</li>');
     expect(markup).toContain('<p class="break-words">2 more LastCode changes</p>');
     expect(markup).not.toContain('<li class="list-disc break-words">2 more LastCode changes</li>');
+  });
+});
+
+describe("SidebarUpdatePill local failure", () => {
+  it("uses a destructive button tone without changing the ordinary update tone", () => {
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: true,
+        isInteractionDisabled: false,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-destructive/12");
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        isInteractionDisabled: false,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-sidebar-control-surface");
+  });
+
+  it("renders persistent failure context and an accessible copy action", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SidebarLocalBuildFailurePopover, {
+        failure: {
+          checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",
+          phase: "Building DMG",
+          percent: 94,
+          errorKind: "packaging",
+          currentVersion: "1.2.2",
+          targetVersion: "1.2.3-nightly.4",
+          logPath: "/Users/test/.lastcode/local-updates/build.log",
+          error: "hdiutil \u001B[31mfailed\u001B[0m\0",
+        },
+        isCopied: false,
+        onCopy: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Local build failed");
+    expect(markup).toContain("Building DMG · 94% est.");
+    expect(markup).toContain("hdiutil failed");
+    expect(markup).not.toContain("\u001B");
+    expect(markup).not.toContain("\0");
+    expect(markup).toContain('aria-label="Copy local build failure details"');
   });
 });
