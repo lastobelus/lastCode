@@ -8,6 +8,7 @@ import {
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
+  parseThreadAnnotationSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
@@ -413,5 +414,26 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("parseThreadAnnotationSlashCommand", () => {
+  it("opens the editor for a bare command", () => {
+    expect(parseThreadAnnotationSlashCommand(" /annotate ")).toEqual({ kind: "open-editor" });
+  });
+
+  it("captures inline and multiline markdown", () => {
+    expect(parseThreadAnnotationSlashCommand("/annotate # Follow up\n- [ ] ship it")).toEqual({
+      kind: "save",
+      body: "# Follow up\n- [ ] ship it",
+    });
+  });
+
+  it("is case insensitive but requires a command boundary", () => {
+    expect(parseThreadAnnotationSlashCommand("/ANNOTATE #tag")).toEqual({
+      kind: "save",
+      body: "#tag",
+    });
+    expect(parseThreadAnnotationSlashCommand("/annotated nope")).toBeNull();
   });
 });
