@@ -5,17 +5,22 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  UpdateActivationCommitResult,
+  UpdateActivationTargetDigest,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
   type OrchestrationShellSnapshot,
   type TerminalSummary,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -24,13 +29,20 @@ import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepo
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { layer as updateDrainLayer } from "./UpdateDrain.ts";
-import { makeUpdateDrainAdmission } from "./UpdateDrainAdmission.ts";
+import {
+  makeUpdateDrainAdmission,
+  persistUpdateActivationCommit,
+  updateActivationCommitRecordPath,
+} from "./UpdateDrainAdmission.ts";
 
 const requestId = UpdateDrainRequestId.make("update-1");
 const targetVersion = UpdateDrainTargetVersion.make("1.2.3");
 const threadId = ThreadId.make("thread-1");
 const turnId = TurnId.make("turn-1");
 const now = "2026-08-21T00:00:00.000Z";
+const decodeActivationCommitRecord = Schema.decodeUnknownSync(
+  Schema.fromJsonString(UpdateActivationCommitResult),
+);
 
 const emptyShell = (): OrchestrationShellSnapshot => ({
   snapshotSequence: 0,
@@ -239,7 +251,6 @@ it.effect("reports only execution blockers and atomically claims when they clear
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );
-
 it.effect("keeps accepted provider starts blocking until they reach the session projection", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness();
@@ -283,3 +294,133 @@ it.effect("keeps accepted provider starts blocking until they reach the session 
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );
+
+it.effect("keeps a trial closed until the exact activation commit is durable", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const targetDigest = UpdateActivationTargetDigest.make("a".repeat(64));
+    const persisted = yield* Ref.make<ReadonlyArray<unknown>>([]);
+
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission({
+        trial: { requestId, targetDigest },
+        persistCommit: (record) => Ref.update(persisted, (records) => [...records, record]),
+      });
+
+      const beforeDrain = yield* Effect.result(admission.admit("thread-turn", Effect.void));
+      assert.equal(beforeDrain._tag, "Failure");
+      assert.equal(
+        beforeDrain._tag === "Failure" && "reason" in beforeDrain.failure
+          ? beforeDrain.failure.reason
+          : null,
+        "no_active_drain",
+      );
+
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("trial-start"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+
+      const unclaimed = yield* Effect.result(
+        admission.commitUpdateActivation({ requestId, targetDigest }),
+      );
+      assert.equal(unclaimed._tag, "Failure");
+      assert.equal(
+        unclaimed._tag === "Failure" ? unclaimed.failure.reason : null,
+        "drain_not_claimed",
+      );
+      yield* admission.claimActivation({ requestId });
+
+      const blocked = yield* Effect.result(admission.admit("terminal-write", Effect.void));
+      assert.equal(blocked._tag, "Failure");
+      assert.equal((yield* admission.status).admission, "closed");
+
+      const wrongRequest = yield* Effect.result(
+        admission.commitUpdateActivation({
+          requestId: UpdateDrainRequestId.make("wrong-request"),
+          targetDigest,
+        }),
+      );
+      assert.equal(wrongRequest._tag, "Failure");
+      assert.equal(
+        wrongRequest._tag === "Failure" ? wrongRequest.failure.reason : null,
+        "request_mismatch",
+      );
+
+      const wrongDigest = yield* Effect.result(
+        admission.commitUpdateActivation({
+          requestId,
+          targetDigest: UpdateActivationTargetDigest.make("b".repeat(64)),
+        }),
+      );
+      assert.equal(wrongDigest._tag, "Failure");
+      assert.equal(
+        wrongDigest._tag === "Failure" ? wrongDigest.failure.reason : null,
+        "digest_mismatch",
+      );
+
+      const committed = yield* admission.commitUpdateActivation({ requestId, targetDigest });
+      assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
+      assert.equal((yield* admission.status).admission, "open");
+
+      let workRan = false;
+      yield* admission.admit(
+        "thread-turn",
+        Effect.sync(() => {
+          workRan = true;
+        }),
+      );
+      assert.isTrue(workRan);
+
+      const retried = yield* admission.commitUpdateActivation({ requestId, targetDigest });
+      assert.deepStrictEqual(retried, committed);
+      assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("leaves normal startup admission unchanged", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission();
+      yield* admission.admit("thread-turn", Effect.void);
+      assert.equal((yield* admission.status).admission, "open");
+
+      const result = yield* Effect.result(
+        admission.commitUpdateActivation({
+          requestId,
+          targetDigest: UpdateActivationTargetDigest.make("a".repeat(64)),
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(result._tag === "Failure" ? result.failure.reason : null, "not_trial");
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.layer(NodeServices.layer)("update activation commit record", (it) => {
+  it.effect("writes the exact external record at the stable runtime path", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "lastcode-activation-" });
+        const record = {
+          requestId,
+          targetDigest: UpdateActivationTargetDigest.make("c".repeat(64)),
+          committedAt: "2026-08-22T00:00:00.000Z",
+        } as const;
+
+        yield* persistUpdateActivationCommit(baseDir, record);
+        const recordPath = yield* updateActivationCommitRecordPath(baseDir);
+        assert.deepStrictEqual(
+          decodeActivationCommitRecord(yield* fs.readFileString(recordPath)),
+          record,
+        );
+      }),
+    ),
+  );
+});

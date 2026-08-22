@@ -1,5 +1,6 @@
 import {
   AuthAccessReadScope,
+  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -53,6 +54,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverStartUpdateDrain]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverCancelUpdateDrain]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverClaimUpdateActivation]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverCommitUpdateActivation]: AuthAccessWriteScope,
   [WS_METHODS.serverGetUpdateDrainStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,

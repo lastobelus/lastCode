@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
+  UpdateActivationCommitInput,
   UpdateDrainCommand,
   UpdateDrainCommandReceipt,
   UpdateDrainState,
@@ -12,6 +13,7 @@ const decodeCommand = Schema.decodeUnknownSync(UpdateDrainCommand);
 const decodeState = Schema.decodeUnknownSync(UpdateDrainState);
 const decodeReceipt = Schema.decodeUnknownSync(UpdateDrainCommandReceipt);
 const decodeStatus = Schema.decodeUnknownSync(UpdateDrainStatus);
+const decodeActivationCommit = Schema.decodeUnknownSync(UpdateActivationCommitInput);
 
 describe("update drain contracts", () => {
   it("decodes lifecycle commands", () => {
@@ -81,5 +83,14 @@ describe("update drain contracts", () => {
     });
     expect(status.blockers).toHaveLength(1);
     expect(status).not.toHaveProperty("quietGrace");
+  });
+
+  it("accepts only an exact lower-case SHA-256 activation digest", () => {
+    expect(
+      decodeActivationCommit({ requestId: "request-1", targetDigest: "a".repeat(64) }),
+    ).toEqual({ requestId: "request-1", targetDigest: "a".repeat(64) });
+    expect(() =>
+      decodeActivationCommit({ requestId: "request-1", targetDigest: "A".repeat(64) }),
+    ).toThrow();
   });
 });

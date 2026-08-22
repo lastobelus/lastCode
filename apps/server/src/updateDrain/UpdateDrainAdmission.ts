@@ -1,6 +1,9 @@
 import {
   CommandId,
   ThreadId,
+  UpdateActivationCommitError,
+  type UpdateActivationCommitInput,
+  UpdateActivationCommitResult,
   UpdateDrainAdmissionError,
   type UpdateDrainBlocker,
   type UpdateDrainCancelCommand,
@@ -8,14 +11,20 @@ import {
   type UpdateDrainCommandReceipt,
   UpdateDrainError,
   type UpdateDrainStartCommand,
+  type UpdateDrainState,
   type UpdateDrainStatus,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
+import { writeFileStringAtomically } from "../atomicWrite.ts";
+import * as ServerConfig from "../config.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
@@ -40,6 +49,9 @@ export interface UpdateDrainAdmissionShape {
   readonly claimActivation: (
     input: UpdateDrainClaimInput,
   ) => Effect.Effect<UpdateDrainCommandReceipt, UpdateDrainError>;
+  readonly commitUpdateActivation: (
+    input: UpdateActivationCommitInput,
+  ) => Effect.Effect<UpdateActivationCommitResult, UpdateActivationCommitError>;
   readonly status: Effect.Effect<UpdateDrainStatus, UpdateDrainError>;
   readonly admit: <A, E, R>(
     kind: UpdateDrainAdmissionKind,
@@ -68,7 +80,38 @@ function pendingTurnStartKey(threadId: string, messageId: string) {
   return `${threadId}\u0000${messageId}`;
 }
 
-export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* () {
+interface UpdateActivationTrialOptions {
+  readonly trial: UpdateActivationCommitInput;
+  readonly persistCommit: (
+    record: UpdateActivationCommitResult,
+  ) => Effect.Effect<void, UpdateActivationCommitError>;
+}
+
+const encodeUpdateActivationCommit = Schema.encodeSync(
+  Schema.fromJsonString(UpdateActivationCommitResult),
+);
+
+export const updateActivationCommitRecordPath = Effect.fn("updateActivationCommitRecordPath")(
+  function* (baseDir: string) {
+    const path = yield* Path.Path;
+    return path.join(baseDir, "runtime", "lastcode-activation-commit.json");
+  },
+);
+
+export const persistUpdateActivationCommit = Effect.fn("persistUpdateActivationCommit")(function* (
+  baseDir: string,
+  record: UpdateActivationCommitResult,
+) {
+  const filePath = yield* updateActivationCommitRecordPath(baseDir);
+  yield* writeFileStringAtomically({
+    filePath,
+    contents: `${encodeUpdateActivationCommit(record)}\n`,
+  });
+});
+
+export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* (
+  activation?: UpdateActivationTrialOptions,
+) {
   const drain = yield* UpdateDrain;
   const projections = yield* ProjectionSnapshotQuery;
   const projectionTurns = yield* ProjectionTurnRepository;
@@ -82,6 +125,42 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       (pending) => pendingTurnStartKey(pending.threadId, pending.messageId),
     ),
   );
+  let activationCommit: UpdateActivationCommitResult | undefined;
+
+  const admissionIsClosed = (durable: UpdateDrainState): boolean => {
+    if (activation !== undefined) return activationCommit === undefined;
+    return durable.intent !== null && durable.intent.status !== "cancelled";
+  };
+
+  const rejectClosedAdmission = (
+    durable: UpdateDrainState,
+    kind: UpdateDrainAdmissionKind,
+  ): Effect.Effect<never, UpdateDrainAdmissionError | UpdateDrainError> => {
+    if (durable.intent === null || durable.intent.status === "cancelled") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "no_active_drain",
+          message: "Trial update admission is closed without a durable activation claim.",
+        }),
+      );
+    }
+    if (activation !== undefined && durable.intent.requestId !== activation.trial.requestId) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "request_mismatch",
+          message: `Trial update '${activation.trial.requestId}' does not match active drain '${durable.intent.requestId}'.`,
+        }),
+      );
+    }
+    return Effect.fail(
+      new UpdateDrainAdmissionError({
+        reason: "update_draining",
+        requestId: durable.intent.requestId,
+        targetVersion: durable.intent.targetVersion,
+        message: `Cannot start ${kind.replaceAll("-", " ")} while LastCode is awaiting update activation commit.`,
+      }),
+    );
+  };
 
   const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
     // Read pending starts first. If one transitions while the shell snapshot is
@@ -163,7 +242,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
 
   const statusUnlocked = Effect.fn("UpdateDrainAdmission.statusUnlocked")(function* () {
     const durable = yield* drain.status;
-    if (durable.intent === null || durable.intent.status === "cancelled") {
+    if (!admissionIsClosed(durable)) {
       return {
         ...durable,
         admission: "open" as const,
@@ -203,18 +282,63 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       }),
     );
 
+  const commitUpdateActivation: UpdateDrainAdmissionShape["commitUpdateActivation"] = (input) =>
+    mutex.withPermits(1)(
+      Effect.gen(function* () {
+        if (activation === undefined) {
+          return yield* new UpdateActivationCommitError({
+            reason: "not_trial",
+            message: "This server did not start as an update activation trial.",
+          });
+        }
+        if (input.requestId !== activation.trial.requestId) {
+          return yield* new UpdateActivationCommitError({
+            reason: "request_mismatch",
+            message: `Activation request '${input.requestId}' does not match trial request '${activation.trial.requestId}'.`,
+          });
+        }
+        if (input.targetDigest !== activation.trial.targetDigest) {
+          return yield* new UpdateActivationCommitError({
+            reason: "digest_mismatch",
+            message: "Activation target digest does not match the running trial package.",
+          });
+        }
+        if (activationCommit !== undefined) return activationCommit;
+
+        const durable = yield* drain.status.pipe(
+          Effect.mapError(
+            () =>
+              new UpdateActivationCommitError({
+                reason: "drain_not_claimed",
+                message: "Failed to verify the durable update drain activation claim.",
+              }),
+          ),
+        );
+        if (
+          durable.intent?.status !== "claimed" ||
+          durable.intent.requestId !== activation.trial.requestId
+        ) {
+          return yield* new UpdateActivationCommitError({
+            reason: "drain_not_claimed",
+            message: `Durable update drain '${activation.trial.requestId}' is not claimed for activation.`,
+          });
+        }
+
+        const record: UpdateActivationCommitResult = {
+          ...activation.trial,
+          committedAt: DateTime.formatIso(yield* DateTime.now),
+        };
+        yield* activation.persistCommit(record);
+        activationCommit = record;
+        return record;
+      }),
+    );
+
   const admit: UpdateDrainAdmissionShape["admit"] = (kind, effect) =>
     mutex.withPermits(1)(
       Effect.gen(function* () {
         const durable = yield* drain.status;
-        if (durable.intent !== null && durable.intent.status !== "cancelled") {
-          return yield* new UpdateDrainAdmissionError({
-            reason: "update_draining",
-            requestId: durable.intent.requestId,
-            targetVersion: durable.intent.targetVersion,
-            message: `Cannot start ${kind.replaceAll("-", " ")} while LastCode is draining for update ${durable.intent.targetVersion}.`,
-          });
-        }
+        if (admissionIsClosed(durable)) return yield* rejectClosedAdmission(durable, kind);
         return yield* effect;
       }),
     );
@@ -223,19 +347,44 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
     mutex.withPermits(1)(
       Effect.gen(function* () {
         const durable = yield* drain.status;
-        return yield* durable.intent !== null && durable.intent.status !== "cancelled"
-          ? whenClosed
-          : effect;
+        return yield* admissionIsClosed(durable) ? whenClosed : effect;
       }),
     );
 
   return UpdateDrainAdmission.of({
     dispatch,
     claimActivation,
+    commitUpdateActivation,
     status: mutex.withPermits(1)(statusUnlocked()),
     admit,
     admitOrElse,
   });
 });
 
-export const layer = Layer.effect(UpdateDrainAdmission, makeUpdateDrainAdmission());
+export const layer = Layer.effect(
+  UpdateDrainAdmission,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* makeUpdateDrainAdmission(
+      config.updateActivationTrial === undefined
+        ? undefined
+        : {
+            trial: config.updateActivationTrial,
+            persistCommit: (record) =>
+              persistUpdateActivationCommit(config.baseDir, record).pipe(
+                Effect.provideService(FileSystem.FileSystem, fs),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  () =>
+                    new UpdateActivationCommitError({
+                      reason: "write_failed",
+                      message: "Failed to persist the update activation commit record.",
+                    }),
+                ),
+              ),
+          },
+    );
+  }),
+);

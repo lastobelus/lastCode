@@ -20,6 +20,11 @@ export const UpdateDrainTargetVersion = TrimmedNonEmptyString.pipe(
 );
 export type UpdateDrainTargetVersion = typeof UpdateDrainTargetVersion.Type;
 
+export const UpdateActivationTargetDigest = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{64}$/),
+).pipe(Schema.brand("UpdateActivationTargetDigest"));
+export type UpdateActivationTargetDigest = typeof UpdateActivationTargetDigest.Type;
+
 export const UpdateDrainIntentStatus = Schema.Literals(["draining", "cancelled", "claimed"]);
 export type UpdateDrainIntentStatus = typeof UpdateDrainIntentStatus.Type;
 
@@ -187,6 +192,36 @@ export const UpdateDrainClaimInput = Schema.Struct({
   requestId: UpdateDrainRequestId,
 });
 export type UpdateDrainClaimInput = typeof UpdateDrainClaimInput.Type;
+
+export const UpdateActivationCommitInput = Schema.Struct({
+  requestId: UpdateDrainRequestId,
+  targetDigest: UpdateActivationTargetDigest,
+});
+export type UpdateActivationCommitInput = typeof UpdateActivationCommitInput.Type;
+
+export const UpdateActivationCommitResult = Schema.Struct({
+  requestId: UpdateDrainRequestId,
+  targetDigest: UpdateActivationTargetDigest,
+  committedAt: IsoDateTime,
+});
+export type UpdateActivationCommitResult = typeof UpdateActivationCommitResult.Type;
+
+export const UpdateActivationCommitFailureReason = Schema.Literals([
+  "not_trial",
+  "request_mismatch",
+  "digest_mismatch",
+  "drain_not_claimed",
+  "write_failed",
+]);
+export type UpdateActivationCommitFailureReason = typeof UpdateActivationCommitFailureReason.Type;
+
+export class UpdateActivationCommitError extends Schema.TaggedErrorClass<UpdateActivationCommitError>()(
+  "UpdateActivationCommitError",
+  {
+    reason: UpdateActivationCommitFailureReason,
+    message: Schema.String,
+  },
+) {}
 
 export class UpdateDrainError extends Schema.TaggedErrorClass<UpdateDrainError>()(
   "UpdateDrainError",

@@ -33,6 +33,7 @@ import {
   UpdateDrainRequestId,
   UpdateDrainAdmissionError,
   UpdateDrainTargetVersion,
+  UpdateActivationTargetDigest,
   WS_METHODS,
   WsRpcGroup,
   EditorId,
@@ -635,6 +636,8 @@ const buildAppUnderTest = (options?: {
               requestId: input.requestId,
               createdAt: DateTime.formatIso(TEST_EPOCH),
             }),
+          commitUpdateActivation: () =>
+            Effect.die(new Error("Unexpected update activation commit request.")),
           admit: (_kind, effect) => effect,
           admitOrElse: (_kind, effect) => effect,
           status: drain.status.pipe(
@@ -4699,6 +4702,58 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         status: "claimed",
       });
       assert.equal(result.status.admission, "closed");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("restricts activation commit to an administrator and routes the exact input", () =>
+    Effect.gen(function* () {
+      const requestId = UpdateDrainRequestId.make("rpc-activation-commit");
+      const targetDigest = UpdateActivationTargetDigest.make("d".repeat(64));
+      const committedAt = "2026-08-22T00:00:00.000Z";
+      let commits = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          updateDrainAdmission: {
+            commitUpdateActivation: (input) =>
+              Effect.sync(() => {
+                commits += 1;
+                return { ...input, committedAt };
+              }),
+          },
+        },
+      });
+
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+        body: yield* HttpBody.json({ scopes: ["orchestration:operate"] }),
+      });
+      assert.equal(pairingResponse.status, 200);
+      const pairing = (yield* pairingResponse.json) as { readonly credential: string };
+      const standardCookie = yield* getAuthenticatedSessionCookieHeader(pairing.credential);
+      const unauthenticatedWsUrl = yield* getWsServerUrl("/ws", { authenticated: false });
+      const standardWsUrl = appendSessionCookieToWsUrl(unauthenticatedWsUrl, standardCookie);
+
+      const denied = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(standardWsUrl, (client) =>
+            client[WS_METHODS.serverCommitUpdateActivation]({ requestId, targetDigest }),
+          ),
+        ),
+      );
+      assert.equal(denied._tag, "EnvironmentAuthorizationError");
+      if (denied._tag === "EnvironmentAuthorizationError") {
+        assert.equal(denied.requiredScope, "access:write");
+      }
+      assert.equal(commits, 0);
+
+      const committed = yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.serverCommitUpdateActivation]({ requestId, targetDigest }),
+        ),
+      );
+      assert.deepStrictEqual(committed, { requestId, targetDigest, committedAt });
+      assert.equal(commits, 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

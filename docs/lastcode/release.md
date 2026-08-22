@@ -225,3 +225,19 @@ thread work, background agent work, and starting terminals or terminals with a
 running subprocess. When that list is empty, the activation claim is committed
 under the same server-lifetime admission lock. The claim survives a server
 restart and keeps admission closed for the future activation helper.
+
+A candidate server can start in trial mode when its launcher supplies one JSON
+environment value:
+
+```text
+LASTCODE_UPDATE_TRIAL={"requestId":"<drain request>","targetDigest":"<64 lowercase hex>"}
+```
+
+The trial serves the normal authenticated connection and drain-status paths but
+keeps work admission closed. An administrative client commits the trial through
+`server.commitUpdateActivation` with the same request and digest. The server
+accepts that call only while the matching durable drain is claimed, atomically
+writes `runtime/lastcode-activation-commit.json`, and then opens work admission.
+Repeating the exact call returns the original commit result without rewriting
+the record. Full package identity remains in the staging descriptor and helper
+journal; neither it nor a second update identifier is copied into the database.

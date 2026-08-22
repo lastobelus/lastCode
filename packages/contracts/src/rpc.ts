@@ -2,6 +2,9 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import {
+  UpdateActivationCommitError,
+  UpdateActivationCommitInput,
+  UpdateActivationCommitResult,
   UpdateDrainAdmissionError,
   UpdateDrainCancelInput,
   UpdateDrainClaimInput,
@@ -291,6 +294,7 @@ export const WS_METHODS = {
   serverStartUpdateDrain: "server.startUpdateDrain",
   serverCancelUpdateDrain: "server.cancelUpdateDrain",
   serverClaimUpdateActivation: "server.claimUpdateActivation",
+  serverCommitUpdateActivation: "server.commitUpdateActivation",
   serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
   // Cloud environment methods
@@ -505,6 +509,12 @@ export const WsServerClaimUpdateActivationRpc = Rpc.make(WS_METHODS.serverClaimU
   payload: UpdateDrainClaimInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerCommitUpdateActivationRpc = Rpc.make(WS_METHODS.serverCommitUpdateActivation, {
+  payload: UpdateActivationCommitInput,
+  success: UpdateActivationCommitResult,
+  error: Schema.Union([UpdateActivationCommitError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
@@ -1095,6 +1105,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerStartUpdateDrainRpc,
   WsServerCancelUpdateDrainRpc,
   WsServerClaimUpdateActivationRpc,
+  WsServerCommitUpdateActivationRpc,
   WsServerGetUpdateDrainStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,

@@ -1754,6 +1754,12 @@ const makeWsRpcLayer = (
             updateDrainAdmission.claimActivation(input),
             { "rpc.aggregate": "update-drain" },
           ),
+        [WS_METHODS.serverCommitUpdateActivation]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverCommitUpdateActivation,
+            updateDrainAdmission.commitUpdateActivation(input),
+            { "rpc.aggregate": "update-drain" },
+          ),
         [WS_METHODS.serverGetUpdateDrainStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetUpdateDrainStatus, updateDrainAdmission.status, {
             "rpc.aggregate": "update-drain",

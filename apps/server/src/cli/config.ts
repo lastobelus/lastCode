@@ -1,6 +1,10 @@
 import * as NetService from "@t3tools/shared/Net";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
-import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
+import {
+  DesktopBackendBootstrap,
+  PortSchema,
+  UpdateActivationCommitInput,
+} from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -139,6 +143,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  updateActivationTrial: Config.schema(
+    Schema.fromJsonString(UpdateActivationCommitInput),
+    "LASTCODE_UPDATE_TRIAL",
+  ).pipe(Config.option, Config.map(Option.getOrUndefined)),
 });
 
 export interface CliServerFlags {
@@ -386,6 +394,9 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      ...(env.updateActivationTrial === undefined
+        ? {}
+        : { updateActivationTrial: env.updateActivationTrial }),
     };
 
     return config;
