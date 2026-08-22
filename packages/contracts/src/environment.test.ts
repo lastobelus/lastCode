@@ -26,7 +26,6 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.pullRequests,
     ).toBe(true);
   });
-
   it("treats a missing attachment upload capability as unsupported", () => {
     expect(decodeDescriptor(descriptor).capabilities.attachmentUploads).toBeUndefined();
   });
@@ -39,7 +38,6 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.attachmentUploads,
     ).toBe(true);
   });
-
   it("preserves the server's generic attachment upload limit", () => {
     expect(
       decodeDescriptor({
@@ -50,5 +48,15 @@ describe("ExecutionEnvironmentDescriptor", () => {
         },
       }).capabilities.fileAttachments,
     ).toEqual({ maxUploadBytes: 50 * 1024 * 1024 });
+  });
+
+  it("treats missing thread annotations as unsupported and preserves support", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadAnnotations).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadAnnotations: true },
+      }).capabilities.threadAnnotations,
+    ).toBe(true);
   });
 });
