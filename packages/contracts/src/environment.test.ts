@@ -26,4 +26,14 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.pullRequests,
     ).toBe(true);
   });
+
+  it("treats missing thread annotations as unsupported and preserves support", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadAnnotations).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadAnnotations: true },
+      }).capabilities.threadAnnotations,
+    ).toBe(true);
+  });
 });
