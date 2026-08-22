@@ -32,10 +32,7 @@ import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLive
 import * as ThreadPlanProgress from "../orchestration/ThreadPlanProgress.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
-import {
-  clearPersistedServerRuntimeState,
-  readPersistedServerRuntimeState,
-} from "../serverRuntimeState.ts";
+import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -532,7 +529,6 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
     if (attempted.success.output._tag === "Failure") return yield* attempted.success.output.failure;
     return Option.some(attempted.success.output.success);
   }
-  yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
   return Option.none<unknown>();
 });
 

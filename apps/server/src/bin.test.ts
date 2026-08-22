@@ -40,6 +40,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
+  readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -591,7 +592,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
     }),
   );
 
-  it.effect("reads a bounded thread from temporary SQLite when no server is available", () =>
+  it.effect("falls back to bounded SQLite reads without clearing the runtime record", () =>
     Effect.gen(function* () {
       const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-"));
       const workspaceRoot = NodeFS.mkdtempSync(
@@ -619,6 +620,18 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         });
       }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
 
+      const unavailableRuntime = {
+        version: 1 as const,
+        pid: process.pid,
+        port: 0,
+        origin: "http://127.0.0.1:0",
+        startedAt: "2026-08-21T00:00:00.000Z",
+      };
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: unavailableRuntime,
+      });
+
       const { output } = yield* captureStdout(
         runCli(["thread", "read", "thread-offline", "--turn-limit", "1", "--base-dir", baseDir]),
       );
@@ -626,6 +639,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
       assert.equal(result.kind, "read");
       assert.equal(result.threadId, "thread-offline-bounded");
+      const preservedRuntime = yield* readPersistedServerRuntimeState(
+        config.serverRuntimeStatePath,
+      );
+      assert.deepStrictEqual(preservedRuntime, Option.some(unavailableRuntime));
     }),
   );
 
