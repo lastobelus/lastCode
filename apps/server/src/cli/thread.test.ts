@@ -198,7 +198,7 @@ it("keeps pending-input, working, snoozed, settled, and active lifecycle states 
   );
 });
 
-it("treats only future snoozes as snoozed while preserving higher-priority lifecycle states", () => {
+it("matches effective snooze expiry, precedence, and raised-hand behavior", () => {
   const base = {
     hasPendingUserInput: false,
     hasPendingApprovals: false,
@@ -206,6 +206,7 @@ it("treats only future snoozes as snoozed while preserving higher-priority lifec
     session: null,
     backgroundLiveness: null,
     snoozedUntil: "2026-06-02T00:00:00.000Z",
+    snoozedAt: "2026-05-31T12:00:00.000Z",
     settledOverride: null,
     settledAt: null,
   } as unknown as OrchestrationThreadShell;
@@ -221,7 +222,53 @@ it("treats only future snoozes as snoozed while preserving higher-priority lifec
   );
   assert.strictEqual(
     threadLifecycle({ ...base, session: { status: "running" } } as never, { now }),
-    "working",
+    "snoozed",
+  );
+  assert.strictEqual(
+    threadLifecycle(
+      {
+        ...base,
+        session: { status: "error", updatedAt: "2026-06-01T01:00:00.000Z" },
+      } as never,
+      { now },
+    ),
+    "active",
+  );
+  assert.strictEqual(
+    threadLifecycle(
+      {
+        ...base,
+        session: { status: "error", updatedAt: "2026-05-31T11:00:00.000Z" },
+      } as never,
+      { now },
+    ),
+    "snoozed",
+  );
+  assert.strictEqual(
+    threadLifecycle(
+      {
+        ...base,
+        latestTurn: {
+          state: "completed",
+          completedAt: "2026-06-01T01:00:00.000Z",
+        },
+      } as never,
+      { now },
+    ),
+    "active",
+  );
+  assert.strictEqual(
+    threadLifecycle(
+      {
+        ...base,
+        latestTurn: {
+          state: "completed",
+          completedAt: "2026-05-31T11:00:00.000Z",
+        },
+      } as never,
+      { now },
+    ),
+    "snoozed",
   );
 });
 

@@ -257,6 +257,22 @@ export function threadLifecycle(
   options: { readonly now: string },
 ): string {
   if (thread.hasPendingUserInput || thread.hasPendingApprovals) return "pending-input";
+  if (thread.snoozedUntil !== null && thread.snoozedUntil !== undefined) {
+    const wakeAt = Date.parse(thread.snoozedUntil);
+    const now = Date.parse(options.now);
+    if (!Number.isNaN(wakeAt) && !Number.isNaN(now) && wakeAt > now) {
+      const raisedByError =
+        thread.session?.status === "error" &&
+        (thread.snoozedAt == null ||
+          Date.parse(thread.session.updatedAt) > Date.parse(thread.snoozedAt));
+      const raisedByCompletion =
+        thread.snoozedAt != null &&
+        thread.latestTurn?.state === "completed" &&
+        thread.latestTurn.completedAt != null &&
+        Date.parse(thread.latestTurn.completedAt) > Date.parse(thread.snoozedAt);
+      if (!raisedByError && !raisedByCompletion) return "snoozed";
+    }
+  }
   if (
     thread.latestTurn?.state === "running" ||
     thread.session?.status === "running" ||
@@ -264,11 +280,6 @@ export function threadLifecycle(
     thread.backgroundLiveness === "working"
   ) {
     return "working";
-  }
-  if (thread.snoozedUntil !== null && thread.snoozedUntil !== undefined) {
-    const wakeAt = Date.parse(thread.snoozedUntil);
-    const now = Date.parse(options.now);
-    if (!Number.isNaN(wakeAt) && !Number.isNaN(now) && wakeAt > now) return "snoozed";
   }
   if (thread.settledOverride === "settled" || thread.settledAt !== null) return "settled";
   return "active";
