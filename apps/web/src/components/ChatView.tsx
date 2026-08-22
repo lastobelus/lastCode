@@ -91,6 +91,7 @@ import {
   collapseExpandedComposerCursor,
   type ComposerSubmissionIntent,
   parseStandaloneComposerSlashCommand,
+  parseThreadAnnotationSlashCommand,
 } from "../composer-logic";
 import {
   derivePendingApprovals,
@@ -337,6 +338,11 @@ import {
   shouldOfferResumeCompaction,
 } from "./chat/ContextWindowMeter.logic";
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
+import {
+  runThreadAnnotationBodySave,
+  ThreadAnnotationEditorDialog,
+  ThreadAnnotationPostIt,
+} from "./thread-annotation/ThreadAnnotation";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -1381,6 +1387,15 @@ function ChatViewContent(props: ChatViewProps) {
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const upsertThreadAnnotation = useAtomCommand(threadEnvironment.upsertAnnotation, {
+    reportFailure: false,
+  });
+  const resolveThreadAnnotation = useAtomCommand(threadEnvironment.resolveAnnotation, {
+    reportFailure: false,
+  });
+  const reopenThreadAnnotation = useAtomCommand(threadEnvironment.reopenAnnotation, {
     reportFailure: false,
   });
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
@@ -5119,6 +5134,81 @@ function ChatViewContent(props: ChatViewProps) {
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const supportsPinning = serverConfig?.environment.capabilities.threadPinning === true;
   const activeThreadPinned = supportsPinning && activeThreadShell?.pinnedAt != null;
+  const supportsThreadAnnotations =
+    serverConfig?.environment.capabilities.threadAnnotations === true;
+  const threadAnnotation = activeThread?.annotation ?? null;
+  const canAnnotateThread =
+    isServerThread &&
+    supportsThreadAnnotations &&
+    (threadAnnotation !== null ||
+      activeThread?.messages.some((message) => message.role === "user") === true);
+  const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
+  const [annotationMutationPending, setAnnotationMutationPending] = useState(false);
+  const [dismissedAnnotationKey, setDismissedAnnotationKey] = useState<string | null>(null);
+  const annotationVersionKey = threadAnnotation
+    ? `${routeThreadKey}:${threadAnnotation.updatedAt}`
+    : null;
+
+  useEffect(() => {
+    setDismissedAnnotationKey(null);
+    setAnnotationEditorOpen(false);
+  }, [routeThreadKey]);
+
+  const reportAnnotationFailure = useCallback((action: string, error: unknown) => {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: `Failed to ${action} annotation`,
+        description: error instanceof Error ? error.message : "An error occurred.",
+      }),
+    );
+  }, []);
+
+  const saveThreadAnnotation = useCallback(
+    async (body: string): Promise<boolean> => {
+      if (!activeThread || !canAnnotateThread) return false;
+      return runThreadAnnotationBodySave(
+        scopeThreadRef(activeThread.environmentId, activeThread.id),
+        async () => {
+          setAnnotationMutationPending(true);
+          const result = await upsertThreadAnnotation({
+            environmentId: activeThread.environmentId,
+            input: { threadId: activeThread.id, body },
+          });
+          setAnnotationMutationPending(false);
+          if (result._tag === "Success") return true;
+          if (!isAtomCommandInterrupted(result)) {
+            reportAnnotationFailure("save", squashAtomCommandFailure(result));
+          }
+          return false;
+        },
+      );
+    },
+    [activeThread, canAnnotateThread, reportAnnotationFailure, upsertThreadAnnotation],
+  );
+
+  const changeThreadAnnotationResolution = useCallback(
+    async (next: "resolve" | "reopen") => {
+      if (!activeThread || !canAnnotateThread) return;
+      setAnnotationMutationPending(true);
+      const command = next === "resolve" ? resolveThreadAnnotation : reopenThreadAnnotation;
+      const result = await command({
+        environmentId: activeThread.environmentId,
+        input: { threadId: activeThread.id },
+      });
+      setAnnotationMutationPending(false);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        reportAnnotationFailure(next, squashAtomCommandFailure(result));
+      }
+    },
+    [
+      activeThread,
+      canAnnotateThread,
+      reopenThreadAnnotation,
+      reportAnnotationFailure,
+      resolveThreadAnnotation,
+    ],
+  );
   const nowMinute = useNowMinute();
   const snoozeNow = new Date().toISOString();
   const activeThreadSnoozed =
@@ -6196,7 +6286,51 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     const sendCtx = composerRef.current?.getSendContext();
-    if (!sendCtx?.providerAvailable) {
+    if (!sendCtx) {
+      notifyDirectAnnotationAttached();
+      return;
+    }
+    const annotationSlashCommand =
+      !directAnnotation &&
+      sendCtx.images.length === 0 &&
+      sendCtx.terminalContexts.length === 0 &&
+      sendCtx.elementContexts.length === 0 &&
+      sendCtx.previewAnnotations.length === 0 &&
+      sendCtx.reviewComments.length === 0
+        ? parseThreadAnnotationSlashCommand(promptRef.current)
+        : null;
+    if (annotationSlashCommand) {
+      if (!canAnnotateThread) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title:
+              isServerThread && !supportsThreadAnnotations
+                ? "Annotations unavailable"
+                : "Send a message first",
+            description:
+              isServerThread && !supportsThreadAnnotations
+                ? "This environment needs a newer LastCode server to annotate threads."
+                : "Annotations can be added after the thread has its first message.",
+          }),
+        );
+        return;
+      }
+      if (annotationSlashCommand.kind === "open-editor") {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        setAnnotationEditorOpen(true);
+        return;
+      }
+      if (await saveThreadAnnotation(annotationSlashCommand.body)) {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      }
+      return;
+    }
+    if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -7922,6 +8056,11 @@ function ChatViewContent(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={loadEarlierTurns}
+                annotation={threadAnnotation}
+                onAnnotationBodyChange={saveThreadAnnotation}
+                onAnnotationEdit={() => setAnnotationEditorOpen(true)}
+                onAnnotationResolve={() => void changeThreadAnnotationResolution("resolve")}
+                onAnnotationReopen={() => void changeThreadAnnotationResolution("reopen")}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -7982,6 +8121,20 @@ function ChatViewContent(props: ChatViewProps) {
                         />
                       </div>
                     </div>
+                  ) : null}
+                  {threadAnnotation &&
+                  threadAnnotation.resolvedAt === null &&
+                  annotationVersionKey !== dismissedAnnotationKey ? (
+                    <ThreadAnnotationPostIt
+                      annotation={threadAnnotation}
+                      cwd={gitCwd ?? undefined}
+                      onBodyChange={saveThreadAnnotation}
+                      onDismiss={() => setDismissedAnnotationKey(annotationVersionKey)}
+                      onEdit={() => setAnnotationEditorOpen(true)}
+                      onResolve={() => void changeThreadAnnotationResolution("resolve")}
+                      pending={annotationMutationPending}
+                      threadRef={routeThreadRef}
+                    />
                   ) : null}
                   <div
                     className="relative"
@@ -8064,6 +8217,7 @@ function ChatViewContent(props: ChatViewProps) {
                             isTimelineAtLogicalEnd={isTimelineAtLogicalEnd}
                             onComposerOverlayHeightChange={publishComposerOverlayHeight}
                             onRestingChange={onComposerRestingChange}
+                            threadAnnotationsSupported={canAnnotateThread}
                             promptRef={promptRef}
                             composerImagesRef={composerImagesRef}
                             composerFilesRef={composerFilesRef}
@@ -8097,6 +8251,7 @@ function ChatViewContent(props: ChatViewProps) {
                             setThreadError={setThreadError}
                             onExpandImage={onExpandTimelineImage}
                             onFileOpen={openFileAttachment}
+                            onOpenThreadAnnotation={() => setAnnotationEditorOpen(true)}
                           />
                         </div>
                       </ComposerSurface.Host>
@@ -8187,6 +8342,13 @@ function ChatViewContent(props: ChatViewProps) {
                 </AlertDialogFooter>
               </AlertDialogPopup>
             </AlertDialog>
+
+            <ThreadAnnotationEditorDialog
+              annotation={threadAnnotation}
+              open={annotationEditorOpen}
+              onOpenChange={setAnnotationEditorOpen}
+              onSave={saveThreadAnnotation}
+            />
 
             {pullRequestDialogState ? (
               <PullRequestThreadDialog

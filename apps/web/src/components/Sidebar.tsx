@@ -42,13 +42,13 @@ import {
   AlarmClockOffIcon,
   CheckIcon,
   ChevronDownIcon,
-  CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
   ClockIcon,
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
+  MessageSquareIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
@@ -176,6 +176,10 @@ import {
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
+import {
+  SidebarThreadHoverContent,
+  type SidebarThreadHoverContentProps,
+} from "./sidebar/SidebarThreadHoverContent";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
   deriveProviderEntriesByEnvironment,
@@ -275,43 +279,7 @@ function terminalProcessLabel(count: number): string {
   return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
 }
 
-function SidebarThreadTooltip({
-  thread,
-  projectTitle,
-  projectDisplayName,
-  projectCwd,
-  projectFaviconPath,
-  projectIcon,
-  environmentLabel,
-  environmentMachine,
-  providerEntry,
-  showInstanceBadge,
-  modelInstanceId,
-  modelLabel,
-  branchMismatch,
-  terminalStatus,
-  terminalProcessCount,
-}: {
-  thread: SidebarThreadSummary;
-  projectTitle: string | null;
-  projectDisplayName: string | null;
-  projectCwd: string | null;
-  projectFaviconPath: string | null;
-  projectIcon: ProjectIconOverride | null;
-  environmentLabel: string | null;
-  environmentMachine: EnvironmentMachineKind;
-  providerEntry: ProviderInstanceEntry | null;
-  showInstanceBadge: boolean;
-  modelInstanceId: string;
-  modelLabel: string;
-  branchMismatch: {
-    threadBranch: string;
-    currentBranch: string;
-  } | null;
-  terminalStatus: TerminalStatusIndicator | null;
-  terminalProcessCount: number;
-}) {
-  const driverKind = providerEntry?.driverKind ?? null;
+function SidebarThreadTooltip(props: SidebarThreadHoverContentProps) {
   return (
     <TooltipPopup
       side="right"
@@ -320,87 +288,7 @@ function SidebarThreadTooltip({
       variant="glass"
       className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
     >
-      <div className="flex min-w-0 max-w-80 flex-col gap-2 p-[var(--floating-content-inset)]">
-        <div className="min-w-0 truncate text-xs leading-none font-medium text-foreground">
-          {thread.title}
-        </div>
-        <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
-          {projectDisplayName ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <ProjectFavicon
-                environmentId={thread.environmentId}
-                cwd={projectCwd ?? ""}
-                projectName={projectTitle ?? ""}
-                faviconPath={projectFaviconPath}
-                projectIcon={projectIcon}
-                className="size-3 shrink-0"
-              />
-              <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
-            </div>
-          ) : null}
-          {environmentLabel ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <EnvironmentMachineIcon
-                kind={environmentMachine}
-                className="size-3 shrink-0 stroke-muted-foreground"
-              />
-              <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
-            </div>
-          ) : null}
-          {thread.branch ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-              <div className="min-w-0 truncate text-foreground/75">{thread.branch}</div>
-            </div>
-          ) : null}
-          {branchMismatch ? (
-            <div className="flex min-w-0 items-start gap-2 text-warning">
-              <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 flex-1 wrap-break-word leading-5">
-                You're currently checked out on another branch.
-              </div>
-            </div>
-          ) : null}
-          {driverKind ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <ProviderInstanceIcon
-                driverKind={driverKind}
-                displayName={
-                  providerEntry?.displayName ?? thread.session?.providerName ?? modelInstanceId
-                }
-                accentColor={providerEntry?.accentColor}
-                // Initials would swallow a size-3 glyph: accent dot, name in label.
-                showBadge={showInstanceBadge && providerEntry?.accentColor !== undefined}
-                badgeContent="none"
-                badgeClassName="h-2 min-w-2 px-0"
-                iconClassName="size-3 shrink-0 grayscale opacity-60"
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {showInstanceBadge && providerEntry
-                  ? `${modelLabel} · ${providerEntry.displayName}`
-                  : modelLabel}
-              </div>
-            </div>
-          ) : null}
-          {terminalStatus ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <TerminalIcon
-                aria-hidden
-                className={cn("size-3 shrink-0", terminalStatus.colorClass)}
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {terminalProcessLabel(terminalProcessCount)}
-              </div>
-            </div>
-          ) : null}
-          {thread.session?.lastError ? (
-            <div className="flex min-w-0 items-center gap-2 text-red-600 dark:text-red-400">
-              <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 truncate">Error occurred</div>
-            </div>
-          ) : null}
-        </div>
-      </div>
+      <SidebarThreadHoverContent {...props} />
     </TooltipPopup>
   );
 }
