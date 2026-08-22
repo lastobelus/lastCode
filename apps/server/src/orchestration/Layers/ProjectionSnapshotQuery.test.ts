@@ -85,12 +85,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
           has_actionable_proposed_plan,
           pinned_at,
           pin_order_key,
+          annotation_json,
           created_at,
           updated_at,
           deleted_at
@@ -105,12 +107,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           'turn-1',
+          'message-1',
           '2026-02-24T00:00:04.000Z',
           1,
           0,
           0,
           '2026-02-24T00:00:01.000Z',
           'gm',
+          '{"body":"# Follow up","anchorMessageId":"message-1","createdAt":"2026-02-24T00:00:02.500Z","updatedAt":"2026-02-24T00:00:02.500Z","resolvedAt":null}',
           '2026-02-24T00:00:02.000Z',
           '2026-02-24T00:00:03.000Z',
           NULL
@@ -328,6 +332,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinnedAt: "2026-02-24T00:00:01.000Z",
           pinOrderKey: "gm",
           titleRegeneration: null,
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: asMessageId("message-1"),
+            createdAt: "2026-02-24T00:00:02.500Z",
+            updatedAt: "2026-02-24T00:00:02.500Z",
+            resolvedAt: null,
+          },
           deletedAt: null,
           messages: [
             {
@@ -447,6 +458,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinnedAt: "2026-02-24T00:00:01.000Z",
           pinOrderKey: "gm",
           titleRegeneration: null,
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: asMessageId("message-1"),
+            createdAt: "2026-02-24T00:00:02.500Z",
+            updatedAt: "2026-02-24T00:00:02.500Z",
+            resolvedAt: null,
+          },
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
@@ -516,6 +534,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -537,6 +556,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             NULL,
             NULL,
             NULL,
+            NULL,
             0,
             0,
             0,
@@ -552,6 +572,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{"provider":"codex","model":"gpt-5-codex"}',
             'full-access',
             'default',
+            NULL,
             NULL,
             NULL,
             NULL,
@@ -636,6 +657,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -654,6 +676,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '{"provider":"codex","model":"gpt-5-codex"}',
           'full-access',
           'default',
+          NULL,
           NULL,
           NULL,
           NULL,
@@ -1293,7 +1316,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("uses projection_threads.latest_turn_id for bulk command and shell snapshots", () =>
+  it.effect("uses projection_threads latest markers for bulk command and shell snapshots", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
@@ -1337,6 +1360,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -1356,6 +1380,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           'turn-running',
+          'message-user-2',
           '2026-04-03T00:00:04.000Z',
           0,
           0,
@@ -1364,6 +1389,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '2026-04-03T00:00:03.000Z',
           NULL,
           NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          'message-user-2',
+          'thread-1',
+          NULL,
+          'user',
+          'Latest prompt',
+          0,
+          '2026-04-03T00:00:30.000Z',
+          '2026-04-03T00:00:30.000Z'
         )
       `;
 
@@ -1434,6 +1482,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const commandReadModel = yield* snapshotQuery.getCommandReadModel();
       assert.equal(commandReadModel.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
       assert.equal(commandReadModel.threads[0]?.latestTurn?.state, "running");
+      assert.equal(commandReadModel.threads[0]?.messages.length, 0);
+      assert.equal(commandReadModel.threads[0]?.latestUserMessageId, asMessageId("message-user-2"));
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));

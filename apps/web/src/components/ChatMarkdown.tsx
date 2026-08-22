@@ -13,7 +13,7 @@ import {
   TriangleAlertIcon,
   WrapTextIcon,
 } from "lucide-react";
-import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -112,6 +112,7 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  taskListDisabled?: boolean;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -119,6 +120,13 @@ interface ChatMarkdownProps {
   lineBreaks?: boolean;
   /** Parse sanitized raw HTML instead of displaying its source text. */
   parseRawHtml?: boolean;
+}
+
+export function resolveChatMarkdownEnvironmentId(
+  activeEnvironmentId: EnvironmentId | null,
+  threadRef: ScopedThreadRef | undefined,
+): EnvironmentId | null {
+  return threadRef?.environmentId ?? activeEnvironmentId;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -1358,6 +1366,7 @@ function ChatMarkdown({
   cwd,
   threadRef,
   onTaskListChange,
+  taskListDisabled = false,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
@@ -1375,7 +1384,8 @@ function ChatMarkdown({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(threadRef?.environmentId ?? null);
-  const environmentId = useActiveEnvironmentId();
+  const activeEnvironmentId = useActiveEnvironmentId();
+  const environmentId = resolveChatMarkdownEnvironmentId(activeEnvironmentId, threadRef);
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
     environmentId,
@@ -1615,6 +1625,7 @@ function ChatMarkdown({
             name="markdown-task"
             aria-label="Toggle task"
             checked={checked}
+            disabled={taskListDisabled}
             onChange={(event) => {
               const markerOffset = Number(
                 event.currentTarget.closest("li")?.dataset.taskMarkerOffset,
@@ -1778,6 +1789,7 @@ function ChatMarkdown({
     openMarkdownFileInPreview,
     resolvedTheme,
     skills,
+    taskListDisabled,
     text,
     threadRef,
   ]);
