@@ -3,11 +3,14 @@ import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EnvironmentId,
+  EnvironmentMetadataHttpApi,
   EnvironmentOrchestrationHttpApi,
   ProviderInstanceId,
   ThreadId,
@@ -17,15 +20,18 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as CliError from "effect/unstable/cli/CliError";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
 
 import { cli, makeCli } from "./bin.ts";
+import { ThreadCliOfflineRuntimeLive } from "./cli/thread.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -36,6 +42,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
+  readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -43,7 +50,9 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
-class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
+class ProjectCliHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentMetadataHttpApi)
+  .add(EnvironmentOrchestrationHttpApi) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
 const noConnectCli = makeCli({ cloudEnabled: false });
@@ -116,8 +125,21 @@ const readPersistedSnapshot = (baseDir: string) =>
 const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
+    const metadataLayer = HttpApiBuilder.group(ProjectCliHttpApi, "metadata", (handlers) =>
+      Effect.succeed(
+        handlers.handle("descriptor", () =>
+          Effect.succeed({
+            environmentId: EnvironmentId.make("env-thread-live"),
+            label: "CLI integration",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "test",
+            capabilities: { repositoryIdentity: true },
+          }),
+        ),
+      ),
+    );
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-      Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer)),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
@@ -567,6 +589,186 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           );
           assert.isTrue(addedProject !== undefined);
           assert.equal(addedProject?.title, "Live Project");
+        }),
+      );
+    }),
+  );
+
+  it.effect("falls back to bounded SQLite reads without clearing the runtime record", () =>
+    Effect.gen(function* () {
+      const seedBaseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-seed-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", seedBaseDir]);
+      const snapshot = yield* readPersistedSnapshot(seedBaseDir);
+      const project = snapshot.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+      const seedConfig = yield* makeCliTestServerConfig(seedBaseDir);
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-offline-create"),
+          threadId: ThreadId.make("thread-offline-bounded"),
+          projectId: project.id,
+          title: "Offline bounded",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        // Leave the applied schema intact but make the latest migration appear pending.
+        // A setup-enabled fallback would try to run it; the inspection layer must not.
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 40`;
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(seedConfig)));
+
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-"));
+      const config = yield* makeCliTestServerConfig(baseDir);
+      NodeFS.mkdirSync(config.stateDir);
+      const seedDatabase = new NodeSqlite.DatabaseSync(seedConfig.dbPath);
+      try {
+        seedDatabase.exec(`VACUUM INTO '${config.dbPath.replaceAll("'", "''")}'`);
+      } finally {
+        seedDatabase.close();
+      }
+      NodeFS.writeFileSync(config.environmentIdPath, "env-thread-offline\n");
+
+      const unavailableRuntime = {
+        version: 1 as const,
+        pid: process.pid,
+        port: 1,
+        origin: "http://127.0.0.1:1",
+        startedAt: "2026-08-21T00:00:00.000Z",
+      };
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: unavailableRuntime,
+      });
+      const baseEntriesBefore = NodeFS.readdirSync(baseDir).toSorted();
+      const stateEntriesBefore = NodeFS.readdirSync(config.stateDir).toSorted();
+      for (const name of stateEntriesBefore) {
+        NodeFS.chmodSync(NodePath.join(config.stateDir, name), 0o444);
+      }
+      NodeFS.chmodSync(config.stateDir, 0o555);
+      NodeFS.chmodSync(baseDir, 0o555);
+      const databaseStatBefore = NodeFS.statSync(config.dbPath);
+
+      const { output } = yield* captureStdout(
+        runCli(["thread", "read", "thread-offline", "--turn-limit", "1", "--base-dir", baseDir]),
+      );
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is the integration boundary under test.
+      const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
+      assert.equal(result.kind, "read");
+      assert.equal(result.threadId, "thread-offline-bounded");
+      const preservedRuntime = yield* readPersistedServerRuntimeState(
+        config.serverRuntimeStatePath,
+      );
+      assert.deepStrictEqual(preservedRuntime, Option.some(unavailableRuntime));
+      const databaseStatAfter = NodeFS.statSync(config.dbPath);
+      assert.equal(databaseStatAfter.size, databaseStatBefore.size);
+      assert.equal(databaseStatAfter.mtimeMs, databaseStatBefore.mtimeMs);
+      assert.deepStrictEqual(NodeFS.readdirSync(baseDir).toSorted(), baseEntriesBefore);
+      assert.deepStrictEqual(NodeFS.readdirSync(config.stateDir).toSorted(), stateEntriesBefore);
+      const verificationDb = new NodeSqlite.DatabaseSync(config.dbPath, { readOnly: true });
+      try {
+        assert.strictEqual(
+          verificationDb
+            .prepare("SELECT migration_id FROM effect_sql_migrations WHERE migration_id = 40")
+            .get(),
+          undefined,
+        );
+      } finally {
+        verificationDb.close();
+      }
+      NodeFS.chmodSync(baseDir, 0o755);
+      NodeFS.chmodSync(config.stateDir, 0o755);
+      for (const name of stateEntriesBefore) {
+        NodeFS.chmodSync(NodePath.join(config.stateDir, name), 0o644);
+      }
+    }),
+  );
+
+  it.effect("keeps the offline thread runtime read-only", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-read-only-runtime-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-read-only-runtime-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* Effect.gen(function* () {
+        const engine = yield* Effect.serviceOption(OrchestrationEngine.OrchestrationEngineService);
+        const query = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
+        const sql = yield* SqlClient.SqlClient;
+        const writeAttempt = yield* Effect.result(
+          sql`CREATE TABLE thread_cli_must_remain_read_only (id INTEGER)`,
+        );
+
+        assert.isTrue(Option.isNone(engine));
+        assert.isTrue(Option.isSome(query));
+        assert.strictEqual(writeAttempt._tag, "Failure");
+      }).pipe(
+        Effect.provide(
+          ThreadCliOfflineRuntimeLive.pipe(
+            Layer.provide(ServerConfig.layer(config)),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      );
+    }),
+  );
+
+  it.effect("uses authenticated live shell and detail reads and revokes its CLI sessions", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-live-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-live-workspace-"),
+      );
+      const config = yield* makeCliTestServerConfig(baseDir);
+      NodeFS.mkdirSync(config.stateDir, { recursive: true });
+      NodeFS.writeFileSync(config.environmentIdPath, `${EnvironmentId.make("env-thread-live")}\n`);
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+          const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const shell = yield* query.getSnapshot();
+          const project = shell.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-live-create"),
+            threadId: ThreadId.make("thread-live-authenticated"),
+            projectId: project.id,
+            title: "Live authenticated",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: "default",
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+          const auth = yield* EnvironmentAuth.EnvironmentAuth;
+          const before = yield* auth.listSessions();
+          NodeFS.unlinkSync(config.environmentIdPath);
+          const { output } = yield* captureStdout(
+            runCli(["thread", "read", "thread-live", "--base-dir", baseDir]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is the integration boundary under test.
+          const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
+          assert.equal(result.kind, "read");
+          assert.equal(result.threadId, "thread-live-authenticated");
+          const after = yield* auth.listSessions();
+          assert.equal(after.length, before.length);
         }),
       );
     }),

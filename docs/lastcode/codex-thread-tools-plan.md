@@ -82,10 +82,15 @@ passed back to `wait`, which resumes waiting for that specific message's project
 provider turn and resulting assistant response. It never interprets an arbitrary newer
 turn as the answer.
 
-`read` and successful `wait` CLI output share a 64,000-character
-transcript/assistant-text presentation budget. JSON includes `textTruncated` and
-`originalTextChars` when selected content exceeds that budget; metadata and identifiers
-are never truncated. The live server may hydrate its existing bounded-turn detail
+`read` and successful `wait` CLI output use a 64,000-character presentation budget.
+For `read`, message text and activity summaries share that budget. Unresolved approval and
+user-input request explanations are retained first, then the newest content fills the remaining
+text budget. Activity records also have a conservative cap: unresolved requests are pinned
+first and the remaining slots contain the newest activity, all in their original deterministic
+order. JSON includes
+`textTruncated` and `originalTextChars` when selected text exceeds the budget, plus
+additive activity-count truncation metadata when the record cap applies; metadata and
+identifiers are never truncated. The live server may hydrate its existing bounded-turn detail
 snapshot before the CLI applies this output bound; this temporary local transport does
 not add a second text-limited SQL/query stack.
 
@@ -143,19 +148,28 @@ Branch: `lastcode/codex-thread-read`
 4. Make the wrapper pin its owning home explicitly on every invocation. For an ordinary
    Node-hosted server it executes that server's runtime and bundled CLI entry with
    `--base-dir <owning-home>`. For packaged macOS LastCode it executes the LastCode
-   binary with `ELECTRON_RUN_AS_NODE=1`, the bundled server CLI entry, and the same
-   explicit base directory. The wrapper contains invocation details only and delegates
-   all behavior to `t3 thread`. Windows packaged hosts are out of scope.
+   binary while preserving inherited `ELECTRON_RUN_AS_NODE=1`, the bundled server CLI
+   entry, and the same explicit base directory. The wrapper contains invocation details
+   only and delegates all behavior to `t3 thread`. Windows and packaged Linux AppImage
+   hosts are out of scope for the POSIX wrapper; AppImage executable and app-resource
+   paths live under a transient mount. Codex still receives LastCode identity variables
+   on those hosts, but no thread command is added to PATH.
 5. Add bounded `list` and `read` commands over the existing shell and thread-detail
    snapshots. `read` accepts an exact or unambiguous thread-ID prefix and returns
-   candidates when resolution is ambiguous.
+   a small deterministic candidate subset plus original-count truncation metadata when
+   resolution is ambiguous. `list` returns at most 50 deterministically ordered threads
+   and reports truncation plus the original thread count when that bound is exceeded.
 6. Default `read` to a small recent-turn window and impose a conservative maximum.
    Include thread status, project/workspace/branch, recent turns, and transcript
    content needed to answer “what is this thread up to?” without dumping the full
    database.
 7. For offline transcript reads, call the bounded thread-detail projection query
    directly rather than the command read model, which intentionally omits hydrated
-   thread bodies.
+   thread bodies. Compose only the SQLite persistence and projection snapshot-query
+   layers through a read-only database client that skips WAL setup and migrations;
+   derive the selected home/state paths without provisioning directories or trace files,
+   and do not probe or reserve a server port. Offline inspection must not start the
+   writable orchestration engine or its projectors alongside a live server.
 8. Preserve lifecycle visibility for active snoozed, settled, pending-input, and
    working threads. Do not mutate those states. Archived and deleted threads are out
    of scope and return not found.
@@ -402,7 +416,7 @@ the product contract and three slices above are the implementation source of tru
   thread addressing, specified the wait HTTP/timeout contract, and retained durable
   message correlation for turns that fail before receiving a provider turn ID.
 - Round 1 `best-practices`: eight findings applied. The plan now pins the wrapper's
-  owning home and packaged invocation, limits the first version to packaged macOS,
+  owning home and packaged invocation, limits the first version to POSIX Node hosts and packaged macOS,
   uses least-privilege command scopes, bounds send input, carries exact message
   correlation through provider-start outcomes, rejects overlapping tool sends, uses
   existing terminal-state vocabulary, and reports pre-adoption restart orphaning
