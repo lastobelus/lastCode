@@ -94,7 +94,7 @@ const validate = (fixture, overrides = {}) =>
   });
 
 describe("immutable Intel release validation", () => {
-  it("keeps target credentials read-only and revalidates the tag before publication", () => {
+  it("isolates write credentials and revalidates the tag before publication", () => {
     const workflow = NodeFS.readFileSync(
       NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
       "utf8",
@@ -110,16 +110,27 @@ describe("immutable Intel release validation", () => {
     expect(automationCheckout).toContain("persist-credentials: false");
     expect(targetCheckout).toContain("persist-credentials: false");
 
-    const publishStep = workflow.slice(
-      workflow.indexOf("- name: Publish immutable exact-tag assets"),
-    );
-    const tagFetch = publishStep.indexOf("git fetch --force --no-tags origin");
-    const tagComparison = publishStep.indexOf(
-      'if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]',
-    );
-    const releaseCreate = publishStep.indexOf('gh release create "$INSTALLABLE_TAG"');
+    const buildJob = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  publish:"));
+    const publishJob = workflow.slice(workflow.indexOf("  publish:"));
+    expect(workflow.slice(0, workflow.indexOf("jobs:"))).toContain("contents: read");
+    expect(buildJob).not.toContain("contents: write");
+    expect(buildJob).toContain("actions/upload-artifact");
+    expect(publishJob).toContain("needs: build");
+    expect(publishJob).toContain("contents: write");
+    expect(publishJob).toContain("actions/download-artifact");
+    expect(publishJob).not.toContain("working-directory: target");
+    expect(workflow.match(/persist-credentials: false/g)).toHaveLength(3);
+
+    const artifactDownload = publishJob.indexOf("- name: Download isolated build assets");
+    const artifactValidation = publishJob.indexOf("- name: Validate isolated build assets");
+    const tagFetch = publishJob.indexOf("git fetch --force --no-tags origin");
+    const tagComparison = publishJob.indexOf('if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]');
+    const releaseCreate = publishJob.indexOf('gh release create "$INSTALLABLE_TAG"');
+    expect(artifactDownload).toBeGreaterThan(-1);
+    expect(artifactValidation).toBeGreaterThan(artifactDownload);
     expect(tagFetch).toBeGreaterThan(-1);
     expect(tagComparison).toBeGreaterThan(tagFetch);
+    expect(releaseCreate).toBeGreaterThan(artifactValidation);
     expect(releaseCreate).toBeGreaterThan(tagComparison);
   });
 

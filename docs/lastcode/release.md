@@ -133,6 +133,10 @@ Before publishing, and again after downloading the published assets, automation
 requires the manifest's x64/macOS architecture, exact tag and commit, byte
 counts, checksums, and asset set to agree.
 
+The Intel build job has read-only repository access. It transfers the validated
+asset set to a fresh publication job, which revalidates the assets and tag before
+receiving write access; target-controlled build steps never share that token.
+
 A rerun for a complete matching release exits successfully before dependency
 installation, CI, or packaging. An existing draft, non-prerelease, partial,
 foreign, or mismatched asset set fails closed. Automation never clobbers or
