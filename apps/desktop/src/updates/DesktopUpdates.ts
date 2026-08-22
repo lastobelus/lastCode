@@ -1,5 +1,6 @@
 import {
   DesktopUpdateChannelSchema,
+  type DesktopLocalBuildFailure,
   type DesktopLastCodeSettingsState,
   type DesktopRuntimeInfo,
   type DesktopUpdateActionResult,
@@ -45,6 +46,9 @@ import {
   reduceDesktopUpdateStateOnDownloadProgress,
   reduceDesktopUpdateStateOnDownloadStart,
   reduceDesktopUpdateStateOnInstallFailure,
+  reduceDesktopUpdateStateOnLocalBuildFailure,
+  reduceDesktopUpdateStateOnLocalBuildProgress,
+  reduceDesktopUpdateStateOnLocalBuildStart,
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
@@ -610,7 +614,17 @@ export const make = Effect.gen(function* () {
 
   const downloadAvailableUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
-    if (!(yield* Ref.get(updaterConfiguredRef)) || state.status !== "available") {
+    const canRetryLocalBuild =
+      state.source === "lastcode-local" &&
+      state.status === "error" &&
+      state.errorContext === "download" &&
+      state.canRetry &&
+      state.availableVersion !== null &&
+      state.localBuildFailure !== null;
+    if (
+      !(yield* Ref.get(updaterConfiguredRef)) ||
+      (state.status !== "available" && !canRetryLocalBuild)
+    ) {
       return { accepted: false, completed: false };
     }
 
@@ -619,12 +633,6 @@ export const make = Effect.gen(function* () {
     }
 
     return yield* Effect.gen(function* () {
-      yield* setState(
-        reduceDesktopUpdateStateOnDownloadStart(
-          state,
-          state.source === "lastcode-local" ? null : 0,
-        ),
-      );
       if (state.source === "lastcode-local") {
         const checkpointTag = yield* Ref.get(localCheckpointTagRef).pipe(
           Effect.flatMap(
@@ -640,18 +648,33 @@ export const make = Effect.gen(function* () {
             }),
           ),
         );
+        yield* setState(
+          reduceDesktopUpdateStateOnLocalBuildStart(state, {
+            checkpointTag,
+            ...LastCodeLocalUpdates.initialLocalBuildProgress(),
+          }),
+        );
         yield* logUpdaterInfo("building local LastCode nightly", { checkpointTag });
-        const build = yield* localUpdates.build(checkpointTag);
-        const feed = yield* localUpdates.startFeed(build.outputDir);
-        yield* Effect.gen(function* () {
-          yield* electronUpdater.setFeedURL({ provider: "generic", url: feed.url });
-          yield* applyAutoUpdaterChannel("nightly");
-          yield* electronUpdater.setDisableDifferentialDownload(true);
-          yield* electronUpdater.checkForUpdates;
-          yield* electronUpdater.downloadUpdate;
-        }).pipe(Effect.ensuring(feed.close));
+        const build = yield* localUpdates.build(checkpointTag, (progress) =>
+          updateState((current) =>
+            reduceDesktopUpdateStateOnLocalBuildProgress(current, {
+              checkpointTag,
+              ...progress,
+            }),
+          ).pipe(Effect.asVoid),
+        );
+        const version = state.availableVersion;
+        if (!version) {
+          return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "build",
+            message: "The built LastCode update no longer has a selected version. Check again.",
+          });
+        }
+        yield* Ref.set(localBuildRef, Option.some({ build, version }));
+        yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, version));
         return { accepted: true, completed: true };
       }
+      yield* setState(reduceDesktopUpdateStateOnDownloadStart(state, 0));
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
@@ -662,9 +685,21 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({
         LastCodeLocalUpdateError: Effect.fn("desktop.updates.handleLocalBuildFailure")(
           function* (error) {
-            yield* updateState((current) =>
-              reduceDesktopUpdateStateOnDownloadFailure(current, error.message),
-            );
+            yield* updateState((current) => {
+              const checkpointTag = current.localBuildProgress?.checkpointTag ?? "unavailable";
+              const progress = current.localBuildProgress ?? {
+                checkpointTag,
+                ...LastCodeLocalUpdates.initialLocalBuildProgress(),
+              };
+              const failure = {
+                ...progress,
+                currentVersion: current.currentVersion,
+                targetVersion: current.availableVersion ?? current.currentVersion,
+                logPath: localUpdates.buildLogPath,
+                error: error.message.replaceAll("\0", "").slice(0, 32_000),
+              } satisfies DesktopLocalBuildFailure;
+              return reduceDesktopUpdateStateOnLocalBuildFailure(current, failure);
+            });
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
               operation: error.operation,
@@ -708,9 +743,23 @@ export const make = Effect.gen(function* () {
         }
         const error = new DesktopUpdateUnexpectedActionError({ action: "download", cause });
         return Effect.gen(function* () {
-          yield* updateState((current) =>
-            reduceDesktopUpdateStateOnDownloadFailure(current, error.message),
-          );
+          yield* updateState((current) => {
+            if (state.source !== "lastcode-local") {
+              return reduceDesktopUpdateStateOnDownloadFailure(current, error.message);
+            }
+            const checkpointTag = current.localBuildProgress?.checkpointTag ?? "unavailable";
+            const progress = current.localBuildProgress ?? {
+              checkpointTag,
+              ...LastCodeLocalUpdates.initialLocalBuildProgress(),
+            };
+            return reduceDesktopUpdateStateOnLocalBuildFailure(current, {
+              ...progress,
+              currentVersion: current.currentVersion,
+              targetVersion: current.availableVersion ?? current.currentVersion,
+              logPath: localUpdates.buildLogPath,
+              error: error.message,
+            });
+          });
           yield* logUpdaterError(error.message, {
             errorTag: error._tag,
             action: error.action,
