@@ -164,9 +164,9 @@ Branch: `lastcode/codex-thread-read`
    directly rather than the command read model, which intentionally omits hydrated
    thread bodies. Compose only the SQLite persistence and projection snapshot-query
    layers through a read-only database client that skips WAL setup and migrations;
-   derive the selected home/state paths without provisioning directories or trace files.
-   Offline inspection must not start the writable orchestration engine or its projectors
-   alongside a live server.
+   derive the selected home/state paths without provisioning directories or trace files,
+   and do not probe or reserve a server port. Offline inspection must not start the
+   writable orchestration engine or its projectors alongside a live server.
 8. Preserve lifecycle visibility for active snoozed, settled, pending-input, and
    working threads. Do not mutate those states. Archived and deleted threads are out
    of scope and return not found.

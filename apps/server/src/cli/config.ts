@@ -221,6 +221,7 @@ export const resolveServerConfig = (
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly activeStateDir?: Option.Option<string>;
     readonly provisionPaths?: boolean;
+    readonly discoverPort?: boolean;
   },
 ) =>
   Effect.gen(function* () {
@@ -267,7 +268,7 @@ export const resolveServerConfig = (
       {
         onSome: (value) => Effect.succeed(value),
         onNone: () => {
-          if (mode === "desktop") {
+          if (mode === "desktop" || options?.discoverPort === false) {
             return Effect.succeed(ServerConfig.DEFAULT_PORT);
           }
           return findAvailablePort(ServerConfig.DEFAULT_PORT);
@@ -451,6 +452,7 @@ export const resolveThreadInspectionConfig = (
   resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
     activeStateDir: flags.stateDir ?? Option.none(),
     provisionPaths: false,
+    discoverPort: false,
   });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
