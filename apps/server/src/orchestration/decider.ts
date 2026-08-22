@@ -1311,6 +1311,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const previousSession = thread.session;
+      const sameProvider = previousSession?.providerName === command.session.providerName;
+      const sameBinding =
+        sameProvider &&
+        (command.session.providerInstanceId === undefined ||
+          command.session.providerInstanceId === previousSession?.providerInstanceId);
+      const providerThreadIdWasSupplied = Object.hasOwn(command.session, "providerThreadId");
+      const session = {
+        ...command.session,
+        ...(sameProvider &&
+        command.session.providerInstanceId === undefined &&
+        previousSession?.providerInstanceId !== undefined
+          ? { providerInstanceId: previousSession.providerInstanceId }
+          : {}),
+        providerThreadId: providerThreadIdWasSupplied
+          ? (command.session.providerThreadId ?? null)
+          : sameBinding
+            ? (previousSession?.providerThreadId ?? null)
+            : null,
+      };
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1322,7 +1342,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-set",
         payload: {
           threadId: command.threadId,
-          session: command.session,
+          session,
         },
       };
       // Only a session coming alive is activity worth waking a settled thread

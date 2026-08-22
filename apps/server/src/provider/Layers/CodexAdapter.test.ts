@@ -19,6 +19,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
@@ -285,7 +286,10 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
 
-      NodeAssert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.ok(runtimeOptions);
+      const { environment: _environment, ...optionsWithoutEnvironment } = runtimeOptions;
+      NodeAssert.deepStrictEqual(optionsWithoutEnvironment, {
         binaryPath: "codex",
         cwd: process.cwd(),
         launchArgs: "",
@@ -465,6 +469,118 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       const runtime = runtimeFactory.lastRuntime;
       NodeAssert.ok(runtime);
       NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable env-feature");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("injects LastCode identity and the active-home thread wrapper into Codex only", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: { PATH: "/usr/bin" },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-thread-tool-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("lastcode-thread-id"),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.environment?.T3CODE_THREAD_ID, "lastcode-thread-id");
+      NodeAssert.equal(runtime.options.environment?.T3CODE_HOME, config.baseDir);
+      NodeAssert.equal(
+        runtime.options.environment?.PATH,
+        `${NodePath.join(config.stateDir, "bin")}:/usr/bin`,
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("injects LastCode identity without a POSIX wrapper on Windows", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: { PATH: "C:\\Windows\\System32" },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-windows-tool-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(Layer.succeed(HostProcessPlatform, "win32")),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("lastcode-windows-thread"),
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.environment?.T3CODE_THREAD_ID, "lastcode-windows-thread");
+      NodeAssert.equal(runtime.options.environment?.T3CODE_HOME, config.baseDir);
+      NodeAssert.equal(runtime.options.environment?.PATH, "C:\\Windows\\System32");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("injects LastCode identity without a transient AppImage wrapper", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: {
+            APPIMAGE: "/tmp/.mount_LastCode/LastCode.AppImage",
+            APPDIR: "/tmp/.mount_LastCode",
+            PATH: "/usr/bin",
+          },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-appimage-tool-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(Layer.succeed(HostProcessPlatform, "linux")),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("lastcode-appimage-thread"),
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.environment?.T3CODE_THREAD_ID, "lastcode-appimage-thread");
+      NodeAssert.equal(runtime.options.environment?.T3CODE_HOME, config.baseDir);
+      NodeAssert.equal(runtime.options.environment?.PATH, "/usr/bin");
     }).pipe(Effect.provide(layer));
   });
 

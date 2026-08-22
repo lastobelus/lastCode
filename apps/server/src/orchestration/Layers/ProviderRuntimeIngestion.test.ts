@@ -321,6 +321,7 @@ describe("ProviderRuntimeIngestion", () => {
       engine,
       dispatch,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
@@ -634,6 +635,7 @@ describe("ProviderRuntimeIngestion", () => {
           threadId,
           status: "starting",
           providerName: "codex",
+          providerThreadId: "codex-native-stopped",
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -649,6 +651,7 @@ describe("ProviderRuntimeIngestion", () => {
           threadId,
           status: "stopped",
           providerName: "codex",
+          providerThreadId: "codex-native-stopped",
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -737,6 +740,36 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) => thread.session?.status === "ready" && thread.session?.activeTurnId === null,
       10_000,
+    );
+  });
+
+  it("preserves thread.started native identity through later lifecycle events", async () => {
+    const harness = await createHarness();
+    harness.emit({
+      type: "thread.started",
+      eventId: asEventId("evt-native-thread-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("thread-1"),
+      payload: { providerThreadId: "codex-native-lifecycle" },
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await waitForThread(
+      harness.readShell as never,
+      (thread) => thread.session?.providerThreadId === "codex-native-lifecycle",
+    );
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-native-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-native-lifecycle"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitForThread(
+      harness.readShell as never,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.providerThreadId === "codex-native-lifecycle",
     );
   });
 
