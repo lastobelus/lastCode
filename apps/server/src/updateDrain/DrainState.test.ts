@@ -175,4 +175,41 @@ describe("update drain decider and projector", () => {
       assert.equal(next.type, "update-drain.started");
     }),
   );
+
+  it.effect("rolls back only the matching claim and preserves terminal history", () =>
+    Effect.gen(function* () {
+      const claimed = {
+        sequence: 2,
+        intent: { requestId, targetVersion, status: "claimed" as const },
+      };
+      const rolledBackDraft = yield* decideUpdateDrainCommand(claimed, new Set([requestId]), {
+        type: "update-drain.rollback",
+        commandId: CommandId.make("rollback-1"),
+        requestId,
+        createdAt: requestedAt,
+      });
+      assert.equal(rolledBackDraft.type, "update-drain.rolled-back");
+      if (rolledBackDraft.type !== "update-drain.rolled-back") return;
+      const rolledBack = projectUpdateDrainEvent(claimed, { ...rolledBackDraft, sequence: 3 });
+
+      const cancel = yield* Effect.result(
+        decideUpdateDrainCommand(rolledBack, new Set([requestId]), {
+          type: "update-drain.cancel",
+          commandId: CommandId.make("cancel-rolled-back"),
+          requestId,
+          createdAt: requestedAt,
+        }),
+      );
+      assert.equal(cancel._tag === "Failure" ? cancel.failure.reason : null, "no_active_drain");
+
+      const next = yield* decideUpdateDrainCommand(rolledBack, new Set([requestId]), {
+        type: "update-drain.start",
+        commandId: CommandId.make("start-after-rollback"),
+        requestId: UpdateDrainRequestId.make("update-2"),
+        targetVersion: UpdateDrainTargetVersion.make("1.2.4"),
+        createdAt: requestedAt,
+      });
+      assert.equal(next.type, "update-drain.started");
+    }),
+  );
 });

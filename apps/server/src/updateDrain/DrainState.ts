@@ -82,7 +82,8 @@ export function decideUpdateDrainCommand(
     if (
       state.intent === null ||
       state.intent.status === "cancelled" ||
-      state.intent.status === "completed"
+      state.intent.status === "completed" ||
+      state.intent.status === "rolled-back"
     ) {
       return Effect.fail(
         new UpdateDrainError({
@@ -158,6 +159,47 @@ export function decideUpdateDrainCommand(
     });
   }
 
+  if (command.type === "update-drain.rollback") {
+    if (
+      state.intent === null ||
+      state.intent.status === "cancelled" ||
+      state.intent.status === "completed" ||
+      state.intent.status === "rolled-back"
+    ) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "no_active_drain",
+          message: "There is no claimed update drain to roll back.",
+        }),
+      );
+    }
+    if (state.intent.requestId !== command.requestId) {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "request_mismatch",
+          message: `Update drain '${command.requestId}' does not match active request '${state.intent.requestId}'.`,
+        }),
+      );
+    }
+    if (state.intent.status !== "claimed") {
+      return Effect.fail(
+        new UpdateDrainError({
+          reason: "activation_claimed",
+          message: `Update drain '${command.requestId}' has not been claimed for activation.`,
+        }),
+      );
+    }
+    return Effect.succeed({
+      type: "update-drain.rolled-back",
+      eventId: eventIdFor(command),
+      commandId: command.commandId,
+      occurredAt: command.createdAt,
+      requestId: command.requestId,
+      targetVersion: state.intent.targetVersion,
+      status: "rolled-back",
+    });
+  }
+
   if (state.intent === null) {
     return Effect.fail(
       new UpdateDrainError({
@@ -166,7 +208,7 @@ export function decideUpdateDrainCommand(
       }),
     );
   }
-  if (state.intent.status === "completed") {
+  if (state.intent.status === "completed" || state.intent.status === "rolled-back") {
     return Effect.fail(
       new UpdateDrainError({
         reason: "no_active_drain",

@@ -30,6 +30,7 @@ export const UpdateDrainIntentStatus = Schema.Literals([
   "cancelled",
   "claimed",
   "completed",
+  "rolled-back",
 ]);
 export type UpdateDrainIntentStatus = typeof UpdateDrainIntentStatus.Type;
 
@@ -117,11 +118,18 @@ export const UpdateDrainCompleteCommand = Schema.Struct({
 });
 export type UpdateDrainCompleteCommand = typeof UpdateDrainCompleteCommand.Type;
 
+export const UpdateDrainRollbackCommand = Schema.Struct({
+  ...UpdateDrainCommandBase,
+  type: Schema.Literal("update-drain.rollback"),
+});
+export type UpdateDrainRollbackCommand = typeof UpdateDrainRollbackCommand.Type;
+
 export const UpdateDrainCommand = Schema.Union([
   UpdateDrainStartCommand,
   UpdateDrainCancelCommand,
   UpdateDrainClaimCommand,
   UpdateDrainCompleteCommand,
+  UpdateDrainRollbackCommand,
 ]);
 export type UpdateDrainCommand = typeof UpdateDrainCommand.Type;
 
@@ -162,11 +170,19 @@ export const UpdateDrainCompletedEvent = Schema.Struct({
 });
 export type UpdateDrainCompletedEvent = typeof UpdateDrainCompletedEvent.Type;
 
+export const UpdateDrainRolledBackEvent = Schema.Struct({
+  ...UpdateDrainEventBase,
+  type: Schema.Literal("update-drain.rolled-back"),
+  status: Schema.Literal("rolled-back"),
+});
+export type UpdateDrainRolledBackEvent = typeof UpdateDrainRolledBackEvent.Type;
+
 export const UpdateDrainEvent = Schema.Union([
   UpdateDrainStartedEvent,
   UpdateDrainCancelledEvent,
   UpdateDrainClaimedEvent,
   UpdateDrainCompletedEvent,
+  UpdateDrainRolledBackEvent,
 ]);
 export type UpdateDrainEvent = typeof UpdateDrainEvent.Type;
 
@@ -190,6 +206,7 @@ export const UpdateDrainCommandReceipt = Schema.Struct({
     "update-drain.cancel",
     "update-drain.claim",
     "update-drain.complete",
+    "update-drain.rollback",
   ]),
   targetVersion: Schema.NullOr(UpdateDrainTargetVersion),
   acceptedAt: IsoDateTime,

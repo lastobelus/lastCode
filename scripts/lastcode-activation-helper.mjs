@@ -569,8 +569,9 @@ async function rollBack(store, journal, executor, reason, hooks) {
     await executor.startCandidateTrial(journal);
     return finishCommit(store, journal, hooks);
   }
-  await executor.startPriorService(journal);
-  return transition(store, journal, "rolled-back", { rollbackReason: reason });
+  const rolledBack = transition(store, journal, "rolled-back", { rollbackReason: reason });
+  await executor.startPriorService(rolledBack);
+  return rolledBack;
 }
 
 async function finishCommit(store, journal, hooks) {
@@ -585,7 +586,10 @@ async function recover(store, journal, executor, hooks) {
     finishCommittedSelection(journal);
     return journal;
   }
-  if (journal.state === "rolled-back") return journal;
+  if (journal.state === "rolled-back") {
+    await executor.startPriorService(journal);
+    return journal;
+  }
   let commit;
   try {
     commit = readExactCommitRecord(journal);

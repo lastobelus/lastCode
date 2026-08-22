@@ -58,6 +58,7 @@ import Migration0042 from "./Migrations/042_ProjectionThreadAnnotation.ts";
 import Migration0043 from "./Migrations/043_UpdateDrain.ts";
 import Migration0044 from "./Migrations/044_UpdateDrainClaim.ts";
 import Migration0045 from "./Migrations/045_UpdateDrainComplete.ts";
+import Migration0046 from "./Migrations/046_UpdateDrainRollback.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -115,6 +116,7 @@ export const migrationEntries = [
   [43, "UpdateDrain", Migration0043],
   [44, "UpdateDrainClaim", Migration0044],
   [45, "UpdateDrainComplete", Migration0045],
+  [46, "UpdateDrainRollback", Migration0046],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

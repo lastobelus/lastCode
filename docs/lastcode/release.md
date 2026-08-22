@@ -243,6 +243,9 @@ writes the helper's exact `runtime/activation/<requestId>/commit.json` record,
 durably completes that drain request, and then opens work admission. A restart
 between the file write and drain transition finishes the matching completion
 idempotently before admission opens; a later update uses a new drain request.
+If the helper rolls a trial back, it durably marks the request's existing journal
+`rolled-back` before restarting the prior service. Startup records the matching
+terminal drain transition before reopening admission, so a later request can proceed.
 Repeating the exact call returns the original commit result without rewriting
 the record. Full package identity remains in the staging descriptor and helper
 journal; neither it nor a second update identifier is copied into the database.

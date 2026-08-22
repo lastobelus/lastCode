@@ -118,9 +118,10 @@ function makeExecutor(options = {}) {
         service = "candidate";
         options.onCandidateStart?.(journal);
       },
-      startPriorService: async () => {
+      startPriorService: async (journal) => {
         calls.startPrior += 1;
         service = "prior";
+        options.onPriorStart?.(journal);
       },
     },
   };
@@ -178,7 +179,13 @@ describe("LastCode one-owner activation helper", () => {
 
   it("rolls back after a bounded commit timeout", async () => {
     const fixture = createFixture();
-    const fake = makeExecutor();
+    const fake = makeExecutor({
+      onPriorStart: () => {
+        expect(makeActivationJournalStore(fixture.paths.journalPath).read().state).toBe(
+          "rolled-back",
+        );
+      },
+    });
 
     const result = await run(fixture, fake);
 
@@ -349,7 +356,7 @@ describe("LastCode one-owner activation helper", () => {
     expect(result.state).toBe("rolled-back");
     expect(reads).toBe(2);
     expect(fake.calls.stop).toBe(0);
-    expect(fake.calls.startPrior).toBe(0);
+    expect(fake.calls.startPrior).toBe(1);
   });
 
   it("restores the SQLite main file and both sidecars", async () => {
@@ -389,7 +396,7 @@ describe("LastCode one-owner activation helper", () => {
     }
   });
 
-  it("retries committed and rolled-back journals without repeating service changes", async () => {
+  it("retries terminal journals without repeating selection changes", async () => {
     const committedFixture = createFixture();
     const committedFake = makeExecutor({ onCandidateStart: (journal) => commitRecord(journal) });
     await run(committedFixture, committedFake);
@@ -404,6 +411,10 @@ describe("LastCode one-owner activation helper", () => {
     const rolledBackCalls = { ...rolledBackFake.calls };
 
     expect((await run(rolledBackFixture, rolledBackFake)).state).toBe("rolled-back");
-    expect(rolledBackFake.calls).toEqual(rolledBackCalls);
+    expect(rolledBackFake.calls).toEqual({
+      ...rolledBackCalls,
+      startPrior: rolledBackCalls.startPrior + 1,
+    });
+    expectPriorSelection(rolledBackFixture.paths);
   });
 });

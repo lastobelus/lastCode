@@ -4,12 +4,14 @@ import {
   UpdateActivationCommitError,
   type UpdateActivationCommitInput,
   UpdateActivationCommitResult,
+  UpdateActivationTargetDigest,
   UpdateDrainAdmissionError,
   type UpdateDrainBlocker,
   type UpdateDrainCancelCommand,
   type UpdateDrainClaimInput,
   type UpdateDrainCommandReceipt,
   UpdateDrainError,
+  UpdateDrainRequestId,
   type UpdateDrainStartCommand,
   type UpdateDrainState,
   type UpdateDrainStatus,
@@ -94,6 +96,18 @@ const encodeUpdateActivationCommit = Schema.encodeSync(
 const decodeUpdateActivationCommit = Schema.decodeUnknownEffect(
   Schema.fromJsonString(UpdateActivationCommitResult),
 );
+const decodeUpdateActivationRollbackJournal = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      schemaVersion: Schema.Literal(1),
+      requestId: UpdateDrainRequestId,
+      targetDigest: UpdateActivationTargetDigest,
+      state: Schema.Literal("rolled-back"),
+      attempted: Schema.Literal(true),
+      rollbackReason: Schema.String,
+    }),
+  ),
+);
 
 export const updateActivationCommitRecordPath = Effect.fn("updateActivationCommitRecordPath")(
   function* (baseDir: string, requestId: UpdateActivationCommitInput["requestId"]) {
@@ -133,8 +147,24 @@ export const readUpdateActivationCommit = Effect.fn("readUpdateActivationCommit"
   return commit;
 });
 
+export const readUpdateActivationRollback = Effect.fn("readUpdateActivationRollback")(function* (
+  baseDir: string,
+  requestId: UpdateDrainRequestId,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const journalPath = path.join(baseDir, "runtime", "activation", requestId, "journal.json");
+  if (!(yield* fs.exists(journalPath))) return undefined;
+  const decoded = yield* Effect.result(
+    fs.readFileString(journalPath).pipe(Effect.flatMap(decodeUpdateActivationRollbackJournal)),
+  );
+  if (decoded._tag === "Failure" || decoded.success.requestId !== requestId) return undefined;
+  return requestId;
+});
+
 export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* (
   activation?: UpdateActivationTrialOptions,
+  existingRollbackRequestId?: UpdateDrainRequestId,
 ) {
   const drain = yield* UpdateDrain;
   const projections = yield* ProjectionSnapshotQuery;
@@ -359,6 +389,23 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       );
   });
 
+  const rollbackActivation = Effect.fn("UpdateDrainAdmission.rollbackActivation")(function* (
+    requestId: UpdateDrainRequestId,
+  ) {
+    const durable = yield* drain.status;
+    if (durable.intent?.status === "rolled-back" && durable.intent.requestId === requestId) return;
+    yield* drain.dispatch({
+      type: "update-drain.rollback",
+      commandId: CommandId.make(`update-drain:rollback:${requestId}`),
+      requestId,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+  });
+
+  if (existingRollbackRequestId !== undefined) {
+    yield* rollbackActivation(existingRollbackRequestId);
+  }
+
   if (activation?.existingCommit !== undefined) {
     const durable = yield* drain.status.pipe(
       Effect.mapError(
@@ -462,6 +509,15 @@ export const layer = Layer.effect(
     const config = yield* ServerConfig.ServerConfig;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const drain = yield* UpdateDrain;
+    const durable = yield* drain.status;
+    const rollbackRequestId =
+      durable.intent?.status === "claimed" || durable.intent?.status === "rolled-back"
+        ? yield* readUpdateActivationRollback(config.baseDir, durable.intent.requestId).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
+          )
+        : undefined;
     return yield* makeUpdateDrainAdmission(
       config.updateActivationTrial === undefined
         ? undefined
@@ -494,6 +550,7 @@ export const layer = Layer.effect(
                 ),
               ),
           },
+      rollbackRequestId,
     );
   }),
 );

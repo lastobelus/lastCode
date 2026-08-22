@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
@@ -32,6 +33,7 @@ import {
   makeUpdateDrainAdmission,
   persistUpdateActivationCommit,
   readUpdateActivationCommit,
+  readUpdateActivationRollback,
   updateActivationCommitRecordPath,
 } from "./UpdateDrainAdmission.ts";
 
@@ -504,6 +506,47 @@ it.effect("persists the commit before durable completion and admission reopening
   }),
 );
 
+it.effect("durably rolls back a claimed snapshot before opening and permits the next drain", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    yield* Effect.gen(function* () {
+      const initial = yield* makeUpdateDrainAdmission();
+      yield* initial.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("rollback-start"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+      yield* initial.claimActivation({ requestId });
+
+      const restarted = yield* makeUpdateDrainAdmission(undefined, requestId);
+      assert.deepStrictEqual(yield* restarted.status, {
+        sequence: 3,
+        intent: { requestId, targetVersion, status: "rolled-back" },
+        admission: "open",
+        blockers: [],
+      });
+
+      const repeated = yield* makeUpdateDrainAdmission(undefined, requestId);
+      assert.equal((yield* repeated.status).sequence, 3);
+      const nextRequestId = UpdateDrainRequestId.make("update-after-rollback");
+      yield* repeated.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-after-rollback"),
+        requestId: nextRequestId,
+        targetVersion: UpdateDrainTargetVersion.make("1.2.4"),
+        createdAt: now,
+      });
+      assert.deepStrictEqual((yield* repeated.status).intent, {
+        requestId: nextRequestId,
+        targetVersion: "1.2.4",
+        status: "draining",
+      });
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
 it.effect("leaves normal startup admission unchanged", () =>
   Effect.gen(function* () {
     const harness = yield* makeHarness();
@@ -558,6 +601,38 @@ it.layer(NodeServices.layer)("update activation commit record", (it) => {
           ))._tag,
           "Failure",
         );
+      }),
+    ),
+  );
+
+  it.effect("accepts only the matching terminal rollback journal", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "lastcode-rollback-" });
+        const journalDir = path.join(baseDir, "runtime", "activation", requestId);
+        const journalPath = path.join(journalDir, "journal.json");
+        yield* fs.makeDirectory(journalDir, { recursive: true });
+        const writeJournal = (state: string, journalRequestId: string) =>
+          fs.writeFileString(
+            journalPath,
+            JSON.stringify({
+              schemaVersion: 1,
+              requestId: journalRequestId,
+              targetDigest: "a".repeat(64),
+              state,
+              attempted: true,
+              rollbackReason: "Trial timed out.",
+            }),
+          );
+
+        yield* writeJournal("trial", requestId);
+        assert.isUndefined(yield* readUpdateActivationRollback(baseDir, requestId));
+        yield* writeJournal("rolled-back", "wrong-request");
+        assert.isUndefined(yield* readUpdateActivationRollback(baseDir, requestId));
+        yield* writeJournal("rolled-back", requestId);
+        assert.equal(yield* readUpdateActivationRollback(baseDir, requestId), requestId);
       }),
     ),
   );

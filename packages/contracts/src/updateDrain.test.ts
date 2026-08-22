@@ -50,6 +50,14 @@ describe("update drain contracts", () => {
         createdAt: "2026-08-21T00:03:00.000Z",
       }),
     ).toMatchObject({ type: "update-drain.complete" });
+    expect(
+      decodeCommand({
+        type: "update-drain.rollback",
+        commandId: "update-drain:rollback:request-1",
+        requestId: "request-1",
+        createdAt: "2026-08-21T00:04:00.000Z",
+      }),
+    ).toMatchObject({ type: "update-drain.rollback" });
   });
 
   it("keeps blocker and grace data outside the durable status contract", () => {
