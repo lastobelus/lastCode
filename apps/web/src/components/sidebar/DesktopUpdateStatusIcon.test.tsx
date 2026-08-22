@@ -22,4 +22,14 @@ describe("DesktopUpdateStatusIcon", () => {
     expect(markup).not.toContain("animate-spin");
     expect(markup).toContain("transition-[stroke-dashoffset]");
   });
+
+  it("keeps a final local estimate determinate and below completion", () => {
+    const markup = renderToStaticMarkup(
+      <DesktopUpdateStatusIcon downloadPercent={99} status="downloading" />,
+    );
+
+    expect(markup).not.toContain("animate-[spin_700ms_ease-out_1]");
+    expect(markup).toContain("transition-[stroke-dashoffset]");
+    expect(markup).toContain("motion-reduce:transition-none");
+  });
 });
