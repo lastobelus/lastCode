@@ -12,6 +12,7 @@ import {
   EnvironmentId,
   EnvironmentMetadataHttpApi,
   EnvironmentOrchestrationHttpApi,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -21,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -31,7 +33,12 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
 
 import { cli, makeCli } from "./bin.ts";
-import { ThreadCliOfflineRuntimeLive } from "./cli/thread.ts";
+import {
+  ThreadCliOfflineRuntimeLive,
+  ThreadSendMessageError,
+  ThreadSendServerUnavailableError,
+  ThreadSendTargetError,
+} from "./cli/thread.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -50,6 +57,9 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const isThreadSendMessageError = Schema.is(ThreadSendMessageError);
+const isThreadSendServerUnavailableError = Schema.is(ThreadSendServerUnavailableError);
+const isThreadSendTargetError = Schema.is(ThreadSendTargetError);
 class ProjectCliHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentOrchestrationHttpApi) {}
@@ -771,6 +781,198 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           assert.equal(after.length, before.length);
         }),
       );
+    }),
+  );
+
+  it.effect("sends through the authenticated live route and revokes its CLI session", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-send-live-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-send-live-workspace-"),
+      );
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+          const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const shell = yield* query.getSnapshot();
+          const project = shell.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          const threadId = ThreadId.make("thread-send-live-authenticated");
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-send-live-create"),
+            threadId,
+            projectId: project.id,
+            title: "Live send",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: "plan",
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+          const auth = yield* EnvironmentAuth.EnvironmentAuth;
+          const beforeSessions = yield* auth.listSessions();
+          const { output } = yield* captureStdout(
+            runCliWithRuntime([
+              "thread",
+              "send",
+              "thread-send-live",
+              "--message",
+              "  Report the current status.  ",
+              "--base-dir",
+              baseDir,
+              "--json",
+            ]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is the integration boundary under test.
+          const accepted = JSON.parse(output) as {
+            readonly kind: string;
+            readonly environmentId: string;
+            readonly threadId: string;
+            readonly messageId: string;
+          };
+          assert.deepStrictEqual(
+            {
+              kind: accepted.kind,
+              environmentId: accepted.environmentId,
+              threadId: accepted.threadId,
+            },
+            {
+              kind: "accepted",
+              environmentId: "env-thread-live",
+              threadId,
+            },
+          );
+          assert.isTrue(accepted.messageId.length > 0);
+          const detail = yield* query.getThreadDetailSnapshot(threadId);
+          assert.isTrue(Option.isSome(detail));
+          if (Option.isSome(detail)) {
+            const sent = detail.value.thread.messages.find(
+              (message) => message.id === accepted.messageId,
+            );
+            assert.equal(sent?.role, "user");
+            assert.equal(sent?.text, "Report the current status.");
+          }
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-send-live-rival"),
+            threadId: ThreadId.make("thread-send-live-rival"),
+            projectId: project.id,
+            title: "Live send rival",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: "default",
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+          const ambiguous = yield* Effect.result(
+            runCliWithRuntime([
+              "thread",
+              "send",
+              "thread-send-live",
+              "--message",
+              "ambiguous",
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          const missing = yield* Effect.result(
+            runCliWithRuntime([
+              "thread",
+              "send",
+              "missing-thread",
+              "--message",
+              "missing",
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          const oversized = yield* Effect.result(
+            runCliWithRuntime([
+              "thread",
+              "send",
+              threadId,
+              "--message",
+              "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1),
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          assert.strictEqual(ambiguous._tag, "Failure");
+          assert.isTrue(ambiguous._tag === "Failure" && isThreadSendTargetError(ambiguous.failure));
+          assert.strictEqual(missing._tag, "Failure");
+          assert.isTrue(missing._tag === "Failure" && isThreadSendTargetError(missing.failure));
+          assert.strictEqual(oversized._tag, "Failure");
+          assert.isTrue(
+            oversized._tag === "Failure" && isThreadSendMessageError(oversized.failure),
+          );
+          assert.equal((yield* auth.listSessions()).length, beforeSessions.length);
+        }),
+      );
+    }),
+  );
+
+  it.effect("requires a live server for send without mutating offline state", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-send-offline-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-send-offline-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+      const snapshot = yield* readPersistedSnapshot(baseDir);
+      const project = snapshot.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+      const config = yield* makeCliTestServerConfig(baseDir);
+      const threadId = ThreadId.make("thread-send-offline");
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-send-offline-create"),
+          threadId,
+          projectId: project.id,
+          title: "Offline send target",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+      const databaseStatBefore = NodeFS.statSync(config.dbPath);
+
+      const result = yield* Effect.result(
+        runCliWithRuntime([
+          "thread",
+          "send",
+          threadId,
+          "--message",
+          "must not persist",
+          "--base-dir",
+          baseDir,
+        ]),
+      );
+
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.isTrue(isThreadSendServerUnavailableError(result.failure));
+      }
+      const databaseStatAfter = NodeFS.statSync(config.dbPath);
+      assert.equal(databaseStatAfter.size, databaseStatBefore.size);
+      assert.equal(databaseStatAfter.mtimeMs, databaseStatBefore.mtimeMs);
+      const after = yield* readPersistedSnapshot(baseDir);
+      assert.deepStrictEqual(after.threads.find((thread) => thread.id === threadId)?.messages, []);
     }),
   );
 

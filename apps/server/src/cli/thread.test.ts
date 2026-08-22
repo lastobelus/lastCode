@@ -1,28 +1,39 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import {
+  CommandId,
   ThreadId,
   EnvironmentId,
+  MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  type OrchestrationCommand,
   type OrchestrationMessage,
   type OrchestrationThread,
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
 
+import { decideOrchestrationCommand } from "../orchestration/decider.ts";
+import { createEmptyReadModel } from "../orchestration/projector.ts";
 import {
   THREAD_TRANSCRIPT_MAX_CHARS,
   THREAD_ACTIVITY_MAX_RESULTS,
   THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS,
   THREAD_LIST_MAX_RESULTS,
   type ThreadReadSource,
+  type ThreadSendSource,
+  ThreadCliError,
   boundThreadPresentation,
   boundTranscriptMessages,
   currentThreadOutput,
   listThreadsOutput,
   readThreadOutput,
   resolveThreadTarget,
+  sendThreadOutput,
   threadLifecycle,
   validateThreadTurnLimit,
   withReadSession,
+  withSendSession,
 } from "./thread.ts";
 
 const shellThread = (id: string) => ({ id: ThreadId.make(id) }) as OrchestrationThreadShell;
@@ -57,6 +68,9 @@ const runnerSource = () => {
     id: ThreadId.make("thread-runner"),
     projectId: "project-runner",
     title: "Runner thread",
+    modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+    runtimeMode: "approval-required",
+    interactionMode: "plan",
     updatedAt: "2026-01-02T00:00:00.000Z",
     branch: "main",
     worktreePath: null,
@@ -533,4 +547,182 @@ it.effect(
       ]);
       assert.deepStrictEqual(revoked, ["session-1", "session-2", "session-3"]);
     }),
+);
+
+it.effect("prepares and dispatches an exact accepted send using the target thread settings", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const dispatched: unknown[] = [];
+    const sendSource: ThreadSendSource = {
+      descriptor: source.descriptor,
+      shell: source.shell,
+      dispatch: (command) => {
+        dispatched.push(command);
+        return Effect.succeed({ sequence: 42 });
+      },
+    };
+    const result = yield* sendThreadOutput(sendSource, {
+      identifier: "thread-r",
+      message: "  Tell me the status.  ",
+      commandId: CommandId.make("command-send"),
+      messageId: MessageId.make("message-send"),
+      createdAt: "2026-08-22T00:00:00.000Z",
+    });
+
+    assert.deepStrictEqual(result, {
+      kind: "accepted",
+      environmentId: "env-runner",
+      threadId: "thread-runner",
+      messageId: "message-send",
+    });
+    assert.deepStrictEqual(dispatched, [
+      {
+        type: "thread.turn.start",
+        commandId: "command-send",
+        threadId: "thread-runner",
+        message: {
+          messageId: "message-send",
+          role: "user",
+          text: "Tell me the status.",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        createdAt: "2026-08-22T00:00:00.000Z",
+      },
+    ]);
+  }),
+);
+
+it.effect("rejects blank, missing, ambiguous, and oversized sends before dispatch", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    let dispatchCount = 0;
+    const sendSource: ThreadSendSource = {
+      descriptor: source.descriptor,
+      shell: {
+        ...source.shell,
+        threads: [
+          source.shell.threads[0]!,
+          { ...source.shell.threads[0]!, id: ThreadId.make("thread-rival") },
+        ],
+      },
+      dispatch: () => {
+        dispatchCount += 1;
+        return Effect.succeed({ sequence: 1 });
+      },
+    };
+    const input = {
+      message: "hello",
+      commandId: CommandId.make("command-send-invalid"),
+      messageId: MessageId.make("message-send-invalid"),
+      createdAt: "2026-08-22T00:00:00.000Z",
+    };
+
+    const blank = yield* Effect.result(
+      sendThreadOutput(sendSource, { ...input, identifier: "   " }),
+    );
+    const missing = yield* Effect.result(
+      sendThreadOutput(sendSource, { ...input, identifier: "missing" }),
+    );
+    const ambiguous = yield* Effect.result(
+      sendThreadOutput(sendSource, { ...input, identifier: "thread-r" }),
+    );
+    const oversized = yield* Effect.result(
+      sendThreadOutput(sendSource, {
+        ...input,
+        identifier: "thread-runner",
+        message: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1),
+      }),
+    );
+
+    assert.strictEqual(blank._tag, "Failure");
+    assert.strictEqual(blank._tag === "Failure" ? blank.failure._tag : "", "ThreadSendTargetError");
+    assert.strictEqual(missing._tag, "Failure");
+    assert.strictEqual(ambiguous._tag, "Failure");
+    if (ambiguous._tag === "Failure" && ambiguous.failure._tag === "ThreadSendTargetError") {
+      assert.deepStrictEqual(ambiguous.failure.candidates, ["thread-rival", "thread-runner"]);
+    }
+    assert.strictEqual(oversized._tag, "Failure");
+    assert.strictEqual(
+      oversized._tag === "Failure" ? oversized.failure._tag : "",
+      "ThreadSendMessageError",
+    );
+    assert.strictEqual(dispatchCount, 0);
+  }),
+);
+
+it.effect("does not report acceptance when authoritative dispatch rejects the send", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const result = yield* Effect.result(
+      sendThreadOutput(
+        {
+          descriptor: source.descriptor,
+          shell: source.shell,
+          dispatch: (command) =>
+            decideOrchestrationCommand({
+              // Empty attachments make the client turn-start representation
+              // identical to the normalized internal command for this test.
+              command: command as unknown as OrchestrationCommand,
+              readModel: createEmptyReadModel("2026-08-22T00:00:00.000Z"),
+            }).pipe(
+              Effect.asVoid,
+              Effect.mapError(
+                (cause) => new ThreadCliError({ operation: "test decider rejection", cause }),
+              ),
+              Effect.provide(NodeServices.layer),
+            ),
+        },
+        {
+          identifier: "thread-runner",
+          message: "hello",
+          commandId: CommandId.make("command-send-rejected"),
+          messageId: MessageId.make("message-send-rejected"),
+          createdAt: "2026-08-22T00:00:00.000Z",
+        },
+      ),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.strictEqual(result.failure._tag, "ThreadCliError");
+      if (result.failure._tag === "ThreadCliError") {
+        assert.strictEqual(
+          (result.failure.cause as { readonly _tag?: string })._tag,
+          "OrchestrationCommandInvariantError",
+        );
+      }
+    }
+  }),
+);
+
+it.effect("issues read and operate scopes and revokes send sessions on every exit path", () =>
+  Effect.gen(function* () {
+    const issuedScopes: string[][] = [];
+    const revoked: string[] = [];
+    const auth = {
+      issueSession: ({ scopes }: { scopes: string[] }) => {
+        issuedScopes.push(scopes);
+        return Effect.succeed({ sessionId: `send-${issuedScopes.length}`, token: "token" });
+      },
+      revokeSession: (sessionId: string) => {
+        revoked.push(sessionId);
+        return Effect.void;
+      },
+    } as never;
+
+    yield* withSendSession(auth, () => Effect.succeed("ok"));
+    yield* Effect.result(withSendSession(auth, () => Effect.fail("rejected")));
+    yield* Effect.result(
+      withSendSession(auth, () => Effect.fail({ _tag: "TimeoutException" as const })),
+    );
+
+    assert.deepStrictEqual(issuedScopes, [
+      ["orchestration:read", "orchestration:operate"],
+      ["orchestration:read", "orchestration:operate"],
+      ["orchestration:read", "orchestration:operate"],
+    ]);
+    assert.deepStrictEqual(revoked, ["send-1", "send-2", "send-3"]);
+  }),
 );
