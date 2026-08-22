@@ -62,6 +62,7 @@ export function mergeEnvironmentThread(
     snoozedAt: shell.snoozedAt,
     pinnedAt: shell.pinnedAt,
     pinOrderKey: shell.pinOrderKey,
+    annotation: shell.annotation,
     session: shell.session,
   };
 }
