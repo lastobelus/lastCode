@@ -28,6 +28,8 @@ const baseState: DesktopUpdateState = {
   downloadedVersion: null,
   releaseNotes: [],
   downloadPercent: null,
+  localBuildProgress: null,
+  localBuildFailure: null,
   checkedAt: null,
   message: null,
   errorContext: null,
