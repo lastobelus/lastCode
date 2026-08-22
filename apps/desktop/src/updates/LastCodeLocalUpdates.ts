@@ -3,16 +3,207 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
+import * as NodeStringDecoder from "node:string_decoder";
+import * as NodeUtil from "node:util";
 
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import {
+  BUILD_PHASES,
+  estimateBuildProgress,
+  resolveBuildPhaseIndex,
+} from "../../../../scripts/lib/lastcode-build-progress.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
 const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
+const BUILD_PROGRESS_POLL_INTERVAL = Duration.millis(400);
+const BUILD_PROGRESS_EMIT_INTERVAL_MS = 1_000;
+const MAX_BUILD_LOG_BYTES_PER_POLL = 512_000;
+const BUILD_LOG_MARKER_CARRY_LENGTH = 512;
+const PACKAGING_PHASE_INDEX = BUILD_PHASES.findIndex(
+  ({ marker }) => marker === "[desktop-artifact] Building desktop/server/web artifacts",
+);
+
+export interface LastCodeLocalBuildProgress {
+  readonly phase: string;
+  readonly percent: number;
+  readonly errorKind: "build" | "packaging";
+}
+
+interface BuildLogIdentity {
+  readonly device: number;
+  readonly inode: number;
+}
+
+function readBuildLogIdentity(stat: NodeFS.Stats): BuildLogIdentity {
+  return { device: stat.dev, inode: stat.ino };
+}
+
+function sameBuildLogIdentity(
+  left: BuildLogIdentity | undefined,
+  right: BuildLogIdentity,
+): boolean {
+  return left?.device === right.device && left.inode === right.inode;
+}
+
+export function resolveLocalBuildErrorKind(phaseIndex: number): "build" | "packaging" {
+  return phaseIndex >= PACKAGING_PHASE_INDEX ? "packaging" : "build";
+}
+
+export function initialLocalBuildProgress(): LastCodeLocalBuildProgress {
+  return {
+    phase: BUILD_PHASES[0].label,
+    percent: 0,
+    errorKind: "build",
+  };
+}
+
+export class LocalBuildProgressTracker {
+  readonly #logPath: string;
+  #offset = 0;
+  #identity: BuildLogIdentity | undefined;
+  #decoder = new NodeStringDecoder.StringDecoder("utf8");
+  #markerCarry = "";
+  #phaseIndex = 0;
+  #phaseStartedAt: number;
+  #lastEmittedAt: number;
+  #lastEmittedPercent = 0;
+
+  constructor(logPath: string, startedAt: number) {
+    this.#logPath = logPath;
+    this.#phaseStartedAt = startedAt;
+    this.#lastEmittedAt = startedAt;
+    try {
+      const stat = NodeFS.statSync(logPath);
+      this.#offset = stat.size;
+      this.#identity = readBuildLogIdentity(stat);
+    } catch (cause) {
+      if (!(cause instanceof Error) || !("code" in cause) || cause.code !== "ENOENT") throw cause;
+    }
+  }
+
+  poll(now: number): LastCodeLocalBuildProgress | null {
+    const previousPhaseIndex = this.#phaseIndex;
+    for (const appended of this.#readAppendedLog()) {
+      const plainAppended = NodeUtil.stripVTControlCharacters(appended);
+      this.#phaseIndex = resolveBuildPhaseIndex(
+        `${this.#markerCarry}${plainAppended}`,
+        this.#phaseIndex,
+      );
+      this.#markerCarry = `${this.#markerCarry}${plainAppended}`.slice(
+        -BUILD_LOG_MARKER_CARRY_LENGTH,
+      );
+      if (this.#phaseIndex !== previousPhaseIndex) this.#phaseStartedAt = now;
+    }
+
+    const percent = Math.min(
+      99,
+      Math.max(
+        this.#lastEmittedPercent,
+        Math.floor(estimateBuildProgress(this.#phaseIndex, now - this.#phaseStartedAt) * 100),
+      ),
+    );
+    const phaseChanged = this.#phaseIndex !== previousPhaseIndex;
+    const interpolationDue =
+      percent > this.#lastEmittedPercent &&
+      now - this.#lastEmittedAt >= BUILD_PROGRESS_EMIT_INTERVAL_MS;
+    if (!phaseChanged && !interpolationDue) return null;
+
+    this.#lastEmittedAt = now;
+    this.#lastEmittedPercent = percent;
+    return {
+      phase: BUILD_PHASES[this.#phaseIndex]?.label ?? BUILD_PHASES[0].label,
+      percent,
+      errorKind: resolveLocalBuildErrorKind(this.#phaseIndex),
+    };
+  }
+
+  hasPendingLogBytes(): boolean {
+    try {
+      const stat = NodeFS.statSync(this.#logPath);
+      return (
+        !sameBuildLogIdentity(this.#identity, readBuildLogIdentity(stat)) ||
+        stat.size !== this.#offset
+      );
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return false;
+      throw cause;
+    }
+  }
+
+  *#readAppendedLog(): Generator<string> {
+    let stat: NodeFS.Stats;
+    try {
+      stat = NodeFS.statSync(this.#logPath);
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+      throw cause;
+    }
+
+    const identity = readBuildLogIdentity(stat);
+    if (!sameBuildLogIdentity(this.#identity, identity) || stat.size < this.#offset) {
+      this.#offset = 0;
+      this.#identity = identity;
+      this.#decoder = new NodeStringDecoder.StringDecoder("utf8");
+      this.#markerCarry = "";
+    }
+    if (stat.size <= this.#offset) return;
+
+    const fd = NodeFS.openSync(this.#logPath, "r");
+    try {
+      const length = Math.min(MAX_BUILD_LOG_BYTES_PER_POLL, stat.size - this.#offset);
+      const buffer = Buffer.allocUnsafe(length);
+      const bytesRead = NodeFS.readSync(fd, buffer, 0, length, this.#offset);
+      if (bytesRead === 0) return;
+      this.#offset += bytesRead;
+      yield this.#decoder.write(buffer.subarray(0, bytesRead));
+    } finally {
+      NodeFS.closeSync(fd);
+    }
+  }
+}
+
+export function monitorLocalBuildProgress<A, E, R>(
+  logPath: string,
+  helperEffect: Effect.Effect<A, E, R>,
+  onProgress: (progress: LastCodeLocalBuildProgress) => Effect.Effect<void>,
+): Effect.Effect<A, E, R> {
+  return Effect.gen(function* () {
+    const startedAt = yield* Clock.currentTimeMillis;
+    const tracker = new LocalBuildProgressTracker(logPath, startedAt);
+    const pollProgress = Clock.currentTimeMillis.pipe(
+      Effect.flatMap((now) => {
+        const progress = tracker.poll(now);
+        return progress ? onProgress(progress) : Effect.void;
+      }),
+    );
+    const monitor = Effect.forever(
+      pollProgress.pipe(
+        Effect.catchCause(() => Effect.void),
+        Effect.andThen(Effect.sleep(BUILD_PROGRESS_POLL_INTERVAL)),
+      ),
+    );
+    const monitorFiber = yield* monitor.pipe(Effect.forkChild({ startImmediately: true }));
+    const drainProgress = Effect.gen(function* () {
+      while (tracker.hasPendingLogBytes()) {
+        yield* pollProgress;
+        yield* Effect.yieldNow;
+      }
+    }).pipe(Effect.catchCause(() => Effect.void));
+    return yield* helperEffect.pipe(
+      Effect.ensuring(
+        drainProgress.pipe(Effect.andThen(Fiber.interrupt(monitorFiber)), Effect.asVoid),
+      ),
+    );
+  });
+}
 
 const LastCodeReleaseNotes = Schema.Union([
   Schema.Struct({
@@ -96,11 +287,13 @@ export class LastCodeLocalUpdates extends Context.Service<
   LastCodeLocalUpdates,
   {
     readonly supported: boolean;
+    readonly buildLogPath: string;
     readonly inspect: (
       currentVersion: string,
     ) => Effect.Effect<LastCodeLocalUpdateInspection, LastCodeLocalUpdateError>;
     readonly build: (
       checkpointTag: string,
+      onProgress?: (progress: LastCodeLocalBuildProgress) => Effect.Effect<void>,
     ) => Effect.Effect<LastCodeLocalUpdateBuild, LastCodeLocalUpdateError>;
     readonly prepareInstall: (args: {
       readonly dmgPath: string;
@@ -146,6 +339,12 @@ export function terminateHelperProcess(
 
 function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"]) {
   const dashboardPath = NodePath.join(environment.homeDirectory, ".lastcode", "dashboard.json");
+  const buildLogPath = NodePath.join(
+    environment.homeDirectory,
+    ".lastcode",
+    "local-updates",
+    "build.log",
+  );
 
   const readRepository = (): {
     readonly repoRoot: string;
@@ -175,8 +374,9 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
   const runHelper = (
     operation: "inspect" | "build",
     args: ReadonlyArray<string>,
-  ): Effect.Effect<unknown, LastCodeLocalUpdateError> =>
-    Effect.tryPromise({
+    onProgress?: (progress: LastCodeLocalBuildProgress) => Effect.Effect<void>,
+  ): Effect.Effect<unknown, LastCodeLocalUpdateError> => {
+    const helperEffect = Effect.tryPromise({
       try: (signal) => {
         const { repoRoot, helperPath } = readRepository();
         return new Promise<string>((resolve, reject) => {
@@ -228,7 +428,13 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
                 cause instanceof Error ? cause.message : `LastCode local ${operation} failed.`,
               cause,
             }),
-    }).pipe(
+    });
+
+    const monitoredHelper = onProgress
+      ? monitorLocalBuildProgress(buildLogPath, helperEffect, onProgress)
+      : helperEffect;
+
+    return monitoredHelper.pipe(
       Effect.flatMap((raw) =>
         Effect.try({
           try: () => parseHelperResult(raw),
@@ -241,6 +447,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
         }),
       ),
     );
+  };
 
   const prepareInstall = (args: {
     readonly dmgPath: string;
@@ -431,6 +638,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
       environment.isPackaged &&
       environment.platform === "darwin" &&
       environment.runtimeInfo.hostArch === "arm64",
+    buildLogPath,
     inspect: (currentVersion) =>
       runHelper("inspect", groupedInspectionArgs(currentVersion)).pipe(
         Effect.flatMap((result) =>
@@ -445,8 +653,8 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
           }),
         ),
       ),
-    build: (checkpointTag) =>
-      runHelper("build", ["--checkpoint", checkpointTag]).pipe(
+    build: (checkpointTag, onProgress) =>
+      runHelper("build", ["--checkpoint", checkpointTag], onProgress).pipe(
         Effect.flatMap((result) =>
           Effect.try({
             try: () => decodeBuildResult(result),
