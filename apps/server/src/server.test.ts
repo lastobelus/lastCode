@@ -29,6 +29,8 @@ import {
   ProviderInstanceId,
   ResolvedKeybindingRule,
   ThreadId,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   WS_METHODS,
   WsRpcGroup,
   EditorId,
@@ -154,6 +156,8 @@ import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import * as Data from "effect/Data";
 
 import { makeOrchestrationIntegrationHarness } from "../integration/OrchestrationEngineHarness.integration.ts";
@@ -613,6 +617,10 @@ const buildAppUnderTest = (options?: {
     const serviceLauncherClientLayer = ServiceLauncherClient.layer.pipe(
       Layer.provide(Layer.succeed(HostProcessEnvironment, {})),
     );
+    const updateDrainLayer = UpdateDrain.layer.pipe(
+      Layer.provide(UpdateDrainRepositoryLive),
+      Layer.provide(SqlitePersistenceMemory),
+    );
 
     const servedRoutesLayer = HttpRouter.serve(
       makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
@@ -842,6 +850,7 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      Layer.provide(updateDrainLayer),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
@@ -4517,6 +4526,49 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.strictEqual(error.message, `Failed to upload feedback for thread ${threadId}.`);
         assert.isDefined(error.cause);
       }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes authorized update drain start, status, and cancel RPCs", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const commandId = CommandId.make("rpc-update-drain-start");
+      const requestId = UpdateDrainRequestId.make("rpc-update-1");
+      const targetVersion = UpdateDrainTargetVersion.make("0.0.35-nightly.1");
+
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const started = yield* client[WS_METHODS.serverStartUpdateDrain]({
+              commandId,
+              requestId,
+              targetVersion,
+            });
+            const draining = yield* client[WS_METHODS.serverGetUpdateDrainStatus]({});
+            const cancelled = yield* client[WS_METHODS.serverCancelUpdateDrain]({
+              commandId: CommandId.make("rpc-update-drain-cancel"),
+              requestId,
+            });
+            const final = yield* client[WS_METHODS.serverGetUpdateDrainStatus]({});
+            return { started, draining, cancelled, final };
+          }),
+        ),
+      );
+
+      assert.equal(result.started.status, "accepted");
+      assert.deepStrictEqual(result.draining.intent, {
+        requestId,
+        targetVersion,
+        status: "draining",
+      });
+      assert.equal(result.cancelled.status, "accepted");
+      assert.deepStrictEqual(result.final.intent, {
+        requestId,
+        targetVersion,
+        status: "cancelled",
+      });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
