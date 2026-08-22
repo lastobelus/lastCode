@@ -1640,6 +1640,9 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
+              ...(event.type === "thread.started" && event.payload?.providerThreadId !== undefined
+                ? { providerThreadId: event.payload.providerThreadId }
+                : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
               lastError,

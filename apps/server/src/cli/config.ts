@@ -17,6 +17,11 @@ import { readBootstrapEnvelope } from "../bootstrap.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 
+export class CliLocationError extends Schema.TaggedErrorClass<CliLocationError>()(
+  "CliLocationError",
+  { message: Schema.String },
+) {}
+
 export const modeFlag = Flag.choice("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
   Flag.optional,
@@ -159,6 +164,7 @@ export interface CliServerFlags {
 export interface CliAuthLocationFlags {
   readonly baseDir: Option.Option<string>;
   readonly devUrl?: Option.Option<URL>;
+  readonly stateDir?: Option.Option<string>;
 }
 
 export const sharedServerLocationFlags = {
@@ -213,6 +219,7 @@ export const resolveServerConfig = (
   options?: {
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly activeStateDir?: Option.Option<string>;
   },
 ) =>
   Effect.gen(function* () {
@@ -282,9 +289,30 @@ export const resolveServerConfig = (
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
     yield* fs.makeDirectory(cwd, { recursive: true });
-    const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
-      baseDirIsExplicit: Option.isSome(explicitBaseDir),
+    const requestedStateDir = yield* Option.match(options?.activeStateDir ?? Option.none(), {
+      onNone: () => Effect.void,
+      onSome: (value) => Effect.map(expandHomePath(value.trim()), path.resolve),
     });
+    const userdataStateDir = path.join(baseDir, "userdata");
+    const devStateDir = path.join(baseDir, "dev");
+    if (
+      requestedStateDir !== undefined &&
+      requestedStateDir !== userdataStateDir &&
+      requestedStateDir !== devStateDir
+    ) {
+      return yield* new CliLocationError({
+        message: "--state-dir must select the userdata or dev directory within --base-dir.",
+      });
+    }
+    const derivedPaths = yield* ServerConfig.deriveServerPaths(
+      baseDir,
+      requestedStateDir === userdataStateDir
+        ? undefined
+        : requestedStateDir === devStateDir
+          ? (devUrl ?? new URL("http://127.0.0.1"))
+          : devUrl,
+      { baseDirIsExplicit: requestedStateDir === undefined && Option.isSome(explicitBaseDir) },
+    );
     yield* ServerConfig.ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
@@ -411,6 +439,7 @@ export const resolveCliAuthConfig = (
       tailscaleServePort: Option.none(),
     },
     cliLogLevel,
+    { activeStateDir: flags.stateDir ?? Option.none() },
   );
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;

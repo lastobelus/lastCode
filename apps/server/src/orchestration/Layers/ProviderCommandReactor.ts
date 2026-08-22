@@ -38,6 +38,9 @@ import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
 } from "../Services/ProviderCommandReactor.ts";
+
+const ProviderThreadResumeCursor = Schema.Struct({ threadId: Schema.String });
+const isProviderThreadResumeCursor = Schema.is(ProviderThreadResumeCursor);
 import { forkParked, ServerActivation } from "../../serverActivation.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import {
@@ -639,6 +642,9 @@ const make = Effect.gen(function* () {
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
+            ...(session.provider === "codex" && isProviderThreadResumeCursor(session.resumeCursor)
+              ? { providerThreadId: session.resumeCursor.threadId }
+              : {}),
             runtimeMode: desiredRuntimeMode,
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,

@@ -8,6 +8,8 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EnvironmentId,
+  EnvironmentMetadataHttpApi,
   EnvironmentOrchestrationHttpApi,
   ProviderInstanceId,
   ThreadId,
@@ -43,7 +45,9 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
-class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
+class ProjectCliHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentMetadataHttpApi)
+  .add(EnvironmentOrchestrationHttpApi) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
 const noConnectCli = makeCli({ cloudEnabled: false });
@@ -116,8 +120,21 @@ const readPersistedSnapshot = (baseDir: string) =>
 const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
+    const metadataLayer = HttpApiBuilder.group(ProjectCliHttpApi, "metadata", (handlers) =>
+      Effect.succeed(
+        handlers.handle("descriptor", () =>
+          Effect.succeed({
+            environmentId: EnvironmentId.make("env-thread-live"),
+            label: "CLI integration",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "test",
+            capabilities: { repositoryIdentity: true },
+          }),
+        ),
+      ),
+    );
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-      Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer)),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
@@ -567,6 +584,93 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           );
           assert.isTrue(addedProject !== undefined);
           assert.equal(addedProject?.title, "Live Project");
+        }),
+      );
+    }),
+  );
+
+  it.effect("reads a bounded thread from temporary SQLite when no server is available", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-offline-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+      const snapshot = yield* readPersistedSnapshot(baseDir);
+      const project = snapshot.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+      const config = yield* makeCliTestServerConfig(baseDir);
+      NodeFS.writeFileSync(config.environmentIdPath, "env-thread-offline\n");
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-offline-create"),
+          threadId: ThreadId.make("thread-offline-bounded"),
+          projectId: project.id,
+          title: "Offline bounded",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+
+      const { output } = yield* captureStdout(
+        runCli(["thread", "read", "thread-offline", "--turn-limit", "1", "--base-dir", baseDir]),
+      );
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is the integration boundary under test.
+      const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
+      assert.equal(result.kind, "read");
+      assert.equal(result.threadId, "thread-offline-bounded");
+    }),
+  );
+
+  it.effect("uses authenticated live shell and detail reads and revokes its CLI sessions", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-thread-live-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-thread-live-workspace-"),
+      );
+      const config = yield* makeCliTestServerConfig(baseDir);
+      NodeFS.mkdirSync(config.stateDir, { recursive: true });
+      NodeFS.writeFileSync(config.environmentIdPath, `${EnvironmentId.make("env-thread-live")}\n`);
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+          const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const shell = yield* query.getSnapshot();
+          const project = shell.projects.find((entry) => entry.workspaceRoot === workspaceRoot)!;
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-live-create"),
+            threadId: ThreadId.make("thread-live-authenticated"),
+            projectId: project.id,
+            title: "Live authenticated",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: "default",
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+          const auth = yield* EnvironmentAuth.EnvironmentAuth;
+          const before = yield* auth.listSessions();
+          NodeFS.unlinkSync(config.environmentIdPath);
+          const { output } = yield* captureStdout(
+            runCli(["thread", "read", "thread-live", "--base-dir", baseDir]),
+          );
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is the integration boundary under test.
+          const result = JSON.parse(output) as { readonly kind: string; readonly threadId: string };
+          assert.equal(result.kind, "read");
+          assert.equal(result.threadId, "thread-live-authenticated");
+          const after = yield* auth.listSessions();
+          assert.equal(after.length, before.length);
         }),
       );
     }),

@@ -82,10 +82,12 @@ passed back to `wait`, which resumes waiting for that specific message's project
 provider turn and resulting assistant response. It never interprets an arbitrary newer
 turn as the answer.
 
-`read` and successful `wait` CLI output share a 64,000-character
-transcript/assistant-text presentation budget. JSON includes `textTruncated` and
-`originalTextChars` when selected content exceeds that budget; metadata and identifiers
-are never truncated. The live server may hydrate its existing bounded-turn detail
+`read` and successful `wait` CLI output use a 64,000-character presentation budget.
+For `read`, message text and activity summaries share that single newest-first budget,
+and activity records also have a conservative recent-record cap. JSON includes
+`textTruncated` and `originalTextChars` when selected text exceeds the budget, plus
+additive activity-count truncation metadata when the record cap applies; metadata and
+identifiers are never truncated. The live server may hydrate its existing bounded-turn detail
 snapshot before the CLI applies this output bound; this temporary local transport does
 not add a second text-limited SQL/query stack.
 
@@ -145,7 +147,8 @@ Branch: `lastcode/codex-thread-read`
    `--base-dir <owning-home>`. For packaged macOS LastCode it executes the LastCode
    binary with `ELECTRON_RUN_AS_NODE=1`, the bundled server CLI entry, and the same
    explicit base directory. The wrapper contains invocation details only and delegates
-   all behavior to `t3 thread`. Windows packaged hosts are out of scope.
+   all behavior to `t3 thread`. Windows hosts are out of scope for the POSIX wrapper;
+   Codex still receives LastCode identity variables there, but no thread command is added to PATH.
 5. Add bounded `list` and `read` commands over the existing shell and thread-detail
    snapshots. `read` accepts an exact or unambiguous thread-ID prefix and returns
    candidates when resolution is ambiguous.
@@ -402,7 +405,7 @@ the product contract and three slices above are the implementation source of tru
   thread addressing, specified the wait HTTP/timeout contract, and retained durable
   message correlation for turns that fail before receiving a provider turn ID.
 - Round 1 `best-practices`: eight findings applied. The plan now pins the wrapper's
-  owning home and packaged invocation, limits the first version to packaged macOS,
+  owning home and packaged invocation, limits the first version to POSIX Node hosts and packaged macOS,
   uses least-privilege command scopes, bounds send input, carries exact message
   correlation through provider-start outcomes, rejects overlapping tool sends, uses
   existing terminal-state vocabulary, and reports pre-adoption restart orphaning

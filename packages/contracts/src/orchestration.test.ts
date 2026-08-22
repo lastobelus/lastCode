@@ -792,6 +792,21 @@ it.effect("decodes orchestration session runtime mode defaults", () =>
   }),
 );
 
+it.effect("preserves optional provider-native thread identity", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationSession({
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      providerThreadId: "codex-thread-1",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.providerThreadId, "codex-thread-1");
+  }),
+);
+
 it.effect("defaults proposed plan implementation metadata for historical rows", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeOrchestrationProposedPlan({
