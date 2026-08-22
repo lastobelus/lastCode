@@ -152,7 +152,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
   let activationCommit: UpdateActivationCommitResult | undefined;
 
   const admissionIsClosed = (durable: UpdateDrainState): boolean => {
-    if (activation !== undefined) return activationCommit === undefined;
+    if (activation !== undefined && activationCommit === undefined) return true;
     return durable.intent?.status === "draining" || durable.intent?.status === "claimed";
   };
 
@@ -168,7 +168,11 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
         }),
       );
     }
-    if (activation !== undefined && durable.intent.requestId !== activation.trial.requestId) {
+    if (
+      activation !== undefined &&
+      activationCommit === undefined &&
+      durable.intent.requestId !== activation.trial.requestId
+    ) {
       return Effect.fail(
         new UpdateDrainError({
           reason: "request_mismatch",
@@ -356,7 +360,18 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
   });
 
   if (activation?.existingCommit !== undefined) {
-    yield* completeActivation(activation.existingCommit);
+    const durable = yield* drain.status.pipe(
+      Effect.mapError(
+        () =>
+          new UpdateActivationCommitError({
+            reason: "drain_not_claimed",
+            message: "Failed to verify the durable update drain activation state.",
+          }),
+      ),
+    );
+    if (durable.intent?.requestId === activation.existingCommit.requestId) {
+      yield* completeActivation(activation.existingCommit);
+    }
     activationCommit = activation.existingCommit;
   }
 

@@ -395,6 +395,32 @@ it.effect("keeps a trial closed until the exact activation commit is durable", (
         committed,
       );
       assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
+
+      const nextRequestId = UpdateDrainRequestId.make("update-2");
+      yield* restarted.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("trial-next-start"),
+        requestId: nextRequestId,
+        targetVersion: UpdateDrainTargetVersion.make("1.2.4"),
+        createdAt: now,
+      });
+      assert.equal((yield* restarted.status).admission, "closed");
+      assert.equal(
+        (yield* Effect.result(restarted.admit("thread-turn", Effect.void)))._tag,
+        "Failure",
+      );
+
+      const restartedDuringNextDrain = yield* makeUpdateDrainAdmission({
+        trial: { requestId, targetDigest },
+        existingCommit: committed,
+        persistCommit: (record) => Ref.update(persisted, (records) => [...records, record]),
+      });
+      assert.deepStrictEqual((yield* restartedDuringNextDrain.status).intent, {
+        requestId: nextRequestId,
+        targetVersion: "1.2.4",
+        status: "draining",
+      });
+      assert.equal((yield* restartedDuringNextDrain.status).admission, "closed");
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );
