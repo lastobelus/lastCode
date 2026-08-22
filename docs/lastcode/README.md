@@ -24,6 +24,8 @@ directories.
   evaluation tags.
 - [Local nightly updates](local-nightly-updates.md): the opt-in in-app
   checkpoint build, staging, installation, safety boundaries, and logs.
+- [Packaged server runtime foundation](packaged-server-runtime.md): immutable
+  LastCode runtime validation and the headless LaunchAgent activation boundary.
 - [Settings import](settings-import.md): the one-time, selective migration from
   T3 Code into an independent LastCode profile, including exclusions and backups.
 
