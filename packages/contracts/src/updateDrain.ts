@@ -201,8 +201,9 @@ export type UpdateActivationCommitInput = typeof UpdateActivationCommitInput.Typ
 
 export const UpdateActivationCommitResult = Schema.Struct({
   requestId: UpdateDrainRequestId,
+  schemaVersion: Schema.Literal(1),
+  status: Schema.Literal("committed"),
   targetDigest: UpdateActivationTargetDigest,
-  committedAt: IsoDateTime,
 });
 export type UpdateActivationCommitResult = typeof UpdateActivationCommitResult.Type;
 

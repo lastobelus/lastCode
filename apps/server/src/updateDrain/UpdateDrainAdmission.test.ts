@@ -5,7 +5,6 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
-  UpdateActivationCommitResult,
   UpdateActivationTargetDigest,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
@@ -32,6 +31,7 @@ import { layer as updateDrainLayer } from "./UpdateDrain.ts";
 import {
   makeUpdateDrainAdmission,
   persistUpdateActivationCommit,
+  readUpdateActivationCommit,
   updateActivationCommitRecordPath,
 } from "./UpdateDrainAdmission.ts";
 
@@ -41,7 +41,7 @@ const threadId = ThreadId.make("thread-1");
 const turnId = TurnId.make("turn-1");
 const now = "2026-08-21T00:00:00.000Z";
 const decodeActivationCommitRecord = Schema.decodeUnknownSync(
-  Schema.fromJsonString(UpdateActivationCommitResult),
+  Schema.fromJsonString(Schema.Unknown),
 );
 
 const emptyShell = (): OrchestrationShellSnapshot => ({
@@ -378,6 +378,18 @@ it.effect("keeps a trial closed until the exact activation commit is durable", (
       const retried = yield* admission.commitUpdateActivation({ requestId, targetDigest });
       assert.deepStrictEqual(retried, committed);
       assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
+
+      const restarted = yield* makeUpdateDrainAdmission({
+        trial: { requestId, targetDigest },
+        existingCommit: committed,
+        persistCommit: (record) => Ref.update(persisted, (records) => [...records, record]),
+      });
+      assert.equal((yield* restarted.status).admission, "open");
+      assert.deepStrictEqual(
+        yield* restarted.commitUpdateActivation({ requestId, targetDigest }),
+        committed,
+      );
+      assert.deepStrictEqual(yield* Ref.get(persisted), [committed]);
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );
@@ -410,15 +422,31 @@ it.layer(NodeServices.layer)("update activation commit record", (it) => {
         const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "lastcode-activation-" });
         const record = {
           requestId,
+          schemaVersion: 1,
+          status: "committed",
           targetDigest: UpdateActivationTargetDigest.make("c".repeat(64)),
-          committedAt: "2026-08-22T00:00:00.000Z",
         } as const;
 
         yield* persistUpdateActivationCommit(baseDir, record);
-        const recordPath = yield* updateActivationCommitRecordPath(baseDir);
+        const recordPath = yield* updateActivationCommitRecordPath(baseDir, requestId);
+        assert.deepStrictEqual(decodeActivationCommitRecord(yield* fs.readFileString(recordPath)), {
+          ...record,
+        });
         assert.deepStrictEqual(
-          decodeActivationCommitRecord(yield* fs.readFileString(recordPath)),
+          yield* readUpdateActivationCommit(baseDir, {
+            requestId,
+            targetDigest: record.targetDigest,
+          }),
           record,
+        );
+        assert.equal(
+          (yield* Effect.result(
+            readUpdateActivationCommit(baseDir, {
+              requestId,
+              targetDigest: UpdateActivationTargetDigest.make("d".repeat(64)),
+            }),
+          ))._tag,
+          "Failure",
         );
       }),
     ),

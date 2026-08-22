@@ -3,7 +3,8 @@ import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serve
 import {
   DesktopBackendBootstrap,
   PortSchema,
-  UpdateActivationCommitInput,
+  UpdateActivationTargetDigest,
+  UpdateDrainRequestId,
 } from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
@@ -143,10 +144,19 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
-  updateActivationTrial: Config.schema(
-    Schema.fromJsonString(UpdateActivationCommitInput),
-    "LASTCODE_UPDATE_TRIAL",
-  ).pipe(Config.option, Config.map(Option.getOrUndefined)),
+  updateActivationTrial: Config.all({
+    mode: Config.schema(Schema.Literal("trial"), "LASTCODE_ACTIVATION_MODE"),
+    requestId: Config.schema(UpdateDrainRequestId, "LASTCODE_ACTIVATION_REQUEST_ID"),
+    targetDigest: Config.schema(UpdateActivationTargetDigest, "LASTCODE_ACTIVATION_TARGET_DIGEST"),
+  }).pipe(
+    Config.option,
+    Config.map(
+      Option.match({
+        onNone: () => undefined,
+        onSome: ({ requestId, targetDigest }) => ({ requestId, targetDigest }),
+      }),
+    ),
+  ),
 });
 
 export interface CliServerFlags {

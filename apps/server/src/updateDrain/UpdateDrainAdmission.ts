@@ -82,6 +82,7 @@ function pendingTurnStartKey(threadId: string, messageId: string) {
 
 interface UpdateActivationTrialOptions {
   readonly trial: UpdateActivationCommitInput;
+  readonly existingCommit?: UpdateActivationCommitResult | undefined;
   readonly persistCommit: (
     record: UpdateActivationCommitResult,
   ) => Effect.Effect<void, UpdateActivationCommitError>;
@@ -90,11 +91,14 @@ interface UpdateActivationTrialOptions {
 const encodeUpdateActivationCommit = Schema.encodeSync(
   Schema.fromJsonString(UpdateActivationCommitResult),
 );
+const decodeUpdateActivationCommit = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(UpdateActivationCommitResult),
+);
 
 export const updateActivationCommitRecordPath = Effect.fn("updateActivationCommitRecordPath")(
-  function* (baseDir: string) {
+  function* (baseDir: string, requestId: UpdateActivationCommitInput["requestId"]) {
     const path = yield* Path.Path;
-    return path.join(baseDir, "runtime", "lastcode-activation-commit.json");
+    return path.join(baseDir, "runtime", "activation", requestId, "commit.json");
   },
 );
 
@@ -102,11 +106,30 @@ export const persistUpdateActivationCommit = Effect.fn("persistUpdateActivationC
   baseDir: string,
   record: UpdateActivationCommitResult,
 ) {
-  const filePath = yield* updateActivationCommitRecordPath(baseDir);
+  const filePath = yield* updateActivationCommitRecordPath(baseDir, record.requestId);
   yield* writeFileStringAtomically({
     filePath,
     contents: `${encodeUpdateActivationCommit(record)}\n`,
   });
+});
+
+export const readUpdateActivationCommit = Effect.fn("readUpdateActivationCommit")(function* (
+  baseDir: string,
+  trial: UpdateActivationCommitInput,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const filePath = yield* updateActivationCommitRecordPath(baseDir, trial.requestId);
+  if (!(yield* fs.exists(filePath))) return undefined;
+  const commit = yield* fs
+    .readFileString(filePath)
+    .pipe(Effect.flatMap(decodeUpdateActivationCommit));
+  if (commit.requestId !== trial.requestId || commit.targetDigest !== trial.targetDigest) {
+    return yield* new UpdateActivationCommitError({
+      reason: "request_mismatch",
+      message: "Activation commit does not match the running trial.",
+    });
+  }
+  return commit;
 });
 
 export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* (
@@ -125,7 +148,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       (pending) => pendingTurnStartKey(pending.threadId, pending.messageId),
     ),
   );
-  let activationCommit: UpdateActivationCommitResult | undefined;
+  let activationCommit = activation?.existingCommit;
 
   const admissionIsClosed = (durable: UpdateDrainState): boolean => {
     if (activation !== undefined) return activationCommit === undefined;
@@ -326,7 +349,8 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
 
         const record: UpdateActivationCommitResult = {
           ...activation.trial,
-          committedAt: DateTime.formatIso(yield* DateTime.now),
+          schemaVersion: 1,
+          status: "committed",
         };
         yield* activation.persistCommit(record);
         activationCommit = record;
@@ -372,6 +396,20 @@ export const layer = Layer.effect(
         ? undefined
         : {
             trial: config.updateActivationTrial,
+            existingCommit: yield* readUpdateActivationCommit(
+              config.baseDir,
+              config.updateActivationTrial,
+            ).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.mapError(
+                () =>
+                  new UpdateActivationCommitError({
+                    reason: "write_failed",
+                    message: "Failed to read the update activation commit record.",
+                  }),
+              ),
+            ),
             persistCommit: (record) =>
               persistUpdateActivationCommit(config.baseDir, record).pipe(
                 Effect.provideService(FileSystem.FileSystem, fs),

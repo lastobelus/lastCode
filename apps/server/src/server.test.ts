@@ -4709,7 +4709,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     Effect.gen(function* () {
       const requestId = UpdateDrainRequestId.make("rpc-activation-commit");
       const targetDigest = UpdateActivationTargetDigest.make("d".repeat(64));
-      const committedAt = "2026-08-22T00:00:00.000Z";
       let commits = 0;
       yield* buildAppUnderTest({
         layers: {
@@ -4717,7 +4716,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             commitUpdateActivation: (input) =>
               Effect.sync(() => {
                 commits += 1;
-                return { ...input, committedAt };
+                return { ...input, schemaVersion: 1 as const, status: "committed" as const };
               }),
           },
         },
@@ -4752,7 +4751,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           client[WS_METHODS.serverCommitUpdateActivation]({ requestId, targetDigest }),
         ),
       );
-      assert.deepStrictEqual(committed, { requestId, targetDigest, committedAt });
+      assert.deepStrictEqual(committed, {
+        requestId,
+        schemaVersion: 1,
+        status: "committed",
+        targetDigest,
+      });
       assert.equal(commits, 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

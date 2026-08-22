@@ -138,7 +138,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
-  it.effect("decodes the exact update trial identity from one environment value", () =>
+  it.effect("decodes the exact activation helper trial environment", () =>
     Effect.gen(function* () {
       const baseDir = NodePath.join(NodeOS.tmpdir(), "t3-update-trial-config");
       const requestId = "trial-request-1";
@@ -168,7 +168,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   T3CODE_HOME: baseDir,
                   T3CODE_MODE: "desktop",
                   T3CODE_PORT: "4002",
-                  LASTCODE_UPDATE_TRIAL: `{"requestId":"${requestId}","targetDigest":"${targetDigest}"}`,
+                  LASTCODE_ACTIVATION_MODE: "trial",
+                  LASTCODE_ACTIVATION_REQUEST_ID: requestId,
+                  LASTCODE_ACTIVATION_TARGET_DIGEST: targetDigest,
                 },
               }),
             ),
