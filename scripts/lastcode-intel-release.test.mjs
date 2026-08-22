@@ -99,10 +99,15 @@ describe("immutable Intel release validation", () => {
       NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
       "utf8",
     );
+    const automationCheckout = workflow.slice(
+      workflow.indexOf("- name: Checkout workflow automation"),
+      workflow.indexOf("- name: Checkout exact installable"),
+    );
     const targetCheckout = workflow.slice(
       workflow.indexOf("- name: Checkout exact installable"),
       workflow.indexOf("- name: Validate immutable tag and commit"),
     );
+    expect(automationCheckout).toContain("persist-credentials: false");
     expect(targetCheckout).toContain("persist-credentials: false");
 
     const publishStep = workflow.slice(

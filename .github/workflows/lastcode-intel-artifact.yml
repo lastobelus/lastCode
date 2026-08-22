@@ -33,6 +33,7 @@ jobs:
         with:
           fetch-depth: 1
           path: automation
+          persist-credentials: false
           ref: ${{ github.workflow_sha }}
           sparse-checkout: |
             /package.json
