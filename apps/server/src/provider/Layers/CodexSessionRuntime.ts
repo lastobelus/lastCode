@@ -910,6 +910,8 @@ export const makeCodexSessionRuntime = (
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
+    /** Unregistered child threads whose latest observed turn failed terminally. */
+    const collabChildPreRegistrationFailuresRef = yield* Ref.make(new Set<string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
 
@@ -1002,6 +1004,20 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+    const emitCollabChildSystemError = (child: CollabChildAgentState) =>
+      emitEvent({
+        kind: "notification",
+        threadId: options.threadId,
+        ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
+        method: "collabAgent/statusChanged",
+        payload: {
+          agentThreadId: child.agentThreadId,
+          ...(child.nickname ? { nickname: child.nickname } : {}),
+          ...(child.role ? { role: child.role } : {}),
+          ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+          status: { type: "systemError" },
+        },
+      });
 
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
@@ -1051,6 +1067,9 @@ export const makeCodexSessionRuntime = (
           // child onto a new fleet's CTA (review finding). Only a genuinely
           // new registration captures the current turn.
           const existingChild = (yield* Ref.get(collabChildAgentsRef)).get(thread.id);
+          const preRegistrationFailure = (yield* Ref.get(
+            collabChildPreRegistrationFailuresRef,
+          )).has(thread.id);
           const spawnTurnId = existingChild
             ? existingChild.spawnTurnId
             : ((yield* Ref.get(sessionRef)).activeTurnId ?? undefined);
@@ -1083,6 +1102,9 @@ export const makeCodexSessionRuntime = (
               ...(state.parentThreadId ? { parentThreadId: state.parentThreadId } : {}),
             },
           });
+          if (preRegistrationFailure) {
+            yield* emitCollabChildSystemError(state);
+          }
           return true;
         }
 
@@ -1109,6 +1131,9 @@ export const makeCodexSessionRuntime = (
           }
           const activitySpawnTurnId = (yield* Ref.get(sessionRef)).activeTurnId ?? undefined;
           const existingChild = (yield* Ref.get(collabChildAgentsRef)).get(item.agentThreadId);
+          const preRegistrationFailure = (yield* Ref.get(
+            collabChildPreRegistrationFailuresRef,
+          )).has(item.agentThreadId);
           yield* Ref.update(collabChildAgentsRef, (current) => {
             const next = new Map(current);
             // Merge-late semantics: when thread/started registered first, a
@@ -1152,7 +1177,9 @@ export const makeCodexSessionRuntime = (
           const preRegistrationLiveTurn = (yield* Ref.get(collabChildLiveTurnsRef)).get(
             item.agentThreadId,
           );
-          if (!existingChild && item.kind === "interacted" && preRegistrationLiveTurn) {
+          if (preRegistrationFailure && registeredChild) {
+            yield* emitCollabChildSystemError(registeredChild);
+          } else if (!existingChild && item.kind === "interacted" && preRegistrationLiveTurn) {
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
@@ -1199,6 +1226,11 @@ export const makeCodexSessionRuntime = (
                 ? ((notification.params as { turn: { id: string } }).turn.id as string)
                 : undefined;
             if (childTurnId) {
+              yield* Ref.update(collabChildPreRegistrationFailuresRef, (current) => {
+                const next = new Set(current);
+                next.delete(child.agentThreadId);
+                return next;
+              });
               yield* Ref.update(collabChildLiveTurnsRef, (current) => {
                 const next = new Map(current);
                 next.set(child.agentThreadId, childTurnId);
@@ -1303,16 +1335,7 @@ export const makeCodexSessionRuntime = (
               next.delete(child.agentThreadId);
               return next;
             });
-            yield* emitEvent({
-              kind: "notification",
-              threadId: options.threadId,
-              ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
-              method: "collabAgent/statusChanged",
-              payload: {
-                ...childIdentity,
-                status: { type: "systemError" },
-              },
-            });
+            yield* emitCollabChildSystemError(child);
             return true;
           }
           default:
@@ -1385,6 +1408,11 @@ export const makeCodexSessionRuntime = (
                   ? (notification.params as { turn: { id: string } }).turn.id
                   : undefined;
               if (foreignTurnId) {
+                yield* Ref.update(collabChildPreRegistrationFailuresRef, (current) => {
+                  const next = new Set(current);
+                  next.delete(foreignThreadId);
+                  return next;
+                });
                 yield* Ref.update(collabChildLiveTurnsRef, (current) => {
                   const next = new Map(current);
                   next.set(foreignThreadId, foreignTurnId);
@@ -1401,6 +1429,13 @@ export const makeCodexSessionRuntime = (
                 next.delete(foreignThreadId);
                 return next;
               });
+              if (notification.method === "error" && !notification.params.willRetry) {
+                yield* Ref.update(collabChildPreRegistrationFailuresRef, (current) => {
+                  const next = new Set(current);
+                  next.add(foreignThreadId);
+                  return next;
+                });
+              }
             }
           }
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
