@@ -18,6 +18,7 @@ import {
   selectCheckpointTags,
   selectRevisionBuilds,
   selectNightlySyncWorktree,
+  selectRebaseRange,
 } from "./lastcode-checkpoints.mjs";
 
 describe("LastCode checkpoint dashboard", () => {
@@ -169,6 +170,15 @@ describe("LastCode checkpoint dashboard", () => {
       previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
     });
     expect(parseRebaseRange("smoke failed")).toBeUndefined();
+    expect(
+      selectRebaseRange("git -c core.editor=true rebase --continue failed with exit code 1.", {
+        upstreamTag: "v0.0.34-nightly.20260823.1167",
+        previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+      }),
+    ).toEqual({
+      upstreamTag: "v0.0.34-nightly.20260823.1167",
+      previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+    });
   });
 
   it("explains the stopped commit and the upstream change touching conflicted files", () => {
@@ -199,9 +209,26 @@ describe("LastCode checkpoint dashboard", () => {
         isRebaseInProgress: false,
         failedDuringRebase: false,
         hasFailureRecord: false,
+        isDaemonRunning: true,
       })[0],
     ).toBe(
       "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    );
+  });
+
+  it("distinguishes an unrecorded revision failure after the daemon exits", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        recoveryBranch: "sync/revision/v0.0.34-nightly.20260823.1167.1",
+        isRebaseInProgress: false,
+        failedDuringRebase: false,
+        hasFailureRecord: false,
+        isDaemonRunning: false,
+      })[0],
+    ).toBe(
+      "Revision automation stopped after retaining this attempt. Inspect the daemon log for the smoke or publication error, then discard the attempt.",
     );
   });
 
