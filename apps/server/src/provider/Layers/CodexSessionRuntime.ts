@@ -1032,6 +1032,7 @@ export const makeCodexSessionRuntime = (
           ...(child.nickname ? { nickname: child.nickname } : {}),
           ...(child.role ? { role: child.role } : {}),
           ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+          ...(child.parentThreadId ? { parentThreadId: child.parentThreadId } : {}),
           status: { type: "systemError" },
         },
       });
@@ -1116,6 +1117,15 @@ export const makeCodexSessionRuntime = (
           if (state.terminalError) {
             if (!existingChild) {
               yield* emitCollabChildStarted(state);
+              yield* emitCollabChildSystemError(state);
+            } else if (
+              existingChild.nickname !== state.nickname ||
+              existingChild.role !== state.role ||
+              existingChild.agentPath !== state.agentPath ||
+              existingChild.parentThreadId !== state.parentThreadId
+            ) {
+              // Keep the terminal status authoritative while propagating
+              // identity that arrived after the first registration path.
               yield* emitCollabChildSystemError(state);
             }
           } else {
