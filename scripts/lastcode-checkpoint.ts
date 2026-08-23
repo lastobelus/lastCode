@@ -111,6 +111,13 @@ export function checkpointSmokeEnvironment(
   return resolved;
 }
 
+export function checkpointSmokeTypecheckCommands(): ReadonlyArray<ReadonlyArray<string>> {
+  return [
+    ["run", "--filter", "@t3tools/scripts", "typecheck"],
+    ["run", "--filter", "@t3tools/client-runtime", "typecheck"],
+  ];
+}
+
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -673,9 +680,9 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
     ],
     { environment },
   );
-  run(worktree, vp.isolated, ["run", "--filter", "@t3tools/scripts", "typecheck"], {
-    environment,
-  });
+  for (const args of checkpointSmokeTypecheckCommands()) {
+    run(worktree, vp.isolated, args, { environment });
+  }
 }
 
 function notify(platform: NodeJS.Platform, title: string, message: string): void {
