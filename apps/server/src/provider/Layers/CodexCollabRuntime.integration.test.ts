@@ -212,8 +212,8 @@ describe("CodexSessionRuntime collab integration", () => {
               willRetry: false,
             },
           },
-          threadRegistrationA,
           registrationA,
+          threadRegistrationA,
           turnStartedB,
           {
             method: "error",
@@ -283,8 +283,15 @@ describe("CodexSessionRuntime collab integration", () => {
       );
       assert.lengthOf(
         childAFailures,
-        1,
-        "the terminal child state must surface once across both registration paths",
+        2,
+        "late thread metadata must enrich the terminal state without restarting the child",
+      );
+      const terminalMetadataFailure = childAFailures.at(-1);
+      assert.isDefined(terminalMetadataFailure);
+      assert.equal(
+        (terminalMetadataFailure.payload as { parentThreadId?: string }).parentThreadId,
+        ROOT,
+        "the terminal metadata patch must preserve parent linkage from thread registration",
       );
       assert.include(
         startedThreadIds,
