@@ -545,8 +545,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     clearConfirmingArchive();
     setThreadRowActive(false);
   }, [clearConfirmingArchive]);
-  const handleThreadDetailsTooltipOpenChange = useCallback((open: boolean) => {
-    if (!open) setThreadRowActive(false);
+  const handleThreadDetailsTooltipOpenChange = useCallback<
+    NonNullable<React.ComponentProps<typeof Tooltip>["onOpenChange"]>
+  >((open, eventDetails) => {
+    if (!open && eventDetails.reason === "escape-key") setThreadRowActive(false);
   }, []);
   const handleBlurCapture = useCallback(
     (event: React.FocusEvent<HTMLLIElement>) => {
