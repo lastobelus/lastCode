@@ -5,6 +5,7 @@ import {
   checkpointMessage,
   checkpointPromotionPushArgs,
   checkpointSmokeEnvironment,
+  checkpointSmokeTypecheckCommands,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
@@ -65,6 +66,13 @@ it("removes the Electron host mode from checkpoint smoke subprocesses", () => {
     checkpointSmokeEnvironment({ ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" }),
     { KEEP_ME: "yes" },
   );
+});
+
+it("typechecks shared client commands before publishing a checkpoint", () => {
+  assert.deepStrictEqual(checkpointSmokeTypecheckCommands(), [
+    ["run", "--filter", "@t3tools/scripts", "typecheck"],
+    ["run", "--filter", "@t3tools/client-runtime", "typecheck"],
+  ]);
 });
 
 it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {
