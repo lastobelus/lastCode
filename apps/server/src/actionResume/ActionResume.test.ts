@@ -33,6 +33,8 @@ import * as ActionResume from "./ActionResume.ts";
 const threadId = ThreadId.make("thread-action-resume");
 const projectId = ProjectId.make("project-action-resume");
 const providerInstanceId = ProviderInstanceId.make("codex");
+const claudeProviderInstanceId = ProviderInstanceId.make("claudeAgent");
+const openCodeProviderInstanceId = ProviderInstanceId.make("opencode");
 const now = "2026-08-17T00:00:00.000Z";
 
 const thread = {
@@ -170,6 +172,14 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
         instanceId: providerInstanceId,
         driver: ProviderDriverKind.make("codex"),
       } as never,
+      {
+        instanceId: claudeProviderInstanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+      } as never,
+      {
+        instanceId: openCodeProviderInstanceId,
+        driver: ProviderDriverKind.make("opencode"),
+      } as never,
     ]),
     ThreadActionResume.layer,
     Layer.mock(UpdateDrainAdmission)({
@@ -194,19 +204,47 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       ],
     );
 
+    const claudeListed = yield* service.listProjectActions({
+      threadId,
+      providerInstanceId: claudeProviderInstanceId,
+    });
+    assert.isTrue(claudeListed.find(({ id }) => id === "qa")?.resumeEligible);
+
+    const unsupportedListed = yield* service.listProjectActions({
+      threadId,
+      providerInstanceId: openCodeProviderInstanceId,
+    });
+    assert.isFalse(unsupportedListed.find(({ id }) => id === "qa")?.resumeEligible);
+    const unsupportedRun = yield* service
+      .runProjectActionAndResume({ threadId, providerInstanceId: openCodeProviderInstanceId }, "qa")
+      .pipe(Effect.flip);
+    assert.equal(unsupportedRun.reason, "unsupported_provider");
+
+    const claudeRunning = yield* service.runProjectActionAndResume(
+      { threadId, providerInstanceId: claudeProviderInstanceId },
+      "qa",
+    );
+    assert.equal(claudeRunning.outcome, "running");
+    yield* terminalListener!({
+      type: "closed",
+      threadId,
+      terminalId: claudeRunning.terminalId,
+      deleteHistory: true,
+    });
+
     const running = yield* service.runProjectActionAndResume(
       { threadId, providerInstanceId },
       "qa",
     );
     assert.equal(running.outcome, "running");
-    assert.equal(opened.length, 1);
-    assert.equal(written.length, 1);
+    assert.equal(opened.length, 2);
+    assert.equal(written.length, 2);
     assert.isBelow(
       timeline.indexOf("terminal:open"),
       timeline.indexOf("dispatch:thread.activity.append"),
     );
-    assert.match(written[0]?.data ?? "", /vp test run/);
-    assert.match(written[0]?.data ?? "", /exit \$__t3_action_status/);
+    assert.match(written.at(-1)?.data ?? "", /vp test run/);
+    assert.match(written.at(-1)?.data ?? "", /exit \$__t3_action_status/);
 
     assert.isDefined(terminalListener);
     const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
