@@ -189,13 +189,7 @@ describe("CodexSessionRuntime collab integration", () => {
               willRetry: false,
             },
           },
-          {
-            ...registrationA,
-            params: {
-              ...registrationA.params,
-              item: { ...registrationA.params.item, kind: "interacted" },
-            },
-          },
+          registrationA,
           turnStartedB,
           {
             method: "error",
@@ -240,11 +234,29 @@ describe("CodexSessionRuntime collab integration", () => {
       const startedThreadIds = events
         .filter((event) => event.method === "collabAgent/turnStarted")
         .map((event) => (event.payload as { agentThreadId?: string }).agentThreadId);
+      const childAActivityIndex = events.findIndex(
+        (event) =>
+          event.method === "collabAgent/activity" &&
+          (event.payload as { agentThreadId?: string }).agentThreadId === CHILD_A,
+      );
+      const childAFailureIndex = events.findIndex(
+        (event) =>
+          event.method === "collabAgent/statusChanged" &&
+          (event.payload as { agentThreadId?: string; status?: { type?: string } })
+            .agentThreadId === CHILD_A &&
+          (event.payload as { status?: { type?: string } }).status?.type === "systemError",
+      );
 
       assert.notInclude(
         startedThreadIds,
         CHILD_A,
         "a terminal child turn must not replay as live when activity registers it later",
+      );
+      assert.isAtLeast(childAActivityIndex, 0, "the late child registration must still surface");
+      assert.isAbove(
+        childAFailureIndex,
+        childAActivityIndex,
+        "terminal state must follow a late started registration so liveness settles failed",
       );
       assert.include(
         startedThreadIds,
