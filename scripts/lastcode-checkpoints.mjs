@@ -182,6 +182,46 @@ export function failureWasDuringRebase(record) {
   );
 }
 
+export function parseRebaseRange(error) {
+  if (typeof error !== "string") return undefined;
+  const match = /\brebase\s+--onto\s+(\S+)\s+(\S+)(?:\s|$)/.exec(error);
+  return match ? { upstreamTag: match[1], previousUpstreamTag: match[2] } : undefined;
+}
+
+export function selectRebaseRange(error, retainedRange) {
+  return parseRebaseRange(error) ?? retainedRange;
+}
+
+export function formatRecoveryProblemLines({
+  stoppedCommit,
+  conflictPaths = [],
+  previousUpstreamTag,
+  upstreamTag,
+  overlappingUpstreamCommits = [],
+}) {
+  if (!stoppedCommit && conflictPaths.length === 0) return [];
+  const lines = [
+    stoppedCommit
+      ? `Problem: Git could not replay LastCode commit ${stoppedCommit}.`
+      : "Problem: Git could not automatically combine LastCode and upstream changes.",
+  ];
+  if (conflictPaths.length > 0) {
+    lines.push(`Conflicted ${conflictPaths.length === 1 ? "file" : "files"}:`);
+    lines.push(...conflictPaths.map((path) => `  ${path}`));
+  }
+  if (overlappingUpstreamCommits.length > 0) {
+    const range =
+      previousUpstreamTag && upstreamTag
+        ? ` between ${previousUpstreamTag} and ${upstreamTag}`
+        : "";
+    lines.push(
+      `Upstream commits touching ${conflictPaths.length === 1 ? "that file" : "those files"}${range}:`,
+    );
+    lines.push(...overlappingUpstreamCommits.map((commit) => `  ${commit}`));
+  }
+  return lines;
+}
+
 export function checkpointTagsWithoutUnpublishedFailures(tags, publishedTags, records) {
   const published = new Set(publishedTags);
   const latestRuns = latestRunsByUpstreamTag(records);
@@ -278,6 +318,69 @@ function rebaseInProgress(worktree) {
   });
 }
 
+function readRebaseState(worktree, filename) {
+  for (const stateDirectory of ["rebase-merge", "rebase-apply"]) {
+    const gitPath = git(worktree, ["rev-parse", "--git-path", `${stateDirectory}/${filename}`], {
+      allowFailure: true,
+    });
+    if (!gitPath) continue;
+    const path = NodePath.isAbsolute(gitPath) ? gitPath : NodePath.join(worktree, gitPath);
+    if (NodeFS.existsSync(path)) return NodeFS.readFileSync(path, "utf8").trim();
+  }
+  return undefined;
+}
+
+function retainedRebaseRange(worktree) {
+  const onto = readRebaseState(worktree, "onto");
+  const originalHead = readRebaseState(worktree, "orig-head");
+  if (!onto || !originalHead) return undefined;
+  const upstreamTag = git(
+    worktree,
+    ["describe", "--tags", "--exact-match", "--match", "v*-nightly.*", onto],
+    { allowFailure: true },
+  );
+  const previousUpstreamTag = git(
+    worktree,
+    ["describe", "--tags", "--abbrev=0", "--match", "v*-nightly.*", originalHead],
+    { allowFailure: true },
+  );
+  return upstreamTag && previousUpstreamTag ? { upstreamTag, previousUpstreamTag } : undefined;
+}
+
+function recoveryProblemLines(repoRoot, worktree, failure) {
+  if (!rebaseInProgress(worktree)) return [];
+  const conflictPaths = splitLines(
+    git(worktree, ["diff", "--name-only", "--diff-filter=U"], { allowFailure: true }),
+  );
+  const stoppedCommit = git(worktree, ["show", "-s", "--format=%h %s", "REBASE_HEAD"], {
+    allowFailure: true,
+  });
+  const range = selectRebaseRange(failure?.error, retainedRebaseRange(worktree));
+  const overlappingUpstreamCommits =
+    range && conflictPaths.length > 0
+      ? splitLines(
+          git(
+            repoRoot,
+            [
+              "log",
+              "--format=%h %s",
+              `${range.previousUpstreamTag}..${range.upstreamTag}`,
+              "--",
+              ...conflictPaths,
+            ],
+            { allowFailure: true },
+          ),
+        )
+      : [];
+  return formatRecoveryProblemLines({
+    stoppedCommit,
+    conflictPaths,
+    previousUpstreamTag: range?.previousUpstreamTag,
+    upstreamTag: range?.upstreamTag,
+    overlappingUpstreamCommits,
+  });
+}
+
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -289,6 +392,8 @@ export function recoveryActionLines({
   recoveryBranch,
   isRebaseInProgress,
   failedDuringRebase,
+  hasFailureRecord = true,
+  isDaemonRunning = false,
 }) {
   const lines = [];
   if (isRebaseInProgress) {
@@ -299,9 +404,21 @@ export function recoveryActionLines({
     lines.push(
       "The retained rebase is complete; release it so the daemon can replay the recorded resolution.",
     );
-  } else {
+  } else if (hasFailureRecord) {
     lines.push(
       "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
+    );
+  } else if (isDaemonRunning) {
+    lines.push(
+      "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    );
+  } else if (recoveryBranch?.startsWith("sync/revision/")) {
+    lines.push(
+      "Revision automation stopped after retaining this attempt. Inspect the daemon log for the smoke or publication error, then discard the attempt.",
+    );
+  } else {
+    lines.push(
+      "Automation stopped before recording failure details. Inspect the daemon log, then discard this retained attempt.",
     );
   }
   lines.push(
@@ -499,21 +616,22 @@ function styledStatus(status) {
   return style(ansi.pacific, "●");
 }
 
-function daemonSummary() {
+function daemonStatus() {
   const uid = NodeOS.userInfo().uid;
   const result = NodeChildProcess.spawnSync("launchctl", ["print", `gui/${uid}/${SERVICE_LABEL}`], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
-  if (result.error) return "Daemon: unavailable";
-  if (result.status !== 0) return "Daemon: not installed";
+  if (result.error) return { summary: "Daemon: unavailable", running: false };
+  if (result.status !== 0) return { summary: "Daemon: not installed", running: false };
   const state = /^\s*state = (.+)$/m.exec(result.stdout)?.[1] ?? "unknown";
   const exit = /^\s*last exit code = (.+)$/m.exec(result.stdout)?.[1] ?? "—";
   const label = state === "running" ? "running" : "idle";
-  return `Daemon: ${label} · Last exit: ${exit}`;
+  return { summary: `Daemon: ${label} · Last exit: ${exit}`, running: state === "running" };
 }
 
 function printDashboard(repoRoot, home, count, verbose) {
+  const daemon = daemonStatus();
   const remoteState = remotePublicationState(repoRoot);
   const rows = checkpointRows(repoRoot, home, count, remoteState);
   const columns = [
@@ -584,6 +702,9 @@ function printDashboard(repoRoot, home, count, verbose) {
       ),
     );
     console.log(style(ansi.lavender, `Start with: git -C ${shellQuote(recoveryWorktree)} status`));
+    for (const line of recoveryProblemLines(repoRoot, recoveryWorktree, recoveryFailure)) {
+      console.log(style(ansi.error, line));
+    }
     const automationWorktree = findAutomationWorktree(repoRoot);
     for (const line of recoveryActionLines({
       repoRoot,
@@ -592,6 +713,8 @@ function printDashboard(repoRoot, home, count, verbose) {
       recoveryBranch,
       isRebaseInProgress: rebaseInProgress(recoveryWorktree),
       failedDuringRebase: failureWasDuringRebase(recoveryFailure),
+      hasFailureRecord: recoveryFailure !== undefined,
+      isDaemonRunning: daemon.running,
     })) {
       console.log(style(ansi.lavender, line));
     }
@@ -636,7 +759,7 @@ function printDashboard(repoRoot, home, count, verbose) {
       )
     : undefined;
   console.log("");
-  console.log(style(ansi.lavender, daemonSummary()));
+  console.log(style(ansi.lavender, daemon.summary));
   console.log(
     style(
       freshness === "Up to date"
