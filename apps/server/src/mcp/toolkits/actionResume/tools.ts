@@ -21,7 +21,7 @@ const ListedProjectAction = Schema.Struct({
 export const ListProjectActionsTool = Tool.make("list_project_actions", {
   description:
     "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id.",
-  parameters: Schema.Struct({}),
+  parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ actions: Schema.Array(ListedProjectAction) }),
   failure: ActionResumeToolError,
   dependencies,
