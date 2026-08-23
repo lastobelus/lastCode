@@ -78,6 +78,11 @@ it.effect("rejects MCP action launch while update drain admission is closed", ()
 
     const result = yield* Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
+      const listTool = server.tools.find(({ tool }) => tool.name === "list_project_actions");
+      expect(listTool?.tool.inputSchema).toEqual({
+        type: "object",
+        additionalProperties: false,
+      });
       return yield* server
         .callTool({ name: "run_project_action_and_resume", arguments: { actionId: "qa" } })
         .pipe(
