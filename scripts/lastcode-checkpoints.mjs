@@ -400,6 +400,10 @@ export function recoveryActionLines({
     lines.push(
       `Resolve and stage conflicts, then repeat until the rebase finishes: git -C ${shellQuote(worktree)} rebase --continue`,
     );
+  } else if (isDaemonRunning) {
+    return [
+      "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    ];
   } else if (failedDuringRebase) {
     lines.push(
       "The retained rebase is complete; release it so the daemon can replay the recorded resolution.",
@@ -407,10 +411,6 @@ export function recoveryActionLines({
   } else if (hasFailureRecord) {
     lines.push(
       "No rebase is in progress. Fix the smoke failure on lastcode/main, then discard this retained attempt.",
-    );
-  } else if (isDaemonRunning) {
-    lines.push(
-      "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
     );
   } else if (recoveryBranch?.startsWith("sync/revision/")) {
     lines.push(
