@@ -6,7 +6,9 @@ import {
   failureDetailLines,
   failureWasDuringRebase,
   failedRunsWithoutPublishedTags,
+  formatRecoveryProblemLines,
   formatDuration,
+  parseRebaseRange,
   parseOptions,
   parseRemotePublicationState,
   parseTrailers,
@@ -16,6 +18,7 @@ import {
   selectCheckpointTags,
   selectRevisionBuilds,
   selectNightlySyncWorktree,
+  selectRebaseRange,
 } from "./lastcode-checkpoints.mjs";
 
 describe("LastCode checkpoint dashboard", () => {
@@ -155,6 +158,78 @@ describe("LastCode checkpoint dashboard", () => {
         error: "git -c core.editor=true rebase --continue failed with exit code 1.",
       }),
     ).toBe(true);
+  });
+
+  it("extracts the checkpoint range from a failed rebase command", () => {
+    expect(
+      parseRebaseRange(
+        "git rebase --onto v0.0.34-nightly.20260823.1167 v0.0.34-nightly.20260823.1166 failed with exit code 1.",
+      ),
+    ).toEqual({
+      upstreamTag: "v0.0.34-nightly.20260823.1167",
+      previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+    });
+    expect(parseRebaseRange("smoke failed")).toBeUndefined();
+    expect(
+      selectRebaseRange("git -c core.editor=true rebase --continue failed with exit code 1.", {
+        upstreamTag: "v0.0.34-nightly.20260823.1167",
+        previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+      }),
+    ).toEqual({
+      upstreamTag: "v0.0.34-nightly.20260823.1167",
+      previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+    });
+  });
+
+  it("explains the stopped commit and the upstream change touching conflicted files", () => {
+    expect(
+      formatRecoveryProblemLines({
+        stoppedCommit: "8bac1eb94 feat(lastcode): resume agents after opted-in Actions (#28)",
+        conflictPaths: ["packages/contracts/src/rpc.ts"],
+        previousUpstreamTag: "v0.0.34-nightly.20260823.1166",
+        upstreamTag: "v0.0.34-nightly.20260823.1167",
+        overlappingUpstreamCommits: [
+          "3db38b881 feat(codex): submit thread feedback to OpenAI (#7949)",
+        ],
+      }),
+    ).toEqual([
+      "Problem: Git could not replay LastCode commit 8bac1eb94 feat(lastcode): resume agents after opted-in Actions (#28).",
+      "Conflicted file:",
+      "  packages/contracts/src/rpc.ts",
+      "Upstream commits touching that file between v0.0.34-nightly.20260823.1166 and v0.0.34-nightly.20260823.1167:",
+      "  3db38b881 feat(codex): submit thread feedback to OpenAI (#7949)",
+    ]);
+  });
+
+  it("does not diagnose an in-flight retained attempt as a smoke failure", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        isRebaseInProgress: false,
+        failedDuringRebase: false,
+        hasFailureRecord: false,
+        isDaemonRunning: true,
+      })[0],
+    ).toBe(
+      "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    );
+  });
+
+  it("distinguishes an unrecorded revision failure after the daemon exits", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        recoveryBranch: "sync/revision/v0.0.34-nightly.20260823.1167.1",
+        isRebaseInProgress: false,
+        failedDuringRebase: false,
+        hasFailureRecord: false,
+        isDaemonRunning: false,
+      })[0],
+    ).toBe(
+      "Revision automation stopped after retaining this attempt. Inspect the daemon log for the smoke or publication error, then discard the attempt.",
+    );
   });
 
   it("lets a published checkpoint tag reconcile an ambiguous failed push record", () => {
