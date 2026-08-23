@@ -545,6 +545,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     clearConfirmingArchive();
     setThreadRowActive(false);
   }, [clearConfirmingArchive]);
+  const handleThreadDetailsTooltipOpenChange = useCallback((open: boolean) => {
+    if (!open) setThreadRowActive(false);
+  }, []);
   const handleBlurCapture = useCallback(
     (event: React.FocusEvent<HTMLLIElement>) => {
       const currentTarget = event.currentTarget;
@@ -1013,6 +1016,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         disabled={hasActiveAnnotation}
         handle={threadDetailsTooltipHandle}
         open={!hasActiveAnnotation && threadRowActive}
+        onOpenChange={handleThreadDetailsTooltipOpenChange}
       >
         <TooltipPopup
           align="start"
