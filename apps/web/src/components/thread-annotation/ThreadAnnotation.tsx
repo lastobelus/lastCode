@@ -7,6 +7,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   useSyncExternalStore,
@@ -81,6 +82,7 @@ export function ThreadAnnotationEditorDialog(props: {
 }) {
   const [body, setBody] = useState("");
   const [saving, setSaving] = useState(false);
+  const formId = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const wasOpenRef = useRef(false);
 
@@ -105,14 +107,14 @@ export function ThreadAnnotationEditorDialog(props: {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogPopup className="max-w-xl">
-        <form onSubmit={(event) => void submit(event)}>
-          <DialogHeader>
-            <DialogTitle>{props.annotation ? "Edit annotation" : "Annotate thread"}</DialogTitle>
-            <DialogDescription>
-              Markdown supports headings, lists, task lists, links, and tags.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel scrollFade={false}>
+        <DialogHeader>
+          <DialogTitle>{props.annotation ? "Edit annotation" : "Annotate thread"}</DialogTitle>
+          <DialogDescription>
+            Markdown supports headings, lists, task lists, links, and tags.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel scrollFade={false}>
+          <form id={formId} onSubmit={(event) => void submit(event)}>
             <Textarea
               ref={textareaRef}
               aria-label="Thread annotation"
@@ -130,16 +132,16 @@ export function ThreadAnnotationEditorDialog(props: {
                 }
               }}
             />
-          </DialogPanel>
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button disabled={!body.trim() || saving} type="submit">
-              {saving ? "Saving…" : props.annotation ? "Save" : "Add annotation"}
-            </Button>
-          </DialogFooter>
-        </form>
+          </form>
+        </DialogPanel>
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button disabled={!body.trim() || saving} form={formId} type="submit">
+            {saving ? "Saving…" : props.annotation ? "Save" : "Add annotation"}
+          </Button>
+        </DialogFooter>
       </DialogPopup>
     </Dialog>
   );
