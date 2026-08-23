@@ -148,6 +148,119 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("replays only retrying pre-registration child turns after errors", () =>
+    Effect.gen(function* () {
+      const byIndex = wireFixture.notifications;
+      const turnStartedA = byIndex.find(
+        (entry) =>
+          entry.method === "turn/started" &&
+          (entry.params as { threadId?: string }).threadId === CHILD_A,
+      );
+      const turnStartedB = byIndex.find(
+        (entry) =>
+          entry.method === "turn/started" &&
+          (entry.params as { threadId?: string }).threadId === CHILD_B,
+      );
+      const registrationA = byIndex.find((entry) => {
+        const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
+        return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_A;
+      });
+      const registrationB = byIndex.find((entry) => {
+        const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
+        return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_B;
+      });
+      assert.isDefined(turnStartedA);
+      assert.isDefined(turnStartedB);
+      assert.isDefined(registrationA);
+      assert.isDefined(registrationB);
+      const turnIdA = (turnStartedA.params as { turn: { id: string } }).turn.id;
+      const turnIdB = (turnStartedB.params as { turn: { id: string } }).turn.id;
+
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [
+          turnStartedA,
+          {
+            method: "error",
+            params: {
+              threadId: CHILD_A,
+              turnId: turnIdA,
+              error: { message: "child failed before registration" },
+              willRetry: false,
+            },
+          },
+          {
+            ...registrationA,
+            params: {
+              ...registrationA.params,
+              item: { ...registrationA.params.item, kind: "interacted" },
+            },
+          },
+          turnStartedB,
+          {
+            method: "error",
+            params: {
+              threadId: CHILD_B,
+              turnId: turnIdB,
+              error: { message: "child will retry before registration" },
+              willRetry: true,
+            },
+          },
+          {
+            ...registrationB,
+            params: {
+              ...registrationB.params,
+              item: { ...registrationB.params.item, kind: "interacted" },
+            },
+          },
+        ],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-collab-terminal-before-registration"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.method === "turn/completed"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "error before registration" });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const startedThreadIds = events
+        .filter((event) => event.method === "collabAgent/turnStarted")
+        .map((event) => (event.payload as { agentThreadId?: string }).agentThreadId);
+
+      assert.notInclude(
+        startedThreadIds,
+        CHILD_A,
+        "a terminal child turn must not replay as live when activity registers it later",
+      );
+      assert.include(
+        startedThreadIds,
+        CHILD_B,
+        "a retrying child turn must remain live when activity registers it later",
+      );
+      assert.notInclude(
+        events.map((event) => event.method),
+        "error",
+        "pre-registration child errors must not leak onto the parent event stream",
+      );
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   // it.live: the runtime talks to a real child process; under it.effect's
   // TestClock the internal timers freeze and the join never completes.
   it.live("Stop interrupts every live child regardless of registration timing", () =>

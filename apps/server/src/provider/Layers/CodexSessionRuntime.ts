@@ -753,6 +753,7 @@ function shouldSuppressChildConversationNotification(
     method === "thread/tokenUsage/updated" ||
     method === "turn/started" ||
     method === "turn/completed" ||
+    method === "error" ||
     method === "turn/plan/updated" ||
     method === "item/plan/delta"
   );
@@ -1392,7 +1393,8 @@ export const makeCodexSessionRuntime = (
               }
             } else if (
               notification.method === "turn/completed" ||
-              notification.method === "thread/closed"
+              notification.method === "thread/closed" ||
+              (notification.method === "error" && !notification.params.willRetry)
             ) {
               yield* Ref.update(collabChildLiveTurnsRef, (current) => {
                 const next = new Map(current);
