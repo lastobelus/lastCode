@@ -4165,7 +4165,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(mcpSession
             ? {
                 append:
-                  "When the user asks to run a saved Project Action by name, call mcp__t3-code__list_project_actions, match the returned name, then call mcp__t3-code__run_project_action_and_resume. End your turn immediately after launch so the automated follow-up can arrive; do not search for or reproduce the Action command.",
+                  "When the user asks to run a saved Project Action by name, call mcp__t3-code__list_project_actions. If exactly one Action matches that name, call mcp__t3-code__run_project_action_and_resume with its id; ask the user to clarify if multiple Actions match. End your turn immediately after launch so the automated follow-up can arrive; do not search for or reproduce the Action command.",
               }
             : {}),
         },
