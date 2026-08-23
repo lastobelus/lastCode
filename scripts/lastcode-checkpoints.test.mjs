@@ -210,10 +210,27 @@ describe("LastCode checkpoint dashboard", () => {
         failedDuringRebase: false,
         hasFailureRecord: false,
         isDaemonRunning: true,
-      })[0],
-    ).toBe(
+      }),
+    ).toEqual([
       "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
-    );
+    ]);
+  });
+
+  it("does not offer cleanup while the daemon validates a completed rebase", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: false,
+        failedDuringRebase: true,
+        hasFailureRecord: true,
+        isDaemonRunning: true,
+      }),
+    ).toEqual([
+      "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    ]);
   });
 
   it("distinguishes an unrecorded revision failure after the daemon exits", () => {
