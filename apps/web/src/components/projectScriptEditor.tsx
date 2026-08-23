@@ -361,10 +361,11 @@ export function ProjectScriptEditorDialog({
               </label>
               <label className="flex items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
                 <span className="space-y-0.5">
-                  <span className="block">Allow agents to run and resume</span>
+                  <span className="block">Allow Codex and Claude to run and resume</span>
                   <span className="block text-xs text-muted-foreground">
-                    Lets a Codex agent launch this command and receive one automated follow-up when
-                    it finishes. The terminal transcript stays available as the output artifact.
+                    Lets Codex or Claude launch this command and receive one automated follow-up
+                    when it finishes. The terminal transcript stays available as the output
+                    artifact.
                   </span>
                 </span>
                 <Switch
