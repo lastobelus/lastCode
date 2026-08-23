@@ -41,6 +41,11 @@ import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 
 export const ACTION_RESUME_ACTIVITY_KIND = "action.resume.lifecycle";
 
+const ACTION_RESUME_PROVIDER_DRIVERS = new Set([
+  ProviderDriverKind.make("codex"),
+  ProviderDriverKind.make("claudeAgent"),
+]);
+
 export interface ListedProjectAction {
   readonly id: string;
   readonly name: string;
@@ -269,14 +274,14 @@ const make = Effect.gen(function* () {
   const decodeState = Schema.decodeUnknownEffect(ActionResumeState);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
 
-  const providerIsCodex = Effect.fn("ActionResume.providerIsCodex")(function* (
-    providerInstanceId: ProviderInstanceId,
-  ) {
-    const provider = (yield* providers.getProviders).find(
-      (entry) => entry.instanceId === providerInstanceId,
-    );
-    return provider?.driver === ProviderDriverKind.make("codex");
-  });
+  const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
+    function* (providerInstanceId: ProviderInstanceId) {
+      const provider = (yield* providers.getProviders).find(
+        (entry) => entry.instanceId === providerInstanceId,
+      );
+      return provider !== undefined && ACTION_RESUME_PROVIDER_DRIVERS.has(provider.driver);
+    },
+  );
 
   const persistState = Effect.fn("ActionResume.persistState")(function* (state: ActionResumeState) {
     const previous = registry.getLatest(state.threadId);
@@ -498,12 +503,12 @@ const make = Effect.gen(function* () {
   const listProjectActionsImpl = Effect.fn("ActionResume.listProjectActions")(function* (
     invocation: ActionResumeInvocation,
   ) {
-    const codex = yield* providerIsCodex(invocation.providerInstanceId);
+    const providerSupported = yield* providerSupportsActionResume(invocation.providerInstanceId);
     const { project } = yield* resolveProjectContext(invocation.threadId);
     const launchBlocked = actionBlocksNewLaunch(registry.getLatest(invocation.threadId));
     return project.scripts.map((script) => {
-      const disabledReason = !codex
-        ? "Resume-capable Actions are available to Codex providers in this first slice."
+      const disabledReason = !providerSupported
+        ? "Resume-capable Actions are currently available to Codex and Claude providers."
         : script.allowAgentResume !== true
           ? "This Action has not been opted in for agent-triggered resume."
           : launchBlocked
@@ -593,10 +598,10 @@ const make = Effect.gen(function* () {
 
   const runProjectActionAndResumeImpl = Effect.fn("ActionResume.runProjectActionAndResume")(
     function* (invocation: ActionResumeInvocation, actionId: string) {
-      if (!(yield* providerIsCodex(invocation.providerInstanceId))) {
+      if (!(yield* providerSupportsActionResume(invocation.providerInstanceId))) {
         return yield* new ActionResumeError({
           reason: "unsupported_provider",
-          message: "Resume-capable Actions are available to Codex providers in this first slice.",
+          message: "Resume-capable Actions are currently available to Codex and Claude providers.",
         });
       }
       const { project } = yield* resolveProjectContext(invocation.threadId);
