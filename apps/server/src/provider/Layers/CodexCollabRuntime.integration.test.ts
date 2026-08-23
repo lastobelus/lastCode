@@ -165,6 +165,7 @@ describe("CodexSessionRuntime collab integration", () => {
         const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
         return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_A;
       });
+      const rootThreadStarted = byIndex.find((entry) => entry.method === "thread/started");
       const registrationB = byIndex.find((entry) => {
         const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
         return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_B;
@@ -173,8 +174,30 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.isDefined(turnStartedB);
       assert.isDefined(registrationA);
       assert.isDefined(registrationB);
+      assert.isDefined(rootThreadStarted);
       const turnIdA = (turnStartedA.params as { turn: { id: string } }).turn.id;
       const turnIdB = (turnStartedB.params as { turn: { id: string } }).turn.id;
+      const threadRegistrationA = {
+        ...rootThreadStarted,
+        params: {
+          thread: {
+            ...rootThreadStarted.params.thread,
+            id: CHILD_A,
+            sessionId: CHILD_A,
+            parentThreadId: ROOT,
+            source: {
+              subAgent: {
+                thread_spawn: {
+                  agent_nickname: "alpha",
+                  agent_path: "/root/alpha",
+                  depth: 1,
+                  parent_thread_id: ROOT,
+                },
+              },
+            },
+          },
+        },
+      };
 
       const script = {
         rootThreadId: ROOT,
@@ -189,6 +212,7 @@ describe("CodexSessionRuntime collab integration", () => {
               willRetry: false,
             },
           },
+          threadRegistrationA,
           registrationA,
           turnStartedB,
           {
@@ -234,12 +258,12 @@ describe("CodexSessionRuntime collab integration", () => {
       const startedThreadIds = events
         .filter((event) => event.method === "collabAgent/turnStarted")
         .map((event) => (event.payload as { agentThreadId?: string }).agentThreadId);
-      const childAActivityIndex = events.findIndex(
+      const childARegistrationEvents = events.filter(
         (event) =>
-          event.method === "collabAgent/activity" &&
+          (event.method === "collabAgent/started" || event.method === "collabAgent/activity") &&
           (event.payload as { agentThreadId?: string }).agentThreadId === CHILD_A,
       );
-      const childAFailureIndex = events.findIndex(
+      const childAFailures = events.filter(
         (event) =>
           event.method === "collabAgent/statusChanged" &&
           (event.payload as { agentThreadId?: string; status?: { type?: string } })
@@ -252,11 +276,15 @@ describe("CodexSessionRuntime collab integration", () => {
         CHILD_A,
         "a terminal child turn must not replay as live when activity registers it later",
       );
-      assert.isAtLeast(childAActivityIndex, 0, "the late child registration must still surface");
-      assert.isAbove(
-        childAFailureIndex,
-        childAActivityIndex,
-        "terminal state must follow a late started registration so liveness settles failed",
+      assert.deepEqual(
+        childARegistrationEvents.map((event) => event.method),
+        [],
+        "late registration through either path must not restart a failed child",
+      );
+      assert.lengthOf(
+        childAFailures,
+        1,
+        "the terminal child state must surface once across both registration paths",
       );
       assert.include(
         startedThreadIds,
