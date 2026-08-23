@@ -676,6 +676,8 @@ interface CollabChildAgentState {
   readonly agentPath: string | undefined;
   readonly depth: number | undefined;
   readonly parentThreadId: string | undefined;
+  /** A terminal error remains authoritative until a genuine new turn starts. */
+  readonly terminalError: boolean;
   /**
    * Parent canonical turn active when the child registered. Stamped on every
    * synthetic collabAgent/* event so clients can batch a fleet by its spawn
@@ -1082,28 +1084,39 @@ export const makeCodexSessionRuntime = (
             parentThreadId:
               spawn.parentThreadId ?? thread.parentThreadId ?? existingChild?.parentThreadId,
             spawnTurnId,
+            terminalError: existingChild?.terminalError ?? preRegistrationFailure,
           };
           yield* Ref.update(collabChildAgentsRef, (current) => {
             const next = new Map(current);
             next.set(thread.id, state);
             return next;
           });
-          yield* emitEvent({
-            kind: "notification",
-            threadId: options.threadId,
-            method: "collabAgent/started",
-            ...(state.spawnTurnId ? { turnId: state.spawnTurnId } : {}),
-            payload: {
-              agentThreadId: state.agentThreadId,
-              ...(state.nickname ? { nickname: state.nickname } : {}),
-              ...(state.role ? { role: state.role } : {}),
-              ...(state.agentPath ? { agentPath: state.agentPath } : {}),
-              ...(state.depth !== undefined ? { depth: state.depth } : {}),
-              ...(state.parentThreadId ? { parentThreadId: state.parentThreadId } : {}),
-            },
-          });
           if (preRegistrationFailure) {
-            yield* emitCollabChildSystemError(state);
+            yield* Ref.update(collabChildPreRegistrationFailuresRef, (current) => {
+              const next = new Set(current);
+              next.delete(thread.id);
+              return next;
+            });
+          }
+          if (state.terminalError) {
+            if (!existingChild) {
+              yield* emitCollabChildSystemError(state);
+            }
+          } else {
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "collabAgent/started",
+              ...(state.spawnTurnId ? { turnId: state.spawnTurnId } : {}),
+              payload: {
+                agentThreadId: state.agentThreadId,
+                ...(state.nickname ? { nickname: state.nickname } : {}),
+                ...(state.role ? { role: state.role } : {}),
+                ...(state.agentPath ? { agentPath: state.agentPath } : {}),
+                ...(state.depth !== undefined ? { depth: state.depth } : {}),
+                ...(state.parentThreadId ? { parentThreadId: state.parentThreadId } : {}),
+              },
+            });
           }
           return true;
         }
@@ -1153,21 +1166,18 @@ export const makeCodexSessionRuntime = (
               depth: existingChild?.depth,
               parentThreadId: existingChild?.parentThreadId,
               spawnTurnId: existingChild ? existingChild.spawnTurnId : activitySpawnTurnId,
+              terminalError: existingChild?.terminalError ?? preRegistrationFailure,
             });
             return next;
           });
           const registeredChild = (yield* Ref.get(collabChildAgentsRef)).get(item.agentThreadId);
-          yield* emitEvent({
-            kind: "notification",
-            threadId: options.threadId,
-            method: "collabAgent/activity",
-            ...(registeredChild?.spawnTurnId ? { turnId: registeredChild.spawnTurnId } : {}),
-            payload: {
-              agentThreadId: item.agentThreadId,
-              agentPath: item.agentPath,
-              activityKind: item.kind,
-            },
-          });
+          if (preRegistrationFailure) {
+            yield* Ref.update(collabChildPreRegistrationFailuresRef, (current) => {
+              const next = new Set(current);
+              next.delete(item.agentThreadId);
+              return next;
+            });
+          }
           // A child turn can start before this activity registers the child.
           // The foreign-notification suppressor records that live turn but
           // cannot emit agent lifecycle until identity is known. Replay the
@@ -1177,21 +1187,36 @@ export const makeCodexSessionRuntime = (
           const preRegistrationLiveTurn = (yield* Ref.get(collabChildLiveTurnsRef)).get(
             item.agentThreadId,
           );
-          if (preRegistrationFailure && registeredChild) {
-            yield* emitCollabChildSystemError(registeredChild);
-          } else if (!existingChild && item.kind === "interacted" && preRegistrationLiveTurn) {
+          if (registeredChild?.terminalError) {
+            if (!existingChild) {
+              yield* emitCollabChildSystemError(registeredChild);
+            }
+          } else {
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
+              method: "collabAgent/activity",
               ...(registeredChild?.spawnTurnId ? { turnId: registeredChild.spawnTurnId } : {}),
-              method: "collabAgent/turnStarted",
               payload: {
                 agentThreadId: item.agentThreadId,
-                ...(registeredChild?.nickname ? { nickname: registeredChild.nickname } : {}),
-                ...(registeredChild?.role ? { role: registeredChild.role } : {}),
                 agentPath: item.agentPath,
+                activityKind: item.kind,
               },
             });
+            if (!existingChild && item.kind === "interacted" && preRegistrationLiveTurn) {
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                ...(registeredChild?.spawnTurnId ? { turnId: registeredChild.spawnTurnId } : {}),
+                method: "collabAgent/turnStarted",
+                payload: {
+                  agentThreadId: item.agentThreadId,
+                  ...(registeredChild?.nickname ? { nickname: registeredChild.nickname } : {}),
+                  ...(registeredChild?.role ? { role: registeredChild.role } : {}),
+                  agentPath: item.agentPath,
+                },
+              });
+            }
           }
           return true;
         }
@@ -1234,6 +1259,11 @@ export const makeCodexSessionRuntime = (
               yield* Ref.update(collabChildLiveTurnsRef, (current) => {
                 const next = new Map(current);
                 next.set(child.agentThreadId, childTurnId);
+                return next;
+              });
+              yield* Ref.update(collabChildAgentsRef, (current) => {
+                const next = new Map(current);
+                next.set(child.agentThreadId, { ...child, terminalError: false });
                 return next;
               });
             }
@@ -1333,6 +1363,11 @@ export const makeCodexSessionRuntime = (
             yield* Ref.update(collabChildLiveTurnsRef, (current) => {
               const next = new Map(current);
               next.delete(child.agentThreadId);
+              return next;
+            });
+            yield* Ref.update(collabChildAgentsRef, (current) => {
+              const next = new Map(current);
+              next.set(child.agentThreadId, { ...child, terminalError: true });
               return next;
             });
             yield* emitCollabChildSystemError(child);
