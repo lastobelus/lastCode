@@ -278,8 +278,8 @@ describe("CodexSessionRuntime collab integration", () => {
       );
       assert.deepEqual(
         childARegistrationEvents.map((event) => event.method),
-        [],
-        "late registration through either path must not restart a failed child",
+        ["collabAgent/started"],
+        "a failed child needs one start anchor, but later registration must not duplicate it",
       );
       assert.lengthOf(
         childAFailures,

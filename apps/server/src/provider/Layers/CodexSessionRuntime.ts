@@ -1006,6 +1006,21 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+    const emitCollabChildStarted = (child: CollabChildAgentState) =>
+      emitEvent({
+        kind: "notification",
+        threadId: options.threadId,
+        method: "collabAgent/started",
+        ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
+        payload: {
+          agentThreadId: child.agentThreadId,
+          ...(child.nickname ? { nickname: child.nickname } : {}),
+          ...(child.role ? { role: child.role } : {}),
+          ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+          ...(child.depth !== undefined ? { depth: child.depth } : {}),
+          ...(child.parentThreadId ? { parentThreadId: child.parentThreadId } : {}),
+        },
+      });
     const emitCollabChildSystemError = (child: CollabChildAgentState) =>
       emitEvent({
         kind: "notification",
@@ -1100,23 +1115,11 @@ export const makeCodexSessionRuntime = (
           }
           if (state.terminalError) {
             if (!existingChild) {
+              yield* emitCollabChildStarted(state);
               yield* emitCollabChildSystemError(state);
             }
           } else {
-            yield* emitEvent({
-              kind: "notification",
-              threadId: options.threadId,
-              method: "collabAgent/started",
-              ...(state.spawnTurnId ? { turnId: state.spawnTurnId } : {}),
-              payload: {
-                agentThreadId: state.agentThreadId,
-                ...(state.nickname ? { nickname: state.nickname } : {}),
-                ...(state.role ? { role: state.role } : {}),
-                ...(state.agentPath ? { agentPath: state.agentPath } : {}),
-                ...(state.depth !== undefined ? { depth: state.depth } : {}),
-                ...(state.parentThreadId ? { parentThreadId: state.parentThreadId } : {}),
-              },
-            });
+            yield* emitCollabChildStarted(state);
           }
           return true;
         }
@@ -1189,6 +1192,7 @@ export const makeCodexSessionRuntime = (
           );
           if (registeredChild?.terminalError) {
             if (!existingChild) {
+              yield* emitCollabChildStarted(registeredChild);
               yield* emitCollabChildSystemError(registeredChild);
             }
           } else {
