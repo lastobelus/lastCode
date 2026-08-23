@@ -363,8 +363,8 @@ export function ProjectScriptEditorDialog({
                 <span className="space-y-0.5">
                   <span className="block">Allow agents to run and resume</span>
                   <span className="block text-xs text-muted-foreground">
-                    Lets a Codex agent launch this command and receive one automated follow-up when
-                    it finishes. The terminal transcript stays available as the output artifact.
+                    Lets an agent launch this command and receive one automated follow-up when it
+                    finishes. The terminal transcript stays available as the output artifact.
                   </span>
                 </span>
                 <Switch

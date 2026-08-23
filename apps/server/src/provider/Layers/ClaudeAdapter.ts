@@ -4159,7 +4159,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          ...(mcpSession
+            ? {
+                append:
+                  "When the user asks to run a saved Project Action by name, call mcp__t3-code__list_project_actions, match the returned name, then call mcp__t3-code__run_project_action_and_resume. Return control after launch and wait for the automated follow-up; do not search for or reproduce the Action command.",
+              }
+            : {}),
+        },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
@@ -4189,6 +4198,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   headers: {
                     Authorization: mcpSession.authorizationHeader,
                   },
+                  // Product-native tools must be available when Claude interprets
+                  // prompts such as "run <Project Action>".
+                  alwaysLoad: true,
                 },
               },
             }
