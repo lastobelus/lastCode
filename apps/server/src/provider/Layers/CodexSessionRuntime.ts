@@ -1296,6 +1296,9 @@ export const makeCodexSessionRuntime = (
               next.delete(child.agentThreadId);
               return next;
             });
+            if (child.terminalError) {
+              return true;
+            }
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
@@ -1308,6 +1311,9 @@ export const makeCodexSessionRuntime = (
             });
             return true;
           case "thread/status/changed":
+            if (child.terminalError) {
+              return true;
+            }
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
@@ -1353,6 +1359,9 @@ export const makeCodexSessionRuntime = (
               next.delete(child.agentThreadId);
               return next;
             });
+            if (child.terminalError) {
+              return true;
+            }
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
