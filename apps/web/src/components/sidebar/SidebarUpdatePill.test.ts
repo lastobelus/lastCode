@@ -133,6 +133,15 @@ describe("SidebarUpdatePill local failure", () => {
     ).toContain("bg-sidebar-control-surface");
   });
 
+  it("keeps disabled update details hoverable without applying action hover styling", () => {
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        isInteractionDisabled: true,
+        showUpdateIconState: true,
+      }),
+    ).not.toContain("hover:");
+  });
   it("renders persistent failure context and an accessible copy action", () => {
     const markup = renderToStaticMarkup(
       createElement(SidebarLocalBuildFailurePopover, {
