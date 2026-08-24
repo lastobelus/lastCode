@@ -349,6 +349,29 @@ describe("LastCode userland install command", () => {
     ).rejects.toThrow("did not remain running");
   });
 
+  it("can wait for startup without relaunching the app", async () => {
+    let elapsed = 0;
+    let launches = 0;
+    await expect(
+      launchApp("/Applications/LastCode.app", {
+        isRunning: () => false,
+        maxLaunchAttempts: 1,
+        now: () => elapsed,
+        pollIntervalMs: 250,
+        retryIntervalMs: 100,
+        runCommand: () => {
+          launches += 1;
+        },
+        stabilityMs: 500,
+        timeoutMs: 1_000,
+        wait: async (delay) => {
+          elapsed += delay;
+        },
+      }),
+    ).rejects.toThrow("did not remain running");
+    expect(launches).toBe(1);
+  });
+
   it("restores the previous app when launch fails after the swap", async () => {
     const root = temporaryDirectory();
     const targetPath = NodePath.join(root, "LastCode.app");
