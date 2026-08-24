@@ -24,7 +24,14 @@ import {
   AuthWebSocketTicketResult,
   ServerAuthSessionMethod,
 } from "./auth.ts";
-import { AuthSessionId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  AuthSessionId,
+  EnvironmentId,
+  MessageId,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TurnId,
+} from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   ClientOrchestrationCommand,
@@ -62,6 +69,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_scope",
   "scope_not_granted",
   "invalid_command",
+  "wrong_environment",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -184,7 +192,10 @@ export class EnvironmentInternalError extends Schema.TaggedErrorClass<Environmen
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "correlation_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedErrorClass<EnvironmentResourceNotFoundError>()(
@@ -497,6 +508,43 @@ const EnvironmentOrchestrationThreadSnapshotQuery = {
   beforeCursor: Schema.optional(TrimmedNonEmptyString),
 };
 
+export const ThreadWaitHandle = Schema.Struct({
+  kind: Schema.Literal("wait-handle"),
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  messageId: MessageId,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ThreadWaitHandle = typeof ThreadWaitHandle.Type;
+
+export const ThreadWaitResult = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("completed"),
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    turnId: TurnId,
+    response: Schema.String,
+    responseTruncated: Schema.Boolean,
+  }),
+  Schema.Struct({
+    kind: Schema.Literals(["error", "interrupted"]),
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    turnId: Schema.optional(TurnId),
+  }),
+  Schema.Struct({ kind: Schema.Literal("timed-out"), waitHandle: ThreadWaitHandle }),
+]);
+export type ThreadWaitResult = typeof ThreadWaitResult.Type;
+
+const ThreadWaitInput = Schema.Struct({
+  waitHandle: ThreadWaitHandle,
+  timeoutMs: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isBetween({ minimum: 1, maximum: 600_000 }),
+  ),
+});
+
 export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/orchestration/snapshot", {
@@ -527,6 +575,19 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       payload: ClientOrchestrationCommand,
       success: DispatchResult,
       error: EnvironmentOrchestrationDispatchErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("waitThread", "/api/orchestration/thread-wait", {
+      headers: OptionalBearerHeaders,
+      payload: ThreadWaitInput,
+      success: ThreadWaitResult,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentScopeRequiredError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentInternalError,
+      ],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
