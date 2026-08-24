@@ -90,10 +90,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
           return yield* projectionSnapshotQuery
-            .getShellSnapshot({
-              includeWorktreeCleanupTombstones:
-                args.payload.includeWorktreeCleanupTombstones === "true",
-            })
+            .getShellSnapshot()
             .pipe(
               Effect.catch((cause) =>
                 failEnvironmentInternal("orchestration_snapshot_failed", cause),

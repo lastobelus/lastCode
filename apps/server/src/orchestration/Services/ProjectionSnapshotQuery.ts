@@ -81,9 +81,10 @@ export interface ProjectionSnapshotQueryShape {
    * Returns only projects and thread shell summaries so clients can bootstrap
    * lightweight navigation state without hydrating every thread body.
    */
-  readonly getShellSnapshot: (options?: {
-    readonly includeWorktreeCleanupTombstones?: boolean;
-  }) => Effect.Effect<OrchestrationShellSnapshot, ProjectionRepositoryError>;
+  readonly getShellSnapshot: () => Effect.Effect<
+    OrchestrationShellSnapshot,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read archived thread shell summaries for the archive page.

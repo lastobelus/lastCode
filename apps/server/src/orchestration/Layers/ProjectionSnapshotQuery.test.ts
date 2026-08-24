@@ -1644,13 +1644,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         WHERE thread_id = 'thread-deleted'
       `;
 
-      const legacyCleanupShellSnapshot = yield* snapshotQuery.getShellSnapshot();
-      assert.equal(legacyCleanupShellSnapshot.projects.length, 1);
-      assert.equal(legacyCleanupShellSnapshot.threads.length, 0);
-
-      const cleanupShellSnapshot = yield* snapshotQuery.getShellSnapshot({
-        includeWorktreeCleanupTombstones: true,
-      });
+      const cleanupShellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(cleanupShellSnapshot.projects.length, 1);
       assert.deepStrictEqual(cleanupShellSnapshot.threads[0]?.worktreeCleanup, {
         status: "deleting",

@@ -28,7 +28,6 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
   readonly prepared: PreparedConnection;
   readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   readonly timeoutMs?: number;
-  readonly includeWorktreeCleanupTombstones?: boolean;
 }) {
   const requestUrl = environmentEndpointUrl(input.prepared.httpBaseUrl, "/api/orchestration/shell");
   const client = yield* makeEnvironmentHttpApiClient(input.prepared.httpBaseUrl);
@@ -43,13 +42,7 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
     input.timeoutMs ?? DEFAULT_SHELL_SNAPSHOT_TIMEOUT_MS,
     withEnvironmentCredentials(
       input.prepared.httpAuthorization,
-      client.orchestration.shellSnapshot({
-        payload:
-          input.includeWorktreeCleanupTombstones === true
-            ? { includeWorktreeCleanupTombstones: "true" as const }
-            : {},
-        headers,
-      }),
+      client.orchestration.shellSnapshot({ headers }),
     ),
   );
 });
@@ -65,7 +58,6 @@ export class ShellSnapshotLoader extends Context.Service<
   {
     readonly load: (
       prepared: PreparedConnection,
-      options?: { readonly includeWorktreeCleanupTombstones?: boolean },
     ) => Effect.Effect<Option.Option<OrchestrationShellSnapshot>>;
   }
 >()("@t3tools/client-runtime/state/shellSnapshotHttp/ShellSnapshotLoader") {}
@@ -82,14 +74,8 @@ export const shellSnapshotLoaderLayer: Layer.Layer<
     // connections, so the loader must not hard-require it.
     const signer = yield* Effect.serviceOption(ManagedRelayDpopSigner);
     return ShellSnapshotLoader.of({
-      load: (prepared: PreparedConnection, options = {}) =>
-        fetchEnvironmentShellSnapshot({
-          prepared,
-          signer,
-          ...(options.includeWorktreeCleanupTombstones === true
-            ? { includeWorktreeCleanupTombstones: true }
-            : {}),
-        }).pipe(
+      load: (prepared: PreparedConnection) =>
+        fetchEnvironmentShellSnapshot({ prepared, signer }).pipe(
           Effect.map(Option.some<OrchestrationShellSnapshot>),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.catchCause((cause) =>

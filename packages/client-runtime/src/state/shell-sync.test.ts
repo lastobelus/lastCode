@@ -50,14 +50,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
 function session(client: WsRpcProtocolClient): RpcSession.RpcSession {
   return {
     client,
-    initialConfig: Effect.succeed({
-      shellResumeCompletionMarker: true,
-      environment: {
-        capabilities: {
-          threadWorktreeCleanup: true,
-        },
-      },
-    } as never),
+    initialConfig: Effect.succeed({ shellResumeCompletionMarker: true } as never),
     ready: Effect.void,
     probe: Effect.void,
     closed: Effect.never,
@@ -176,15 +169,12 @@ describe("environment shell synchronization", () => {
       const subscribeInputs = yield* Queue.unbounded<{
         readonly afterSequence?: number;
         readonly requestCompletionMarker?: boolean;
-        readonly includeWorktreeCleanupTombstones?: boolean;
       }>();
       const loaderCalls = yield* Ref.make(0);
-      const loaderCapabilities = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
       const client = {
         [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: {
           readonly afterSequence?: number;
           readonly requestCompletionMarker?: boolean;
-          readonly includeWorktreeCleanupTombstones?: boolean;
         }) =>
           Stream.unwrap(
             Queue.offer(subscribeInputs, input).pipe(Effect.as(Stream.fromQueue(events))),
@@ -218,14 +208,7 @@ describe("environment shell synchronization", () => {
         clear: () => Effect.void,
       });
       const snapshotLoader = ShellSnapshotLoader.of({
-        load: (_prepared, options) =>
-          Effect.all([
-            Ref.update(loaderCalls, (count) => count + 1),
-            Ref.update(loaderCapabilities, (values) => [
-              ...values,
-              options?.includeWorktreeCleanupTombstones,
-            ]),
-          ]).pipe(Effect.as(Option.none())),
+        load: () => Ref.update(loaderCalls, (count) => count + 1).pipe(Effect.as(Option.none())),
       });
       const shellState = yield* makeEnvironmentShellState().pipe(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -240,9 +223,7 @@ describe("environment shell synchronization", () => {
       const subscribeInput = yield* Queue.take(subscribeInputs);
       expect(subscribeInput.afterSequence).toBeUndefined();
       expect(subscribeInput.requestCompletionMarker).toBe(true);
-      expect(subscribeInput.includeWorktreeCleanupTombstones).toBe(true);
       expect(yield* Ref.get(loaderCalls)).toBe(1);
-      expect(yield* Ref.get(loaderCapabilities)).toEqual([true]);
       const synchronizing = yield* SubscriptionRef.get(shellState);
       expect(synchronizing.status).toBe("synchronizing");
       expect(Option.getOrThrow(synchronizing.snapshot)).toEqual(cachedSnapshot);
@@ -262,7 +243,6 @@ describe("environment shell synchronization", () => {
       const resumedInput = yield* Queue.take(subscribeInputs);
       expect(resumedInput.afterSequence).toBe(resetSnapshot.snapshotSequence);
       expect(resumedInput.requestCompletionMarker).toBe(true);
-      expect(resumedInput.includeWorktreeCleanupTombstones).toBe(true);
       expect(yield* Ref.get(loaderCalls)).toBe(1);
     }),
   );
