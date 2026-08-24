@@ -14,6 +14,9 @@ export type ThreadStatusKind =
   | "waiting"
   | "connecting"
   | "error"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
   | "plan-ready";
 
 export interface ThreadStatusPresentation extends StatusTone {
@@ -50,6 +53,42 @@ function isLatestTurnSettled(
 export function resolveThreadStatus(
   thread: EnvironmentThreadShell,
 ): ThreadStatusPresentation | null {
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      kind: "cleanup-failed",
+      label: "Cleanup failed",
+      pillClassName: "bg-rose-500/12 dark:bg-rose-500/16",
+      textClassName: "text-rose-700 dark:text-rose-300",
+      iconColor: "#ff453a",
+      iconBackground: "rgba(255,69,58,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "queued") {
+    return {
+      kind: "cleanup-queued",
+      label: "Deleting (Queued)",
+      pillClassName: "bg-orange-500/12 dark:bg-orange-500/16",
+      textClassName: "text-orange-700 dark:text-orange-300",
+      iconColor: "#ff9f0a",
+      iconBackground: "rgba(255,159,10,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      kind: "cleanup-deleting",
+      label: "Deleting",
+      pillClassName: "bg-orange-500/12 dark:bg-orange-500/16",
+      textClassName: "text-orange-700 dark:text-orange-300",
+      iconColor: "#ff9f0a",
+      iconBackground: "rgba(255,159,10,0.22)",
+      pulse: false,
+    };
+  }
+
   if (thread.hasPendingApprovals) {
     return {
       kind: "pending-approval",
@@ -139,4 +178,21 @@ export function resolveThreadStatus(
   }
 
   return null;
+}
+
+/**
+ * Returns the durable cleanup status when a thread is being deleted. Mobile
+ * list variants use this shared presentation so cleanup state cannot fall
+ * through to the ordinary agent-status labels.
+ */
+export function resolveWorktreeCleanupStatus(
+  thread: EnvironmentThreadShell,
+): ThreadStatusPresentation | null {
+  if (thread.worktreeCleanup == null) return null;
+  const status = resolveThreadStatus(thread);
+  return status?.kind === "cleanup-failed" ||
+    status?.kind === "cleanup-queued" ||
+    status?.kind === "cleanup-deleting"
+    ? status
+    : null;
 }
