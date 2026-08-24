@@ -477,6 +477,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = yield* nowIso;
+
+      // Deletion commands can be retried after the first deleted event has
+      // already been projected. Preserve the tombstone, especially its
+      // durable worktree-cleanup state, rather than allowing a retry that
+      // omits deleteWorktree to clear an in-flight cleanup.
+      if (thread.deletedAt !== null) {
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.deleted",
+          payload: {
+            threadId: command.threadId,
+            deletedAt: thread.deletedAt,
+            ...(thread.worktreeCleanup === null ? {} : { worktreeCleanup: thread.worktreeCleanup }),
+          },
+        };
+      }
+
       let worktreeCleanup: NonNullable<
         OrchestrationReadModel["threads"][number]["worktreeCleanup"]
       > | null = null;

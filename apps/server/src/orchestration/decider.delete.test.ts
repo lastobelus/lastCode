@@ -172,6 +172,26 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
       });
 
       const afterFirst = yield* projectEvent(readModel, { ...firstEvent, sequence: 4 });
+      const repeated = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.delete",
+          commandId: asCommandId("cmd-thread-delete-worktree-1-repeat"),
+          threadId: asThreadId("thread-delete-1"),
+        },
+        readModel: afterFirst,
+      });
+      const repeatedEvent = (
+        Array.isArray(repeated) ? repeated[0] : repeated
+      ) as PlannedThreadDeletedEvent;
+      expect(repeatedEvent.type).toBe("thread.deleted");
+      if (repeatedEvent.type !== "thread.deleted") return;
+      expect(repeatedEvent.payload.worktreeCleanup).toEqual(firstEvent.payload.worktreeCleanup);
+      const afterRepeat = yield* projectEvent(afterFirst, { ...repeatedEvent, sequence: 5 });
+      expect(
+        afterRepeat.threads.find((thread) => thread.id === asThreadId("thread-delete-1"))
+          ?.worktreeCleanup,
+      ).toEqual(firstEvent.payload.worktreeCleanup);
+
       const second = yield* decideOrchestrationCommand({
         command: {
           type: "thread.delete",
