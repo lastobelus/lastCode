@@ -72,6 +72,47 @@ it.effect("decodes a dispatch error after its bootstrap thread was deleted", () 
   }),
 );
 
+it.effect("decodes durable worktree cleanup commands and events", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeOrchestrationCommand({
+      type: "thread.delete",
+      commandId: "cmd-delete-worktree",
+      threadId: "thread-cleanup",
+      deleteWorktree: true,
+    });
+    assert.strictEqual(command.type, "thread.delete");
+    if (command.type === "thread.delete") assert.strictEqual(command.deleteWorktree, true);
+
+    const event = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-delete-worktree",
+      aggregateKind: "thread",
+      aggregateId: "thread-cleanup",
+      type: "thread.deleted",
+      occurredAt: "2026-08-23T00:00:00.000Z",
+      commandId: "cmd-delete-worktree",
+      causationEventId: null,
+      correlationId: "cmd-delete-worktree",
+      metadata: {},
+      payload: {
+        threadId: "thread-cleanup",
+        deletedAt: "2026-08-23T00:00:00.000Z",
+        worktreeCleanup: {
+          status: "queued",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/cleanup",
+          queuedAt: "2026-08-23T00:00:00.000Z",
+          blockedByThreadId: "thread-blocker",
+        },
+      },
+    });
+    assert.strictEqual(event.type, "thread.deleted");
+    if (event.type === "thread.deleted") {
+      assert.strictEqual(event.payload.worktreeCleanup?.status, "queued");
+    }
+  }),
+);
+
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeTurnDiffInput({

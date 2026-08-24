@@ -1,6 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import {
   type ClientOrchestrationCommand,
@@ -13,6 +14,8 @@ import {
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 export const canonicalizeClientCommandTimestamps = (
@@ -50,7 +53,47 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
+    const projectionSnapshotQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
+    const vcsDriverRegistry = yield* Effect.serviceOption(VcsDriverRegistry.VcsDriverRegistry);
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+
+    const resolveGitCommonDir = (cwd: string) =>
+      Effect.gen(function* () {
+        if (Option.isNone(vcsDriverRegistry)) return null;
+        const handle = yield* vcsDriverRegistry.value.resolve({ cwd }).pipe(Effect.option);
+        if (Option.isNone(handle) || handle.value.repository.metadataPath === null) {
+          return null;
+        }
+        const metadataPath = handle.value.repository.metadataPath;
+        const resolvedPath = path.isAbsolute(metadataPath)
+          ? path.normalize(metadataPath)
+          : path.resolve(cwd, metadataPath);
+        return yield* fileSystem
+          .realPath(resolvedPath)
+          .pipe(Effect.orElseSucceed(() => resolvedPath));
+      });
+
+    const resolveProjectRepositoryKey = (projectId: string) =>
+      Effect.gen(function* () {
+        if (Option.isNone(projectionSnapshotQuery)) return null;
+        const readModel = yield* projectionSnapshotQuery.value
+          .getCommandReadModel()
+          .pipe(Effect.option);
+        if (Option.isNone(readModel)) return null;
+        const project = readModel.value.projects.find((candidate) => candidate.id === projectId);
+        return project === undefined ? null : yield* resolveGitCommonDir(project.workspaceRoot);
+      });
+
+    const resolveThreadDeleteRepositoryKey = (threadId: string) =>
+      Effect.gen(function* () {
+        if (Option.isNone(projectionSnapshotQuery)) return null;
+        const readModel = yield* projectionSnapshotQuery.value
+          .getCommandReadModel()
+          .pipe(Effect.option);
+        if (Option.isNone(readModel)) return null;
+        const thread = readModel.value.threads.find((candidate) => candidate.id === threadId);
+        return thread === undefined ? null : yield* resolveProjectRepositoryKey(thread.projectId);
+      });
 
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
       workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
@@ -97,6 +140,26 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       return {
         ...canonicalCommand,
         workspaceRoot: yield* normalizeProjectWorkspaceRoot(canonicalCommand.workspaceRoot),
+      } satisfies OrchestrationCommand;
+    }
+
+    if (canonicalCommand.type === "thread.delete" && canonicalCommand.deleteWorktree === true) {
+      const repositoryKey = yield* resolveThreadDeleteRepositoryKey(canonicalCommand.threadId);
+      const { repositoryKey: _clientRepositoryKey, ...commandWithoutRepositoryKey } =
+        canonicalCommand;
+      return {
+        ...commandWithoutRepositoryKey,
+        ...(repositoryKey === null ? {} : { repositoryKey }),
+      } satisfies OrchestrationCommand;
+    }
+
+    if (canonicalCommand.type === "project.delete" && canonicalCommand.force === true) {
+      const repositoryKey = yield* resolveProjectRepositoryKey(canonicalCommand.projectId);
+      const { repositoryKey: _clientRepositoryKey, ...commandWithoutRepositoryKey } =
+        canonicalCommand;
+      return {
+        ...commandWithoutRepositoryKey,
+        ...(repositoryKey === null ? {} : { repositoryKey }),
       } satisfies OrchestrationCommand;
     }
 
