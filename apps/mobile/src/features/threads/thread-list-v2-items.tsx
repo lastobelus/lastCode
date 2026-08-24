@@ -24,16 +24,19 @@ import { relativeTime } from "../../lib/time";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { terminalEnvironment } from "../../state/terminal";
+import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
+import { resolveWorktreeCleanupStatus } from "./threadPresentation";
 import {
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
+  resolveThreadListV2CleanupActions,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
@@ -89,6 +92,11 @@ const SNOOZED_MENU_ACTIONS: MenuAction[] = [
 const LEGACY_MENU_ACTIONS: MenuAction[] = [
   { id: "archive", title: "Archive", image: "archivebox" },
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+];
+
+const FAILED_CLEANUP_MENU_ACTIONS: MenuAction[] = [
+  { id: "retry-worktree-cleanup", title: "Retry", image: "arrow.clockwise" },
+  { id: "keep-worktree", title: "Keep worktree", image: "externaldrive" },
 ];
 
 /** Rounded-row radius shared with the v1 sidebar rows. */
@@ -410,7 +418,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
   const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
+  const cleanupFailed = resolveThreadListV2CleanupActions(thread.worktreeCleanup).length > 0;
+  const cleanupPending = thread.worktreeCleanup != null && !cleanupFailed;
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
+  const retryWorktreeCleanup = useAtomCommand(threadEnvironment.retryWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
 
   const pr = useThreadPr(thread, props.projectCwd ?? props.project?.workspaceRoot ?? null);
   const prState = pr?.state ?? null;
@@ -432,7 +448,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const selected = props.selected === true;
 
   const status = resolveThreadListV2Status(thread);
-  const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const cleanupStatus = resolveWorktreeCleanupStatus(thread);
+  const statusLabel = cleanupStatus
+    ? { label: cleanupStatus.label, className: cleanupStatus.textClassName }
+    : STATUS_LABEL_BY_STATUS[status];
   const timeLabel = threadTimeLabel(thread);
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
@@ -472,6 +491,48 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       );
     }
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
+  const handleRetryWorktreeCleanup = useCallback(async () => {
+    const result = await retryWorktreeCleanup({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not retry worktree cleanup",
+        error instanceof Error ? error.message : "The worktree cleanup could not be retried.",
+      );
+    }
+  }, [retryWorktreeCleanup, thread.environmentId, thread.id]);
+  const handleKeepWorktree = useCallback(() => {
+    Alert.alert(
+      "Keep worktree?",
+      "LastCode will stop trying to remove this worktree. You can remove it manually later.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Keep worktree",
+          style: "destructive",
+          onPress: () => {
+            void abandonWorktreeCleanup({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id },
+            }).then((result) => {
+              if (result._tag === "Failure") {
+                const error = Cause.squash(result.cause);
+                Alert.alert(
+                  "Could not keep worktree",
+                  error instanceof Error
+                    ? error.message
+                    : "The worktree cleanup could not be dismissed.",
+                );
+              }
+            });
+          },
+        },
+      ],
+    );
+  }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
   // row can un-settle — explicit settles clear the override, auto-settled
@@ -632,6 +693,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "cancel-action") void handleCancelAction();
+      if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
+      if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
@@ -648,7 +711,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleArchive,
       handleCancelAction,
       handleDelete,
+      handleKeepWorktree,
       handleRegenerateTitle,
+      handleRetryWorktreeCleanup,
       handleMovePinnedDown,
       handleMovePinnedUp,
       handlePin,
@@ -852,10 +917,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         accessibilityHint={swipeAccessibilityHint}
         accessibilityLabel={thread.title}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         onPress={() => {
           close();
-          onSelectThread(thread);
+          if (!cleanupFailed) onSelectThread(thread);
         }}
         style={
           sidebarPane
@@ -892,11 +958,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         accessibilityHint={swipeAccessibilityHint}
         accessibilityLabel={thread.title}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         className={sidebarPane ? undefined : "bg-screen"}
         onPress={() => {
           close();
-          onSelectThread(thread);
+          if (!cleanupFailed) onSelectThread(thread);
         }}
         style={
           sidebarPane
@@ -975,6 +1042,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           sidebarPane ? { borderRadius: SIDEBAR_V2_ROW_RADIUS, overflow: "hidden" } : undefined
         }
         enableTrackpadSwipe
+        enabled={!cleanupPending && !cleanupFailed}
         // Full swipe commits the advertised lifecycle action (Settle /
         // Un-settle), never the secondary snooze action.
         fullSwipeAction="primary"
@@ -991,18 +1059,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {(close) => (
           <ControlPillMenu
             actions={
-              snoozedRow
-                ? snoozedMenuActions
-                : !props.settlementSupported
-                  ? legacyMenuActions
-                  : canUnsettle
-                    ? slimMenuActions
-                    : swipeActions.secondary === "snooze"
-                      ? snoozableCardMenuActions
-                      : cardMenuActions
+              cleanupFailed
+                ? FAILED_CLEANUP_MENU_ACTIONS
+                : cleanupPending
+                  ? []
+                  : snoozedRow
+                    ? snoozedMenuActions
+                    : !props.settlementSupported
+                      ? legacyMenuActions
+                      : canUnsettle
+                        ? slimMenuActions
+                        : swipeActions.secondary === "snooze"
+                          ? snoozableCardMenuActions
+                          : cardMenuActions
             }
             onPressAction={handleMenuAction}
-            shouldOpenOnLongPress
+            shouldOpenOnLongPress={cleanupFailed || !cleanupPending}
           >
             {rowContent(close)}
           </ControlPillMenu>
