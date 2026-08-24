@@ -2,6 +2,7 @@ import type { SidebarThreadSummary } from "../types";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { ensureLocalApi } from "../localApi";
+import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "./ui/dialog";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 
 export function WorktreeCleanupFailureDialog(props: {
   thread: SidebarThreadSummary;
@@ -21,6 +23,18 @@ export function WorktreeCleanupFailureDialog(props: {
   const retry = useAtomCommand(threadEnvironment.retryWorktreeCleanup, { reportFailure: true });
   const abandon = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
     reportFailure: true,
+  });
+  const { copyToClipboard } = useCopyToClipboard({
+    target: "worktree cleanup details",
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not copy worktree cleanup details",
+          description: error instanceof Error ? error.message : "An error occurred while copying.",
+        }),
+      );
+    },
   });
   const cleanup = props.thread.worktreeCleanup;
   if (cleanup?.status !== "failed") return null;
@@ -76,11 +90,7 @@ export function WorktreeCleanupFailureDialog(props: {
           <Button type="button" variant="destructive-outline" onClick={() => void keepWorktree()}>
             Keep worktree
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => void navigator.clipboard.writeText(details)}
-          >
+          <Button type="button" variant="outline" onClick={() => copyToClipboard(details)}>
             Copy details
           </Button>
           <Button

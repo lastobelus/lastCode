@@ -4,7 +4,7 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise } from "@t3tools/client-runtime/state/runtime";
+import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSettle, canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -17,6 +17,7 @@ import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../component
 import { useComposerDraftStore } from "../composerDraftStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
+import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { readLocalApi } from "../localApi";
@@ -35,6 +36,7 @@ import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useUiStateStore } from "../uiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
+import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
 
@@ -48,6 +50,13 @@ export class ThreadArchiveBlockedError extends Schema.TaggedErrorClass<ThreadArc
   override get message(): string {
     return "Cannot archive a running thread.";
   }
+}
+
+export function shouldDeleteWorktreeClientSide(input: {
+  readonly shouldDeleteWorktree: boolean;
+  readonly supportsDurableWorktreeCleanup: boolean;
+}): boolean {
+  return input.shouldDeleteWorktree && !input.supportsDurableWorktreeCleanup;
 }
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedErrorClass<ThreadSettlementUnsupportedError>()(
@@ -167,6 +176,12 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession);
+  const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
+    reportFailure: false,
+  });
+  const refreshVcsStatus = useAtomCommand(vcsEnvironment.refreshStatus, {
+    reportFailure: false,
+  });
   const sidebarThreadSortOrder = useClientSettings((settings) => settings.sidebarThreadSortOrder);
   const confirmThreadDelete = useClientSettings((settings) => settings.confirmThreadDelete);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
@@ -305,10 +320,10 @@ export function useThreadActions() {
       const displayWorktreePath = orphanedWorktreePath
         ? formatWorktreePathForDisplay(orphanedWorktreePath)
         : null;
-      const canDeleteWorktree =
-        orphanedWorktreePath !== null &&
-        threadProject !== null &&
-        readEnvironmentSupportsWorktreeCleanup(threadRef.environmentId);
+      const supportsDurableWorktreeCleanup = readEnvironmentSupportsWorktreeCleanup(
+        threadRef.environmentId,
+      );
+      const canDeleteWorktree = orphanedWorktreePath !== null && threadProject !== null;
       const localApi = readLocalApi();
       let shouldDeleteWorktree = false;
       if (canDeleteWorktree && localApi) {
@@ -356,7 +371,9 @@ export function useThreadActions() {
         environmentId: threadRef.environmentId,
         input: {
           threadId: threadRef.threadId,
-          ...(shouldDeleteWorktree ? { deleteWorktree: true } : {}),
+          ...(shouldDeleteWorktree && supportsDurableWorktreeCleanup
+            ? { deleteWorktree: true }
+            : {}),
         },
       });
       if (deleteResult._tag === "Failure") {
@@ -406,6 +423,57 @@ export function useThreadActions() {
         }
       }
 
+      if (
+        !shouldDeleteWorktreeClientSide({
+          shouldDeleteWorktree,
+          supportsDurableWorktreeCleanup,
+        }) ||
+        !orphanedWorktreePath ||
+        !threadProject
+      ) {
+        return deleteResult;
+      }
+
+      const removeResult = await removeWorktree({
+        environmentId: threadRef.environmentId,
+        input: {
+          cwd: threadProject.workspaceRoot,
+          path: orphanedWorktreePath,
+          force: true,
+        },
+      });
+      const refreshResult =
+        removeResult._tag === "Success"
+          ? await refreshVcsStatus({
+              environmentId: threadRef.environmentId,
+              input: { cwd: threadProject.workspaceRoot },
+            })
+          : null;
+      const cleanupFailure =
+        removeResult._tag === "Failure"
+          ? removeResult
+          : refreshResult?._tag === "Failure"
+            ? refreshResult
+            : null;
+      if (cleanupFailure) {
+        const error = squashAtomCommandFailure(cleanupFailure);
+        const message = error instanceof Error ? error.message : "Unknown error removing worktree.";
+        console.error("Failed to remove orphaned worktree after thread deletion", {
+          threadId: threadRef.threadId,
+          projectCwd: threadProject.workspaceRoot,
+          worktreePath: orphanedWorktreePath,
+          error,
+        });
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Thread deleted, but worktree removal failed",
+            description: `Could not remove ${displayWorktreePath ?? orphanedWorktreePath}. ${message}`,
+          }),
+        );
+        return cleanupFailure;
+      }
+
       return deleteResult;
     },
     [
@@ -415,6 +483,8 @@ export function useThreadActions() {
       closeTerminal,
       deleteThreadMutation,
       getCurrentRouteThreadRef,
+      refreshVcsStatus,
+      removeWorktree,
       router,
       resolveThreadTarget,
       sidebarThreadSortOrder,
