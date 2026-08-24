@@ -3075,38 +3075,42 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       args.push("--force");
     }
     args.push(input.path);
-    const result = yield* executeGitWithStableDiagnostics(
-      "GitVcsDriver.removeWorktree",
-      input.cwd,
-      args,
-      { timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS, allowNonZeroExit: true },
-    );
-    if (result.exitCode === 0) {
-      return;
+    if (input.allowMissing === true) {
+      const result = yield* executeGitWithStableDiagnostics(
+        "GitVcsDriver.removeWorktree",
+        input.cwd,
+        args,
+        {
+          allowNonZeroExit: true,
+          timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
+        },
+      );
+      if (result.exitCode === 0) return;
+      const alreadyGone =
+        isMissingWorktreeStderr(result.stderr) &&
+        !(yield* fileSystem.exists(input.path).pipe(Effect.orElseSucceed(() => false)));
+      if (alreadyGone) {
+        yield* pruneWorktrees({ cwd: input.cwd });
+        return;
+      }
+      yield* Effect.logWarning(
+        `GitVcsDriver.removeWorktree: git worktree remove exited with code ${result.exitCode} for ${input.path} (stderr length ${result.stderr.length}).`,
+      );
+      return yield* new GitCommandError({
+        ...gitCommandContext({
+          operation: "GitVcsDriver.removeWorktree",
+          cwd: input.cwd,
+          args,
+        }),
+        detail: "git worktree remove failed",
+        ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
     }
-    // Threads can share a worktree path, and worktrees get removed or pruned
-    // outside the app, so a worktree that is already gone is a no-op rather
-    // than an error. Prune so no stale registration lingers to block a later
-    // `worktree add` at the same path.
-    const alreadyGone =
-      isMissingWorktreeStderr(result.stderr) &&
-      !(yield* fileSystem.exists(input.path).pipe(Effect.orElseSucceed(() => false)));
-    if (alreadyGone) {
-      yield* pruneWorktrees({ cwd: input.cwd });
-      return;
-    }
-    // Raw stderr stays out of both the wire error and the log (it can carry
-    // secrets); log bounded diagnostics so a genuine failure is visible
-    // server-side.
-    yield* Effect.logWarning(
-      `GitVcsDriver.removeWorktree: git worktree remove exited with code ${result.exitCode} for ${input.path} (stderr length ${result.stderr.length}).`,
-    );
-    return yield* new GitCommandError({
-      ...gitCommandContext({ operation: "GitVcsDriver.removeWorktree", cwd: input.cwd, args }),
-      detail: "git worktree remove failed",
-      ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
-      stdoutLength: result.stdout.length,
-      stderrLength: result.stderr.length,
+    yield* executeGit("GitVcsDriver.removeWorktree", input.cwd, args, {
+      timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
+      fallbackErrorDetail: "git worktree remove failed",
     });
   });
 
