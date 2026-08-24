@@ -85,8 +85,7 @@ export function resolveSidebarUpdateButtonToneClassName({
   }
   return cn(
     "text-[var(--sidebar-icon-color)]",
-    !isInteractionDisabled &&
-      "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+    !isInteractionDisabled && "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
   );
 }
 
