@@ -459,6 +459,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
 
         const orchestrationEngine = {
           readEvents: () => Stream.empty,
+          getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
           dispatch: () => Effect.succeed({ sequence: 1 }),
           streamDomainEvents: Stream.fromQueue(events),
           subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
@@ -653,6 +655,8 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           }),
           Layer.succeed(OrchestrationEngineService, {
             readEvents: () => Stream.empty,
+            getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
+            subscribeDomainEvents: Effect.succeed(Stream.empty),
             dispatch: () => Effect.succeed({ sequence: 1 }),
             streamDomainEvents: Stream.fromQueue(events),
             subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
