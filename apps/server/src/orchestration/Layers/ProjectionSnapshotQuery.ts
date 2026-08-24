@@ -27,6 +27,7 @@ import {
   ThreadLinkedPullRequest,
   ThreadId,
   ThreadAnnotation,
+  ThreadWorktreeCleanup,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -94,6 +95,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
+    worktreeCleanup: Schema.optional(Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup))),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -447,6 +449,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           annotation_json AS "annotation",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
@@ -486,6 +489,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           annotation_json AS "annotation",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
@@ -493,8 +497,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           deleted_at AS "deletedAt"
         FROM projection_threads
-        WHERE deleted_at IS NULL
-          AND archived_at IS NULL
+        WHERE (deleted_at IS NULL AND archived_at IS NULL)
+          OR worktree_cleanup_json IS NOT NULL
         ORDER BY project_id ASC, created_at ASC, thread_id ASC
       `,
   });
@@ -527,6 +531,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           annotation_json AS "annotation",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
@@ -972,6 +977,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           annotation_json AS "annotation",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
@@ -980,8 +986,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE thread_id = ${threadId}
-          AND deleted_at IS NULL
-          AND archived_at IS NULL
+          AND ((deleted_at IS NULL AND archived_at IS NULL)
+            OR worktree_cleanup_json IS NOT NULL)
         LIMIT 1
       `,
   });
@@ -1736,6 +1742,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
                 ...(row.annotation !== null ? { annotation: row.annotation } : {}),
+                ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -1948,6 +1955,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   titleRegeneration: mapTitleRegeneration(row),
                   ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                   latestUserMessageId: row.latestUserMessageId,
+                  ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2063,7 +2071,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   : Result.failVoid,
               ),
               threads: Arr.filterMap(threadRows, (row) =>
-                row.deletedAt === null
+                row.deletedAt === null || row.worktreeCleanup != null
                   ? Result.succeed({
                       id: row.threadId,
                       projectId: row.projectId,
@@ -2088,6 +2096,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       pinOrderKey: row.pinOrderKey ?? null,
                       titleRegeneration: mapTitleRegeneration(row),
                       ...(row.annotation !== null ? { annotation: row.annotation } : {}),
+                      ...(row.worktreeCleanup != null
+                        ? { worktreeCleanup: row.worktreeCleanup }
+                        : {}),
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
                       hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2238,6 +2249,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   ...(row.annotation !== null ? { annotation: row.annotation } : {}),
+                  ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                   session: sessionByThread.get(row.threadId) ?? null,
                   latestUserMessageAt: row.latestUserMessageAt,
                   hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2522,6 +2534,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         ...(threadRow.value.annotation !== null ? { annotation: threadRow.value.annotation } : {}),
+        ...(threadRow.value.worktreeCleanup != null
+          ? { worktreeCleanup: threadRow.value.worktreeCleanup }
+          : {}),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -2629,7 +2644,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ]);
 
-      if (Option.isNone(threadRow)) {
+      if (Option.isNone(threadRow) || threadRow.value.deletedAt !== null) {
         return Option.none<OrchestrationThread>();
       }
 
