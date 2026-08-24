@@ -82,6 +82,8 @@ const runReconciliation = (input: {
     Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, input.directory),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,
+      getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
+      subscribeDomainEvents: Effect.succeed(Stream.empty),
       dispatch: input.dispatch,
       streamDomainEvents: Stream.empty,
       latestSequence: Effect.succeed(0),
@@ -287,6 +289,8 @@ it.effect("does not fail startup when the live provider session inventory cannot
     }),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,
+      getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
+      subscribeDomainEvents: Effect.succeed(Stream.empty),
       dispatch: () => Effect.die("unused"),
       streamDomainEvents: Stream.empty,
       latestSequence: Effect.succeed(0),
