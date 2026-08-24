@@ -759,8 +759,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.notInclude(error.detail, "Git command failed in");
       }),
     );
-
-    it.effect("treats removing an already-gone worktree as a no-op", () =>
+    it.effect("allows an unregistered missing worktree when explicitly requested", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const pathService = yield* Path.Path;
@@ -768,7 +767,39 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const driver = yield* GitVcsDriver.GitVcsDriver;
         yield* driver.initRepo({ cwd });
 
-        yield* driver.removeWorktree({ cwd, path: missingWorktree });
+        yield* driver.removeWorktree({
+          cwd,
+          path: missingWorktree,
+          force: true,
+          allowMissing: true,
+        });
+      }),
+    );
+
+    it.effect("does not treat an absent locked worktree as removed", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "locked");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/locked-worktree",
+        });
+        yield* git(cwd, ["worktree", "lock", worktreePath]);
+        yield* fileSystem.remove(worktreePath, { recursive: true });
+
+        const error = yield* driver
+          .removeWorktree({ cwd, path: worktreePath, force: true, allowMissing: true })
+          .pipe(Effect.flip);
+        const registered = yield* git(cwd, ["worktree", "list", "--porcelain"]);
+
+        assert.equal(error._tag, "GitCommandError");
+        assert.include(registered, worktreePath);
       }),
     );
   });
