@@ -485,6 +485,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            providerThreadId: "provider-thread-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -502,7 +503,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
-        assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+        const snapshotThread = snapshot.threads[0];
+        assert.ok(snapshotThread);
+        assert.ok(snapshotThread.session);
+        assert.deepEqual(threadDetail.value, {
+          ...snapshotThread,
+          session: {
+            ...snapshotThread.session,
+            providerThreadId: "provider-thread-1",
+          },
+        });
       }
     }),
   );
