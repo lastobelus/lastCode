@@ -214,6 +214,18 @@ describe("CodexSessionRuntime collab integration", () => {
           },
           registrationA,
           threadRegistrationA,
+          {
+            method: "thread/status/changed",
+            params: { threadId: CHILD_A, status: { type: "idle" } },
+          },
+          {
+            method: "turn/completed",
+            params: {
+              threadId: CHILD_A,
+              turn: { id: turnIdA, status: "completed", items: [] },
+            },
+          },
+          { method: "thread/closed", params: { threadId: CHILD_A } },
           turnStartedB,
           {
             method: "error",
@@ -270,6 +282,22 @@ describe("CodexSessionRuntime collab integration", () => {
             .agentThreadId === CHILD_A &&
           (event.payload as { status?: { type?: string } }).status?.type === "systemError",
       );
+      const childATerminalOverrides = events.filter((event) => {
+        if (!event.payload || typeof event.payload !== "object") {
+          return false;
+        }
+        const payload = event.payload as {
+          agentThreadId?: string;
+          status?: { type?: string };
+        };
+        return (
+          payload.agentThreadId === CHILD_A &&
+          (event.method === "collabAgent/turnCompleted" ||
+            event.method === "collabAgent/closed" ||
+            (event.method === "collabAgent/statusChanged" &&
+              payload.status?.type !== "systemError"))
+        );
+      });
 
       assert.notInclude(
         startedThreadIds,
@@ -292,6 +320,11 @@ describe("CodexSessionRuntime collab integration", () => {
         (terminalMetadataFailure.payload as { parentThreadId?: string }).parentThreadId,
         ROOT,
         "the terminal metadata patch must preserve parent linkage from thread registration",
+      );
+      assert.deepEqual(
+        childATerminalOverrides.map((event) => event.method),
+        [],
+        "trailing lifecycle must not overwrite a terminal child error",
       );
       assert.include(
         startedThreadIds,
