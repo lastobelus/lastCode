@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import {
   collectThreadDeleteCandidates,
+  resolveArchivedThreadsForDelete,
   resolveThreadTargetWithArchivedFallback,
   shouldDeleteWorktreeClientSide,
   ThreadArchiveBlockedError,
@@ -99,5 +100,34 @@ describe("collectThreadDeleteCandidates", () => {
     expect(candidates).toHaveLength(2);
     expect(candidates.map((thread) => thread.id)).toEqual(["thread-2", "thread-1"]);
     expect(getOrphanedWorktreePathForThread(candidates, target.id)).toBeNull();
+  });
+});
+
+describe("resolveArchivedThreadsForDelete", () => {
+  it("loads archived owners for a normal worktree deletion", async () => {
+    const archivedThread = {
+      environmentId: EnvironmentId.make("environment-1"),
+      id: ThreadId.make("archived-owner"),
+      worktreePath: "/tmp/shared-worktree",
+    };
+
+    await expect(
+      resolveArchivedThreadsForDelete({
+        worktreePath: "/tmp/shared-worktree",
+        load: async () => [archivedThread],
+      }),
+    ).resolves.toEqual([archivedThread]);
+  });
+
+  it("uses supplied archived shells without loading them again", async () => {
+    const load = () => Promise.reject(new Error("should not load"));
+
+    await expect(
+      resolveArchivedThreadsForDelete({
+        archivedThreads: [],
+        worktreePath: "/tmp/shared-worktree",
+        load,
+      }),
+    ).resolves.toEqual([]);
   });
 });

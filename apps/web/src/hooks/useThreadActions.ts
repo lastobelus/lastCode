@@ -20,7 +20,10 @@ import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
-import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
+import {
+  loadArchivedThreadsForEnvironment,
+  refreshArchivedThreadsForEnvironment,
+} from "../lib/archivedThreadsState";
 import { readLocalApi } from "../localApi";
 import {
   readEnvironmentSupportsPinning,
@@ -100,6 +103,16 @@ export function collectThreadDeleteCandidates<
     candidates.set(`${thread.environmentId}:${thread.id}`, thread);
   }
   return [...candidates.values()];
+}
+
+export function resolveArchivedThreadsForDelete<T>(input: {
+  readonly archivedThreads?: ReadonlyArray<T>;
+  readonly worktreePath: string | null;
+  readonly load: () => Promise<ReadonlyArray<T>>;
+}): Promise<ReadonlyArray<T>> {
+  if (input.archivedThreads !== undefined) return Promise.resolve(input.archivedThreads);
+  if (input.worktreePath === null) return Promise.resolve([]);
+  return input.load();
 }
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedErrorClass<ThreadSettlementUnsupportedError>()(
@@ -339,15 +352,22 @@ export function useThreadActions() {
         return result;
       }
       const { thread, threadRef } = resolved;
+      const archivedThreadsResult = await settlePromise(() =>
+        resolveArchivedThreadsForDelete({
+          ...(opts.archivedThreads === undefined ? {} : { archivedThreads: opts.archivedThreads }),
+          worktreePath: thread.worktreePath,
+          load: () => loadArchivedThreadsForEnvironment(threadRef.environmentId),
+        }),
+      );
+      if (archivedThreadsResult._tag === "Failure") {
+        return archivedThreadsResult;
+      }
+      const archivedThreads = archivedThreadsResult.value;
       const activeThreads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell === null ? [] : [shell];
       });
-      const threads = collectThreadDeleteCandidates(
-        activeThreads,
-        thread,
-        opts.archivedThreads ?? [],
-      );
+      const threads = collectThreadDeleteCandidates(activeThreads, thread, archivedThreads);
       const threadProject = readProject({
         environmentId: threadRef.environmentId,
         projectId: thread.projectId,
