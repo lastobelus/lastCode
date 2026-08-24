@@ -767,7 +767,6 @@ const makeWsRpcLayer = (
                 projectId: ProjectId.make(event.aggregateId),
               }),
             );
-          case "thread.deleted":
           case "thread.archived":
             return Effect.succeed(
               Option.some({
@@ -776,6 +775,8 @@ const makeWsRpcLayer = (
                 threadId: ThreadId.make(event.aggregateId),
               }),
             );
+          case "thread.deleted":
+            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
           case "thread.unarchived":
             return threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence);
           default:
