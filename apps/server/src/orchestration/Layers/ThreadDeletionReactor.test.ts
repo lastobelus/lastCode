@@ -27,6 +27,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import { ProviderAdapterProcessError } from "../../provider/Errors.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import {
   ProjectionThreadRepository,
   type ProjectionThread,
@@ -223,6 +224,9 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
         }),
+        Layer.mock(ProjectionProjectRepository)({
+          listAll: () => Effect.succeed([]),
+        }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>
             Effect.sync(() => operations.push(`remove:${path}`)).pipe(
@@ -333,6 +337,9 @@ describe("durable worktree cleanup", () => {
           getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectionProjectRepository)({
+          listAll: () => Effect.succeed([]),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: () => Effect.sync(() => operations.push("remove-worktree")),
@@ -447,6 +454,9 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
         }),
+        Layer.mock(ProjectionProjectRepository)({
+          listAll: () => Effect.succeed([]),
+        }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>
             Effect.gen(function* () {
@@ -547,6 +557,16 @@ describe("durable worktree cleanup", () => {
         },
         "2026-08-23T00:00:03.000Z",
       );
+      const fifth = cleanupRow(
+        "cleanup-active-project-root",
+        {
+          status: "deleting",
+          repositoryRoot: "/repo-e",
+          worktreePath: "/worktrees/active-project-root",
+          startedAt: "2026-08-23T00:00:04.000Z",
+        },
+        "2026-08-23T00:00:04.000Z",
+      );
       const activeOwner = {
         threadId: ThreadId.make("active-owner"),
         worktreePath: third.worktreePath ?? "/worktrees/third",
@@ -556,6 +576,7 @@ describe("durable worktree cleanup", () => {
         [second.threadId, second],
         [third.threadId, third],
         [fourth.threadId, fourth],
+        [fifth.threadId, fifth],
       ]);
       const removals: string[] = [];
       const operations: string[] = [];
@@ -579,8 +600,24 @@ describe("durable worktree cleanup", () => {
         }),
         Layer.mock(ProjectionThreadRepository)({
           getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
-          listPendingWorktreeCleanup: () => Effect.succeed([first, second, third, fourth]),
+          listPendingWorktreeCleanup: () => Effect.succeed([first, second, third, fourth, fifth]),
           listActiveWorktreeOwners: () => Effect.succeed([activeOwner]),
+        }),
+        Layer.mock(ProjectionProjectRepository)({
+          listAll: () =>
+            Effect.succeed([
+              {
+                projectId: ProjectId.make("active-project"),
+                title: "Active project",
+                workspaceRoot: fifth.worktreePath!,
+                defaultModelSelection: null,
+                defaultThreadEnvMode: null,
+                scripts: [],
+                createdAt: "2026-08-23T00:00:00.000Z",
+                updatedAt: "2026-08-23T00:00:00.000Z",
+                deletedAt: null,
+              },
+            ]),
         }),
         Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
           resolve: () =>
@@ -659,6 +696,8 @@ describe("durable worktree cleanup", () => {
         `stop:${fourth.threadId}`,
         `close:${fourth.threadId}`,
         "remove:/worktrees/already-removed",
+        `stop:${fifth.threadId}`,
+        `close:${fifth.threadId}`,
       ]);
       expect(
         updates.map((command) => [command.threadId, command.cleanup?.status ?? "complete"]),
@@ -669,6 +708,7 @@ describe("durable worktree cleanup", () => {
         [third.threadId, "deleting"],
         [third.threadId, "failed"],
         [fourth.threadId, "complete"],
+        [fifth.threadId, "failed"],
       ]);
       expect(updates[2]?.cleanup).toMatchObject({
         status: "failed",
@@ -679,6 +719,10 @@ describe("durable worktree cleanup", () => {
         error: expect.stringContaining("active-owner"),
       });
       expect(updates[5]?.cleanup).toBeNull();
+      expect(updates[6]?.cleanup).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("active-project"),
+      });
     }),
   );
 });

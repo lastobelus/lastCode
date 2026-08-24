@@ -273,6 +273,44 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
     }),
   );
 
+  it.effect("rejects deleting a worktree registered as an active project root", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedReadModel;
+      const worktreePath = "/tmp/project-delete-worktrees/active-project";
+      const readModel = {
+        ...seeded,
+        threads: seeded.threads.map((thread) =>
+          thread.id === asThreadId("thread-delete-1")
+            ? { ...thread, branch: "active-project", worktreePath }
+            : thread,
+        ),
+        projects: [
+          ...seeded.projects,
+          {
+            ...seeded.projects[0]!,
+            id: asProjectId("project-active-worktree"),
+            workspaceRoot: worktreePath,
+          },
+        ],
+      };
+
+      const error = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.delete",
+            commandId: asCommandId("cmd-delete-active-project-worktree"),
+            threadId: asThreadId("thread-delete-1"),
+            deleteWorktree: true,
+          },
+          readModel,
+        }),
+      );
+
+      expect(error.message).toContain("project-active-worktree");
+      expect(error.message).toContain("workspace root");
+    }),
+  );
+
   it.effect("refuses to delete a worktree still owned by another live thread", () =>
     Effect.gen(function* () {
       const seeded = yield* seedReadModel;

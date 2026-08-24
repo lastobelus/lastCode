@@ -17,6 +17,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
@@ -67,6 +68,7 @@ export const logCleanupCauseUnlessInterrupted = <R, E>({
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const gitWorkflow = yield* GitWorkflowService;
+  const projectionProjects = yield* ProjectionProjectRepository;
   const projectionThreads = yield* ProjectionThreadRepository;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
@@ -220,6 +222,21 @@ const make = Effect.gen(function* () {
     }
 
     const normalizedWorktreePath = normalizeProjectPathForComparison(deleting.worktreePath);
+    const activeProject = (yield* projectionProjects.listAll()).find(
+      (candidate) =>
+        candidate.deletedAt === null &&
+        normalizeProjectPathForComparison(candidate.workspaceRoot) === normalizedWorktreePath,
+    );
+    if (activeProject !== undefined) {
+      const failedAt = yield* nowIso;
+      yield* dispatchCleanup(job.threadId, {
+        ...deleting,
+        status: "failed",
+        failedAt,
+        error: `Worktree '${deleting.worktreePath}' is now used as the workspace root of active project '${activeProject.projectId}'.`,
+      });
+      return;
+    }
     const activeOwner = (yield* projectionThreads.listActiveWorktreeOwners()).find(
       (candidate) =>
         candidate.threadId !== job.threadId &&

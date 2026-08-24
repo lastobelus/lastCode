@@ -519,6 +519,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: thread.projectId,
         });
         const normalizedWorktreePath = normalizeProjectPathForComparison(thread.worktreePath);
+        const sharedProject = readModel.projects.find(
+          (candidate) =>
+            candidate.deletedAt === null &&
+            normalizeProjectPathForComparison(candidate.workspaceRoot) === normalizedWorktreePath,
+        );
+        if (sharedProject !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Worktree '${thread.worktreePath}' is still used as the workspace root of project '${sharedProject.id}'.`,
+          });
+        }
         const sharedThread = readModel.threads.find(
           (candidate) =>
             candidate.id !== thread.id &&
