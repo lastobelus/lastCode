@@ -1422,12 +1422,10 @@ export const makeCodexSessionRuntime = (
         const payload = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
-        const childParentTurnId = (() => {
-          const providerConversationId = readNotificationThreadId(notification);
-          return providerConversationId
-            ? collabReceiverTurns.get(providerConversationId)
-            : undefined;
-        })();
+        const notificationConversationId = readNotificationThreadId(notification);
+        const childParentTurnId = notificationConversationId
+          ? collabReceiverTurns.get(notificationConversationId)
+          : undefined;
 
         rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
         // Interception FIRST: a registered v2 child is usually also in the
@@ -1448,15 +1446,16 @@ export const makeCodexSessionRuntime = (
         // thread/* onto parent session state. Root-id-known guard keeps the
         // root's own early notifications flowing during session open.
         const suppressRootId = currentProviderThreadId(yield* Ref.get(sessionRef));
-        const foreignConversation = (() => {
-          const providerConversationId = readNotificationThreadId(notification);
-          return (
-            providerConversationId !== undefined &&
-            suppressRootId !== undefined &&
-            providerConversationId !== suppressRootId
-          );
-        })();
+        const rootConversation =
+          notificationConversationId !== undefined &&
+          suppressRootId !== undefined &&
+          notificationConversationId === suppressRootId;
+        const foreignConversation =
+          notificationConversationId !== undefined &&
+          suppressRootId !== undefined &&
+          notificationConversationId !== suppressRootId;
         if (
+          !rootConversation &&
           (childParentTurnId !== undefined || foreignConversation) &&
           shouldSuppressChildConversationNotification(notification.method)
         ) {
