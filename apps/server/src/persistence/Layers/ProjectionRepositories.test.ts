@@ -98,7 +98,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
-        worktreePath: null,
+        worktreePath: "/tmp/thread-null-options-worktree",
         latestTurnId: null,
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
@@ -167,6 +167,10 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       assert.strictEqual(
         Option.getOrNull(persisted)?.latestUserMessageId,
         MessageId.make("message-1"),
+      );
+      assert.deepStrictEqual(
+        (yield* threads.listActiveWorktreeOwners()).map((thread) => thread.threadId),
+        [ThreadId.make("thread-null-options")],
       );
     }),
   );
