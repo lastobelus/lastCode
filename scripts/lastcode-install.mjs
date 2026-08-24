@@ -260,6 +260,7 @@ export async function launchApp(appPath, options = {}) {
   const retryIntervalMs = options.retryIntervalMs ?? LAUNCH_RETRY_INTERVAL_MS;
   const stabilityMs = options.stabilityMs ?? LAUNCH_STABILITY_MS;
   const timeoutMs = options.timeoutMs ?? LAUNCH_TIMEOUT_MS;
+  const maxLaunchAttempts = options.maxLaunchAttempts ?? Number.POSITIVE_INFINITY;
   const deadline = now() + timeoutMs;
   const environment = cleanLaunchEnvironment(options.environment ?? process.env);
   let launchAttempts = 0;
@@ -277,7 +278,7 @@ export async function launchApp(appPath, options = {}) {
       }
     } else {
       runningSince = undefined;
-      if (currentTime >= nextLaunchAt) {
+      if (currentTime >= nextLaunchAt && launchAttempts < maxLaunchAttempts) {
         launchAttempts += 1;
         console.log(`Launching LastCode (attempt ${launchAttempts})…`);
         try {
@@ -440,7 +441,7 @@ async function readHandoffCommand(stream = process.stdin) {
   throw new Error("Install handoff closed before COMMIT or CANCEL.");
 }
 
-async function prepareDmgInstall(dmgPath, options = {}) {
+export async function prepareDmgInstall(dmgPath, options = {}) {
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
   if (process.platform !== "darwin") throw new Error("lastcode-install only supports macOS.");
   const resolvedDmg = NodePath.resolve(dmgPath);
@@ -532,7 +533,7 @@ export async function replacePreparedApp(prepared, options = {}) {
   prepared.oldAppMoved = false;
 }
 
-function cleanupPreparedInstall(prepared) {
+export function cleanupPreparedInstall(prepared) {
   NodeFS.rmSync(prepared.staging, { force: true, recursive: true });
   if (
     prepared.oldAppMoved &&
