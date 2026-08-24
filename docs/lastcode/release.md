@@ -184,6 +184,37 @@ ceiling used to keep htulo from moving ahead of airy.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
+### Daily htulo updates
+
+Htulo's external updater can be installed as a login LaunchAgent:
+
+```bash
+pnpm lastcode:daily-update install
+pnpm lastcode:daily-update status
+pnpm lastcode:daily-update run-now
+```
+
+At 04:00 each day it prepares and validates the newest eligible Intel app before
+interrupting work. If an update is ready, it uses htulo's local
+`lastcode-thread` command to ask every working thread to pause, waits for the
+explicit `PAUSED FOR LASTCODE UPDATE` replies, checks once for a newly started
+thread, quits LastCode once, swaps the app, launches it once, and tells the
+paused threads to resume. A missing reply leaves the prepared update in place
+for the next run and does not quit LastCode. Threads that may already have
+paused are always queued for a resume; undelivered resumes are kept in
+`~/.lastcode/daily-update/pending-resumes.json` and retried before the next
+daily update check.
+
+The first update from a LastCode version older than the thread command is a
+manual bootstrap after the user has paused work:
+
+```bash
+pnpm lastcode:daily-update run --bootstrap
+```
+
+`--bootstrap` is never present in the scheduled LaunchAgent. Remove the schedule
+with `pnpm lastcode:daily-update uninstall`.
+
 State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
 credential-free handoff contract for later drain and activation work. It names
 the immutable tag and commit, expected version and DMG hash, and one candidate
