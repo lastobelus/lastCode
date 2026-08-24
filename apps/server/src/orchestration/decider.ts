@@ -309,6 +309,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         workspaceRoot: command.workspaceRoot,
         exceptProjectId: command.projectId,
       });
+      const cleanupOwner = findWorktreeCleanupOwner(readModel, command.workspaceRoot);
+      if (cleanupOwner !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Workspace root '${command.workspaceRoot}' is still being cleaned up by thread '${cleanupOwner.id}'.`,
+        });
+      }
 
       return {
         ...(yield* withEventBase({
@@ -344,6 +351,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           workspaceRoot: command.workspaceRoot,
           exceptProjectId: command.projectId,
         });
+        const cleanupOwner = findWorktreeCleanupOwner(readModel, command.workspaceRoot);
+        if (cleanupOwner !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Workspace root '${command.workspaceRoot}' is still being cleaned up by thread '${cleanupOwner.id}'.`,
+          });
+        }
       }
       const occurredAt = yield* nowIso;
       return {

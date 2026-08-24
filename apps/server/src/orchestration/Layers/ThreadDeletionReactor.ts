@@ -200,8 +200,6 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const worker = yield* makeDrainableWorker(processThreadDeletedSafely);
-
   const processCleanup = Effect.fn("processThreadWorktreeCleanup")(function* (job: CleanupJob) {
     if (job.needsTeardown) {
       yield* stopProviderSessionStrict(job.threadId);
@@ -277,15 +275,10 @@ const make = Effect.gen(function* () {
         cwd: deleting.repositoryRoot,
         path: deleting.worktreePath,
         force: true,
+        allowMissing: true,
       }),
     );
-    // A restart can observe `deleting` after Git removed the worktree but
-    // before the completion event was persisted. Git quite reasonably rejects
-    // a second removal of an unregistered path, so an absent path is already
-    // the desired end state and should complete the durable cleanup.
-    const alreadyRemoved =
-      Result.isFailure(removal) && !(yield* fileSystem.exists(deleting.worktreePath));
-    if (Result.isSuccess(removal) || alreadyRemoved) {
+    if (Result.isSuccess(removal)) {
       yield* dispatchCleanupWithRetry(job.threadId, null);
       return;
     }
@@ -448,31 +441,50 @@ const make = Effect.gen(function* () {
     return Effect.void;
   };
 
-  const cleanupDrain = Effect.gen(function* () {
-    const workers = yield* Ref.get(cleanupWorkersRef);
-    yield* Effect.forEach(workers.values(), (entry) => entry.worker.drain, {
-      concurrency: "unbounded",
-    });
+  const worker = yield* makeDrainableWorker((event: ThreadDeletedEvent) =>
+    processThreadDeletedSafely(event).pipe(
+      Effect.andThen(Ref.get(failedThreadTeardownIdsRef)),
+      Effect.flatMap((failedThreadIds) =>
+        failedThreadIds.has(event.payload.threadId) ? Effect.void : enqueueCleanupFromEvent(event),
+      ),
+    ),
+  );
+
+  const cleanupDrain: Effect.Effect<void> = Effect.gen(function* () {
+    while (true) {
+      const snapshot = yield* cleanupWorkersMutex.withPermit(
+        Effect.gen(function* () {
+          const workers = yield* Ref.get(cleanupWorkersRef);
+          return yield* Effect.forEach(Array.from(workers.entries()), ([repositoryKey, entry]) =>
+            Ref.get(entry.generation).pipe(
+              Effect.map((generation) => ({ repositoryKey, entry, generation })),
+            ),
+          );
+        }),
+      );
+      yield* Effect.forEach(snapshot, ({ entry }) => entry.worker.drain, {
+        concurrency: "unbounded",
+      });
+      const stable = yield* cleanupWorkersMutex.withPermit(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(cleanupWorkersRef);
+          if (current.size !== snapshot.length) return false;
+          const checks = yield* Effect.forEach(snapshot, ({ repositoryKey, entry, generation }) => {
+            if (current.get(repositoryKey) !== entry) return Effect.succeed(false);
+            return Ref.get(entry.generation).pipe(Effect.map((value) => value === generation));
+          });
+          return checks.every(Boolean);
+        }),
+      );
+      if (stable) return;
+    }
   });
 
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
         if (event.type === "thread.deleted") {
-          return worker
-            .enqueue(event)
-            .pipe(
-              Effect.andThen(worker.drain),
-              Effect.andThen(
-                Ref.get(failedThreadTeardownIdsRef).pipe(
-                  Effect.flatMap((failedThreadIds) =>
-                    failedThreadIds.has(event.payload.threadId)
-                      ? Effect.void
-                      : enqueueCleanupFromEvent(event),
-                  ),
-                ),
-              ),
-            );
+          return worker.enqueue(event);
         }
         return enqueueCleanupFromEvent(event);
       }),
@@ -497,7 +509,7 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: Effect.all([worker.drain, cleanupDrain]).pipe(Effect.asVoid),
+    drain: worker.drain.pipe(Effect.andThen(cleanupDrain)),
   } satisfies ThreadDeletionReactorShape;
 });
 

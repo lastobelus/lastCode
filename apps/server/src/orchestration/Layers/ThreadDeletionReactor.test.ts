@@ -189,6 +189,8 @@ describe("durable worktree cleanup", () => {
       };
       const rows = new Map([[thread.threadId, thread]]);
       const operations: string[] = [];
+      const teardownStarted = yield* Deferred.make<void, never>();
+      const releaseTeardown = yield* Deferred.make<void, never>();
       const removed = yield* Deferred.make<void>();
       const completionDispatchFailed = yield* Deferred.make<void>();
       let completionDispatchAttempts = 0;
@@ -237,7 +239,10 @@ describe("durable worktree cleanup", () => {
         }),
         Layer.mock(ProviderService)({
           stopSession: ({ threadId }) =>
-            Effect.sync(() => void operations.push(`stop:${threadId}`)),
+            Effect.sync(() => void operations.push(`stop:${threadId}`)).pipe(
+              Effect.andThen(Deferred.succeed(teardownStarted, undefined)),
+              Effect.andThen(Deferred.await(releaseTeardown)),
+            ),
         }),
         Layer.mock(TerminalManager.TerminalManager)({
           close: ({ threadId }) => Effect.sync(() => void operations.push(`close:${threadId}`)),
@@ -253,8 +258,14 @@ describe("durable worktree cleanup", () => {
       yield* Effect.gen(function* () {
         const reactor = yield* ThreadDeletionReactor;
         yield* reactor.start();
+        yield* Deferred.await(teardownStarted);
+        const drainCompleted = yield* Deferred.make<void, never>();
+        const drain = yield* Effect.forkChild(
+          reactor.drain.pipe(Effect.andThen(Deferred.succeed(drainCompleted, undefined))),
+        );
+        expect(yield* Deferred.isDone(drainCompleted)).toBe(false);
+        yield* Deferred.succeed(releaseTeardown, undefined);
         yield* Deferred.await(removed);
-        const drain = yield* Effect.forkChild(reactor.drain);
         yield* Deferred.await(completionDispatchFailed);
         yield* TestClock.adjust("1 second");
         yield* Fiber.join(drain);
@@ -649,7 +660,7 @@ describe("durable worktree cleanup", () => {
             }),
         }),
         Layer.mock(GitWorkflowService)({
-          removeWorktree: ({ path }) =>
+          removeWorktree: ({ path, allowMissing }) =>
             Effect.gen(function* () {
               removals.push(path);
               operations.push(`remove:${path}`);
@@ -661,7 +672,7 @@ describe("durable worktree cleanup", () => {
                   detail: "permission denied",
                 });
               }
-              if (path === fourth.worktreePath) {
+              if (path === fourth.worktreePath && allowMissing !== true) {
                 return yield* new GitCommandError({
                   operation: "remove worktree",
                   command: "git worktree remove",

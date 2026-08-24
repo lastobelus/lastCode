@@ -389,6 +389,38 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
       );
       expect(pathReuseError.message).toContain("is still being cleaned up by thread");
 
+      const projectCreateReuseError = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.create",
+            commandId: asCommandId("cmd-cleanup-project-create-reuse"),
+            projectId: asProjectId("project-cleanup-reuse"),
+            title: "Cleanup reuse",
+            workspaceRoot: "/tmp/project-delete-worktrees/cleanup-retry",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          readModel: afterDelete,
+        }),
+      );
+      expect(projectCreateReuseError.message).toContain(
+        "is still being cleaned up by thread 'thread-delete-1'",
+      );
+
+      const projectUpdateReuseError = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.meta.update",
+            commandId: asCommandId("cmd-cleanup-project-update-reuse"),
+            projectId: asProjectId("project-delete"),
+            workspaceRoot: "/tmp/project-delete-worktrees/cleanup-retry",
+          },
+          readModel: afterDelete,
+        }),
+      );
+      expect(projectUpdateReuseError.message).toContain(
+        "is still being cleaned up by thread 'thread-delete-1'",
+      );
+
       const failed = yield* decideOrchestrationCommand({
         command: {
           type: "thread.worktree-cleanup.update",
