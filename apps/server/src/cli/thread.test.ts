@@ -28,6 +28,7 @@ import {
   currentThreadOutput,
   listThreadsOutput,
   isAuthoritativeDispatchFailure,
+  isPendingCurrentThreadWait,
   readThreadOutput,
   retryAmbiguousTrackedDispatch,
   resolveThreadTarget,
@@ -62,6 +63,33 @@ it.effect("does not retry an authoritative tracked dispatch rejection", () =>
     assert.strictEqual(attempts, 1);
   }),
 );
+
+it("rejects only pending standalone waits for the current thread", () => {
+  const waitHandle = {
+    kind: "wait-handle" as const,
+    environmentId: EnvironmentId.make("env-runner"),
+    threadId: ThreadId.make("thread-runner"),
+    messageId: MessageId.make("message-wait"),
+  };
+  assert.isTrue(
+    isPendingCurrentThreadWait(waitHandle, { kind: "timed-out", waitHandle }, "thread-runner"),
+  );
+  assert.isFalse(
+    isPendingCurrentThreadWait(
+      waitHandle,
+      {
+        kind: "interrupted",
+        environmentId: EnvironmentId.make("env-runner"),
+        threadId: ThreadId.make("thread-runner"),
+        messageId: MessageId.make("message-wait"),
+      },
+      "thread-runner",
+    ),
+  );
+  assert.isFalse(
+    isPendingCurrentThreadWait(waitHandle, { kind: "timed-out", waitHandle }, "thread-other"),
+  );
+});
 
 const shellThread = (id: string) => ({ id: ThreadId.make(id) }) as OrchestrationThreadShell;
 

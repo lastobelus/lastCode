@@ -16,6 +16,7 @@ import {
   type OrchestrationThreadShell,
   ThreadId,
   ThreadWaitHandle,
+  type ThreadWaitResult,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
@@ -1032,6 +1033,8 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
       ),
     });
   }
+  const currentThreadId = process.env.T3CODE_THREAD_ID?.trim();
+  const waitingOnCurrentThread = currentThreadId === waitHandle.threadId;
   return yield* Effect.gen(function* () {
     const auth = yield* EnvironmentAuth.EnvironmentAuth;
     const result = yield* withReadSession(auth, (token) =>
@@ -1039,13 +1042,24 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
         client.orchestration
           .waitThread({
             headers: { authorization: `Bearer ${token}` },
-            payload: { waitHandle, timeoutMs },
+            payload: { waitHandle, timeoutMs: waitingOnCurrentThread ? 1 : timeoutMs },
           })
-          .pipe(Effect.timeout(`${timeoutMs + 5_000} millis`)),
+          .pipe(Effect.timeout(`${(waitingOnCurrentThread ? 1 : timeoutMs) + 5_000} millis`)),
       ),
     );
     if (result._tag === "Failure" && isAuthoritativeWaitFailure(result.failure)) {
       return yield* new ThreadCliError({ operation: "live wait", cause: result.failure });
+    }
+    if (
+      result._tag === "Success" &&
+      isPendingCurrentThreadWait(waitHandle, result.success, currentThreadId)
+    ) {
+      return yield* new ThreadCliError({
+        operation: "live wait",
+        cause: new Error(
+          "Cannot wait for a pending request in the current thread because its queued turn cannot start until this command exits.",
+        ),
+      });
     }
     yield* Console.log(
       yield* encodeJson(
@@ -1061,6 +1075,14 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     ),
   );
 });
+
+export function isPendingCurrentThreadWait(
+  waitHandle: ThreadWaitHandle,
+  result: ThreadWaitResult,
+  currentThreadId: string | undefined,
+) {
+  return currentThreadId === waitHandle.threadId && result.kind === "timed-out";
+}
 
 const jsonFlag = Flag.boolean("json").pipe(
   Flag.withDescription("Print stable JSON output."),
