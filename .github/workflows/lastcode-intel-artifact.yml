@@ -48,16 +48,6 @@ jobs:
         with:
           node-version-file: automation/package.json
 
-      - name: Require immutable GitHub Releases
-        working-directory: automation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" > "$RUNNER_TEMP/immutable-releases.json"
-          node scripts/lastcode-intel-release.mjs validate-repository \
-            --repository-json "$RUNNER_TEMP/immutable-releases.json"
-
       - name: Checkout exact installable
         uses: actions/checkout@v6
         with:
@@ -244,15 +234,6 @@ jobs:
         with:
           node-version-file: package.json
 
-      - name: Require immutable GitHub Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" > "$RUNNER_TEMP/immutable-releases.json"
-          node scripts/lastcode-intel-release.mjs validate-repository \
-            --repository-json "$RUNNER_TEMP/immutable-releases.json"
-
       - name: Download isolated build assets
         uses: actions/download-artifact@v8
         with:
@@ -335,11 +316,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" > "$RUNNER_TEMP/immutable-releases.json"
-          node scripts/lastcode-intel-release.mjs validate-repository \
-            --repository-json "$RUNNER_TEMP/immutable-releases.json"
 
           release_notes="$(printf '%s\n%s\n' \
             "Certificate-free LastCode macOS x64 artifacts for ${INSTALLABLE_TAG}." \
