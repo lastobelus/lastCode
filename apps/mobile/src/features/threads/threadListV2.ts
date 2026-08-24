@@ -30,6 +30,15 @@ export { snoozeWakeLabel };
 export type ThreadListV2Status = "approval" | "input" | "working" | "waiting" | "failed" | "ready";
 export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooze" | "unsnooze";
 
+export type ThreadListV2CleanupAction = "retry-worktree-cleanup" | "keep-worktree";
+
+/** Failed cleanup tombstones stay reachable on mobile through recovery actions. */
+export function resolveThreadListV2CleanupActions(
+  cleanup: EnvironmentThreadShell["worktreeCleanup"],
+): readonly ThreadListV2CleanupAction[] {
+  return cleanup?.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [];
+}
+
 export function resolveThreadListV2SnoozeMenuSelection(input: {
   readonly event: string;
   readonly displayedPresets: ReadonlyArray<SnoozePreset>;

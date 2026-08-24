@@ -17,6 +17,7 @@ import {
   buildThreadListV2Items,
   buildThreadListV2ListItems,
   resolveThreadListV2Enabled,
+  resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
@@ -197,6 +198,41 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",
     );
+  });
+});
+
+describe("resolveThreadListV2CleanupActions", () => {
+  it("keeps failed cleanup tombstones recoverable from the mobile menu", () => {
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "failed",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+        failedAt: NOW,
+        error: "permission denied",
+      }),
+    ).toEqual(["retry-worktree-cleanup", "keep-worktree"]);
+  });
+
+  it("keeps queued and active cleanup tombstones menu-inert", () => {
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "queued",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        queuedAt: NOW,
+        blockedByThreadId: ThreadId.make("blocking"),
+      }),
+    ).toEqual([]);
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "deleting",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+      }),
+    ).toEqual([]);
   });
 });
 

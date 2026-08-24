@@ -5,6 +5,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -57,6 +58,7 @@ const make = Effect.gen(function* () {
   const projectionThreads = yield* ProjectionThreadRepository;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const fileSystem = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const cleanupWorkersRef = yield* Ref.make<ReadonlyMap<string, DrainableWorker<CleanupJob>>>(
     new Map(),
@@ -163,7 +165,13 @@ const make = Effect.gen(function* () {
         force: true,
       }),
     );
-    if (Result.isSuccess(removal)) {
+    // A restart can observe `deleting` after Git removed the worktree but
+    // before the completion event was persisted. Git quite reasonably rejects
+    // a second removal of an unregistered path, so an absent path is already
+    // the desired end state and should complete the durable cleanup.
+    const alreadyRemoved =
+      Result.isFailure(removal) && !(yield* fileSystem.exists(deleting.worktreePath));
+    if (Result.isSuccess(removal) || alreadyRemoved) {
       yield* dispatchCleanup(job.threadId, null).pipe(
         Effect.retry({ times: 2 }),
         Effect.catchCause((cause) => {

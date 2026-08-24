@@ -188,6 +188,7 @@ describe("durable worktree cleanup", () => {
   effectIt.live("resumes same-repository cleanup in order and persists failures", () =>
     Effect.gen(function* () {
       const root = "/repo";
+      const existingWorktreePath = process.cwd();
       const first = cleanupRow(
         "cleanup-first",
         {
@@ -203,7 +204,7 @@ describe("durable worktree cleanup", () => {
         {
           status: "queued",
           repositoryRoot: `${root}/`,
-          worktreePath: "/worktrees/second",
+          worktreePath: existingWorktreePath,
           queuedAt: "2026-08-23T00:00:01.000Z",
           blockedByThreadId: first.threadId,
         },
@@ -220,6 +221,16 @@ describe("durable worktree cleanup", () => {
         },
         "2026-08-23T00:00:02.000Z",
       );
+      const fourth = cleanupRow(
+        "cleanup-already-removed",
+        {
+          status: "deleting",
+          repositoryRoot: root,
+          worktreePath: "/worktrees/already-removed",
+          startedAt: "2026-08-23T00:00:03.000Z",
+        },
+        "2026-08-23T00:00:03.000Z",
+      );
       const activeOwner = {
         threadId: ThreadId.make("active-owner"),
         worktreePath: third.worktreePath ?? "/worktrees/third",
@@ -228,6 +239,7 @@ describe("durable worktree cleanup", () => {
         [first.threadId, first],
         [second.threadId, second],
         [third.threadId, third],
+        [fourth.threadId, fourth],
       ]);
       const removals: string[] = [];
       const operations: string[] = [];
@@ -251,7 +263,7 @@ describe("durable worktree cleanup", () => {
         }),
         Layer.mock(ProjectionThreadRepository)({
           getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
-          listPendingWorktreeCleanup: () => Effect.succeed([first, second, third]),
+          listPendingWorktreeCleanup: () => Effect.succeed([first, second, third, fourth]),
           listActiveWorktreeOwners: () => Effect.succeed([activeOwner]),
         }),
         Layer.mock(GitWorkflowService)({
@@ -265,6 +277,14 @@ describe("durable worktree cleanup", () => {
                   command: "git worktree remove",
                   cwd: root,
                   detail: "permission denied",
+                });
+              }
+              if (path === fourth.worktreePath) {
+                return yield* new GitCommandError({
+                  operation: "remove worktree",
+                  command: "git worktree remove",
+                  cwd: root,
+                  detail: "not a working tree",
                 });
               }
             }),
@@ -289,16 +309,23 @@ describe("durable worktree cleanup", () => {
         yield* reactor.drain;
       }).pipe(Effect.provide(testLayer));
 
-      expect(removals).toEqual(["/worktrees/first", "/worktrees/second"]);
+      expect(removals).toEqual([
+        "/worktrees/first",
+        second.worktreePath,
+        "/worktrees/already-removed",
+      ]);
       expect(operations).toEqual([
         `stop:${first.threadId}`,
         `close:${first.threadId}`,
         "remove:/worktrees/first",
         `stop:${second.threadId}`,
         `close:${second.threadId}`,
-        "remove:/worktrees/second",
+        `remove:${second.worktreePath}`,
         `stop:${third.threadId}`,
         `close:${third.threadId}`,
+        `stop:${fourth.threadId}`,
+        `close:${fourth.threadId}`,
+        "remove:/worktrees/already-removed",
       ]);
       expect(
         updates.map((command) => [command.threadId, command.cleanup?.status ?? "complete"]),
@@ -308,6 +335,7 @@ describe("durable worktree cleanup", () => {
         [second.threadId, "failed"],
         [third.threadId, "deleting"],
         [third.threadId, "failed"],
+        [fourth.threadId, "complete"],
       ]);
       expect(updates[2]?.cleanup).toMatchObject({
         status: "failed",
@@ -317,6 +345,7 @@ describe("durable worktree cleanup", () => {
         status: "failed",
         error: expect.stringContaining("active-owner"),
       });
+      expect(updates[5]?.cleanup).toBeNull();
     }),
   );
 });

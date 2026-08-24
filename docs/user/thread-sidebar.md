@@ -38,8 +38,8 @@ thread it is waiting for. Cleanup for different repositories can proceed at the 
 
 If cleanup fails, the row changes to **Cleanup failed**. Select anywhere on that row to see the
 error and choose **Retry**, **Copy details**, or **Keep worktree**. LastCode resumes unfinished
-cleanup after a server restart. Mobile shows these states but recovery actions are available only
-on web and desktop.
+cleanup after a server restart. On mobile, long-press a failed row to choose **Retry** or
+**Keep worktree**.
 
 ## Environment artwork
 
