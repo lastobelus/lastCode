@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -154,6 +155,7 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
+    readonly turnRequestResolutionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly createSecondThread?: boolean;
     readonly startSessionEffect?: (
@@ -370,6 +372,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     let titleRegenerationCompletionDispatchAttempts = 0;
+    let turnRequestResolutionDispatchAttempts = 0;
     const reactorOrchestrationLayer = Layer.effect(
       OrchestrationEngineService,
       Effect.gen(function* () {
@@ -377,6 +380,15 @@ describe("ProviderCommandReactor", () => {
         return {
           readEvents: engine.readEvents,
           dispatch: (command) => {
+            if (command.type === "thread.turn-request.resolve") {
+              turnRequestResolutionDispatchAttempts += 1;
+              if (
+                turnRequestResolutionDispatchAttempts <=
+                (input?.turnRequestResolutionDispatchFailures ?? 0)
+              ) {
+                return Effect.die(new Error("Injected turn request resolution failure"));
+              }
+            }
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
               if (
@@ -391,6 +403,8 @@ describe("ProviderCommandReactor", () => {
           get streamDomainEvents() {
             return engine.streamDomainEvents;
           },
+          getTurnRequestWaitState: engine.getTurnRequestWaitState,
+          subscribeDomainEvents: engine.subscribeDomainEvents,
           latestSequence: engine.latestSequence,
         } satisfies OrchestrationEngineService["Service"];
       }),
@@ -433,7 +447,7 @@ describe("ProviderCommandReactor", () => {
     const projectionTurns = await runtime.runPromise(Effect.service(ProjectionTurnRepository));
     const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
 
-    await Effect.runPromise(
+    await runtime.runPromise(
       engine.dispatch({
         type: "project.create",
         commandId: CommandId.make("cmd-project-create"),
@@ -519,6 +533,9 @@ describe("ProviderCommandReactor", () => {
       runEffect,
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
+      },
+      get turnRequestResolutionDispatchAttempts() {
+        return turnRequestResolutionDispatchAttempts;
       },
     };
   }
@@ -623,6 +640,79 @@ describe("ProviderCommandReactor", () => {
       expect(pendingStarts.some((pending) => pending.threadId === "thread-1")).toBe(false);
     }),
   );
+
+  it("finalizes a marked request with the exact provider turn id", async () => {
+    const harness = await createHarness();
+    const observed = await harness.runEffect(
+      Effect.gen(function* () {
+        const fiber = yield* Stream.runHead(
+          harness.engine.streamDomainEvents.pipe(
+            Stream.filter((event) => event.type === "thread.turn-request-resolved"),
+          ),
+        ).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-tracked"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-tracked"),
+            role: "user",
+            text: "track this exact turn",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          trackRequestCorrelation: true,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        return yield* Fiber.join(fiber);
+      }),
+    );
+
+    expect(observed._tag).toBe("Some");
+    if (observed._tag === "Some" && observed.value.type === "thread.turn-request-resolved") {
+      expect(observed.value.payload.outcome).toEqual({ kind: "started", turnId: "turn-1" });
+    }
+    const getState = harness.engine.getTurnRequestWaitState;
+    expect(getState).toBeDefined();
+    if (getState) {
+      expect(
+        await harness.runEffect(
+          getState({
+            threadId: ThreadId.make("thread-1"),
+            messageId: asMessageId("user-message-tracked"),
+          }),
+        ),
+      ).toEqual({ kind: "pending" });
+    }
+  });
+
+  it("does not mark a started provider session failed when correlation persistence fails", async () => {
+    const harness = await createHarness({ turnRequestResolutionDispatchFailures: 1 });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-correlation-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-correlation-failure"),
+          role: "user",
+          text: "start despite correlation storage failure",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        trackRequestCorrelation: true,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.turnRequestResolutionDispatchAttempts).toBe(1);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.session?.status).not.toBe("error");
+  });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
