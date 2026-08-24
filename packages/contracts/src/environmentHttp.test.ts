@@ -7,7 +7,9 @@ import {
   EnvironmentRequestInvalidError,
   EnvironmentResourceNotFoundError,
   EnvironmentScopeRequiredError,
+  ThreadWaitHandle,
 } from "./environmentHttp.ts";
+import * as Schema from "effect/Schema";
 
 const traceId = "trace-1";
 
@@ -59,4 +61,22 @@ describe("environment HTTP errors", () => {
       expect(error.message).toContain(details[index]);
     });
   });
+});
+
+it("decodes strict compact wait handles", () => {
+  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ThreadWaitHandle));
+  const value = decode(
+    '{"kind":"wait-handle","environmentId":"env-1","threadId":"thread-1","messageId":"message-1"}',
+  );
+  expect(value.kind).toBe("wait-handle");
+  expect(() =>
+    decode(
+      '{"kind":"accepted","environmentId":"env-1","threadId":"thread-1","messageId":"message-1"}',
+    ),
+  ).toThrow();
+  expect(() =>
+    decode(
+      '{"kind":"wait-handle","environmentId":"env-1","threadId":"thread-1","messageId":"message-1","extra":true}',
+    ),
+  ).toThrow();
 });
