@@ -134,12 +134,11 @@ requires the manifest's x64/macOS architecture, exact tag and commit, byte
 counts, checksums, and asset set to agree.
 
 Repository **Settings → Releases → Immutable releases** must be enabled before
-dispatch. The workflow checks that repository policy before checking out target
-code, checks it again in the isolated publisher, and fails without building or
-publishing when the setting is unavailable or disabled. Enabling the setting is
-an explicit maintainer action; the workflow never changes repository policy.
-Every reused or newly published release must also report itself immutable, so a
-release created before the repository policy was enabled fails closed.
+dispatch. Enabling and checking that setting is an explicit maintainer action
+because GitHub's workflow token cannot read the administration-only endpoint;
+the workflow never changes repository policy. Every reused or newly published
+release must report itself immutable, so a release created before the repository
+policy was enabled fails closed.
 
 The Intel build job has read-only repository access. It transfers the validated
 asset set to a fresh publication job, which revalidates the assets and tag before
