@@ -25,9 +25,11 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  ThreadTurnRequestOutcome,
   isProviderSendTurnSupportedImageMimeType,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { TurnId } from "./baseSchemas.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
@@ -40,6 +42,7 @@ const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrches
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
 );
+const decodeThreadTurnRequestOutcome = Schema.decodeUnknownEffect(ThreadTurnRequestOutcome);
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
@@ -80,6 +83,31 @@ it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
     });
     assert.strictEqual(parsed.fromTurnCount, 1);
     assert.strictEqual(parsed.toTurnCount, 2);
+  }),
+);
+
+it.effect("accepts only explicit tracked correlation markers and typed request outcomes", () =>
+  Effect.gen(function* () {
+    const payload = yield* decodeThreadTurnStartRequestedPayload({
+      threadId: "thread-1",
+      messageId: "message-1",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      trackRequestCorrelation: true,
+      createdAt: "2026-08-22T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.trackRequestCorrelation, true);
+    const invalid = yield* Effect.result(
+      decodeThreadTurnStartRequestedPayload({ ...payload, trackRequestCorrelation: false }),
+    );
+    assert.strictEqual(invalid._tag, "Failure");
+    assert.deepStrictEqual(
+      yield* decodeThreadTurnRequestOutcome({ kind: "started", turnId: TurnId.make("t") }),
+      {
+        kind: "started",
+        turnId: TurnId.make("t"),
+      },
+    );
   }),
 );
 
@@ -868,6 +896,21 @@ it.effect("decodes orchestration session runtime mode defaults", () =>
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
+  }),
+);
+
+it.effect("preserves optional provider-native thread identity", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationSession({
+      threadId: "thread-1",
+      status: "ready",
+      providerName: "codex",
+      providerThreadId: "codex-thread-1",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.providerThreadId, "codex-thread-1");
   }),
 );
 
