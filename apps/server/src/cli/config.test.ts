@@ -17,8 +17,8 @@ import {
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { deriveServerPaths } from "../config.ts";
-import { resolveServerConfig } from "./config.ts";
+import { DEFAULT_PORT, deriveServerPaths } from "../config.ts";
+import { resolveServerConfig, resolveThreadInspectionConfig } from "./config.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
@@ -79,7 +79,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           host: Option.none(),
           baseDir: Option.none(),
           cwd: Option.none(),
-          devUrl: Option.none(),
+          devUrl: Option.some(new URL("http://127.0.0.1:5173")),
           noBrowser: Option.none(),
           bootstrapFd: Option.none(),
           autoBootstrapProjectFromCwd: Option.none(),
@@ -618,5 +618,109 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 443,
       });
     }),
+  );
+
+  it.effect("pins every derived path to the explicitly active dev state", () =>
+    Effect.gen(function* () {
+      const { join } = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "thread-active-home-" });
+      const stateDir = join(baseDir, "dev");
+      const inheritedDevUrl = new URL("http://127.0.0.1:5173");
+      const resolved = yield* resolveServerConfig(
+        {
+          mode: Option.none(),
+          port: Option.some(3773),
+          host: Option.none(),
+          baseDir: Option.some(baseDir),
+          cwd: Option.none(),
+          devUrl: Option.some(inheritedDevUrl),
+          noBrowser: Option.none(),
+          bootstrapFd: Option.none(),
+          autoBootstrapProjectFromCwd: Option.none(),
+          logWebSocketEvents: Option.none(),
+          tailscaleServeEnabled: Option.none(),
+          tailscaleServePort: Option.none(),
+        },
+        Option.none(),
+        { activeStateDir: Option.some(stateDir) },
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+      );
+      assert.equal(resolved.baseDir, baseDir);
+      assert.equal(resolved.stateDir, stateDir);
+      assert.equal(resolved.devUrl, inheritedDevUrl);
+      assert.equal(resolved.dbPath, join(stateDir, "state.sqlite"));
+      assert.equal(resolved.environmentIdPath, join(stateDir, "environment-id"));
+      assert.equal(resolved.serverRuntimeStatePath, join(stateDir, "server-runtime.json"));
+      assert.equal(resolved.secretsDir, join(stateDir, "secrets"));
+
+      const userdataStateDir = join(baseDir, "userdata");
+      const userdata = yield* resolveServerConfig(
+        {
+          mode: Option.none(),
+          port: Option.some(3773),
+          host: Option.none(),
+          baseDir: Option.some(baseDir),
+          cwd: Option.none(),
+          devUrl: Option.some(new URL("http://127.0.0.1:5173")),
+          noBrowser: Option.none(),
+          bootstrapFd: Option.none(),
+          autoBootstrapProjectFromCwd: Option.none(),
+          logWebSocketEvents: Option.none(),
+          tailscaleServeEnabled: Option.none(),
+          tailscaleServePort: Option.none(),
+        },
+        Option.none(),
+        { activeStateDir: Option.some(userdataStateDir) },
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+      );
+      assert.equal(userdata.stateDir, userdataStateDir);
+      assert.equal(userdata.devUrl?.href, "http://127.0.0.1:5173/");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("derives thread inspection config without probing ports or provisioning paths", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { join } = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "thread-config-read-only-" });
+      const baseDir = join(root, "missing-home");
+      let portProbeCount = 0;
+      const netLayer = Layer.succeed(NetService.NetService, {
+        canListenOnHost: () => Effect.die("unexpected port probe"),
+        isPortAvailableOnLoopback: () => Effect.die("unexpected port probe"),
+        hasListenerOnHost: () => Effect.die("unexpected port probe"),
+        reserveLoopbackPort: () => Effect.die("unexpected port probe"),
+        findAvailablePort: () => {
+          portProbeCount += 1;
+          return Effect.die("unexpected port probe");
+        },
+      });
+      const resolved = yield* resolveThreadInspectionConfig(
+        { baseDir: Option.some(baseDir) },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), netLayer),
+        ),
+      );
+
+      assert.equal(resolved.port, DEFAULT_PORT);
+      assert.equal(resolved.baseDir, baseDir);
+      assert.equal(portProbeCount, 0);
+      assert.isFalse(yield* fs.exists(baseDir));
+    }).pipe(Effect.scoped),
   );
 });
