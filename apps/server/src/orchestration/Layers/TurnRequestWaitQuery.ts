@@ -20,7 +20,51 @@ const WaitRow = Schema.Struct({
   response: Schema.NullOr(Schema.String),
   responseStreaming: Schema.NullOr(Schema.Number),
   assistantFinalizedAt: Schema.NullOr(Schema.String),
+  sessionStatus: Schema.NullOr(
+    Schema.Literals(["idle", "starting", "running", "ready", "interrupted", "stopped", "error"]),
+  ),
+  sessionActiveTurnId: Schema.NullOr(TurnId),
 });
+
+export const resolveTurnRequestWaitState = (value: typeof WaitRow.Type): TurnRequestWaitState => {
+  if (value.correlationState === "error" || value.correlationState === "interrupted") {
+    return { kind: "terminal", state: value.correlationState };
+  }
+  if (value.turnId !== null && value.turnState !== null && value.turnState !== "running") {
+    if (
+      value.turnState === "interrupted" &&
+      value.sessionStatus === "running" &&
+      value.sessionActiveTurnId === value.turnId
+    ) {
+      return { kind: "pending" };
+    }
+    if (value.turnState === "completed") {
+      if (value.assistantFinalizedAt === null) {
+        return { kind: "pending" };
+      }
+      if (value.assistantMessageId === null) {
+        return { kind: "terminal", state: "completed", turnId: value.turnId, response: "" };
+      }
+      if (value.response === null) {
+        if (value.assistantMessageId !== MessageId.make(`assistant:${value.turnId}`)) {
+          return { kind: "pending" };
+        }
+        return { kind: "terminal", state: "completed", turnId: value.turnId, response: "" };
+      }
+      if (value.responseStreaming !== 0) {
+        return { kind: "pending" };
+      }
+      return {
+        kind: "terminal",
+        state: "completed",
+        turnId: value.turnId,
+        response: value.response,
+      };
+    }
+    return { kind: "terminal", state: value.turnState, turnId: value.turnId };
+  }
+  return { kind: "pending" };
+};
 
 export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
   const getRow = SqlSchema.findOneOption({
@@ -30,7 +74,8 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       SELECT correlations.state AS "correlationState", correlations.turn_id AS "turnId",
         turns.state AS "turnState", turns.assistant_message_id AS "assistantMessageId",
         messages.text AS "response", messages.is_streaming AS "responseStreaming",
-        finalizations.finalized_at AS "assistantFinalizedAt"
+        finalizations.finalized_at AS "assistantFinalizedAt",
+        sessions.status AS "sessionStatus", sessions.active_turn_id AS "sessionActiveTurnId"
       FROM projection_turn_request_correlations AS correlations
       LEFT JOIN projection_turns AS turns
         ON turns.thread_id = correlations.thread_id AND turns.turn_id = correlations.turn_id
@@ -39,6 +84,8 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       LEFT JOIN projection_turn_assistant_finalizations AS finalizations
         ON finalizations.thread_id = correlations.thread_id
           AND finalizations.turn_id = correlations.turn_id
+      LEFT JOIN projection_thread_sessions AS sessions
+        ON sessions.thread_id = correlations.thread_id
       WHERE correlations.thread_id = ${threadId} AND correlations.message_id = ${messageId}
       LIMIT 1
     `,
@@ -53,51 +100,7 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       if (threads.length === 0) return { kind: "thread-not-found" } as const;
       const row = yield* getRow(input);
       if (Option.isNone(row)) return { kind: "correlation-not-found" } as const;
-      const value = row.value;
-      if (value.correlationState === "error" || value.correlationState === "interrupted") {
-        return { kind: "terminal", state: value.correlationState } as const;
-      }
-      if (value.turnId !== null && value.turnState !== null && value.turnState !== "running") {
-        if (value.turnState === "completed") {
-          if (value.assistantFinalizedAt === null) {
-            return { kind: "pending" } as const;
-          }
-          if (value.assistantMessageId === null) {
-            return {
-              kind: "terminal",
-              state: "completed",
-              turnId: value.turnId,
-              response: "",
-            } as const;
-          }
-          if (value.response === null) {
-            if (value.assistantMessageId !== MessageId.make(`assistant:${value.turnId}`)) {
-              return { kind: "pending" } as const;
-            }
-            return {
-              kind: "terminal",
-              state: "completed",
-              turnId: value.turnId,
-              response: "",
-            } as const;
-          }
-          if (value.responseStreaming !== 0) {
-            return { kind: "pending" } as const;
-          }
-          return {
-            kind: "terminal",
-            state: "completed",
-            turnId: value.turnId,
-            response: value.response,
-          } as const;
-        }
-        return {
-          kind: "terminal",
-          state: value.turnState,
-          turnId: value.turnId,
-        } as const;
-      }
-      return { kind: "pending" } as const;
+      return resolveTurnRequestWaitState(row.value);
     }).pipe(
       Effect.mapError((cause) =>
         Schema.isSchemaError(cause)

@@ -40,7 +40,6 @@ export const readThreadWaitUntilTerminal = (
         event.aggregateId === threadId &&
         (event.type === "thread.turn-request-resolved" ||
           event.type === "thread.turn-assistant-finalized" ||
-          event.type === "thread.turn-interrupt-requested" ||
           event.type === "thread.session-set" ||
           event.type === "thread.deleted"),
     ),
