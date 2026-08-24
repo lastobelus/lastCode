@@ -126,31 +126,21 @@ describe("immutable Intel release validation", () => {
     expect(workflow.match(/--json assets,isDraft,isImmutable,isPrerelease,tagName/g)).toHaveLength(
       3,
     );
+    expect(workflow).not.toContain('"repos/${GITHUB_REPOSITORY}/immutable-releases"');
 
     const artifactDownload = publishJob.indexOf("- name: Download isolated build assets");
-    const buildPolicy = buildJob.indexOf("- name: Require immutable GitHub Releases");
     const targetCheckoutIndex = buildJob.indexOf("- name: Checkout exact installable");
-    const publisherPolicy = publishJob.indexOf("- name: Require immutable GitHub Releases");
     const artifactValidation = publishJob.indexOf("- name: Validate isolated build assets");
     const tagFetch = publishJob.indexOf("git fetch --force --no-tags origin");
     const tagComparison = publishJob.indexOf('if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]');
     const releaseCreate = publishJob.indexOf('gh release create "$INSTALLABLE_TAG"');
-    const finalPolicyCheck = publishJob.lastIndexOf(
-      '"repos/${GITHUB_REPOSITORY}/immutable-releases"',
-      releaseCreate,
-    );
-    expect(buildPolicy).toBeGreaterThan(-1);
-    expect(targetCheckoutIndex).toBeGreaterThan(buildPolicy);
-    expect(publisherPolicy).toBeGreaterThan(-1);
-    expect(artifactDownload).toBeGreaterThan(publisherPolicy);
+    expect(targetCheckoutIndex).toBeGreaterThan(-1);
     expect(artifactDownload).toBeGreaterThan(-1);
     expect(artifactValidation).toBeGreaterThan(artifactDownload);
     expect(tagFetch).toBeGreaterThan(-1);
     expect(tagComparison).toBeGreaterThan(tagFetch);
     expect(releaseCreate).toBeGreaterThan(artifactValidation);
     expect(releaseCreate).toBeGreaterThan(tagComparison);
-    expect(finalPolicyCheck).toBeGreaterThan(tagComparison);
-    expect(releaseCreate).toBeGreaterThan(finalPolicyCheck);
   });
 
   it("requires GitHub's immutable release policy", () => {
