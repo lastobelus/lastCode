@@ -33,6 +33,18 @@ changed. Editing, resolving, or reopening the annotation moves that marker to th
 Resolved annotations disappear from the sidebar and composer but remain available from their
 yellow minimap marker, where they can be edited or reopened.
 
+## Worktree cleanup in LastCode
+
+When you delete a thread and choose to delete its worktree, the thread stays in the sidebar until
+the server finishes that cleanup. **Deleting** means removal is active. **Deleting (Queued)** means
+another worktree from the same repository is being removed first; hover the row to see which
+thread it is waiting for. Cleanup for different repositories can proceed at the same time.
+
+If cleanup fails, the row changes to **Cleanup failed**. Select anywhere on that row to see the
+error and choose **Retry**, **Copy details**, or **Keep worktree**. LastCode resumes unfinished
+cleanup after a server restart. On mobile, long-press a failed row to choose **Retry** or
+**Keep worktree**.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in
