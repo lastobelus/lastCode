@@ -33,6 +33,7 @@ import {
   OrchestrationProjectionPipelineLive,
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import { makeTurnRequestWaitQuery } from "./TurnRequestWaitQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -1519,6 +1520,43 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      const trackedMessageId = MessageId.make("message-turn-superseded");
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-ts-requested"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-requested"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-requested"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          trackRequestCorrelation: true,
+          createdAt: now,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.turn-request-resolved",
+        eventId: EventId.make("evt-ts-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-resolved"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          outcome: { kind: "started", turnId: oldTurnId },
+        },
+      });
+
       const appendRunningSessionSet = (eventId: string, turnId: TurnId, updatedAt: string) =>
         eventStore.append({
           type: "thread.session-set",
@@ -1562,9 +1600,17 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         ORDER BY requested_at
       `;
       assert.deepEqual(rows, [
-        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:30.000Z" },
+        { turnId: oldTurnId, state: "interrupted", completedAt: "2026-01-01T00:00:30.000Z" },
         { turnId: newTurnId, state: "running", completedAt: null },
       ]);
+      assert.deepEqual(
+        yield* makeTurnRequestWaitQuery(sql).getState({ threadId, messageId: trackedMessageId }),
+        {
+          kind: "terminal",
+          state: "interrupted",
+          turnId: oldTurnId,
+        },
+      );
     }),
   );
 
@@ -2584,6 +2630,87 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             AND state = 'pending'
         `;
         assert.deepEqual(pendingRows, []);
+      }),
+    );
+  },
+);
+
+it.layer(makeProjectionPipelinePrefixedTestLayer("t3-turn-correlation-test-"))(
+  "OrchestrationProjectionPipeline tracked correlations",
+  (it) => {
+    it.effect("tracks marked starts only and preserves the first projected resolution", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-correlation");
+        const now = "2026-08-22T00:00:00.000Z";
+        for (const [index, tracked] of [false, true].entries()) {
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-correlation-start-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-correlation-start-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-correlation-start-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-correlation-${index}`),
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              ...(tracked ? { trackRequestCorrelation: true as const } : {}),
+              createdAt: now,
+            },
+          });
+        }
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-1"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-1"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "started", turnId: TurnId.make("turn-correlation") },
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "terminal", state: "error", completedAt: now },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        const rows = yield* sql<{
+          readonly messageId: string;
+          readonly state: string;
+          readonly turnId: string | null;
+        }>`
+          SELECT message_id AS "messageId", state, turn_id AS "turnId"
+          FROM projection_turn_request_correlations
+        `;
+        assert.deepEqual(rows, [
+          { messageId: "message-correlation-1", state: "started", turnId: "turn-correlation" },
+        ]);
       }),
     );
   },
