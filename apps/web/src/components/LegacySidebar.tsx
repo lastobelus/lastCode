@@ -174,7 +174,7 @@ import {
   NumberFieldInput,
 } from "./ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { Tooltip, TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
   SidebarGroup,
@@ -546,14 +546,19 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     : !isThreadRunning
       ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "pointer-events-none";
-  const [annotationRowActive, setAnnotationRowActive] = useState(false);
+  const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
   }, [setConfirmingArchiveThreadKey, threadKey]);
   const handleMouseLeave = useCallback(() => {
     clearConfirmingArchive();
-    setAnnotationRowActive(false);
+    setThreadRowActive(false);
   }, [clearConfirmingArchive]);
+  const handleThreadDetailsTooltipOpenChange = useCallback<
+    NonNullable<React.ComponentProps<typeof Tooltip>["onOpenChange"]>
+  >((open, eventDetails) => {
+    if (!open && eventDetails.reason === "escape-key") setThreadRowActive(false);
+  }, []);
   const handleBlurCapture = useCallback(
     (event: React.FocusEvent<HTMLLIElement>) => {
       const currentTarget = event.currentTarget;
@@ -562,7 +567,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           return;
         }
         clearConfirmingArchive();
-        setAnnotationRowActive(false);
+        setThreadRowActive(false);
       });
     },
     [clearConfirmingArchive],
@@ -749,14 +754,23 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     },
     [attemptArchiveThread, threadRef],
   );
-  const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
+  const threadDetailsTooltipHandle = useMemo(() => TooltipCreateHandle(), []);
+  const rowButtonRender = useMemo(
+    () => (
+      <TooltipTrigger
+        handle={threadDetailsTooltipHandle}
+        render={<div role="button" tabIndex={0} />}
+      />
+    ),
+    [threadDetailsTooltipHandle],
+  );
 
   return (
     <SidebarMenuSubItem
       className="w-full"
       data-thread-item
-      onFocusCapture={() => setAnnotationRowActive(true)}
-      onMouseEnter={() => setAnnotationRowActive(true)}
+      onFocusCapture={() => setThreadRowActive(true)}
+      onMouseEnter={() => setThreadRowActive(true)}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -809,35 +823,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               onClick={handleRenameInputClick}
               onDoubleClick={handleRenameInputClick}
             />
-          ) : hasActiveAnnotation ? (
+          ) : (
             <span
               className="min-w-0 flex-1 truncate text-sm"
               data-testid={`thread-title-${thread.id}`}
             >
               {thread.title}
             </span>
-          ) : (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    className="min-w-0 flex-1 truncate text-sm"
-                    data-testid={`thread-title-${thread.id}`}
-                  >
-                    {thread.title}
-                  </span>
-                }
-              />
-              <TooltipPopup
-                align="start"
-                className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
-                side="right"
-                sideOffset={4}
-                variant="glass"
-              >
-                {threadHoverDetails}
-              </TooltipPopup>
-            </Tooltip>
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -964,7 +956,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                       onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                       onEdit={() => onEditAnnotation(thread)}
                       onResolve={() => onResolveAnnotation(thread)}
-                      rowActive={annotationRowActive}
+                      rowActive={threadRowActive}
                       threadDetails={threadHoverDetails}
                       threadRef={threadRef}
                       trigger={
@@ -998,7 +990,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                     onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                     onEdit={() => onEditAnnotation(thread)}
                     onResolve={() => onResolveAnnotation(thread)}
-                    rowActive={annotationRowActive}
+                    rowActive={threadRowActive}
                     threadDetails={threadHoverDetails}
                     threadRef={threadRef}
                     trigger={
@@ -1031,6 +1023,22 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           </div>
         </div>
       </SidebarMenuSubButton>
+      <Tooltip
+        disabled={hasActiveAnnotation}
+        handle={threadDetailsTooltipHandle}
+        open={!hasActiveAnnotation && threadRowActive}
+        onOpenChange={handleThreadDetailsTooltipOpenChange}
+      >
+        <TooltipPopup
+          align="start"
+          className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+          side="right"
+          sideOffset={4}
+          variant="glass"
+        >
+          {threadHoverDetails}
+        </TooltipPopup>
+      </Tooltip>
     </SidebarMenuSubItem>
   );
 });
