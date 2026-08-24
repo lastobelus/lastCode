@@ -25,6 +25,7 @@ import {
   readEnvironmentSupportsPinReorder,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsWorktreeCleanup,
   readEnvironmentThreadRefs,
   readProject,
   readThreadShell,
@@ -304,7 +305,10 @@ export function useThreadActions() {
       const displayWorktreePath = orphanedWorktreePath
         ? formatWorktreePathForDisplay(orphanedWorktreePath)
         : null;
-      const canDeleteWorktree = orphanedWorktreePath !== null && threadProject !== null;
+      const canDeleteWorktree =
+        orphanedWorktreePath !== null &&
+        threadProject !== null &&
+        readEnvironmentSupportsWorktreeCleanup(threadRef.environmentId);
       const localApi = readLocalApi();
       let shouldDeleteWorktree = false;
       if (canDeleteWorktree && localApi) {

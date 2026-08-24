@@ -225,16 +225,17 @@ const make = Effect.gen(function* () {
   const getCleanupWorker = Effect.fn("getThreadWorktreeCleanupWorker")(function* (
     repositoryRoot: string,
   ) {
-    const existing = (yield* Ref.get(cleanupWorkersRef)).get(repositoryRoot);
+    const repositoryKey = normalizeProjectPathForComparison(repositoryRoot);
+    const existing = (yield* Ref.get(cleanupWorkersRef)).get(repositoryKey);
     if (existing) return existing;
     const created = yield* makeDrainableWorker((job: CleanupJob) =>
       processCleanupSafely(job).pipe(Effect.ensuring(removeEnqueuedCleanupThreadId(job.threadId))),
     );
     return yield* Ref.modify(cleanupWorkersRef, (workers) => {
-      const current = workers.get(repositoryRoot);
+      const current = workers.get(repositoryKey);
       if (current) return [current, workers] as const;
       const next = new Map(workers);
-      next.set(repositoryRoot, created);
+      next.set(repositoryKey, created);
       return [created, next] as const;
     });
   });

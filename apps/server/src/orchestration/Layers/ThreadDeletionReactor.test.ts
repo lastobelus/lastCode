@@ -202,7 +202,7 @@ describe("durable worktree cleanup", () => {
         "cleanup-second",
         {
           status: "queued",
-          repositoryRoot: root,
+          repositoryRoot: `${root}/`,
           worktreePath: "/worktrees/second",
           queuedAt: "2026-08-23T00:00:01.000Z",
           blockedByThreadId: first.threadId,

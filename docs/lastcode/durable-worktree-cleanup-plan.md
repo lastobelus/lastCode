@@ -12,6 +12,7 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 
 - Keep the existing two-step delete confirmation.
 - Web and desktop may request worktree cleanup. Mobile may delete a thread but does not offer worktree deletion.
+- Web and desktop offer the worktree option only when the connected server advertises durable worktree cleanup support; older servers receive a plain thread deletion instead of silently discarding the cleanup choice.
 - The server derives the repository root and worktree path from the authoritative project and thread records. The client sends only `deleteWorktree: true`; it does not supply paths.
 - Reject a cleanup request unless the thread owns a linked worktree that no other live thread uses.
 - Once deletion is accepted, immediately navigate an active thread route to the existing fallback. The tombstone is a sidebar status item, not an openable chat.

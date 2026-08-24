@@ -1652,6 +1652,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         worktreePath: "/tmp/deleted-project-worktrees/thread-deleted",
         startedAt: "2026-04-05T00:00:05.000Z",
       });
+      const cleanupDetail = yield* snapshotQuery.getThreadDetailById(
+        ThreadId.make("thread-deleted"),
+      );
+      assert.equal(cleanupDetail._tag, "None");
     }),
   );
 

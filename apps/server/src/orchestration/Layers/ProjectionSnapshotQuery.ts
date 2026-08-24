@@ -2623,7 +2623,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ]);
 
-      if (Option.isNone(threadRow)) {
+      if (Option.isNone(threadRow) || threadRow.value.deletedAt !== null) {
         return Option.none<OrchestrationThread>();
       }
 
