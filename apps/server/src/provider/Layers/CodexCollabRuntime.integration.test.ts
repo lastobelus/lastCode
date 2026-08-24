@@ -46,8 +46,17 @@ function buildScript() {
           tool: "wait",
           status: "completed",
           senderThreadId: ROOT,
-          receiverThreadIds: [CHILD_A, CHILD_B],
+          receiverThreadIds: [ROOT, CHILD_A, CHILD_B],
         },
+      },
+    },
+    {
+      method: "error",
+      params: {
+        threadId: ROOT,
+        turnId: "root-turn-error",
+        error: { message: "root error must stay visible" },
+        willRetry: false,
       },
     },
     // Child terminal lifecycle AFTER the receiver map knows the children —
@@ -109,6 +118,7 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.include(methods, "collabAgent/activity");
       assert.include(methods, "collabAgent/turnCompleted");
       assert.include(methods, "collabAgent/closed");
+      assert.include(methods, "error", "receiver bookkeeping must not suppress a root error");
 
       const childTurnCompleted = events.find(
         (event) =>
