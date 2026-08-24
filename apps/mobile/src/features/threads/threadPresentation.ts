@@ -179,3 +179,20 @@ export function resolveThreadStatus(
 
   return null;
 }
+
+/**
+ * Returns the durable cleanup status when a thread is being deleted. Mobile
+ * list variants use this shared presentation so cleanup state cannot fall
+ * through to the ordinary agent-status labels.
+ */
+export function resolveWorktreeCleanupStatus(
+  thread: EnvironmentThreadShell,
+): ThreadStatusPresentation | null {
+  if (thread.worktreeCleanup == null) return null;
+  const status = resolveThreadStatus(thread);
+  return status?.kind === "cleanup-failed" ||
+    status?.kind === "cleanup-queued" ||
+    status?.kind === "cleanup-deleting"
+    ? status
+    : null;
+}

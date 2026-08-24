@@ -401,6 +401,13 @@ export function buildThreadListV2Items(input: {
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
     const changeRequest =
       input.changeRequestByKey?.get(`${thread.environmentId}:${thread.id}`) ?? null;
+    // Cleanup tombstones are deleted-thread recovery state, not lifecycle
+    // state. Keep them in the immediately visible active block regardless of
+    // stale snooze, settle, or pin metadata retained on the thread.
+    if (thread.worktreeCleanup != null) {
+      active.push(thread);
+      continue;
+    }
     // Snooze outranks settlement and pinning until the thread wakes.
     if (supportsSnooze && effectiveSnoozed(thread, { now: snoozeNow })) {
       snoozed.push(thread);
