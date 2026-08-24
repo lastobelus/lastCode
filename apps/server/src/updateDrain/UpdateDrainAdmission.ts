@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRequestCorrelationRepository } from "../persistence/Services/ProjectionTurnRequestCorrelations.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrain } from "./UpdateDrain.ts";
@@ -72,16 +73,33 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
   const drain = yield* UpdateDrain;
   const projections = yield* ProjectionSnapshotQuery;
   const projectionTurns = yield* ProjectionTurnRepository;
+  const turnRequestCorrelations = yield* ProjectionTurnRequestCorrelationRepository;
   const terminals = yield* TerminalManager;
   const mutex = yield* Semaphore.make(1);
   // The provider event stream is hot, so accepted starts from a previous
   // server lifetime cannot be resumed. Keep their exact identities out of the
   // live blocker set; a new start replaces the row with a new message id.
+  const stalePendingTurnStarts = yield* projectionTurns
+    .listPendingTurnStarts()
+    .pipe(Effect.mapError(internalError));
   const stalePendingTurnStartKeys = new Set(
-    (yield* projectionTurns.listPendingTurnStarts().pipe(Effect.mapError(internalError))).map(
-      (pending) => pendingTurnStartKey(pending.threadId, pending.messageId),
+    stalePendingTurnStarts.map((pending) =>
+      pendingTurnStartKey(pending.threadId, pending.messageId),
     ),
   );
+  const restartedAt = DateTime.formatIso(yield* DateTime.now);
+  yield* Effect.forEach(
+    stalePendingTurnStarts,
+    (pending) =>
+      turnRequestCorrelations.resolve({
+        threadId: pending.threadId,
+        messageId: pending.messageId,
+        turnId: null,
+        state: "interrupted",
+        resolvedAt: restartedAt,
+      }),
+    { discard: true },
+  ).pipe(Effect.mapError(internalError));
 
   const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
     // Read pending starts first. If one transitions while the shell snapshot is
