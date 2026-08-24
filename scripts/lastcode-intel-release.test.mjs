@@ -111,7 +111,10 @@ describe("immutable Intel release validation", () => {
       workflow.indexOf("- name: Validate immutable tag and commit"),
     );
     expect(automationCheckout).toContain("persist-credentials: false");
-    expect(targetCheckout).toContain("persist-credentials: false");
+    expect(targetCheckout).not.toContain("actions/checkout");
+    expect(targetCheckout).not.toContain("github.token");
+    expect(targetCheckout).toContain("git clone --filter=blob:none --no-checkout");
+    expect(targetCheckout).toContain('git -C target checkout --detach "$INSTALLABLE_COMMIT"');
 
     const buildJob = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  publish:"));
     const publishJob = workflow.slice(workflow.indexOf("  publish:"));
@@ -122,7 +125,7 @@ describe("immutable Intel release validation", () => {
     expect(publishJob).toContain("contents: write");
     expect(publishJob).toContain("actions/download-artifact");
     expect(publishJob).not.toContain("working-directory: target");
-    expect(workflow.match(/persist-credentials: false/g)).toHaveLength(3);
+    expect(workflow.match(/persist-credentials: false/g)).toHaveLength(2);
     expect(workflow.match(/--json assets,isDraft,isImmutable,isPrerelease,tagName/g)).toHaveLength(
       3,
     );
