@@ -191,6 +191,7 @@ import {
   SidebarThreadHoverContent,
   type SidebarThreadHoverContentProps,
 } from "./sidebar/SidebarThreadHoverContent";
+import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
   deriveProviderEntriesByEnvironment,
@@ -720,6 +721,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   );
   const threadKey = scopedThreadKey(threadRef);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(props.isActive);
+  const cleanup = thread.worktreeCleanup ?? null;
+  const isCleanupPending = cleanup?.status === "deleting" || cleanup?.status === "queued";
+  const isCleanupFailed = cleanup?.status === "failed";
+  const [cleanupFailureOpen, setCleanupFailureOpen] = useState(false);
   const isRegeneratingTitle = thread.titleRegeneration != null;
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
@@ -803,8 +808,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
-  const isInFlight =
-    status === "working" || status === "monitoring" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -832,62 +835,80 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
   const topStatus =
-    status === "working"
+    status === "cleanup-deleting"
       ? {
-          label: "Working",
-          icon: "working" as const,
-          // No shimmer: a label that animates forever is noise in a sidebar
-          // full of them (and repaints every vsync on high-refresh displays).
-          // Working is a background state, so it rests at the dim end of what
-          // the old pulse cycled through; only the thread you have open gets
-          // the label at full strength.
-          className: cn("text-sky-600 dark:text-sky-400", !props.isActive && "opacity-75"),
+          label: "Deleting",
+          icon: "cleanup" as const,
+          className: "text-orange-700 dark:text-orange-300",
         }
-      : status === "monitoring"
+      : status === "cleanup-queued"
         ? {
-            // Monitoring is calm background presence, not active progress
-            // (monitoring-pill D6), so it keeps the label at full strength.
-            label: "Monitoring",
-            icon: null,
-            className: "text-sky-600 dark:text-sky-400",
+            label: "Deleting (Queued)",
+            icon: "cleanup" as const,
+            className: "text-orange-700 dark:text-orange-300",
           }
-        : status === "waiting"
+        : status === "cleanup-failed"
           ? {
-              label: "Waiting",
-              icon: "waiting" as const,
-              className: "text-yellow-700 dark:text-yellow-300",
+              label: "Cleanup failed",
+              icon: null,
+              className: "text-red-700 dark:text-red-300",
             }
-          : status === "approval"
+          : status === "working"
             ? {
-                label: "Approval",
-                icon: null,
-                className: "text-amber-700 dark:text-amber-300",
+                label: "Working",
+                icon: "working" as const,
+                // No shimmer: a label that animates forever is noise in a sidebar
+                // full of them (and repaints every vsync on high-refresh displays).
+                // Working is a background state, so it rests at the dim end of what
+                // the old pulse cycled through; only the thread you have open gets
+                // the label at full strength.
+                className: cn("text-sky-600 dark:text-sky-400", !props.isActive && "opacity-75"),
               }
-            : status === "input"
+            : status === "monitoring"
               ? {
-                  label: "Input",
+                  // Monitoring is calm background presence, not active progress
+                  // (monitoring-pill D6), so it keeps the label at full strength.
+                  label: "Monitoring",
                   icon: null,
-                  className: "text-indigo-600 dark:text-indigo-300",
+                  className: "text-sky-600 dark:text-sky-400",
                 }
-              : status === "failed"
+              : status === "waiting"
                 ? {
-                    label: "Failed",
-                    icon: null,
-                    className: "text-red-700 dark:text-red-300",
+                    label: "Waiting",
+                    icon: "waiting" as const,
+                    className: "text-yellow-700 dark:text-yellow-300",
                   }
-                : isWoke
+                : status === "approval"
                   ? {
-                      label: "Woke",
-                      icon: "woke" as const,
+                      label: "Approval",
+                      icon: null,
                       className: "text-amber-700 dark:text-amber-300",
                     }
-                  : isUnread
+                  : status === "input"
                     ? {
-                        label: "Done",
-                        icon: "done" as const,
-                        className: "text-emerald-700 dark:text-emerald-300",
+                        label: "Input",
+                        icon: null,
+                        className: "text-indigo-600 dark:text-indigo-300",
                       }
-                    : null;
+                    : status === "failed"
+                      ? {
+                          label: "Failed",
+                          icon: null,
+                          className: "text-red-700 dark:text-red-300",
+                        }
+                      : isWoke
+                        ? {
+                            label: "Woke",
+                            icon: "woke" as const,
+                            className: "text-amber-700 dark:text-amber-300",
+                          }
+                        : isUnread
+                          ? {
+                              label: "Done",
+                              icon: "done" as const,
+                              className: "text-emerald-700 dark:text-emerald-300",
+                            }
+                          : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -946,6 +967,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // that is every thread, which is the point: the glyph is what tells rows on
   // different machines apart.
   const isRemote = thread.environmentId !== props.currentEnvironmentId;
+  const cleanupBlockerTitle =
+    cleanup?.status === "queued"
+      ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
+        null)
+      : null;
 
   const detailsTooltip = (
     <SidebarThreadTooltip
@@ -964,14 +990,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       branchMismatch={branchMismatch}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
+      cleanupBlockerTitle={cleanupBlockerTitle}
     />
   );
 
   const handleClick = useCallback(
     (event: ReactMouseEvent) => {
+      if (isCleanupFailed) {
+        event.preventDefault();
+        setCleanupFailureOpen(true);
+        return;
+      }
+      if (isCleanupPending) {
+        event.preventDefault();
+        return;
+      }
       onThreadClick(event, threadRef);
     },
-    [onThreadClick, threadRef],
+    [isCleanupFailed, isCleanupPending, onThreadClick, threadRef],
   );
   const handleAcknowledgeWokeClick = useCallback(
     (event: ReactMouseEvent) => {
@@ -985,21 +1021,28 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const handleContextMenu = useCallback(
     (event: ReactMouseEvent) => {
       event.preventDefault();
+      if (cleanup !== null) return;
       onContextMenu(threadRef, { x: event.clientX, y: event.clientY });
     },
-    [onContextMenu, threadRef],
+    [cleanup, onContextMenu, threadRef],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
       if (event.target !== event.currentTarget) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
+      if (isCleanupFailed) {
+        setCleanupFailureOpen(true);
+        return;
+      }
+      if (isCleanupPending) return;
       onThreadActivate(threadRef);
     },
-    [onThreadActivate, threadRef],
+    [isCleanupFailed, isCleanupPending, onThreadActivate, threadRef],
   );
   const handleDoubleClick = useCallback(
     (event: ReactMouseEvent) => {
+      if (cleanup !== null) return;
       if (isRenaming || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
         return;
       }
@@ -1007,7 +1050,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       event.preventDefault();
       onStartRename(threadRef, thread.title);
     },
-    [isRenaming, onStartRename, thread.title, threadRef],
+    [cleanup, isRenaming, onStartRename, thread.title, threadRef],
   );
   const renameCommittedRef = useRef(false);
   useEffect(() => {
@@ -1079,7 +1122,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Snooze is offered only where it can succeed: capability-gated and never
   // on blocked-on-you work or queued turns (the server rejects both).
   const showSnoozeButton =
-    props.snoozeSupported && canSnooze(thread, { now: new Date().toISOString() });
+    cleanup === null &&
+    props.snoozeSupported &&
+    canSnooze(thread, { now: new Date().toISOString() });
   // If the thread becomes blocked while the popover is open, the button
   // unmounts without firing onOpenChange(false). Deriving the flag keeps a
   // stale true from permanently hiding the status label / pinning the
@@ -1123,6 +1168,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       !props.isActive &&
       !isSelected &&
       "opacity-70 transition-opacity hover:opacity-100",
+    isCleanupPending && "cursor-not-allowed opacity-65 hover:opacity-65",
   );
 
   const title = isRenaming ? (
@@ -1174,7 +1220,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // A real link so cmd/ctrl+click and middle-click open the host in the
   // browser. A plain click still opens T3's pull request view.
   const prBadge =
-    prStatus && pr ? (
+    cleanup === null && prStatus && pr ? (
       <a
         href={pr.url}
         target="_blank"
@@ -1226,7 +1272,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     </Tooltip>
   ) : null;
   const pinIndicator = props.isPinned ? (
-    props.pinningSupported ? (
+    props.pinningSupported && cleanup === null ? (
       <Tooltip>
         <TooltipTrigger
           render={
@@ -1265,6 +1311,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 role="button"
                 tabIndex={0}
                 data-testid="sidebar-row-slim"
+                aria-disabled={isCleanupPending || undefined}
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
@@ -1396,13 +1443,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           </TooltipTrigger>
           {detailsTooltip}
         </Tooltip>
+        <WorktreeCleanupFailureDialog
+          thread={thread}
+          open={cleanupFailureOpen}
+          onOpenChange={setCleanupFailureOpen}
+        />
       </li>
     );
   }
 
   const diff = latestTurnDiff(thread);
 
-  const sortable = props.sortable;
+  const sortable = cleanup === null ? props.sortable : undefined;
   return (
     <li
       data-thread-item
@@ -1429,6 +1481,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               role="button"
               tabIndex={0}
               data-testid="sidebar-row-card"
+              aria-disabled={isCleanupPending || undefined}
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
               onClick={handleClick}
@@ -1556,7 +1609,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           topStatus.className,
                         )}
                       >
-                        {topStatus.icon === "working" ? (
+                        {topStatus.icon === "working" || topStatus.icon === "cleanup" ? (
                           <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
                         ) : topStatus.icon === "waiting" ? (
                           <span
@@ -1574,6 +1627,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           <span aria-hidden>
                             <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                           </span>
+                        ) : status === "cleanup-deleting" && cleanup?.status === "deleting" ? (
+                          <span aria-hidden>
+                            <WorkingDuration startedAt={cleanup.startedAt} />
+                          </span>
                         ) : null}
                       </span>
                     )
@@ -1581,7 +1638,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     threadTimeLabel(thread)
                   )}
                 </span>
-                {props.settlementSupported || showSnoozeButton || hasUnsentDraft ? (
+                {(cleanup === null && props.settlementSupported) ||
+                showSnoozeButton ||
+                hasUnsentDraft ? (
                   <span
                     className={cn(
                       // focus-visible, not focus-within: a mouse click leaves
@@ -1618,7 +1677,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         timestampFormat={props.timestampFormat}
                       />
                     ) : null}
-                    {props.settlementSupported ? (
+                    {cleanup === null && props.settlementSupported ? (
                       <Tooltip>
                         <TooltipTrigger
                           render={
@@ -1707,6 +1766,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         </TooltipTrigger>
         {detailsTooltip}
       </Tooltip>
+      <WorktreeCleanupFailureDialog
+        thread={thread}
+        open={cleanupFailureOpen}
+        onOpenChange={setCleanupFailureOpen}
+      />
     </li>
   );
 });
@@ -2267,6 +2331,10 @@ export default function Sidebar() {
     const snoozed: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
     for (const thread of visible) {
+      if (thread.worktreeCleanup != null) {
+        active.push(thread);
+        continue;
+      }
       // Threads on servers without the settlement capability (old server,
       // or descriptor not loaded yet) never classify as settled: the user
       // could neither un-settle nor pin them, so auto-settling them would
@@ -2319,7 +2387,10 @@ export default function Sidebar() {
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   const searchableThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads],
+    () =>
+      [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads].filter(
+        (thread) => thread.worktreeCleanup == null,
+      ),
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
@@ -2443,9 +2514,9 @@ export default function Sidebar() {
   );
   const orderedThreadKeys = useMemo(
     () =>
-      orderedThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
+      orderedThreads
+        .filter((thread) => thread.worktreeCleanup == null)
+        .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
     [orderedThreads],
   );
   // Rows call back into the click handler without carrying the ordered list as
@@ -3050,7 +3121,8 @@ export default function Sidebar() {
       // the actions will touch.
       const selectedThreadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
       const threadKeys = selectedThreadKeys.filter((threadKey) =>
-        threadByKeyRef.current.has(threadKey),
+        threadByKeyRef.current.has(threadKey) &&
+        threadByKeyRef.current.get(threadKey)?.worktreeCleanup == null,
       );
       if (threadKeys.length === 0) return;
       const count = threadKeys.length;
