@@ -11,6 +11,7 @@ import {
   parseInstallableTag,
   parseStageOptions,
   readPending,
+  readRemoteInstalledVersion,
   stageIntelUpdate,
 } from "./lastcode-intel-stage.mjs";
 
@@ -171,6 +172,96 @@ describe("LastCode Intel staging", () => {
     expect(NodeFS.existsSync(result.pending.dmgPath)).toBe(true);
     expect(readPending(root)).toMatchObject({ commit, tag });
     expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toHaveLength(1);
+  });
+
+  it("stages the newest release that does not exceed the remote host", async () => {
+    const root = temporaryDirectory();
+    const olderTag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    const newerTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
+    const commit = "a".repeat(40);
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(newerTag, commit),
+    );
+    const result = await stageIntelUpdate(
+      {
+        currentVersion: "1.2.3-nightly.20260820.1",
+        homeDirectory: root,
+        maximumVersionHost: "airy",
+      },
+      dependencies(olderTag, commit, {
+        listReleases: async () =>
+          [newerTag, olderTag].map((tagName) => ({
+            tagName,
+            isDraft: false,
+            isImmutable: true,
+            isPrerelease: true,
+          })),
+        readRemoteInstalledVersion: async (host) => {
+          expect(host).toBe("airy");
+          return "1.2.3-nightly.20260821.7";
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "staged",
+      pending: { tag: olderTag, version: "1.2.3-nightly.20260821.7" },
+    });
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toHaveLength(1);
+  });
+
+  it("leaves the pending update untouched when the remote version cannot be read", async () => {
+    const root = temporaryDirectory();
+    const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
+    const commit = "a".repeat(40);
+    await stageIntelUpdate(
+      { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root },
+      dependencies(tag, commit),
+    );
+    const pending = readPending(root);
+
+    await expect(
+      stageIntelUpdate(
+        {
+          currentVersion: "1.2.3-nightly.20260820.1",
+          homeDirectory: root,
+          maximumVersionHost: "airy",
+        },
+        dependencies(tag, commit, {
+          readRemoteInstalledVersion: async () => {
+            throw new Error("airy is offline");
+          },
+        }),
+      ),
+    ).rejects.toThrow("airy is offline");
+
+    expect(readPending(root)).toMatchObject({ candidateId: pending.candidateId, tag });
+  });
+
+  it("reads the installed LastCode version through one SSH command", () => {
+    let invocation;
+    const version = readRemoteInstalledVersion("airy", (command, args) => {
+      invocation = { args, command };
+      return "1.2.3-nightly.20260821.7";
+    });
+
+    expect(version).toBe("1.2.3-nightly.20260821.7");
+    expect(invocation).toEqual({
+      command: "ssh",
+      args: [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "--",
+        "airy",
+        "/usr/libexec/PlistBuddy",
+        "-c",
+        "Print:CFBundleShortVersionString",
+        "/Applications/LastCode.app/Contents/Info.plist",
+      ],
+    });
   });
 
   it("preserves the old pending candidate when a newer release mismatches", async () => {
@@ -451,8 +542,14 @@ describe("LastCode Intel staging", () => {
         "1.2.3-nightly.20260820.1",
         "--repository",
         "lastobelus/lastCode",
+        "--maximum-version-host",
+        "airy",
       ]),
-    ).toMatchObject({ command: "stage", repository: "lastobelus/lastCode" });
+    ).toMatchObject({
+      command: "stage",
+      maximumVersionHost: "airy",
+      repository: "lastobelus/lastCode",
+    });
     expect(parseStageOptions(["status", "--home-dir", "/tmp/intel"])).toMatchObject({
       command: "status",
       homeDirectory: "/tmp/intel",
