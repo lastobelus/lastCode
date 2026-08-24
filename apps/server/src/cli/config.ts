@@ -17,6 +17,11 @@ import { readBootstrapEnvelope } from "../bootstrap.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 
+export class CliLocationError extends Schema.TaggedErrorClass<CliLocationError>()(
+  "CliLocationError",
+  { message: Schema.String },
+) {}
+
 export const modeFlag = Flag.choice("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
   Flag.optional,
@@ -159,6 +164,7 @@ export interface CliServerFlags {
 export interface CliAuthLocationFlags {
   readonly baseDir: Option.Option<string>;
   readonly devUrl?: Option.Option<URL>;
+  readonly stateDir?: Option.Option<string>;
 }
 
 export const sharedServerLocationFlags = {
@@ -213,6 +219,9 @@ export const resolveServerConfig = (
   options?: {
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly activeStateDir?: Option.Option<string>;
+    readonly provisionPaths?: boolean;
+    readonly discoverPort?: boolean;
   },
 ) =>
   Effect.gen(function* () {
@@ -259,7 +268,7 @@ export const resolveServerConfig = (
       {
         onSome: (value) => Effect.succeed(value),
         onNone: () => {
-          if (mode === "desktop") {
+          if (mode === "desktop" || options?.discoverPort === false) {
             return Effect.succeed(ServerConfig.DEFAULT_PORT);
           }
           return findAvailablePort(ServerConfig.DEFAULT_PORT);
@@ -281,16 +290,38 @@ export const resolveServerConfig = (
     );
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
-    yield* fs.makeDirectory(cwd, { recursive: true });
-    const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
-      baseDirIsExplicit: Option.isSome(explicitBaseDir),
+    const provisionPaths = options?.provisionPaths ?? true;
+    if (provisionPaths) yield* fs.makeDirectory(cwd, { recursive: true });
+    const requestedStateDir = yield* Option.match(options?.activeStateDir ?? Option.none(), {
+      onNone: () => Effect.void,
+      onSome: (value) => Effect.map(expandHomePath(value.trim()), path.resolve),
     });
-    yield* ServerConfig.ensureServerDirectories(derivedPaths);
+    const userdataStateDir = path.join(baseDir, "userdata");
+    const devStateDir = path.join(baseDir, "dev");
+    if (
+      requestedStateDir !== undefined &&
+      requestedStateDir !== userdataStateDir &&
+      requestedStateDir !== devStateDir
+    ) {
+      return yield* new CliLocationError({
+        message: "--state-dir must select the userdata or dev directory within --base-dir.",
+      });
+    }
+    const derivedPaths = yield* ServerConfig.deriveServerPaths(
+      baseDir,
+      requestedStateDir === userdataStateDir
+        ? undefined
+        : requestedStateDir === devStateDir
+          ? (devUrl ?? new URL("http://127.0.0.1"))
+          : devUrl,
+      { baseDirIsExplicit: requestedStateDir === undefined && Option.isSome(explicitBaseDir) },
+    );
+    if (provisionPaths) yield* ServerConfig.ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
     );
     const serverTracePath = env.traceFile ?? derivedPaths.serverTracePath;
-    yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
+    if (provisionPaths) yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
     const startupPresentation = options?.startupPresentation ?? "browser";
     const isHeadlessStartup = startupPresentation === "headless";
     const noBrowser = Option.getOrElse(
@@ -391,27 +422,38 @@ export const resolveServerConfig = (
     return config;
   });
 
+const cliAuthServerFlags = (flags: CliAuthLocationFlags): CliServerFlags => ({
+  mode: Option.none(),
+  port: Option.none(),
+  host: Option.none(),
+  baseDir: flags.baseDir,
+  cwd: Option.none(),
+  devUrl: flags.devUrl ?? Option.none(),
+  noBrowser: Option.none(),
+  bootstrapFd: Option.none(),
+  autoBootstrapProjectFromCwd: Option.none(),
+  logWebSocketEvents: Option.none(),
+  tailscaleServeEnabled: Option.none(),
+  tailscaleServePort: Option.none(),
+});
+
 export const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
 ) =>
-  resolveServerConfig(
-    {
-      mode: Option.none(),
-      port: Option.none(),
-      host: Option.none(),
-      baseDir: flags.baseDir,
-      cwd: Option.none(),
-      devUrl: flags.devUrl ?? Option.none(),
-      noBrowser: Option.none(),
-      bootstrapFd: Option.none(),
-      autoBootstrapProjectFromCwd: Option.none(),
-      logWebSocketEvents: Option.none(),
-      tailscaleServeEnabled: Option.none(),
-      tailscaleServePort: Option.none(),
-    },
-    cliLogLevel,
-  );
+  resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+  });
+
+export const resolveThreadInspectionConfig = (
+  flags: CliAuthLocationFlags,
+  cliLogLevel: Option.Option<LogLevel.LogLevel>,
+) =>
+  resolveServerConfig(cliAuthServerFlags(flags), cliLogLevel, {
+    activeStateDir: flags.stateDir ?? Option.none(),
+    provisionPaths: false,
+    discoverPort: false,
+  });
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 
