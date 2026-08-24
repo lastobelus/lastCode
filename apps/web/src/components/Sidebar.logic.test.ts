@@ -707,6 +707,49 @@ describe("resolveSidebarThreadStatus", () => {
 
   const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
 
+  it("prioritizes durable worktree cleanup over agent status", () => {
+    const cleanupBase = {
+      repositoryRoot: "/repo",
+      worktreePath: "/repo-worktrees/one",
+    };
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        session,
+        worktreeCleanup: {
+          ...cleanupBase,
+          status: "deleting",
+          startedAt: "2026-03-09T10:00:00.000Z",
+        },
+      }),
+    ).toBe("cleanup-deleting");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        session,
+        worktreeCleanup: {
+          ...cleanupBase,
+          status: "queued",
+          queuedAt: "2026-03-09T10:00:00.000Z",
+          blockedByThreadId: ThreadId.make("blocker"),
+        },
+      }),
+    ).toBe("cleanup-queued");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        session,
+        worktreeCleanup: {
+          ...cleanupBase,
+          status: "failed",
+          startedAt: "2026-03-09T10:00:00.000Z",
+          failedAt: "2026-03-09T10:01:00.000Z",
+          error: "permission denied",
+        },
+      }),
+    ).toBe("cleanup-failed");
+  });
+
   it("prioritizes approval over a running session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, hasPendingApprovals: true, session })).toBe(
       "approval",
@@ -1108,6 +1151,23 @@ describe("resolveThreadStatusPill", () => {
     },
   };
 
+  it("uses the deleting labels and colors for cleanup tombstones", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          worktreeCleanup: {
+            status: "queued",
+            repositoryRoot: "/repo",
+            worktreePath: "/repo-worktrees/two",
+            queuedAt: "2026-03-09T10:00:00.000Z",
+            blockedByThreadId: ThreadId.make("blocker"),
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Deleting (Queued)", pulse: false });
+  });
+
   it("shows pending approval before all other statuses", () => {
     expect(
       resolveThreadStatusPill({
@@ -1425,6 +1485,41 @@ describe("getFallbackThreadIdAfterDelete", () => {
       ],
       deletedThreadId: ThreadId.make("thread-active"),
       deletedThreadIds: new Set([ThreadId.make("thread-active"), ThreadId.make("thread-newest")]),
+      sortOrder: "created_at",
+    });
+
+    expect(fallbackThreadId).toBe(ThreadId.make("thread-next"));
+  });
+
+  it("skips cleanup tombstones left by an earlier delete", () => {
+    const fallbackThreadId = getFallbackThreadIdAfterDelete({
+      threads: [
+        makeThread({
+          id: ThreadId.make("thread-active"),
+          projectId: ProjectId.make("project-1"),
+          createdAt: "2026-03-09T10:05:00.000Z",
+          messages: [],
+        }),
+        makeThread({
+          id: ThreadId.make("thread-cleanup"),
+          projectId: ProjectId.make("project-1"),
+          createdAt: "2026-03-09T10:10:00.000Z",
+          messages: [],
+          worktreeCleanup: {
+            status: "deleting",
+            repositoryRoot: "/repo",
+            worktreePath: "/repo-worktrees/cleanup",
+            startedAt: "2026-03-09T10:10:00.000Z",
+          },
+        }),
+        makeThread({
+          id: ThreadId.make("thread-next"),
+          projectId: ProjectId.make("project-1"),
+          createdAt: "2026-03-09T10:07:00.000Z",
+          messages: [],
+        }),
+      ],
+      deletedThreadId: ThreadId.make("thread-active"),
       sortOrder: "created_at",
     });
 
