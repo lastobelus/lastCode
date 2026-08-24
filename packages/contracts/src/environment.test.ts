@@ -47,4 +47,14 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.threadAnnotations,
     ).toBe(true);
   });
+
+  it("treats missing worktree cleanup as unsupported and preserves support", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadWorktreeCleanup).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadWorktreeCleanup: true },
+      }).capabilities.threadWorktreeCleanup,
+    ).toBe(true);
+  });
 });

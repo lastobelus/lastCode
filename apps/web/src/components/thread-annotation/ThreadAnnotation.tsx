@@ -268,6 +268,7 @@ export function ThreadAnnotationHoverPopover(props: {
   rowActive: boolean;
   trigger: ReactNode;
   threadDetails: ReactNode;
+  trailingContent?: ReactNode;
   onEdit: () => void;
   onResolve: () => void;
   onBodyChange: (body: string) => Promise<boolean>;
@@ -379,6 +380,7 @@ export function ThreadAnnotationHoverPopover(props: {
               />
             </div>
           </div>
+          {props.trailingContent}
         </div>
       </PopoverPopup>
     </Popover>
