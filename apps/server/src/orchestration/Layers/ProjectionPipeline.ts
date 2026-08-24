@@ -651,6 +651,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pinOrderKey: null,
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
+            annotation: null,
+            worktreeCleanup: null,
+            latestUserMessageId: null,
             latestUserMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
@@ -895,7 +898,23 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             deletedAt: event.payload.deletedAt,
+            worktreeCleanup: event.payload.worktreeCleanup ?? null,
             updatedAt: event.payload.deletedAt,
+          });
+          return;
+        }
+
+        case "thread.worktree-cleanup-updated": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            worktreeCleanup: event.payload.cleanup,
+            updatedAt: event.payload.updatedAt,
           });
           return;
         }
