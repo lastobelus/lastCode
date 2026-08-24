@@ -149,7 +149,11 @@ async function pauseBatch(threads, paused, dependencies) {
 async function resumePaused(paused, dependencies) {
   const results = await Promise.allSettled(
     [...paused.values()].map(async (thread) => {
-      await dependencies.resumeThread(thread.threadId, RESUME_MESSAGE);
+      try {
+        await dependencies.resumeThread(thread.threadId, RESUME_MESSAGE);
+      } catch (error) {
+        if (!dependencies.isMissingThreadError(error, thread.threadId)) throw error;
+      }
       paused.delete(thread.threadId);
     }),
   );
@@ -222,6 +226,16 @@ async function resumeThread(threadTool, threadId, message) {
   throw lastError;
 }
 
+export function isMissingThreadError(error, threadId) {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "stderr" in error &&
+    typeof error.stderr === "string" &&
+    error.stderr.includes(`LastCode thread '${threadId}' was not found.`)
+  );
+}
+
 function defaultDependencies(home) {
   const threadTool = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
   const pendingResumesPath = NodePath.join(
@@ -232,6 +246,7 @@ function defaultDependencies(home) {
   );
   return {
     cleanupInstall: cleanupPreparedInstall,
+    isMissingThreadError,
     listThreads: () => threadCommand(threadTool, ["list"]),
     loadPendingResumes: () => {
       try {

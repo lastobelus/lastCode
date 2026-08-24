@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   installDailyUpdateService,
+  isMissingThreadError,
   parseDailyUpdateOptions,
   renderDailyUpdatePlist,
   runDailyUpdate,
@@ -33,6 +34,7 @@ function fixture(overrides = {}) {
     calls,
     dependencies: {
       cleanupInstall: () => calls.push("cleanup"),
+      isMissingThreadError: () => false,
       listThreads: async () => ({ kind: "list", threads: [] }),
       loadPendingResumes: () => pendingResumes,
       prepareInstall: async () => {
@@ -175,6 +177,21 @@ describe("LastCode daily updater", () => {
       status: "up-to-date",
     });
     expect(test.calls.filter((call) => call === "resume:one")).toHaveLength(2);
+  });
+
+  it("discards a queued resume when the thread no longer exists", async () => {
+    const test = fixture({ stageUpdate: async () => ({ status: "up-to-date" }) });
+    test.dependencies.loadPendingResumes = () => [test.working("gone")];
+    test.dependencies.resumeThread = async () => {
+      throw Object.assign(new Error("missing"), {
+        stderr: "LastCode thread 'gone' was not found.",
+      });
+    };
+    test.dependencies.isMissingThreadError = isMissingThreadError;
+
+    await expect(runDailyUpdate({}, test.dependencies)).resolves.toEqual({
+      status: "up-to-date",
+    });
   });
 
   it("supports one explicit bootstrap without installing it into the schedule", async () => {
