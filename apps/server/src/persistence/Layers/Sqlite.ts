@@ -10,6 +10,10 @@ import { ServerConfig } from "../../config.ts";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
+  readonly readonly?: boolean;
+  readonly create?: boolean;
+  readonly readwrite?: boolean;
+  readonly disableWAL?: boolean;
   readonly spanAttributes?: Record<string, unknown>;
 };
 
@@ -60,6 +64,23 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
+export const makeSqlitePersistenceReadOnly = Effect.fn("makeSqlitePersistenceReadOnly")(function* (
+  dbPath: string,
+) {
+  const path = yield* Path.Path;
+  return makeRuntimeSqliteLayer({
+    filename: dbPath,
+    readonly: true,
+    readwrite: false,
+    create: false,
+    disableWAL: true,
+    spanAttributes: {
+      "db.name": path.basename(dbPath),
+      "service.name": "t3-server",
+    },
+  });
+}, Layer.unwrap);
+
 export const SqlitePersistenceMemory = Layer.provideMerge(
   setup,
   makeRuntimeSqliteLayer({ filename: ":memory:" }),
@@ -69,5 +90,12 @@ export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     return makeSqlitePersistenceLive(dbPath);
+  }),
+);
+
+export const layerReadOnlyConfig = Layer.unwrap(
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    return makeSqlitePersistenceReadOnly(dbPath);
   }),
 );
