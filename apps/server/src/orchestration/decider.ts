@@ -20,6 +20,7 @@ import {
   requireThreadAbsent,
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { projectEvent } from "./projector.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -156,6 +157,47 @@ function latestUserMessageId(thread: OrchestrationReadModel["threads"][number]) 
 
 function nextAnnotationAnchorMessageId(thread: OrchestrationReadModel["threads"][number]) {
   return latestUserMessageId(thread) ?? thread.annotation?.anchorMessageId;
+}
+
+function worktreeCleanupTimestamp(
+  cleanup: NonNullable<OrchestrationReadModel["threads"][number]["worktreeCleanup"]>,
+): string {
+  switch (cleanup.status) {
+    case "deleting":
+      return cleanup.startedAt;
+    case "queued":
+      return cleanup.queuedAt;
+    case "failed":
+      return cleanup.failedAt;
+  }
+}
+
+function findWorktreeCleanupBlocker(
+  readModel: OrchestrationReadModel,
+  repositoryRoot: string,
+  exceptThreadId?: string,
+) {
+  const normalizedRoot = normalizeProjectPathForComparison(repositoryRoot);
+  return readModel.threads
+    .filter((candidate) => {
+      const cleanup = candidate.worktreeCleanup;
+      return (
+        candidate.id !== exceptThreadId &&
+        cleanup != null &&
+        cleanup.status !== "failed" &&
+        normalizeProjectPathForComparison(cleanup.repositoryRoot) === normalizedRoot
+      );
+    })
+    .toSorted((left, right) => {
+      const leftCleanup = left.worktreeCleanup;
+      const rightCleanup = right.worktreeCleanup;
+      if (leftCleanup == null || rightCleanup == null) return 0;
+      return (
+        worktreeCleanupTimestamp(rightCleanup).localeCompare(
+          worktreeCleanupTimestamp(leftCleanup),
+        ) || right.id.localeCompare(left.id)
+      );
+    })[0];
 }
 
 function withEventBase(
@@ -320,9 +362,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
-      const activeThreads = listThreadsByProjectId(readModel, command.projectId).filter(
-        (thread) => thread.deletedAt === null,
-      );
+      const projectThreads = listThreadsByProjectId(readModel, command.projectId);
+      const cleanupThread = projectThreads.find((thread) => thread.worktreeCleanup != null);
+      if (cleanupThread !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' cannot be deleted while thread '${cleanupThread.id}' is cleaning up its worktree. Wait for cleanup to finish or keep the worktree first.`,
+        });
+      }
+      const activeThreads = projectThreads.filter((thread) => thread.deletedAt === null);
       if (activeThreads.length > 0 && command.force !== true) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -400,12 +448,58 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.delete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = yield* nowIso;
+      let worktreeCleanup: NonNullable<
+        OrchestrationReadModel["threads"][number]["worktreeCleanup"]
+      > | null = null;
+      if (command.deleteWorktree === true) {
+        if (thread.worktreePath === null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Thread '${thread.id}' does not own a worktree to delete.`,
+          });
+        }
+        const project = yield* requireProject({
+          readModel,
+          command,
+          projectId: thread.projectId,
+        });
+        const normalizedWorktreePath = normalizeProjectPathForComparison(thread.worktreePath);
+        const sharedThread = readModel.threads.find(
+          (candidate) =>
+            candidate.id !== thread.id &&
+            candidate.deletedAt === null &&
+            candidate.worktreePath !== null &&
+            normalizeProjectPathForComparison(candidate.worktreePath) === normalizedWorktreePath,
+        );
+        if (sharedThread !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Worktree '${thread.worktreePath}' is still used by thread '${sharedThread.id}'.`,
+          });
+        }
+        const blocker = findWorktreeCleanupBlocker(readModel, project.workspaceRoot, thread.id);
+        worktreeCleanup =
+          blocker === undefined
+            ? {
+                status: "deleting",
+                repositoryRoot: project.workspaceRoot,
+                worktreePath: thread.worktreePath,
+                startedAt: occurredAt,
+              }
+            : {
+                status: "queued",
+                repositoryRoot: project.workspaceRoot,
+                worktreePath: thread.worktreePath,
+                queuedAt: occurredAt,
+                blockedByThreadId: blocker.id,
+              };
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -417,7 +511,112 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           deletedAt: occurredAt,
+          ...(worktreeCleanup === null ? {} : { worktreeCleanup }),
         },
+      };
+    }
+
+    case "thread.worktree-cleanup.retry": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const cleanup = thread.worktreeCleanup;
+      if (thread.deletedAt === null || cleanup == null || cleanup.status !== "failed") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' does not have a failed worktree cleanup to retry.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      const blocker = findWorktreeCleanupBlocker(readModel, cleanup.repositoryRoot, thread.id);
+      const nextCleanup =
+        blocker === undefined
+          ? {
+              status: "deleting" as const,
+              repositoryRoot: cleanup.repositoryRoot,
+              worktreePath: cleanup.worktreePath,
+              startedAt: occurredAt,
+            }
+          : {
+              status: "queued" as const,
+              repositoryRoot: cleanup.repositoryRoot,
+              worktreePath: cleanup.worktreePath,
+              queuedAt: occurredAt,
+              blockedByThreadId: blocker.id,
+            };
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: thread.id,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.worktree-cleanup-updated",
+        payload: { threadId: thread.id, cleanup: nextCleanup, updatedAt: occurredAt },
+      };
+    }
+
+    case "thread.worktree-cleanup.abandon": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.deletedAt === null || thread.worktreeCleanup == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' does not have worktree cleanup to abandon.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: thread.id,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.worktree-cleanup-updated",
+        payload: { threadId: thread.id, cleanup: null, updatedAt: occurredAt },
+      };
+    }
+
+    case "thread.worktree-cleanup.update": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.worktreeCleanup;
+      if (thread.deletedAt === null || current == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' no longer has active worktree cleanup.`,
+        });
+      }
+      if (
+        command.cleanup !== null &&
+        (command.cleanup.repositoryRoot !== current.repositoryRoot ||
+          command.cleanup.worktreePath !== current.worktreePath)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' cleanup paths cannot change during processing.`,
+        });
+      }
+      const validTransition =
+        (current.status === "queued" &&
+          (command.cleanup?.status === "deleting" || command.cleanup?.status === "failed")) ||
+        (current.status === "deleting" &&
+          (command.cleanup === null ||
+            command.cleanup.status === "deleting" ||
+            command.cleanup.status === "failed"));
+      if (!validTransition) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Invalid worktree cleanup transition from '${current.status}' to '${command.cleanup?.status ?? "complete"}'.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: thread.id,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.worktree-cleanup-updated",
+        payload: { threadId: thread.id, cleanup: command.cleanup, updatedAt: occurredAt },
       };
     }
 

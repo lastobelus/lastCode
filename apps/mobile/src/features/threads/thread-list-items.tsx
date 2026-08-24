@@ -459,6 +459,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const { thread, onSelectThread, onArchiveThread, onDeleteThread, onRegenerateThreadTitle } =
     props;
+  const cleanupPending = thread.worktreeCleanup != null;
   const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const status = resolveThreadStatus(thread);
@@ -598,7 +599,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         accessibilityHint="Swipe left for archive and delete actions"
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
+        accessibilityState={{ disabled: cleanupPending }}
         className="bg-screen"
+        disabled={cleanupPending}
         onPress={() => {
           close();
           onSelectThread(thread);
@@ -651,7 +654,8 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         accessibilityHint="Opens the thread"
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         onHoverIn={() => setHovered(true)}
         onHoverOut={() => setHovered(false)}
         onPress={() => {
@@ -711,6 +715,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   return (
     <ThreadSwipeable
       backgroundColor={backgroundColor}
+      enabled={!cleanupPending}
       containerStyle={
         compact ? undefined : { borderRadius: SIDEBAR_ROW_RADIUS, overflow: "hidden" }
       }
@@ -734,7 +739,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         // ControlPillMenu injects onLongPress into the row and anchors the
         // token-styled dropdown to it; taps and swipes are untouched.
         <ControlPillMenu
-          actions={menuActions}
+          actions={cleanupPending ? [] : menuActions}
           onPressAction={handleMenuAction}
           shouldOpenOnLongPress
         >

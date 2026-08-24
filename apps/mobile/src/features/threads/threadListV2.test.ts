@@ -127,6 +127,37 @@ describe("resolveThreadListV2Enabled", () => {
 });
 
 describe("resolveThreadListV2Status", () => {
+  it("shows durable cleanup before agent status", () => {
+    const deleting = makeThread({
+      id: ThreadId.make("cleanup"),
+      title: "Cleanup",
+      worktreeCleanup: {
+        status: "deleting",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+      },
+    });
+    expect(resolveThreadStatus(deleting)).toMatchObject({
+      kind: "cleanup-deleting",
+      label: "Deleting",
+      pulse: false,
+    });
+    expect(
+      resolveThreadStatus({
+        ...deleting,
+        worktreeCleanup: {
+          status: "failed",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/cleanup",
+          startedAt: NOW,
+          failedAt: NOW,
+          error: "permission denied",
+        },
+      }),
+    ).toMatchObject({ kind: "cleanup-failed", label: "Cleanup failed" });
+  });
+
   it("prioritizes approval over a running session", () => {
     const thread = makeThread({
       id: ThreadId.make("t"),

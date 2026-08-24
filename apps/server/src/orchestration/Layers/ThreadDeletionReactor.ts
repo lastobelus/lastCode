@@ -1,10 +1,17 @@
-import type { OrchestrationEvent } from "@t3tools/contracts";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { CommandId, type OrchestrationEvent, type ThreadWorktreeCleanup } from "@t3tools/contracts";
+import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -15,6 +22,11 @@ import {
 import { forkParked } from "../../serverActivation.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
+type CleanupJob = {
+  readonly threadId: ThreadDeletedEvent["payload"]["threadId"];
+  readonly cleanup: PendingCleanup;
+};
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -39,8 +51,19 @@ export const logCleanupCauseUnlessInterrupted = <R, E>({
 
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const gitWorkflow = yield* GitWorkflowService;
+  const projectionThreads = yield* ProjectionThreadRepository;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const crypto = yield* Crypto.Crypto;
+  const cleanupWorkersRef = yield* Ref.make<ReadonlyMap<string, DrainableWorker<CleanupJob>>>(
+    new Map(),
+  );
+  const enqueuedCleanupThreadIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+
+  const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+  const serverCommandId = (tag: string) =>
+    crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -80,20 +103,176 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processThreadDeletedSafely);
 
+  const dispatchCleanup = Effect.fn("dispatchThreadWorktreeCleanup")(function* (
+    threadId: CleanupJob["threadId"],
+    cleanup: ThreadWorktreeCleanup | null,
+  ) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.worktree-cleanup.update",
+      commandId: yield* serverCommandId("worktree-cleanup-update"),
+      threadId,
+      cleanup,
+    });
+  });
+
+  const processCleanup = Effect.fn("processThreadWorktreeCleanup")(function* (job: CleanupJob) {
+    const projected = yield* projectionThreads.getById({ threadId: job.threadId });
+    if (Option.isNone(projected)) return;
+    const current = projected.value.worktreeCleanup;
+    if (current == null || current.status === "failed") return;
+
+    const startedAt = yield* nowIso;
+    const deleting = {
+      status: "deleting" as const,
+      repositoryRoot: current.repositoryRoot,
+      worktreePath: current.worktreePath,
+      startedAt: current.status === "deleting" ? current.startedAt : startedAt,
+    };
+    if (current.status === "queued") {
+      yield* dispatchCleanup(job.threadId, deleting);
+    }
+
+    const removal = yield* Effect.result(
+      gitWorkflow.removeWorktree({
+        cwd: deleting.repositoryRoot,
+        path: deleting.worktreePath,
+        force: true,
+      }),
+    );
+    if (Result.isSuccess(removal)) {
+      yield* dispatchCleanup(job.threadId, null);
+      return;
+    }
+
+    const failedAt = yield* nowIso;
+    yield* dispatchCleanup(job.threadId, {
+      ...deleting,
+      status: "failed",
+      failedAt,
+      error: removal.failure.message,
+    });
+  });
+
+  const processCleanupSafely = (job: CleanupJob) =>
+    processCleanup(job).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+        const detail = Cause.pretty(cause);
+        return Effect.gen(function* () {
+          const failedAt = yield* nowIso;
+          yield* dispatchCleanup(job.threadId, {
+            status: "failed",
+            repositoryRoot: job.cleanup.repositoryRoot,
+            worktreePath: job.cleanup.worktreePath,
+            startedAt: job.cleanup.status === "deleting" ? job.cleanup.startedAt : failedAt,
+            failedAt,
+            error: detail,
+          }).pipe(
+            Effect.catchCause((dispatchCause) =>
+              Effect.logWarning("thread worktree cleanup failure could not be persisted", {
+                threadId: job.threadId,
+                worktreePath: job.cleanup.worktreePath,
+                cleanupCause: detail,
+                dispatchCause: Cause.pretty(dispatchCause),
+              }),
+            ),
+          );
+        });
+      }),
+    );
+
+  const removeEnqueuedCleanupThreadId = (threadId: CleanupJob["threadId"]) =>
+    Ref.update(enqueuedCleanupThreadIdsRef, (threadIds) => {
+      const next = new Set(threadIds);
+      next.delete(threadId);
+      return next;
+    });
+
+  const getCleanupWorker = Effect.fn("getThreadWorktreeCleanupWorker")(function* (
+    repositoryRoot: string,
+  ) {
+    const existing = (yield* Ref.get(cleanupWorkersRef)).get(repositoryRoot);
+    if (existing) return existing;
+    const created = yield* makeDrainableWorker((job: CleanupJob) =>
+      processCleanupSafely(job).pipe(Effect.ensuring(removeEnqueuedCleanupThreadId(job.threadId))),
+    );
+    return yield* Ref.modify(cleanupWorkersRef, (workers) => {
+      const current = workers.get(repositoryRoot);
+      if (current) return [current, workers] as const;
+      const next = new Map(workers);
+      next.set(repositoryRoot, created);
+      return [created, next] as const;
+    });
+  });
+
+  const enqueueCleanup = Effect.fn("enqueueThreadWorktreeCleanup")(function* (job: CleanupJob) {
+    const accepted = yield* Ref.modify(enqueuedCleanupThreadIdsRef, (threadIds) => {
+      if (threadIds.has(job.threadId)) return [false, threadIds] as const;
+      const next = new Set(threadIds);
+      next.add(job.threadId);
+      return [true, next] as const;
+    });
+    if (!accepted) return;
+
+    const cleanupWorker = yield* getCleanupWorker(job.cleanup.repositoryRoot);
+    yield* cleanupWorker.enqueue(job);
+  });
+
+  const enqueueCleanupFromEvent = (event: OrchestrationEvent) => {
+    if (event.type === "thread.deleted") {
+      const cleanup = event.payload.worktreeCleanup;
+      return cleanup == null || cleanup.status === "failed"
+        ? Effect.void
+        : enqueueCleanup({ threadId: event.payload.threadId, cleanup });
+    }
+    if (event.type === "thread.worktree-cleanup-updated") {
+      const cleanup = event.payload.cleanup;
+      return cleanup == null || cleanup.status === "failed"
+        ? Effect.void
+        : enqueueCleanup({ threadId: event.payload.threadId, cleanup });
+    }
+    return Effect.void;
+  };
+
+  const cleanupDrain = Effect.gen(function* () {
+    const workers = yield* Ref.get(cleanupWorkersRef);
+    yield* Effect.forEach(workers.values(), (cleanupWorker) => cleanupWorker.drain, {
+      concurrency: "unbounded",
+    });
+  });
+
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-        if (event.type !== "thread.deleted") {
-          return Effect.void;
+        if (event.type === "thread.deleted") {
+          return Effect.all([worker.enqueue(event), enqueueCleanupFromEvent(event)]).pipe(
+            Effect.asVoid,
+          );
         }
-        return worker.enqueue(event);
+        return enqueueCleanupFromEvent(event);
       }),
+    );
+
+    yield* projectionThreads.listPendingWorktreeCleanup().pipe(
+      Effect.flatMap((resumable) =>
+        Effect.forEach(resumable, (thread) => {
+          const cleanup = thread.worktreeCleanup;
+          return cleanup == null || cleanup.status === "failed"
+            ? Effect.void
+            : enqueueCleanup({ threadId: thread.threadId, cleanup });
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("thread worktree cleanup resume failed", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
     );
   });
 
   return {
     start,
-    drain: worker.drain,
+    drain: Effect.all([worker.drain, cleanupDrain]).pipe(Effect.asVoid),
   } satisfies ThreadDeletionReactorShape;
 });
 

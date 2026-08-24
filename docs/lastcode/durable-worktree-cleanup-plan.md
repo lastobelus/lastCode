@@ -56,6 +56,7 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 - The decider chooses the initial deleting or queued state by inspecting unfinished cleanup jobs for the same repository. The resulting `thread.deleted` event contains the concrete cleanup record, making the user’s choice durable with the deletion.
 - Retry is valid only from failed. Abandonment is valid from deleting, queued, or failed. Internal lifecycle transitions validate their expected prior state.
 - A failed job is not an active queue blocker.
+- Project deletion is rejected while any child thread still has a cleanup state, even with `force: true`; the user must wait for cleanup or choose **Keep worktree** first.
 
 ### Projection
 
@@ -68,9 +69,9 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 ### Reactor
 
 - Extend `ThreadDeletionReactor`; it already owns provider-session and terminal cleanup for `thread.deleted`.
-- Queue one scoped cleanup fiber per job behind a repository-keyed semaphore. Semaphore acquisition preserves same-repository serialization while different repositories proceed independently.
-- Before a queued fiber runs, persist the started transition. Call the server `GitWorkflowService.removeWorktree` primitive from PR #74 with `force: true`.
-- Persist completed or failed with the exact structured error message. Refresh Git status after success as best effort; refresh failure must not turn a successful deletion into a failed cleanup.
+- Queue jobs through one scoped drainable worker per repository. Each worker preserves same-repository order while workers for different repositories proceed independently.
+- Before a queued job runs, persist the started transition. Call the server `GitWorkflowService.removeWorktree` primitive from PR #74 with `force: true`.
+- Persist completed or failed with the exact structured error message.
 - At startup, query and enqueue all resumable jobs after projections are bootstrapped. Tests wait on the reactor drain/receipts, never sleeps.
 
 ## Client presentation
@@ -110,9 +111,9 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 - Contract encode/decode tests for every cleanup state and command/event.
 - Decider tests for ownership, shared-worktree rejection, atomic initial state, retry, abandonment, and transition invariants.
 - Projection/migration/query tests for persistence, startup enumeration, shell inclusion, and final removal.
-- Reactor tests with controlled removal effects proving same-repository serialization, cross-repository concurrency, restart recovery, success, failure, retry, and drain semantics.
-- Client-runtime reducer tests proving tombstones survive upserts and disappear on completion/abandonment.
-- Web logic/component tests for status priority, disabled/clickable semantics, hover order/content, failure dialog actions, and both sidebar variants.
+- Reactor tests with controlled removal effects proving same-repository ordering, restart recovery, success, failure, queue continuation, and drain semantics.
+- Projection and shell-stream tests proving tombstones survive upserts and disappear on completion/abandonment.
+- Web logic tests for status priority, route fallback exclusion, and cleanup pills shared by both sidebar variants.
 - Mobile presentation tests proving observe-only status priority.
 - Focused lint and package typechecks, committed-range `git diff --check`, and the guarded LastCode quick-CI push gate.
 - Integrated disposable-state web QA in both sidebar versions, light and dark themes, covering deleting, queued, failure, Retry, Copy details, Keep worktree, navigation fallback, and silent success. Capture before/after images; record motion if elapsed/transition behavior needs review.
@@ -125,4 +126,4 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 - Providers: not provider-shaped; existing deletion reactor stops any provider session first.
 - Contracts/server/projections: required for durable remote and multi-device behavior.
 - Local, relay, and tunnel connections: use the same persisted orchestration commands and shell stream; disconnects do not own job lifetime.
-- Documentation: this LastCode implementation plan records fork-only behavior; no upstream user documentation changes in this PR.
+- Documentation: the implementation plan and LastCode section of the user sidebar guide document this fork-only behavior.
