@@ -4,12 +4,14 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
@@ -173,14 +175,12 @@ const make = Effect.gen(function* () {
       Result.isFailure(removal) && !(yield* fileSystem.exists(deleting.worktreePath));
     if (Result.isSuccess(removal) || alreadyRemoved) {
       yield* dispatchCleanup(job.threadId, null).pipe(
-        Effect.retry({ times: 2 }),
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
-          return Effect.logWarning("removed worktree but could not persist cleanup completion", {
-            threadId: job.threadId,
-            worktreePath: deleting.worktreePath,
-            cause: Cause.pretty(cause),
-          });
+        Effect.retry({
+          schedule: Schedule.exponential("1 second").pipe(
+            Schedule.modifyDelay(({ duration }) =>
+              Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+            ),
+          ),
         }),
       );
       return;

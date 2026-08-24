@@ -660,13 +660,18 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const rowContent = (close: () => void) =>
     compact ? (
       <Pressable
-        accessibilityHint="Swipe left for archive and delete actions"
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : "Swipe left for archive and delete actions"
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ disabled: cleanupPending || cleanupFailed }}
+        accessibilityState={{ disabled: cleanupPending }}
         className="bg-screen"
-        disabled={cleanupPending || cleanupFailed}
+        disabled={cleanupPending}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}
@@ -715,14 +720,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       </Pressable>
     ) : (
       <Pressable
-        accessibilityHint="Opens the thread"
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : "Opens the thread"
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ disabled: cleanupPending || cleanupFailed, selected }}
-        disabled={cleanupPending || cleanupFailed}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         onHoverIn={() => setHovered(true)}
         onHoverOut={() => setHovered(false)}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}

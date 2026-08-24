@@ -14,9 +14,11 @@ import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -25,6 +27,7 @@ import {
   ProjectionThreadRepository,
   type ProjectionThread,
 } from "../../persistence/Services/ProjectionThreads.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -100,7 +103,7 @@ function cleanupRow(
 }
 
 describe("durable worktree cleanup", () => {
-  effectIt.live("tears down the thread before removing its worktree", () =>
+  effectIt.live("tears down the thread before removing its worktree and retries completion", () =>
     Effect.gen(function* () {
       const thread = cleanupRow(
         "cleanup-event",
@@ -132,12 +135,30 @@ describe("durable worktree cleanup", () => {
       const rows = new Map([[thread.threadId, thread]]);
       const operations: string[] = [];
       const removed = yield* Deferred.make<void>();
+      const completionDispatchFailed = yield* Deferred.make<void>();
+      let completionDispatchAttempts = 0;
       const dependencies = Layer.mergeAll(
         Layer.mock(OrchestrationEngineService)({
           streamDomainEvents: Stream.make(deletedEvent),
           latestSequence: Effect.succeed(1),
           readEvents: () => Stream.empty,
           dispatch: (command) => {
+            if (
+              command.type === "thread.worktree-cleanup.update" &&
+              command.cleanup === null &&
+              completionDispatchAttempts++ === 0
+            ) {
+              return Deferred.succeed(completionDispatchFailed, undefined).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new PersistenceSqlError({
+                      operation: "test.dispatchCleanup",
+                      detail: "transient persistence failure",
+                    }),
+                  ),
+                ),
+              );
+            }
             if (command.type === "thread.worktree-cleanup.update") {
               const row = rows.get(command.threadId);
               if (row) rows.set(command.threadId, { ...row, worktreeCleanup: command.cleanup });
@@ -174,8 +195,11 @@ describe("durable worktree cleanup", () => {
         const reactor = yield* ThreadDeletionReactor;
         yield* reactor.start();
         yield* Deferred.await(removed);
-        yield* reactor.drain;
-      }).pipe(Effect.provide(testLayer));
+        const drain = yield* Effect.forkChild(reactor.drain);
+        yield* Deferred.await(completionDispatchFailed);
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(drain);
+      }).pipe(Effect.provide(Layer.merge(testLayer, TestClock.layer())));
 
       expect(operations).toEqual([
         `stop:${thread.threadId}`,
