@@ -687,6 +687,18 @@ interface CollabChildAgentState {
   readonly spawnTurnId: TurnId | undefined;
 }
 
+function collabChildIdentityChanged(
+  before: CollabChildAgentState,
+  after: CollabChildAgentState,
+): boolean {
+  return (
+    before.nickname !== after.nickname ||
+    before.role !== after.role ||
+    before.agentPath !== after.agentPath ||
+    before.parentThreadId !== after.parentThreadId
+  );
+}
+
 function readThreadSpawnSource(thread: { readonly source: unknown }):
   | {
       nickname: string | undefined;
@@ -1118,12 +1130,7 @@ export const makeCodexSessionRuntime = (
             if (!existingChild) {
               yield* emitCollabChildStarted(state);
               yield* emitCollabChildSystemError(state);
-            } else if (
-              existingChild.nickname !== state.nickname ||
-              existingChild.role !== state.role ||
-              existingChild.agentPath !== state.agentPath ||
-              existingChild.parentThreadId !== state.parentThreadId
-            ) {
+            } else if (collabChildIdentityChanged(existingChild, state)) {
               // Keep the terminal status authoritative while propagating
               // identity that arrived after the first registration path.
               yield* emitCollabChildSystemError(state);
@@ -1203,6 +1210,8 @@ export const makeCodexSessionRuntime = (
           if (registeredChild?.terminalError) {
             if (!existingChild) {
               yield* emitCollabChildStarted(registeredChild);
+              yield* emitCollabChildSystemError(registeredChild);
+            } else if (collabChildIdentityChanged(existingChild, registeredChild)) {
               yield* emitCollabChildSystemError(registeredChild);
             }
           } else {

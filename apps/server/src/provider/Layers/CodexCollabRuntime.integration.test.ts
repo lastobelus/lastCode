@@ -177,6 +177,7 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.isDefined(rootThreadStarted);
       const turnIdA = (turnStartedA.params as { turn: { id: string } }).turn.id;
       const turnIdB = (turnStartedB.params as { turn: { id: string } }).turn.id;
+      const childC = "child-terminal-thread-first";
       const threadRegistrationA = {
         ...rootThreadStarted,
         params: {
@@ -195,6 +196,44 @@ describe("CodexSessionRuntime collab integration", () => {
                 },
               },
             },
+          },
+        },
+      };
+      const turnStartedC = {
+        ...turnStartedA,
+        params: {
+          ...turnStartedA.params,
+          threadId: childC,
+          turn: { ...turnStartedA.params.turn, id: `${childC}-turn` },
+        },
+      };
+      const threadRegistrationC = {
+        ...threadRegistrationA,
+        params: {
+          thread: {
+            ...threadRegistrationA.params.thread,
+            id: childC,
+            sessionId: childC,
+            source: {
+              subAgent: {
+                thread_spawn: {
+                  agent_nickname: "gamma",
+                  depth: 1,
+                  parent_thread_id: ROOT,
+                },
+              },
+            },
+          },
+        },
+      };
+      const registrationC = {
+        ...registrationA,
+        params: {
+          ...registrationA.params,
+          item: {
+            ...registrationA.params.item,
+            agentThreadId: childC,
+            agentPath: "/root/gamma",
           },
         },
       };
@@ -226,6 +265,18 @@ describe("CodexSessionRuntime collab integration", () => {
             },
           },
           { method: "thread/closed", params: { threadId: CHILD_A } },
+          turnStartedC,
+          {
+            method: "error",
+            params: {
+              threadId: childC,
+              turnId: `${childC}-turn`,
+              error: { message: "thread-first child failed before registration" },
+              willRetry: false,
+            },
+          },
+          threadRegistrationC,
+          registrationC,
           turnStartedB,
           {
             method: "error",
@@ -298,6 +349,13 @@ describe("CodexSessionRuntime collab integration", () => {
               payload.status?.type !== "systemError"))
         );
       });
+      const childCFailures = events.filter(
+        (event) =>
+          event.method === "collabAgent/statusChanged" &&
+          (event.payload as { agentThreadId?: string; status?: { type?: string } })
+            .agentThreadId === childC &&
+          (event.payload as { status?: { type?: string } }).status?.type === "systemError",
+      );
 
       assert.notInclude(
         startedThreadIds,
@@ -325,6 +383,18 @@ describe("CodexSessionRuntime collab integration", () => {
         childATerminalOverrides.map((event) => event.method),
         [],
         "trailing lifecycle must not overwrite a terminal child error",
+      );
+      assert.lengthOf(
+        childCFailures,
+        2,
+        "late activity identity must enrich a thread-first terminal child",
+      );
+      const childCMetadataFailure = childCFailures.at(-1);
+      assert.isDefined(childCMetadataFailure);
+      assert.equal(
+        (childCMetadataFailure.payload as { agentPath?: string }).agentPath,
+        "/root/gamma",
+        "the terminal metadata patch must preserve a path learned from late activity",
       );
       assert.include(
         startedThreadIds,
