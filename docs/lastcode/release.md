@@ -162,6 +162,7 @@ stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
+pnpm lastcode:intel-stage stage --maximum-version-host airy
 pnpm lastcode:intel-stage status
 ```
 
@@ -175,12 +176,21 @@ checks and supersession; a mismatch, competing invocation, or interrupted check
 leaves the prior pending selection intact. Staging never closes admission, stops
 the app, or starts installation.
 
+`--maximum-version-host airy` reads `/Applications/LastCode.app` on the named
+SSH host and stages only releases at or below that installed nightly. If SSH is
+unavailable or the remote version is not a LastCode nightly, staging stops
+before changing the current pending selection. This is the simple version
+ceiling used to keep htulo from moving ahead of airy.
+The SSH read is non-interactive and requires key-based access; it never opens a
+password prompt.
+
 State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
 credential-free handoff contract for later drain and activation work. It names
 the immutable tag and commit, expected version and DMG hash, and one candidate
 directory. GitHub credentials remain owned by `gh` and are not written into
-candidate metadata. `--home-dir`, `--repository`, and `--current-version` are
-available for isolated validation and recovery work.
+candidate metadata. `--home-dir`, `--repository`, `--current-version`, and
+`--maximum-version-host` are available for isolated validation and recovery
+work.
 
 ## Runtime Identity
 
