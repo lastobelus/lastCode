@@ -1,5 +1,6 @@
 import { CommandId, type OrchestrationEvent, type ThreadWorktreeCleanup } from "@t3tools/contracts";
 import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +27,7 @@ type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed"
 type CleanupJob = {
   readonly threadId: ThreadDeletedEvent["payload"]["threadId"];
   readonly cleanup: PendingCleanup;
+  readonly needsTeardown: boolean;
 };
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
@@ -116,6 +118,11 @@ const make = Effect.gen(function* () {
   });
 
   const processCleanup = Effect.fn("processThreadWorktreeCleanup")(function* (job: CleanupJob) {
+    if (job.needsTeardown) {
+      yield* stopProviderSession(job.threadId);
+      yield* closeThreadTerminals(job.threadId);
+    }
+
     const projected = yield* projectionThreads.getById({ threadId: job.threadId });
     if (Option.isNone(projected)) return;
     const current = projected.value.worktreeCleanup;
@@ -132,6 +139,23 @@ const make = Effect.gen(function* () {
       yield* dispatchCleanup(job.threadId, deleting);
     }
 
+    const normalizedWorktreePath = normalizeProjectPathForComparison(deleting.worktreePath);
+    const activeOwner = (yield* projectionThreads.listActiveWorktreeOwners()).find(
+      (candidate) =>
+        candidate.threadId !== job.threadId &&
+        normalizeProjectPathForComparison(candidate.worktreePath) === normalizedWorktreePath,
+    );
+    if (activeOwner !== undefined) {
+      const failedAt = yield* nowIso;
+      yield* dispatchCleanup(job.threadId, {
+        ...deleting,
+        status: "failed",
+        failedAt,
+        error: `Worktree '${deleting.worktreePath}' is now used by active thread '${activeOwner.threadId}'.`,
+      });
+      return;
+    }
+
     const removal = yield* Effect.result(
       gitWorkflow.removeWorktree({
         cwd: deleting.repositoryRoot,
@@ -140,7 +164,17 @@ const make = Effect.gen(function* () {
       }),
     );
     if (Result.isSuccess(removal)) {
-      yield* dispatchCleanup(job.threadId, null);
+      yield* dispatchCleanup(job.threadId, null).pipe(
+        Effect.retry({ times: 2 }),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+          return Effect.logWarning("removed worktree but could not persist cleanup completion", {
+            threadId: job.threadId,
+            worktreePath: deleting.worktreePath,
+            cause: Cause.pretty(cause),
+          });
+        }),
+      );
       return;
     }
 
@@ -223,13 +257,21 @@ const make = Effect.gen(function* () {
       const cleanup = event.payload.worktreeCleanup;
       return cleanup == null || cleanup.status === "failed"
         ? Effect.void
-        : enqueueCleanup({ threadId: event.payload.threadId, cleanup });
+        : enqueueCleanup({
+            threadId: event.payload.threadId,
+            cleanup,
+            needsTeardown: false,
+          });
     }
     if (event.type === "thread.worktree-cleanup-updated") {
       const cleanup = event.payload.cleanup;
       return cleanup == null || cleanup.status === "failed"
         ? Effect.void
-        : enqueueCleanup({ threadId: event.payload.threadId, cleanup });
+        : enqueueCleanup({
+            threadId: event.payload.threadId,
+            cleanup,
+            needsTeardown: false,
+          });
     }
     return Effect.void;
   };
@@ -245,9 +287,9 @@ const make = Effect.gen(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
         if (event.type === "thread.deleted") {
-          return Effect.all([worker.enqueue(event), enqueueCleanupFromEvent(event)]).pipe(
-            Effect.asVoid,
-          );
+          return worker
+            .enqueue(event)
+            .pipe(Effect.andThen(worker.drain), Effect.andThen(enqueueCleanupFromEvent(event)));
         }
         return enqueueCleanupFromEvent(event);
       }),
@@ -259,7 +301,7 @@ const make = Effect.gen(function* () {
           const cleanup = thread.worktreeCleanup;
           return cleanup == null || cleanup.status === "failed"
             ? Effect.void
-            : enqueueCleanup({ threadId: thread.threadId, cleanup });
+            : enqueueCleanup({ threadId: thread.threadId, cleanup, needsTeardown: true });
         }),
       ),
       Effect.catchCause((cause) =>

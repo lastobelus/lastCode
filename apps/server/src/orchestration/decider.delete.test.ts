@@ -245,6 +245,32 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
         readModel,
       })) as PlannedThreadDeletedEvent;
       const afterDelete = yield* projectEvent(readModel, { ...deleted, sequence: 4 });
+
+      const earlyAbandonError = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.worktree-cleanup.abandon",
+            commandId: asCommandId("cmd-cleanup-abandon-early"),
+            threadId: asThreadId("thread-delete-1"),
+          },
+          readModel: afterDelete,
+        }),
+      );
+      expect(earlyAbandonError.message).toContain("does not have failed worktree cleanup");
+
+      const pathReuseError = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.meta.update",
+            commandId: asCommandId("cmd-cleanup-path-reuse"),
+            threadId: asThreadId("thread-delete-2"),
+            worktreePath: "/tmp/project-delete-worktrees/cleanup-retry",
+          },
+          readModel: afterDelete,
+        }),
+      );
+      expect(pathReuseError.message).toContain("is still being cleaned up by thread");
+
       const failed = yield* decideOrchestrationCommand({
         command: {
           type: "thread.worktree-cleanup.update",

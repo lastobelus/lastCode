@@ -73,6 +73,12 @@ export const ListProjectionThreadsByProjectInput = Schema.Struct({
   projectId: ProjectId,
 });
 export const ListPendingWorktreeCleanupThreadsInput = Schema.Void;
+export const ListActiveWorktreeOwnerThreadsInput = Schema.Void;
+export const ActiveWorktreeOwner = Schema.Struct({
+  threadId: ThreadId,
+  worktreePath: Schema.String,
+});
+export type ActiveWorktreeOwner = typeof ActiveWorktreeOwner.Type;
 export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
 /**
@@ -104,6 +110,11 @@ export interface ProjectionThreadRepositoryShape {
 
   readonly listPendingWorktreeCleanup: () => Effect.Effect<
     ReadonlyArray<ProjectionThread>,
+    ProjectionRepositoryError
+  >;
+
+  readonly listActiveWorktreeOwners: () => Effect.Effect<
+    ReadonlyArray<ActiveWorktreeOwner>,
     ProjectionRepositoryError
   >;
 

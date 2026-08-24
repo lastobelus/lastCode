@@ -1,13 +1,17 @@
 import {
+  CommandId,
+  EventId,
   GitCommandError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationCommand,
+  type OrchestrationEvent,
   type ThreadWorktreeCleanup,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -96,6 +100,91 @@ function cleanupRow(
 }
 
 describe("durable worktree cleanup", () => {
+  effectIt.live("tears down the thread before removing its worktree", () =>
+    Effect.gen(function* () {
+      const thread = cleanupRow(
+        "cleanup-event",
+        {
+          status: "deleting",
+          repositoryRoot: "/repo",
+          worktreePath: "/worktrees/event",
+          startedAt: "2026-08-23T00:00:00.000Z",
+        },
+        "2026-08-23T00:00:00.000Z",
+      );
+      const deletedEvent: Extract<OrchestrationEvent, { type: "thread.deleted" }> = {
+        sequence: 1,
+        eventId: EventId.make("event-thread-deleted"),
+        aggregateKind: "thread",
+        aggregateId: thread.threadId,
+        type: "thread.deleted",
+        occurredAt: "2026-08-23T00:00:00.000Z",
+        commandId: CommandId.make("command-thread-deleted"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-thread-deleted"),
+        metadata: {},
+        payload: {
+          threadId: thread.threadId,
+          deletedAt: "2026-08-23T00:00:00.000Z",
+          worktreeCleanup: thread.worktreeCleanup ?? undefined,
+        },
+      };
+      const rows = new Map([[thread.threadId, thread]]);
+      const operations: string[] = [];
+      const removed = yield* Deferred.make<void>();
+      const dependencies = Layer.mergeAll(
+        Layer.mock(OrchestrationEngineService)({
+          streamDomainEvents: Stream.make(deletedEvent),
+          latestSequence: Effect.succeed(1),
+          readEvents: () => Stream.empty,
+          dispatch: (command) => {
+            if (command.type === "thread.worktree-cleanup.update") {
+              const row = rows.get(command.threadId);
+              if (row) rows.set(command.threadId, { ...row, worktreeCleanup: command.cleanup });
+            }
+            return Effect.succeed({ sequence: 2 });
+          },
+        }),
+        Layer.mock(ProjectionThreadRepository)({
+          getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
+          listPendingWorktreeCleanup: () => Effect.succeed([]),
+          listActiveWorktreeOwners: () => Effect.succeed([]),
+        }),
+        Layer.mock(GitWorkflowService)({
+          removeWorktree: ({ path }) =>
+            Effect.sync(() => operations.push(`remove:${path}`)).pipe(
+              Effect.andThen(Deferred.succeed(removed, undefined)),
+            ),
+        }),
+        Layer.mock(ProviderService)({
+          stopSession: ({ threadId }) =>
+            Effect.sync(() => void operations.push(`stop:${threadId}`)),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          close: ({ threadId }) => Effect.sync(() => void operations.push(`close:${threadId}`)),
+        }),
+        NodeServices.layer,
+      );
+      const testLayer = ThreadDeletionReactorLive.pipe(
+        Layer.provide(dependencies),
+        Layer.merge(dependencies),
+      );
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* ThreadDeletionReactor;
+        yield* reactor.start();
+        yield* Deferred.await(removed);
+        yield* reactor.drain;
+      }).pipe(Effect.provide(testLayer));
+
+      expect(operations).toEqual([
+        `stop:${thread.threadId}`,
+        `close:${thread.threadId}`,
+        "remove:/worktrees/event",
+      ]);
+    }),
+  );
+
   effectIt.live("resumes same-repository cleanup in order and persists failures", () =>
     Effect.gen(function* () {
       const root = "/repo";
@@ -131,12 +220,17 @@ describe("durable worktree cleanup", () => {
         },
         "2026-08-23T00:00:02.000Z",
       );
+      const activeOwner = {
+        threadId: ThreadId.make("active-owner"),
+        worktreePath: third.worktreePath ?? "/worktrees/third",
+      };
       const rows = new Map([
         [first.threadId, first],
         [second.threadId, second],
         [third.threadId, third],
       ]);
       const removals: string[] = [];
+      const operations: string[] = [];
       const updates: Array<
         Extract<OrchestrationCommand, { type: "thread.worktree-cleanup.update" }>
       > = [];
@@ -158,11 +252,13 @@ describe("durable worktree cleanup", () => {
         Layer.mock(ProjectionThreadRepository)({
           getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
           listPendingWorktreeCleanup: () => Effect.succeed([first, second, third]),
+          listActiveWorktreeOwners: () => Effect.succeed([activeOwner]),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>
             Effect.gen(function* () {
               removals.push(path);
+              operations.push(`remove:${path}`);
               if (path === second.worktreePath) {
                 return yield* new GitCommandError({
                   operation: "remove worktree",
@@ -173,8 +269,13 @@ describe("durable worktree cleanup", () => {
               }
             }),
         }),
-        Layer.mock(ProviderService)({ stopSession: () => Effect.void }),
-        Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
+        Layer.mock(ProviderService)({
+          stopSession: ({ threadId }) =>
+            Effect.sync(() => void operations.push(`stop:${threadId}`)),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          close: ({ threadId }) => Effect.sync(() => void operations.push(`close:${threadId}`)),
+        }),
         NodeServices.layer,
       );
       const testLayer = ThreadDeletionReactorLive.pipe(
@@ -188,7 +289,17 @@ describe("durable worktree cleanup", () => {
         yield* reactor.drain;
       }).pipe(Effect.provide(testLayer));
 
-      expect(removals).toEqual(["/worktrees/first", "/worktrees/second", "/worktrees/third"]);
+      expect(removals).toEqual(["/worktrees/first", "/worktrees/second"]);
+      expect(operations).toEqual([
+        `stop:${first.threadId}`,
+        `close:${first.threadId}`,
+        "remove:/worktrees/first",
+        `stop:${second.threadId}`,
+        `close:${second.threadId}`,
+        "remove:/worktrees/second",
+        `stop:${third.threadId}`,
+        `close:${third.threadId}`,
+      ]);
       expect(
         updates.map((command) => [command.threadId, command.cleanup?.status ?? "complete"]),
       ).toEqual([
@@ -196,11 +307,15 @@ describe("durable worktree cleanup", () => {
         [second.threadId, "deleting"],
         [second.threadId, "failed"],
         [third.threadId, "deleting"],
-        [third.threadId, "complete"],
+        [third.threadId, "failed"],
       ]);
       expect(updates[2]?.cleanup).toMatchObject({
         status: "failed",
         error: expect.stringContaining("permission denied"),
+      });
+      expect(updates[4]?.cleanup).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("active-owner"),
       });
     }),
   );

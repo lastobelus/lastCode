@@ -7,8 +7,10 @@ import * as Struct from "effect/Struct";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  ActiveWorktreeOwner,
   DeleteProjectionThreadInput,
   GetProjectionThreadInput,
+  ListActiveWorktreeOwnerThreadsInput,
   ListProjectionThreadsByProjectInput,
   ListPendingWorktreeCleanupThreadsInput,
   ProjectionThread,
@@ -254,6 +256,21 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const listActiveWorktreeOwnerRows = SqlSchema.findAll({
+    Request: ListActiveWorktreeOwnerThreadsInput,
+    Result: ActiveWorktreeOwner,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          worktree_path AS "worktreePath"
+        FROM projection_threads
+        WHERE deleted_at IS NULL
+          AND worktree_path IS NOT NULL
+        ORDER BY created_at ASC, thread_id ASC
+      `,
+  });
+
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -277,6 +294,14 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
         ),
       );
 
+  const listActiveWorktreeOwners: ProjectionThreadRepositoryShape["listActiveWorktreeOwners"] =
+    () =>
+      listActiveWorktreeOwnerRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionThreadRepository.listActiveWorktreeOwners:query"),
+        ),
+      );
+
   const deleteById: ProjectionThreadRepositoryShape["deleteById"] = (input) =>
     deleteProjectionThreadRow(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
@@ -287,6 +312,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
     getById,
     listByProjectId,
     listPendingWorktreeCleanup,
+    listActiveWorktreeOwners,
     deleteById,
   } satisfies ProjectionThreadRepositoryShape;
 });

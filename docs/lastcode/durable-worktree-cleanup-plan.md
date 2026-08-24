@@ -30,7 +30,7 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 - A failed cleanup releases its repository queue so the next queued cleanup can run.
 - Retry re-enters the repository queue. If another cleanup owns it, persist queued state and its blocker; otherwise persist deleting state and start immediately.
 - Success clears the cleanup state and removes the tombstone without a toast.
-- **Keep worktree** is the only abandonment path. It clears the cleanup state and removes the tombstone without deleting the worktree.
+- **Keep worktree** is the only abandonment path and is available after a cleanup failure, when no removal is in flight. It clears the cleanup state and removes the tombstone without deleting the worktree.
 
 ### Failure dialog
 
@@ -54,8 +54,9 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 
 - `thread.delete` derives and validates cleanup ownership from the command read model.
 - The decider chooses the initial deleting or queued state by inspecting unfinished cleanup jobs for the same repository. The resulting `thread.deleted` event contains the concrete cleanup record, making the user’s choice durable with the deletion.
-- Retry is valid only from failed. Abandonment is valid from deleting, queued, or failed. Internal lifecycle transitions validate their expected prior state.
+- Retry and abandonment are valid only from failed. Internal lifecycle transitions validate their expected prior state.
 - A failed job is not an active queue blocker.
+- Thread creation and metadata updates cannot assign a worktree path reserved by an unfinished cleanup. The reactor also rechecks projected active owners immediately before physical removal.
 - Project deletion is rejected while any child thread still has a cleanup state, even with `force: true`; the user must wait for cleanup or choose **Keep worktree** first.
 
 ### Projection
@@ -70,7 +71,7 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
 
 - Extend `ThreadDeletionReactor`; it already owns provider-session and terminal cleanup for `thread.deleted`.
 - Queue jobs through one scoped drainable worker per repository. Each worker preserves same-repository order while workers for different repositories proceed independently.
-- Before a queued job runs, persist the started transition. Call the server `GitWorkflowService.removeWorktree` primitive from PR #74 with `force: true`.
+- Provider-session and terminal teardown completes before worktree removal begins. Before a queued job runs, persist the started transition, recheck active ownership, then call the server `GitWorkflowService.removeWorktree` primitive from PR #74 with `force: true`.
 - Persist completed or failed with the exact structured error message.
 - At startup, query and enqueue all resumable jobs after projections are bootstrapped. Tests wait on the reactor drain/receipts, never sleeps.
 

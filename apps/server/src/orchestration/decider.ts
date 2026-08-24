@@ -200,6 +200,20 @@ function findWorktreeCleanupBlocker(
     })[0];
 }
 
+function findWorktreeCleanupOwner(
+  readModel: OrchestrationReadModel,
+  worktreePath: string,
+  exceptThreadId?: string,
+) {
+  const normalizedPath = normalizeProjectPathForComparison(worktreePath);
+  return readModel.threads.find(
+    (candidate) =>
+      candidate.id !== exceptThreadId &&
+      candidate.worktreeCleanup != null &&
+      normalizeProjectPathForComparison(candidate.worktreeCleanup.worktreePath) === normalizedPath,
+  );
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -424,6 +438,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.worktreePath !== null) {
+        const cleanupOwner = findWorktreeCleanupOwner(readModel, command.worktreePath);
+        if (cleanupOwner !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Worktree '${command.worktreePath}' is still being cleaned up by thread '${cleanupOwner.id}'.`,
+          });
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -556,10 +579,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 
     case "thread.worktree-cleanup.abandon": {
       const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
-      if (thread.deletedAt === null || thread.worktreeCleanup == null) {
+      if (
+        thread.deletedAt === null ||
+        thread.worktreeCleanup == null ||
+        thread.worktreeCleanup.status !== "failed"
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Thread '${thread.id}' does not have worktree cleanup to abandon.`,
+          detail: `Thread '${thread.id}' does not have failed worktree cleanup to abandon.`,
         });
       }
       const occurredAt = yield* nowIso;
@@ -1147,6 +1174,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.branch !== command.expectedBranch
           ? thread.branch
           : command.branch;
+      if (command.worktreePath != null) {
+        const cleanupOwner = findWorktreeCleanupOwner(
+          readModel,
+          command.worktreePath,
+          command.threadId,
+        );
+        if (cleanupOwner !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Worktree '${command.worktreePath}' is still being cleaned up by thread '${cleanupOwner.id}'.`,
+          });
+        }
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
