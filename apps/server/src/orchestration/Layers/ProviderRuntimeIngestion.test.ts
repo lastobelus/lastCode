@@ -798,6 +798,11 @@ describe("ProviderRuntimeIngestion", () => {
         state: "cancelled" as const,
         suffix: "cursor",
       },
+      {
+        provider: ProviderDriverKind.make("codex"),
+        state: "aborted" as const,
+        suffix: "codex-aborted",
+      },
     ];
 
     for (const [index, entry] of cases.entries()) {
@@ -853,15 +858,27 @@ describe("ProviderRuntimeIngestion", () => {
         turnId,
         createdAt,
       });
-      harness.emit({
-        type: "turn.completed",
-        eventId: asEventId(`evt-turn-completed-${entry.suffix}`),
-        provider: entry.provider,
-        threadId,
-        turnId,
-        payload: { state: entry.state },
-        createdAt,
-      });
+      harness.emit(
+        entry.state === "aborted"
+          ? {
+              type: "turn.aborted",
+              eventId: asEventId(`evt-turn-aborted-${entry.suffix}`),
+              provider: entry.provider,
+              threadId,
+              turnId,
+              payload: { reason: "interrupted" },
+              createdAt,
+            }
+          : {
+              type: "turn.completed",
+              eventId: asEventId(`evt-turn-completed-${entry.suffix}`),
+              provider: entry.provider,
+              threadId,
+              turnId,
+              payload: { state: entry.state },
+              createdAt,
+            },
+      );
       await harness.drain();
 
       expect(await harness.readTurnRequestWaitState(threadId, messageId)).toEqual({

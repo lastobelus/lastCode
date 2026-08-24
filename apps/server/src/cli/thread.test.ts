@@ -645,6 +645,38 @@ it.effect("marks only explicitly tracked sends for wait correlation", () =>
   }),
 );
 
+it.effect("rejects waiting on the current thread before dispatch", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    let dispatchCount = 0;
+    const result = yield* Effect.result(
+      sendThreadOutput(
+        {
+          descriptor: source.descriptor,
+          shell: source.shell,
+          dispatch: () => {
+            dispatchCount += 1;
+            return Effect.void;
+          },
+        },
+        {
+          identifier: "thread-runner",
+          message: "pause for update",
+          commandId: CommandId.make("command-self-wait"),
+          messageId: MessageId.make("message-self-wait"),
+          createdAt: "2026-08-22T00:00:00.000Z",
+          trackRequestCorrelation: true,
+          rejectWaitForThreadId: ThreadId.make("thread-runner"),
+        },
+      ),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+    assert.strictEqual(result._tag === "Failure" ? result.failure._tag : "", "ThreadCliError");
+    assert.strictEqual(dispatchCount, 0);
+  }),
+);
+
 it.effect("rejects blank, missing, ambiguous, and oversized sends before dispatch", () =>
   Effect.gen(function* () {
     const { source } = runnerSource();

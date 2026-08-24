@@ -512,6 +512,7 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     readonly messageId: MessageId;
     readonly createdAt: string;
     readonly trackRequestCorrelation?: true;
+    readonly rejectWaitForThreadId?: ThreadId;
   },
 ) {
   const resolution = resolveThreadTarget(source.shell.threads, input.identifier);
@@ -528,6 +529,17 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
               : {}),
           }
         : {}),
+    });
+  }
+  if (
+    input.rejectWaitForThreadId !== undefined &&
+    resolution.thread.id === input.rejectWaitForThreadId
+  ) {
+    return yield* new ThreadCliError({
+      operation: "live send wait",
+      cause: new Error(
+        "Cannot use --wait when sending to the current thread because its queued turn cannot start until this command exits. Send without --wait instead.",
+      ),
     });
   }
   const message = yield* decodeThreadSendMessage(input.message).pipe(
@@ -934,6 +946,9 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
               messageId,
               createdAt: DateTime.formatIso(yield* DateTime.now),
               ...(waitForCompletion ? { trackRequestCorrelation: true as const } : {}),
+              ...(waitForCompletion && process.env.T3CODE_THREAD_ID?.trim()
+                ? { rejectWaitForThreadId: ThreadId.make(process.env.T3CODE_THREAD_ID.trim()) }
+                : {}),
             },
           );
         }),
