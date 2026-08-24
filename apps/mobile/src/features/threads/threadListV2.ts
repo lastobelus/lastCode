@@ -62,6 +62,15 @@ export function resolveThreadListV2ChangeRequestState(input: {
   };
 }
 
+export type ThreadListV2CleanupAction = "retry-worktree-cleanup" | "keep-worktree";
+
+/** Failed cleanup tombstones stay reachable on mobile through recovery actions. */
+export function resolveThreadListV2CleanupActions(
+  cleanup: EnvironmentThreadShell["worktreeCleanup"],
+): readonly ThreadListV2CleanupAction[] {
+  return cleanup?.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [];
+}
+
 export function resolveThreadListV2SnoozeMenuSelection(input: {
   readonly event: string;
   readonly displayedPresets: ReadonlyArray<SnoozePreset>;
@@ -436,6 +445,13 @@ export function buildThreadListV2Items(input: {
         linkedPullRequestKey(thread.linkedPullRequest)
         ? cachedChangeRequest
         : null;
+    // Cleanup tombstones are deleted-thread recovery state, not lifecycle
+    // state. Keep them in the immediately visible active block regardless of
+    // stale snooze, settle, or pin metadata retained on the thread.
+    if (thread.worktreeCleanup != null) {
+      active.push(thread);
+      continue;
+    }
     // Snooze outranks settlement and pinning until the thread wakes.
     if (supportsSnooze && effectiveSnoozed(thread, { now: snoozeNow })) {
       snoozed.push(thread);
