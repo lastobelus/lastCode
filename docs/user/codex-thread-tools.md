@@ -34,6 +34,8 @@ oversized messages, missing or ambiguous targets, authorization failures, and re
 fail without reporting acceptance.
 
 Add `--wait` when the caller needs the exact resulting turn rather than dispatch acceptance.
+`send --wait` cannot target the caller's current thread because that queued turn cannot begin
+until the current command returns; use plain `send` for a self-directed follow-up.
 LastCode emits one `LASTCODE_WAIT_HANDLE=<compact-json>` recovery line on stderr before the
 long wait, then prints one final JSON result on stdout. A completed result includes the exact
 turn ID and a response bounded to 64,000 characters. Timeouts do not interrupt the target;

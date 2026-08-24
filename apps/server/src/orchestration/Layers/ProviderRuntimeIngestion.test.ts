@@ -886,6 +886,14 @@ describe("ProviderRuntimeIngestion", () => {
         state: "interrupted",
         turnId,
       });
+      expect(
+        (await harness.readEvents()).some(
+          (event) =>
+            event.type === "thread.turn-assistant-finalized" &&
+            event.payload.threadId === threadId &&
+            event.payload.turnId === turnId,
+        ),
+      ).toBe(true);
     }
   });
 
