@@ -40,6 +40,8 @@ function buildScript() {
       method: "item/completed",
       params: {
         threadId: ROOT,
+        turnId: "root-turn-error",
+        completedAtMs: 0,
         item: {
           type: "collabAgentToolCall",
           id: "call_fixture_wait",
@@ -47,6 +49,7 @@ function buildScript() {
           status: "completed",
           senderThreadId: ROOT,
           receiverThreadIds: [ROOT, CHILD_A, CHILD_B],
+          agentsStates: {},
         },
       },
     },
@@ -118,7 +121,13 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.include(methods, "collabAgent/activity");
       assert.include(methods, "collabAgent/turnCompleted");
       assert.include(methods, "collabAgent/closed");
-      assert.include(methods, "error", "receiver bookkeeping must not suppress a root error");
+      const rootError = events.find(
+        (event) =>
+          event.method === "error" &&
+          (event.payload as { error?: { message?: string } }).error?.message ===
+            "root error must stay visible",
+      );
+      assert.isDefined(rootError, "receiver bookkeeping must not suppress a root error");
 
       const childTurnCompleted = events.find(
         (event) =>
