@@ -134,7 +134,10 @@ export interface ThreadStatusPill {
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Deleting"
+    | "Deleting (Queued)"
+    | "Cleanup failed";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -152,6 +155,9 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Plan Ready": 3,
   Monitoring: 2,
   Completed: 1,
+  Deleting: 7,
+  "Deleting (Queued)": 7,
+  "Cleanup failed": 8,
 };
 
 type ThreadStatusInput = Pick<
@@ -164,6 +170,7 @@ type ThreadStatusInput = Pick<
   | "session"
   | "backgroundLiveness"
   | "actionResume"
+  | "worktreeCleanup"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -477,14 +484,25 @@ export type SidebarThreadStatus =
   | "waiting"
   | "monitoring"
   | "failed"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
   | "ready";
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness" | "actionResume"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "session"
+  | "backgroundLiveness"
+  | "actionResume"
+  | "worktreeCleanup"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
+  if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
+  if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
   if (thread.hasPendingApprovals) {
     return "approval";
   }
@@ -662,6 +680,33 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      label: "Cleanup failed",
+      colorClass: "text-red-700 dark:text-red-300",
+      dotClass: "bg-red-600 dark:bg-red-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "queued") {
+    return {
+      label: "Deleting (Queued)",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      label: "Deleting",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
   if (thread.hasPendingApprovals) {
     return {
       label: "Pending Approval",
@@ -824,7 +869,8 @@ export function getVisibleThreadsForProject<T extends Pick<Thread, "id">>(input:
 }
 
 export function getFallbackThreadIdAfterDelete<
-  T extends Pick<Thread, "id" | "projectId" | "createdAt" | "updatedAt"> & ThreadSortInput,
+  T extends Pick<Thread, "id" | "projectId" | "createdAt" | "updatedAt"> &
+    ThreadSortInput & { readonly worktreeCleanup?: unknown },
 >(input: {
   threads: readonly T[];
   deletedThreadId: T["id"];
@@ -843,6 +889,7 @@ export function getFallbackThreadIdAfterDelete<
         (thread) =>
           thread.projectId === deletedThread.projectId &&
           thread.id !== deletedThreadId &&
+          thread.worktreeCleanup == null &&
           !deletedThreadIds?.has(thread.id),
       ),
       sortOrder,
