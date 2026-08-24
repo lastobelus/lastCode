@@ -130,15 +130,18 @@ function hasPauseAcknowledgement(result) {
 }
 
 async function pauseBatch(threads, paused, dependencies) {
+  for (const thread of threads) paused.set(thread.threadId, thread);
+  dependencies.savePendingResumes([...paused.values()]);
   const results = await Promise.allSettled(
     threads.map(async (thread) => {
       const result = await dependencies.sendAndWait(thread.threadId, PAUSE_MESSAGE);
       if (!hasPauseAcknowledgement(result)) {
+        if (result?.kind === "completed") paused.delete(thread.threadId);
         fail(`Thread '${thread.title}' did not confirm that it paused.`);
       }
-      paused.set(thread.threadId, thread);
     }),
   );
+  dependencies.savePendingResumes([...paused.values()]);
   const failure = results.find((result) => result.status === "rejected");
   if (failure) throw failure.reason;
 }
@@ -150,11 +153,17 @@ async function resumePaused(paused, dependencies) {
       paused.delete(thread.threadId);
     }),
   );
+  dependencies.savePendingResumes([...paused.values()]);
   const failure = results.find((result) => result.status === "rejected");
   if (failure) throw failure.reason;
 }
 
 export async function runDailyUpdate(options = {}, dependencies) {
+  const paused = new Map(
+    dependencies.loadPendingResumes().map((thread) => [thread.threadId, thread]),
+  );
+  if (paused.size > 0) await resumePaused(paused, dependencies);
+
   const staged = await dependencies.stageUpdate({ maximumVersionHost: "airy" });
   if (!staged.pending) return { status: "up-to-date" };
 
@@ -162,7 +171,6 @@ export async function runDailyUpdate(options = {}, dependencies) {
     expectedSha256: staged.pending.dmgSha256,
     expectedVersion: staged.pending.version,
   });
-  const paused = new Map();
   try {
     if (!options.bootstrap) {
       const first = workingThreads(await dependencies.listThreads());
@@ -216,9 +224,28 @@ async function resumeThread(threadTool, threadId, message) {
 
 function defaultDependencies(home) {
   const threadTool = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
+  const pendingResumesPath = NodePath.join(
+    home,
+    ".lastcode",
+    "daily-update",
+    "pending-resumes.json",
+  );
   return {
     cleanupInstall: cleanupPreparedInstall,
     listThreads: () => threadCommand(threadTool, ["list"]),
+    loadPendingResumes: () => {
+      try {
+        const pending = parseJson(
+          NodeFS.readFileSync(pendingResumesPath, "utf8"),
+          "pending resume queue",
+        );
+        if (!Array.isArray(pending)) fail("Pending resume queue is invalid.");
+        return pending;
+      } catch (error) {
+        if (error && typeof error === "object" && error.code === "ENOENT") return [];
+        throw error;
+      }
+    },
     prepareInstall: prepareDmgInstall,
     quitApp,
     replaceApp: (prepared) =>
@@ -226,6 +253,12 @@ function defaultDependencies(home) {
         launchApp: (appPath) => launchApp(appPath, { maxLaunchAttempts: 1 }),
       }),
     resumeThread: (threadId, message) => resumeThread(threadTool, threadId, message),
+    savePendingResumes: (pending) => {
+      NodeFS.mkdirSync(NodePath.dirname(pendingResumesPath), { recursive: true, mode: 0o700 });
+      const temporaryPath = `${pendingResumesPath}.tmp`;
+      NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(pending)}\n`, { mode: 0o600 });
+      NodeFS.renameSync(temporaryPath, pendingResumesPath);
+    },
     sendAndWait: (threadId, message) =>
       threadCommand(threadTool, [
         "send",

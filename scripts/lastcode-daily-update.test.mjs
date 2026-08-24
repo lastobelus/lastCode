@@ -27,12 +27,14 @@ function temporaryDirectory() {
 
 function fixture(overrides = {}) {
   const calls = [];
+  let pendingResumes = [];
   const working = (threadId, title = threadId) => ({ lifecycle: "working", threadId, title });
   return {
     calls,
     dependencies: {
       cleanupInstall: () => calls.push("cleanup"),
       listThreads: async () => ({ kind: "list", threads: [] }),
+      loadPendingResumes: () => pendingResumes,
       prepareInstall: async () => {
         calls.push("prepare");
         return { prepared: true };
@@ -40,6 +42,9 @@ function fixture(overrides = {}) {
       quitApp: async () => calls.push("quit"),
       replaceApp: async () => calls.push("replace"),
       resumeThread: async (threadId) => calls.push(`resume:${threadId}`),
+      savePendingResumes: (pending) => {
+        pendingResumes = pending;
+      },
       sendAndWait: async (threadId) => {
         calls.push(`pause:${threadId}`);
         return { kind: "completed", response: `Ready\nPAUSED FOR LASTCODE UPDATE` };
@@ -124,6 +129,52 @@ describe("LastCode daily updater", () => {
       status: "up-to-date",
     });
     expect(test.calls).toEqual([]);
+  });
+
+  it("resumes an indeterminate timed-out pause request before aborting", async () => {
+    const test = fixture({
+      listThreads: async () => ({
+        kind: "list",
+        threads: [test.working("one")],
+      }),
+      sendAndWait: async () => ({ kind: "timed-out", waitHandle: { requestId: "request" } }),
+    });
+
+    await expect(runDailyUpdate({}, test.dependencies)).rejects.toThrow("did not confirm");
+    expect(test.calls).toEqual(["stage", "prepare", "resume:one", "cleanup"]);
+  });
+
+  it("retries a durable resume before an up-to-date early return", async () => {
+    const test = fixture({ stageUpdate: async () => ({ status: "up-to-date" }) });
+    test.dependencies.loadPendingResumes = () => [test.working("one")];
+
+    await expect(runDailyUpdate({}, test.dependencies)).resolves.toEqual({
+      status: "up-to-date",
+    });
+    expect(test.calls).toEqual(["resume:one"]);
+  });
+
+  it("keeps a failed post-update resume for the next daily run", async () => {
+    const test = fixture();
+    let listing = 0;
+    let resumeFails = true;
+    test.dependencies.listThreads = async () => ({
+      kind: "list",
+      threads: listing++ === 0 ? [test.working("one")] : [],
+    });
+    test.dependencies.resumeThread = async (threadId) => {
+      test.calls.push(`resume:${threadId}`);
+      if (resumeFails) throw new Error("server still starting");
+    };
+
+    await expect(runDailyUpdate({}, test.dependencies)).rejects.toThrow("server still starting");
+
+    resumeFails = false;
+    test.dependencies.stageUpdate = async () => ({ status: "up-to-date" });
+    await expect(runDailyUpdate({}, test.dependencies)).resolves.toEqual({
+      status: "up-to-date",
+    });
+    expect(test.calls.filter((call) => call === "resume:one")).toHaveLength(2);
   });
 
   it("supports one explicit bootstrap without installing it into the schedule", async () => {

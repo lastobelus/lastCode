@@ -200,7 +200,10 @@ interrupting work. If an update is ready, it uses htulo's local
 explicit `PAUSED FOR LASTCODE UPDATE` replies, checks once for a newly started
 thread, quits LastCode once, swaps the app, launches it once, and tells the
 paused threads to resume. A missing reply leaves the prepared update in place
-for the next run and does not quit LastCode.
+for the next run and does not quit LastCode. Threads that may already have
+paused are always queued for a resume; undelivered resumes are kept in
+`~/.lastcode/daily-update/pending-resumes.json` and retried before the next
+daily update check.
 
 The first update from a LastCode version older than the thread command is a
 manual bootstrap after the user has paused work:
