@@ -1159,6 +1159,24 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             },
             createdAt: emptyAt,
           });
+          const checkpointAssistantMessageId = MessageId.make("message-checkpoint-real-assistant");
+          yield* engine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: CommandId.make("cmd-checkpoint-real-assistant-delta"),
+            threadId,
+            messageId: checkpointAssistantMessageId,
+            delta: "actual checkpoint response",
+            turnId: checkpointTurnId,
+            createdAt: emptyAt,
+          });
+          yield* engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make("cmd-checkpoint-real-assistant-complete"),
+            threadId,
+            messageId: checkpointAssistantMessageId,
+            turnId: checkpointTurnId,
+            createdAt: emptyAt,
+          });
           const syntheticAssistantMessageId = MessageId.make(`assistant:${checkpointTurnId}`);
           yield* engine.dispatch({
             type: "thread.turn.diff.complete",
@@ -1198,7 +1216,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
               kind: "terminal",
               state: "completed",
               turnId: checkpointTurnId,
-              response: "",
+              response: "actual checkpoint response",
             },
           );
           const bufferedMessageId = MessageId.make("message-short-buffered-request");

@@ -19,6 +19,7 @@ const WaitRow = Schema.Struct({
   assistantMessageId: Schema.NullOr(MessageId),
   response: Schema.NullOr(Schema.String),
   responseStreaming: Schema.NullOr(Schema.Number),
+  latestFinalizedAssistantResponse: Schema.NullOr(Schema.String),
   assistantFinalizedAt: Schema.NullOr(Schema.String),
   sessionStatus: Schema.NullOr(
     Schema.Literals(["idle", "starting", "running", "ready", "interrupted", "stopped", "error"]),
@@ -49,6 +50,14 @@ export const resolveTurnRequestWaitState = (value: typeof WaitRow.Type): TurnReq
         if (value.assistantMessageId !== MessageId.make(`assistant:${value.turnId}`)) {
           return { kind: "pending" };
         }
+        if (value.latestFinalizedAssistantResponse !== null) {
+          return {
+            kind: "terminal",
+            state: "completed",
+            turnId: value.turnId,
+            response: value.latestFinalizedAssistantResponse,
+          };
+        }
         return { kind: "terminal", state: "completed", turnId: value.turnId, response: "" };
       }
       if (value.responseStreaming !== 0) {
@@ -74,6 +83,7 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
       SELECT correlations.state AS "correlationState", correlations.turn_id AS "turnId",
         turns.state AS "turnState", turns.assistant_message_id AS "assistantMessageId",
         messages.text AS "response", messages.is_streaming AS "responseStreaming",
+        latest_finalized_assistant.text AS "latestFinalizedAssistantResponse",
         finalizations.finalized_at AS "assistantFinalizedAt",
         sessions.status AS "sessionStatus", sessions.active_turn_id AS "sessionActiveTurnId"
       FROM projection_turn_request_correlations AS correlations
@@ -81,6 +91,18 @@ export const makeTurnRequestWaitQuery = (sql: SqlClient.SqlClient) => {
         ON turns.thread_id = correlations.thread_id AND turns.turn_id = correlations.turn_id
       LEFT JOIN projection_thread_messages AS messages
         ON messages.message_id = turns.assistant_message_id
+      LEFT JOIN projection_thread_messages AS latest_finalized_assistant
+        ON latest_finalized_assistant.message_id = (
+          SELECT candidate.message_id
+          FROM projection_thread_messages AS candidate
+          WHERE candidate.thread_id = correlations.thread_id
+            AND candidate.turn_id = correlations.turn_id
+            AND candidate.role = 'assistant'
+            AND candidate.is_streaming = 0
+            AND candidate.message_id != ('assistant:' || correlations.turn_id)
+          ORDER BY candidate.updated_at DESC, candidate.created_at DESC, candidate.message_id DESC
+          LIMIT 1
+        )
       LEFT JOIN projection_turn_assistant_finalizations AS finalizations
         ON finalizations.thread_id = correlations.thread_id
           AND finalizations.turn_id = correlations.turn_id
