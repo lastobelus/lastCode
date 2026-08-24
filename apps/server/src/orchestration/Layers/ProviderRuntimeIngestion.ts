@@ -1666,10 +1666,14 @@ const make = Effect.gen(function* () {
               return "stopped";
             case "turn.aborted":
               return "interrupted";
-            case "turn.completed":
-              return normalizeRuntimeTurnState(event.payload.state) === "failed"
+            case "turn.completed": {
+              const turnState = normalizeRuntimeTurnState(event.payload.state);
+              return turnState === "failed"
                 ? "error"
-                : "ready";
+                : turnState === "interrupted" || turnState === "cancelled"
+                  ? "interrupted"
+                  : "ready";
+            }
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
@@ -1729,6 +1733,9 @@ const make = Effect.gen(function* () {
               providerName: event.provider,
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
+                : {}),
+              ...(event.type === "thread.started" && event.payload?.providerThreadId !== undefined
+                ? { providerThreadId: event.payload.providerThreadId }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
@@ -1954,6 +1961,14 @@ const make = Effect.gen(function* () {
             planId: proposedPlanIdForTurn(thread.id, turnId),
             turnId,
             updatedAt: now,
+          });
+
+          yield* orchestrationEngine.dispatch({
+            type: "thread.turn-assistant.finalize",
+            commandId: yield* providerCommandId(event, "turn-assistant-finalize"),
+            threadId: thread.id,
+            turnId,
+            createdAt: now,
           });
         }
       }
