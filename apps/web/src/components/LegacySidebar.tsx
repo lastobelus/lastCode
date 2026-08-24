@@ -548,7 +548,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     />
   );
   const cleanupHoverDetails = (
-    <SidebarThreadCleanupHoverContent thread={thread} blockerTitle={cleanupBlockerTitle} />
+    <SidebarThreadCleanupHoverContent
+      thread={thread}
+      blockerTitle={cleanupBlockerTitle}
+      standalone
+    />
   );
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
@@ -821,6 +825,27 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
       >
+        {isCleanupPending && !hasActiveAnnotation ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  aria-label={`${thread.title} cleanup details`}
+                  className="absolute inset-0 z-20 cursor-not-allowed"
+                />
+              }
+            />
+            <TooltipPopup
+              align="start"
+              className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+              side="right"
+              sideOffset={4}
+              variant="glass"
+            >
+              {threadHoverDetails}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           {cleanup === null && prStatus && (
             <Tooltip>

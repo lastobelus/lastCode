@@ -50,6 +50,7 @@ The deleted thread remains visible as a temporary tombstone while cleanup is del
   - failed: `startedAt`, `failedAt`, `error`
 - Add client commands for retry and abandonment, plus internal commands/events for queued, started, failed, and completed transitions.
 - Keep new fields optional on the wire where compatibility with cached snapshots or older clients is required; absent means no cleanup.
+- Pre-feature clients connected to a newer server are outside the compatibility boundary for tombstone presentation. Do not add a server-side presentation shim; clients and server should be upgraded together for this feature.
 
 ### Decision rules
 

@@ -124,16 +124,23 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
 export function SidebarThreadCleanupHoverContent(props: {
   thread: SidebarThreadSummary;
   blockerTitle: string | null;
+  standalone?: boolean;
 }) {
   const cleanup = props.thread.worktreeCleanup;
   if (cleanup == null || cleanup.status === "failed") return null;
 
   return (
-    <div className="-mx-[var(--floating-content-inset)] -mb-[var(--floating-content-inset)] border-t border-orange-600/25 bg-orange-400 px-[var(--floating-content-inset)] py-2 text-xs text-foreground dark:bg-orange-400 dark:text-background">
+    <div
+      className={cn(
+        !props.standalone &&
+          "-mx-[var(--floating-content-inset)] -mb-[var(--floating-content-inset)]",
+        "border-t border-orange-600/25 bg-orange-400 px-[var(--floating-content-inset)] py-2 text-xs text-foreground dark:bg-orange-400 dark:text-background",
+      )}
+    >
       {cleanup.status === "deleting" ? (
         <>
           <div className="font-medium">Deleting worktree</div>
-          <div className="mt-1 break-all font-mono text-[11px] opacity-80">
+          <div className="mt-1 break-all font-mono text-[10px] text-wrap opacity-80">
             {cleanup.worktreePath}
           </div>
         </>
