@@ -4,6 +4,7 @@ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
+import { resolveDialogBackdropStyle } from "~/components/ui/dialog-styles";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
 const Sheet = SheetPrimitive.Root;
@@ -18,7 +19,7 @@ function SheetClose(props: SheetPrimitive.Close.Props) {
   return <SheetPrimitive.Close data-slot="sheet-close" {...props} />;
 }
 
-function SheetBackdrop({ className, ...props }: SheetPrimitive.Backdrop.Props) {
+function SheetBackdrop({ className, style, ...props }: SheetPrimitive.Backdrop.Props) {
   return (
     <SheetPrimitive.Backdrop
       className={cn(
@@ -26,6 +27,9 @@ function SheetBackdrop({ className, ...props }: SheetPrimitive.Backdrop.Props) {
         className,
       )}
       data-slot="sheet-backdrop"
+      style={(state) =>
+        resolveDialogBackdropStyle(state.open, typeof style === "function" ? style(state) : style)
+      }
       {...props}
     />
   );
