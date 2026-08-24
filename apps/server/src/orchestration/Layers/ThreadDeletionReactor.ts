@@ -82,6 +82,11 @@ const make = Effect.gen(function* () {
   const failedThreadTeardownIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+  const canonicalPathForComparison = (value: string) =>
+    fileSystem.realPath(value).pipe(
+      Effect.map(normalizeProjectPathForComparison),
+      Effect.orElseSucceed(() => normalizeProjectPathForComparison(value)),
+    );
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
 
@@ -221,12 +226,19 @@ const make = Effect.gen(function* () {
       yield* dispatchCleanup(job.threadId, deleting);
     }
 
-    const normalizedWorktreePath = normalizeProjectPathForComparison(deleting.worktreePath);
-    const activeProject = (yield* projectionProjects.listAll()).find(
-      (candidate) =>
-        candidate.deletedAt === null &&
-        normalizeProjectPathForComparison(candidate.workspaceRoot) === normalizedWorktreePath,
+    const normalizedWorktreePath = yield* canonicalPathForComparison(deleting.worktreePath);
+    const activeProjects = yield* Effect.forEach(
+      yield* projectionProjects.listAll(),
+      (project) =>
+        canonicalPathForComparison(project.workspaceRoot).pipe(
+          Effect.map((workspaceRoot) => ({ project, workspaceRoot })),
+        ),
+      { concurrency: "unbounded" },
     );
+    const activeProject = activeProjects.find(
+      ({ project, workspaceRoot }) =>
+        project.deletedAt === null && workspaceRoot === normalizedWorktreePath,
+    )?.project;
     if (activeProject !== undefined) {
       const failedAt = yield* nowIso;
       yield* dispatchCleanup(job.threadId, {
@@ -237,11 +249,18 @@ const make = Effect.gen(function* () {
       });
       return;
     }
-    const activeOwner = (yield* projectionThreads.listActiveWorktreeOwners()).find(
-      (candidate) =>
-        candidate.threadId !== job.threadId &&
-        normalizeProjectPathForComparison(candidate.worktreePath) === normalizedWorktreePath,
+    const activeOwners = yield* Effect.forEach(
+      yield* projectionThreads.listActiveWorktreeOwners(),
+      (owner) =>
+        canonicalPathForComparison(owner.worktreePath).pipe(
+          Effect.map((worktreePath) => ({ owner, worktreePath })),
+        ),
+      { concurrency: "unbounded" },
     );
+    const activeOwner = activeOwners.find(
+      ({ owner, worktreePath }) =>
+        owner.threadId !== job.threadId && worktreePath === normalizedWorktreePath,
+    )?.owner;
     if (activeOwner !== undefined) {
       const failedAt = yield* nowIso;
       yield* dispatchCleanup(job.threadId, {

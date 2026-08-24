@@ -13,11 +13,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -513,6 +515,16 @@ describe("durable worktree cleanup", () => {
 
   effectIt.live("resumes same-repository cleanup in order and persists failures", () =>
     Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const activeProjectRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-active-project-root-",
+      });
+      const aliasParent = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-active-project-alias-",
+      });
+      const activeProjectAlias = path.join(aliasParent, "workspace");
+      yield* fileSystem.symlink(activeProjectRoot, activeProjectAlias);
       const root = "/repo-a";
       const existingWorktreePath = process.cwd();
       const first = cleanupRow(
@@ -562,7 +574,7 @@ describe("durable worktree cleanup", () => {
         {
           status: "deleting",
           repositoryRoot: "/repo-e",
-          worktreePath: "/worktrees/active-project-root",
+          worktreePath: activeProjectAlias,
           startedAt: "2026-08-23T00:00:04.000Z",
         },
         "2026-08-23T00:00:04.000Z",
@@ -609,7 +621,7 @@ describe("durable worktree cleanup", () => {
               {
                 projectId: ProjectId.make("active-project"),
                 title: "Active project",
-                workspaceRoot: fifth.worktreePath!,
+                workspaceRoot: activeProjectRoot,
                 defaultModelSelection: null,
                 defaultThreadEnvMode: null,
                 scripts: [],
@@ -723,6 +735,6 @@ describe("durable worktree cleanup", () => {
         status: "failed",
         error: expect.stringContaining("active-project"),
       });
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
