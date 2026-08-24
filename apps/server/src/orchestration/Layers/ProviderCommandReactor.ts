@@ -40,6 +40,9 @@ import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
 } from "../Services/ProviderCommandReactor.ts";
+
+const ProviderThreadResumeCursor = Schema.Struct({ threadId: Schema.String });
+const isProviderThreadResumeCursor = Schema.is(ProviderThreadResumeCursor);
 import { forkParked, ServerActivation } from "../../serverActivation.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import {
@@ -642,6 +645,9 @@ const make = Effect.gen(function* () {
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
+            ...(session.provider === "codex" && isProviderThreadResumeCursor(session.resumeCursor)
+              ? { providerThreadId: session.resumeCursor.threadId }
+              : {}),
             runtimeMode: desiredRuntimeMode,
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
@@ -1068,25 +1074,58 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const finalizeTrackedRequest = (
+      outcome:
+        | { readonly kind: "started"; readonly turnId: TurnId }
+        | {
+            readonly kind: "terminal";
+            readonly state: "error" | "interrupted";
+            readonly completedAt: string;
+          },
+    ) =>
+      event.payload.trackRequestCorrelation === true
+        ? orchestrationEngine
+            .dispatch({
+              type: "thread.turn-request.resolve",
+              commandId: CommandId.make(`turn-request:${event.eventId}`),
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              outcome,
+              createdAt: event.payload.createdAt,
+            })
+            .pipe(Effect.asVoid)
+        : Effect.void;
+
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       yield* projectionTurns.deletePendingTurnStartByThreadId({
         threadId: event.payload.threadId,
       });
-      return;
+      return yield* finalizeTrackedRequest({
+        kind: "terminal",
+        state: "error",
+        completedAt: event.payload.createdAt,
+      });
     }
 
     const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
     if (!message || (message.role !== "user" && message.role !== "system")) {
-      yield* appendProviderFailureActivity({
+      const outcome = {
+        kind: "terminal",
+        state: "error",
+        completedAt: event.payload.createdAt,
+      } as const;
+      return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
         summary: "Provider turn start failed",
         detail: `Turn message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
         createdAt: event.payload.createdAt,
-      });
-      return;
+      }).pipe(
+        Effect.asVoid,
+        Effect.ensuring(finalizeTrackedRequest(outcome).pipe(Effect.ignore({ log: true }))),
+      );
     }
 
     const isFirstUserMessageTurn =
@@ -1123,9 +1162,18 @@ const make = Effect.gen(function* () {
 
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.void;
+        return finalizeTrackedRequest({
+          kind: "terminal",
+          state: "interrupted",
+          completedAt: event.payload.createdAt,
+        });
       }
       const detail = formatFailureDetail(cause);
+      const outcome = {
+        kind: "terminal",
+        state: "error",
+        completedAt: event.payload.createdAt,
+      } as const;
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -1142,6 +1190,7 @@ const make = Effect.gen(function* () {
           }),
         ),
         Effect.asVoid,
+        Effect.ensuring(finalizeTrackedRequest(outcome).pipe(Effect.ignore({ log: true }))),
       );
     };
 
@@ -1175,9 +1224,21 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((result) =>
+        finalizeTrackedRequest({ kind: "started", turnId: result.turnId }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider turn started but correlation finalization failed", {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
