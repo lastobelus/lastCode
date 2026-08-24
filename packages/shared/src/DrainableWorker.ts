@@ -10,6 +10,7 @@
  */
 import * as Scope from "effect/Scope";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
@@ -26,6 +27,14 @@ export interface DrainableWorker<A> {
    * Resolves when the queue is empty and the worker is idle (not processing).
    */
   readonly drain: Effect.Effect<void>;
+
+  /**
+   * Stop the worker after its current queue has been drained.
+   *
+   * Callers that coordinate access to a worker may use this to retire idle
+   * keyed workers before their parent scope closes.
+   */
+  readonly shutdown: Effect.Effect<void>;
 }
 
 /**
@@ -44,7 +53,7 @@ export const makeDrainableWorker = <A, E, R>(
     const queue = yield* Effect.acquireRelease(TxQueue.unbounded<A>(), TxQueue.shutdown);
     const outstanding = yield* TxRef.make(0);
 
-    yield* TxQueue.take(queue).pipe(
+    const workerFiber = yield* TxQueue.take(queue).pipe(
       Effect.tap((a) =>
         Effect.ensuring(
           process(a),
@@ -66,5 +75,7 @@ export const makeDrainableWorker = <A, E, R>(
         Effect.tx,
       );
 
-    return { enqueue, drain } satisfies DrainableWorker<A>;
+    const shutdown = Fiber.interrupt(workerFiber).pipe(Effect.asVoid);
+
+    return { enqueue, drain, shutdown } satisfies DrainableWorker<A>;
   });

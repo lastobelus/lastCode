@@ -13,6 +13,7 @@ import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
@@ -34,6 +35,13 @@ type CleanupJob = {
   readonly cleanup: PendingCleanup;
   readonly needsTeardown: boolean;
 };
+type CleanupWorkerEntry = {
+  readonly repositoryKey: string;
+  readonly worker: DrainableWorker<CleanupJob>;
+  readonly generation: Ref.Ref<number>;
+};
+
+const CLEANUP_WORKER_IDLE_TIMEOUT = Duration.minutes(1);
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -66,9 +74,8 @@ const make = Effect.gen(function* () {
   const vcsDriverRegistry = yield* Effect.serviceOption(VcsDriverRegistry.VcsDriverRegistry);
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
-  const cleanupWorkersRef = yield* Ref.make<ReadonlyMap<string, DrainableWorker<CleanupJob>>>(
-    new Map(),
-  );
+  const cleanupWorkersRef = yield* Ref.make<ReadonlyMap<string, CleanupWorkerEntry>>(new Map());
+  const cleanupWorkersMutex = yield* Semaphore.make(1);
   const enqueuedCleanupThreadIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
   const failedThreadTeardownIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
 
@@ -319,13 +326,46 @@ const make = Effect.gen(function* () {
     const created = yield* makeDrainableWorker((job: CleanupJob) =>
       processCleanupSafely(job).pipe(Effect.ensuring(removeEnqueuedCleanupThreadId(job.threadId))),
     );
-    return yield* Ref.modify(cleanupWorkersRef, (workers) => {
-      const current = workers.get(repositoryKey);
-      if (current) return [current, workers] as const;
+    const entry: CleanupWorkerEntry = {
+      repositoryKey,
+      worker: created,
+      generation: yield* Ref.make(0),
+    };
+    yield* Ref.update(cleanupWorkersRef, (workers) => {
       const next = new Map(workers);
-      next.set(repositoryKey, created);
-      return [created, next] as const;
+      next.set(repositoryKey, entry);
+      return next;
     });
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        while (true) {
+          yield* Effect.sleep(CLEANUP_WORKER_IDLE_TIMEOUT);
+          const generation = yield* cleanupWorkersMutex.withPermit(Ref.get(entry.generation));
+          // Drain outside the global mutex so a long cleanup for one
+          // repository cannot block unrelated repositories from enqueueing.
+          yield* entry.worker.drain;
+          const retired = yield* cleanupWorkersMutex.withPermit(
+            Effect.gen(function* () {
+              const current = (yield* Ref.get(cleanupWorkersRef)).get(repositoryKey);
+              if (current !== entry || (yield* Ref.get(entry.generation)) !== generation) {
+                return false;
+              }
+              yield* Ref.update(cleanupWorkersRef, (workers) => {
+                const next = new Map(workers);
+                if (next.get(repositoryKey) === entry) next.delete(repositoryKey);
+                return next;
+              });
+              return true;
+            }),
+          );
+          if (retired) {
+            yield* entry.worker.shutdown;
+            return;
+          }
+        }
+      }),
+    );
+    return entry;
   });
 
   const enqueueCleanup = Effect.fn("enqueueThreadWorktreeCleanup")(function* (job: CleanupJob) {
@@ -337,8 +377,13 @@ const make = Effect.gen(function* () {
     });
     if (!accepted) return;
 
-    const cleanupWorker = yield* getCleanupWorker(job.cleanup);
-    yield* cleanupWorker.enqueue(job);
+    yield* cleanupWorkersMutex.withPermit(
+      Effect.gen(function* () {
+        const entry = yield* getCleanupWorker(job.cleanup);
+        yield* Ref.update(entry.generation, (generation) => generation + 1);
+        yield* entry.worker.enqueue(job);
+      }),
+    );
   });
 
   const enqueueCleanupFromEvent = (event: OrchestrationEvent) => {
@@ -369,7 +414,7 @@ const make = Effect.gen(function* () {
 
   const cleanupDrain = Effect.gen(function* () {
     const workers = yield* Ref.get(cleanupWorkersRef);
-    yield* Effect.forEach(workers.values(), (cleanupWorker) => cleanupWorker.drain, {
+    yield* Effect.forEach(workers.values(), (entry) => entry.worker.drain, {
       concurrency: "unbounded",
     });
   });

@@ -18,6 +18,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
@@ -102,6 +103,54 @@ function cleanupRow(
     pendingUserInputCount: 0,
     hasActionableProposedPlan: 0,
     deletedAt,
+  };
+}
+
+function deletedEventFor(
+  thread: ProjectionThread,
+  eventId: string,
+  sequence: number,
+): Extract<OrchestrationEvent, { type: "thread.deleted" }> {
+  return {
+    sequence,
+    eventId: EventId.make(eventId),
+    aggregateKind: "thread",
+    aggregateId: thread.threadId,
+    type: "thread.deleted",
+    occurredAt: "2026-08-23T00:00:00.000Z",
+    commandId: CommandId.make(`${eventId}-command`),
+    causationEventId: null,
+    correlationId: CommandId.make(`${eventId}-correlation`),
+    metadata: {},
+    payload: {
+      threadId: thread.threadId,
+      deletedAt: "2026-08-23T00:00:00.000Z",
+      worktreeCleanup: thread.worktreeCleanup ?? undefined,
+    },
+  };
+}
+
+function cleanupUpdatedEventFor(
+  thread: ProjectionThread,
+  eventId: string,
+  sequence: number,
+): Extract<OrchestrationEvent, { type: "thread.worktree-cleanup-updated" }> {
+  return {
+    sequence,
+    eventId: EventId.make(eventId),
+    aggregateKind: "thread",
+    aggregateId: thread.threadId,
+    type: "thread.worktree-cleanup-updated",
+    occurredAt: "2026-08-23T00:00:00.000Z",
+    commandId: CommandId.make(`${eventId}-command`),
+    causationEventId: null,
+    correlationId: CommandId.make(`${eventId}-correlation`),
+    metadata: {},
+    payload: {
+      threadId: thread.threadId,
+      cleanup: thread.worktreeCleanup!,
+      updatedAt: "2026-08-23T00:00:00.000Z",
+    },
   };
 }
 
@@ -331,6 +380,124 @@ describe("durable worktree cleanup", () => {
         status: "failed",
         error: expect.stringContaining("ProviderAdapterProcessError"),
       });
+    }),
+  );
+
+  effectIt.live("retires idle workers and serializes jobs on a recreated worker", () =>
+    Effect.gen(function* () {
+      const root = "/repo";
+      const first = cleanupRow(
+        "cleanup-retire-first",
+        {
+          status: "deleting",
+          repositoryRoot: root,
+          worktreePath: "/worktrees/retire-first",
+          startedAt: "2026-08-23T00:00:00.000Z",
+        },
+        "2026-08-23T00:00:00.000Z",
+      );
+      const second = cleanupRow(
+        "cleanup-retire-second",
+        {
+          status: "deleting",
+          repositoryRoot: root,
+          worktreePath: "/worktrees/retire-second",
+          startedAt: "2026-08-23T00:00:01.000Z",
+        },
+        "2026-08-23T00:00:01.000Z",
+      );
+      const third = cleanupRow(
+        "cleanup-retire-third",
+        {
+          status: "deleting",
+          repositoryRoot: root,
+          worktreePath: "/worktrees/retire-third",
+          startedAt: "2026-08-23T00:00:02.000Z",
+        },
+        "2026-08-23T00:00:02.000Z",
+      );
+      const rows = new Map([
+        [first.threadId, first],
+        [second.threadId, second],
+        [third.threadId, third],
+      ]);
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const firstRemoved = yield* Deferred.make<void>();
+      const secondStarted = yield* Deferred.make<void>();
+      const thirdStarted = yield* Deferred.make<void>();
+      const releaseSecond = yield* Deferred.make<void>();
+      const removalOrder: string[] = [];
+      let activeRemovals = 0;
+      let maxActiveRemovals = 0;
+      const dependencies = Layer.mergeAll(
+        Layer.mock(OrchestrationEngineService)({
+          streamDomainEvents: Stream.fromPubSub(events),
+          latestSequence: Effect.succeed(0),
+          readEvents: () => Stream.empty,
+          dispatch: (command) => {
+            if (command.type === "thread.worktree-cleanup.update") {
+              const row = rows.get(command.threadId);
+              if (row) rows.set(command.threadId, { ...row, worktreeCleanup: command.cleanup });
+            }
+            return Effect.succeed({ sequence: removalOrder.length });
+          },
+        }),
+        Layer.mock(ProjectionThreadRepository)({
+          getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
+          listPendingWorktreeCleanup: () => Effect.succeed([]),
+          listActiveWorktreeOwners: () => Effect.succeed([]),
+        }),
+        Layer.mock(GitWorkflowService)({
+          removeWorktree: ({ path }) =>
+            Effect.gen(function* () {
+              activeRemovals += 1;
+              maxActiveRemovals = Math.max(maxActiveRemovals, activeRemovals);
+              if (path === first.worktreePath) {
+                yield* Deferred.succeed(firstRemoved, undefined);
+              } else if (path === second.worktreePath) {
+                yield* Deferred.succeed(secondStarted, undefined);
+                yield* Deferred.await(releaseSecond);
+              } else if (path === third.worktreePath) {
+                yield* Deferred.succeed(thirdStarted, undefined);
+              }
+              removalOrder.push(path);
+            }).pipe(Effect.ensuring(Effect.sync(() => (activeRemovals -= 1)))),
+        }),
+        Layer.mock(ProviderService)({
+          stopSession: () => Effect.void,
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          close: () => Effect.void,
+        }),
+        NodeServices.layer,
+      );
+      const testDependencies = Layer.merge(TestClock.layer(), dependencies);
+      const testLayer = ThreadDeletionReactorLive.pipe(
+        Layer.provide(testDependencies),
+        Layer.merge(testDependencies),
+      );
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* ThreadDeletionReactor;
+        yield* reactor.start();
+        yield* Effect.yieldNow;
+        yield* PubSub.publish(events, deletedEventFor(first, "event-retire-first", 1));
+        yield* Deferred.await(firstRemoved);
+        yield* reactor.drain;
+
+        // The first repository worker has been idle long enough to retire.
+        yield* TestClock.adjust("1 minute");
+        yield* PubSub.publish(events, cleanupUpdatedEventFor(second, "event-retire-second", 2));
+        yield* PubSub.publish(events, cleanupUpdatedEventFor(third, "event-retire-third", 3));
+        yield* Deferred.await(secondStarted);
+        expect(yield* Deferred.isDone(thirdStarted)).toBe(false);
+        yield* Deferred.succeed(releaseSecond, undefined);
+        yield* Deferred.await(thirdStarted);
+        yield* reactor.drain;
+      }).pipe(Effect.provide(testLayer));
+
+      expect(removalOrder).toEqual([first.worktreePath, second.worktreePath, third.worktreePath]);
+      expect(maxActiveRemovals).toBe(1);
     }),
   );
 
