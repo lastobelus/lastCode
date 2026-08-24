@@ -7,7 +7,6 @@ import {
   resolveSidebarUpdateButtonToneClassName,
   SidebarLocalBuildFailureTooltip,
   SidebarUpdateReleaseNotesContent,
-  shouldNativelyDisableSidebarUpdateButton,
 } from "./SidebarUpdatePill.tsx";
 
 describe("SidebarUpdatePill release notes", () => {
@@ -90,32 +89,27 @@ describe("SidebarUpdatePill local failure", () => {
     expect(
       resolveSidebarUpdateButtonToneClassName({
         hasLocalBuildFailure: true,
+        isInteractionDisabled: false,
         showUpdateIconState: true,
       }),
     ).toContain("bg-destructive/12");
     expect(
       resolveSidebarUpdateButtonToneClassName({
         hasLocalBuildFailure: false,
+        isInteractionDisabled: false,
         showUpdateIconState: true,
       }),
     ).toContain("bg-update-surface");
   });
 
-  it("keeps active local progress hoverable while preserving native hosted disabling", () => {
+  it("keeps disabled update details hoverable without applying action hover styling", () => {
     expect(
-      shouldNativelyDisableSidebarUpdateButton({
-        disabled: true,
-        isActionPending: true,
-        isLocalBuildInProgress: true,
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        isInteractionDisabled: true,
+        showUpdateIconState: true,
       }),
-    ).toBe(false);
-    expect(
-      shouldNativelyDisableSidebarUpdateButton({
-        disabled: true,
-        isActionPending: true,
-        isLocalBuildInProgress: false,
-      }),
-    ).toBe(true);
+    ).not.toContain("hover:");
   });
 
   it("renders persistent failure context and an accessible copy action", () => {
