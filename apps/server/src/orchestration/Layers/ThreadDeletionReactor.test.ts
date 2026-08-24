@@ -13,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -23,6 +24,8 @@ import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import { ProviderAdapterProcessError } from "../../provider/Errors.ts";
 import {
   ProjectionThreadRepository,
   type ProjectionThread,
@@ -186,9 +189,10 @@ describe("durable worktree cleanup", () => {
         }),
         NodeServices.layer,
       );
+      const testDependencies = Layer.merge(TestClock.layer(), dependencies);
       const testLayer = ThreadDeletionReactorLive.pipe(
-        Layer.provide(dependencies),
-        Layer.merge(dependencies),
+        Layer.provide(testDependencies),
+        Layer.merge(testDependencies),
       );
 
       yield* Effect.gen(function* () {
@@ -199,7 +203,7 @@ describe("durable worktree cleanup", () => {
         yield* Deferred.await(completionDispatchFailed);
         yield* TestClock.adjust("1 second");
         yield* Fiber.join(drain);
-      }).pipe(Effect.provide(Layer.merge(testLayer, TestClock.layer())));
+      }).pipe(Effect.provide(testLayer));
 
       expect(operations).toEqual([
         `stop:${thread.threadId}`,
@@ -209,9 +213,130 @@ describe("durable worktree cleanup", () => {
     }),
   );
 
+  effectIt.live("blocks worktree removal when teardown fails and retries failed persistence", () =>
+    Effect.gen(function* () {
+      const thread = cleanupRow(
+        "cleanup-teardown-failed",
+        {
+          status: "deleting",
+          repositoryRoot: "/repo",
+          worktreePath: "/worktrees/teardown-failed",
+          startedAt: "2026-08-23T00:00:00.000Z",
+        },
+        "2026-08-23T00:00:00.000Z",
+      );
+      const deletedEvent: Extract<OrchestrationEvent, { type: "thread.deleted" }> = {
+        sequence: 1,
+        eventId: EventId.make("event-thread-deleted-teardown-failed"),
+        aggregateKind: "thread",
+        aggregateId: thread.threadId,
+        type: "thread.deleted",
+        occurredAt: "2026-08-23T00:00:00.000Z",
+        commandId: CommandId.make("command-thread-deleted-teardown-failed"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-thread-deleted-teardown-failed"),
+        metadata: {},
+        payload: {
+          threadId: thread.threadId,
+          deletedAt: "2026-08-23T00:00:00.000Z",
+          worktreeCleanup: thread.worktreeCleanup ?? undefined,
+        },
+      };
+      const rows = new Map([[thread.threadId, thread]]);
+      const operations: string[] = [];
+      const teardownFailed = yield* Deferred.make<void>();
+      const failureDispatchFailed = yield* Deferred.make<void>();
+      let failureDispatchAttempts = 0;
+      const updates: Array<
+        Extract<OrchestrationCommand, { type: "thread.worktree-cleanup.update" }>
+      > = [];
+      const dependencies = Layer.mergeAll(
+        Layer.mock(OrchestrationEngineService)({
+          streamDomainEvents: Stream.make(deletedEvent),
+          latestSequence: Effect.succeed(1),
+          readEvents: () => Stream.empty,
+          dispatch: (command) => {
+            if (
+              command.type === "thread.worktree-cleanup.update" &&
+              command.cleanup?.status === "failed" &&
+              failureDispatchAttempts++ === 0
+            ) {
+              return Deferred.succeed(failureDispatchFailed, undefined).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new PersistenceSqlError({
+                      operation: "test.dispatchCleanupFailure",
+                      detail: "transient persistence failure",
+                    }),
+                  ),
+                ),
+              );
+            }
+            if (command.type === "thread.worktree-cleanup.update") {
+              updates.push(command);
+              const row = rows.get(command.threadId);
+              if (row) rows.set(command.threadId, { ...row, worktreeCleanup: command.cleanup });
+            }
+            return Effect.succeed({ sequence: updates.length });
+          },
+        }),
+        Layer.mock(ProjectionThreadRepository)({
+          getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
+          listPendingWorktreeCleanup: () => Effect.succeed([]),
+          listActiveWorktreeOwners: () => Effect.succeed([]),
+        }),
+        Layer.mock(GitWorkflowService)({
+          removeWorktree: () => Effect.sync(() => operations.push("remove-worktree")),
+        }),
+        Layer.mock(ProviderService)({
+          stopSession: ({ threadId }) =>
+            Effect.sync(() => operations.push(`stop:${threadId}`)).pipe(
+              Effect.andThen(Deferred.succeed(teardownFailed, undefined)),
+              Effect.andThen(
+                Effect.fail(
+                  new ProviderAdapterProcessError({
+                    provider: "codex",
+                    threadId: String(threadId),
+                    detail: "provider process did not stop",
+                  }),
+                ),
+              ),
+            ),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          close: ({ threadId }) => Effect.sync(() => operations.push(`close:${threadId}`)),
+        }),
+        NodeServices.layer,
+      );
+      const testDependencies = Layer.merge(TestClock.layer(), dependencies);
+      const testLayer = ThreadDeletionReactorLive.pipe(
+        Layer.provide(testDependencies),
+        Layer.merge(testDependencies),
+      );
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* ThreadDeletionReactor;
+        yield* reactor.start();
+        const drain = yield* Effect.forkChild(reactor.drain);
+        yield* Deferred.await(teardownFailed);
+        yield* Deferred.await(failureDispatchFailed);
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(drain);
+      }).pipe(Effect.provide(testLayer));
+
+      expect(operations).toEqual([`stop:${thread.threadId}`]);
+      expect(failureDispatchAttempts).toBe(2);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.cleanup).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("ProviderAdapterProcessError"),
+      });
+    }),
+  );
+
   effectIt.live("resumes same-repository cleanup in order and persists failures", () =>
     Effect.gen(function* () {
-      const root = "/repo";
+      const root = "/repo-a";
       const existingWorktreePath = process.cwd();
       const first = cleanupRow(
         "cleanup-first",
@@ -227,7 +352,7 @@ describe("durable worktree cleanup", () => {
         "cleanup-second",
         {
           status: "queued",
-          repositoryRoot: `${root}/`,
+          repositoryRoot: "/repo-b",
           worktreePath: existingWorktreePath,
           queuedAt: "2026-08-23T00:00:01.000Z",
           blockedByThreadId: first.threadId,
@@ -238,7 +363,7 @@ describe("durable worktree cleanup", () => {
         "cleanup-third",
         {
           status: "queued",
-          repositoryRoot: root,
+          repositoryRoot: "/repo-c",
           worktreePath: "/worktrees/third",
           queuedAt: "2026-08-23T00:00:02.000Z",
           blockedByThreadId: second.threadId,
@@ -249,7 +374,7 @@ describe("durable worktree cleanup", () => {
         "cleanup-already-removed",
         {
           status: "deleting",
-          repositoryRoot: root,
+          repositoryRoot: "/repo-d",
           worktreePath: "/worktrees/already-removed",
           startedAt: "2026-08-23T00:00:03.000Z",
         },
@@ -289,6 +414,23 @@ describe("durable worktree cleanup", () => {
           getById: ({ threadId }) => Effect.succeed(Option.fromUndefinedOr(rows.get(threadId))),
           listPendingWorktreeCleanup: () => Effect.succeed([first, second, third, fourth]),
           listActiveWorktreeOwners: () => Effect.succeed([activeOwner]),
+        }),
+        Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+          resolve: () =>
+            Effect.succeed({
+              kind: "git" as const,
+              repository: {
+                kind: "git" as const,
+                rootPath: "/checkout",
+                metadataPath: "/shared-repository/.git",
+                freshness: {
+                  source: "live-local" as const,
+                  observedAt: DateTime.makeUnsafe("2026-08-23T00:00:00.000Z"),
+                  expiresAt: Option.none(),
+                },
+              },
+              driver: null as never,
+            }),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>

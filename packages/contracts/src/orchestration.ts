@@ -464,6 +464,12 @@ export type ThreadAnnotation = typeof ThreadAnnotation.Type;
 
 const ThreadWorktreeCleanupBase = {
   repositoryRoot: TrimmedNonEmptyString,
+  /**
+   * Canonical Git common directory used to serialize worktree operations.
+   * Optional for cleanup rows written before repository identity was added;
+   * those rows fall back to repositoryRoot when selecting a blocker/worker.
+   */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
   worktreePath: TrimmedNonEmptyString,
 } as const;
 
@@ -791,6 +797,8 @@ const ProjectDeleteCommand = Schema.Struct({
   commandId: CommandId,
   projectId: ProjectId,
   force: Schema.optional(Schema.Boolean),
+  /** Resolved by command normalization for forced worktree cleanup. */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
 });
 
 const ThreadCreateCommand = Schema.Struct({
@@ -814,6 +822,8 @@ const ThreadDeleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   deleteWorktree: Schema.optional(Schema.Boolean),
+  /** Resolved by command normalization from the thread's project checkout. */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
 });
 
 const ThreadWorktreeCleanupRetryCommand = Schema.Struct({

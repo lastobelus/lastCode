@@ -174,10 +174,10 @@ function worktreeCleanupTimestamp(
 
 function findWorktreeCleanupBlocker(
   readModel: OrchestrationReadModel,
-  repositoryRoot: string,
+  repositoryKey: string,
   exceptThreadId?: string,
 ) {
-  const normalizedRoot = normalizeProjectPathForComparison(repositoryRoot);
+  const normalizedKey = normalizeProjectPathForComparison(repositoryKey);
   return readModel.threads
     .filter((candidate) => {
       const cleanup = candidate.worktreeCleanup;
@@ -185,7 +185,8 @@ function findWorktreeCleanupBlocker(
         candidate.id !== exceptThreadId &&
         cleanup != null &&
         cleanup.status !== "failed" &&
-        normalizeProjectPathForComparison(cleanup.repositoryRoot) === normalizedRoot
+        normalizeProjectPathForComparison(cleanup.repositoryKey ?? cleanup.repositoryRoot) ===
+          normalizedKey
       );
     })
     .toSorted((left, right) => {
@@ -400,6 +401,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 type: "thread.delete",
                 commandId: command.commandId,
                 threadId: thread.id,
+                ...(command.repositoryKey === undefined
+                  ? {}
+                  : { repositoryKey: command.repositoryKey }),
               }),
             ),
             {
@@ -528,18 +532,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             detail: `Worktree '${thread.worktreePath}' is still used by thread '${sharedThread.id}'.`,
           });
         }
-        const blocker = findWorktreeCleanupBlocker(readModel, project.workspaceRoot, thread.id);
+        const repositoryKey = command.repositoryKey;
+        const blocker = findWorktreeCleanupBlocker(
+          readModel,
+          repositoryKey ?? project.workspaceRoot,
+          thread.id,
+        );
         worktreeCleanup =
           blocker === undefined
             ? {
                 status: "deleting",
                 repositoryRoot: project.workspaceRoot,
+                ...(repositoryKey === undefined ? {} : { repositoryKey }),
                 worktreePath: thread.worktreePath,
                 startedAt: occurredAt,
               }
             : {
                 status: "queued",
                 repositoryRoot: project.workspaceRoot,
+                ...(repositoryKey === undefined ? {} : { repositoryKey }),
                 worktreePath: thread.worktreePath,
                 queuedAt: occurredAt,
                 blockedByThreadId: blocker.id,
@@ -571,18 +582,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const occurredAt = yield* nowIso;
-      const blocker = findWorktreeCleanupBlocker(readModel, cleanup.repositoryRoot, thread.id);
+      const repositoryKey = cleanup.repositoryKey;
+      const blocker = findWorktreeCleanupBlocker(
+        readModel,
+        repositoryKey ?? cleanup.repositoryRoot,
+        thread.id,
+      );
       const nextCleanup =
         blocker === undefined
           ? {
               status: "deleting" as const,
               repositoryRoot: cleanup.repositoryRoot,
+              ...(repositoryKey === undefined ? {} : { repositoryKey }),
               worktreePath: cleanup.worktreePath,
               startedAt: occurredAt,
             }
           : {
               status: "queued" as const,
               repositoryRoot: cleanup.repositoryRoot,
+              ...(repositoryKey === undefined ? {} : { repositoryKey }),
               worktreePath: cleanup.worktreePath,
               queuedAt: occurredAt,
               blockedByThreadId: blocker.id,

@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
@@ -24,6 +25,7 @@ import {
   type ThreadDeletionReactorShape,
 } from "../Services/ThreadDeletionReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
 type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
@@ -61,15 +63,50 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const fileSystem = yield* FileSystem.FileSystem;
+  const vcsDriverRegistry = yield* Effect.serviceOption(VcsDriverRegistry.VcsDriverRegistry);
+  const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const cleanupWorkersRef = yield* Ref.make<ReadonlyMap<string, DrainableWorker<CleanupJob>>>(
     new Map(),
   );
   const enqueuedCleanupThreadIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const failedThreadTeardownIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
+
+  const dispatchCleanup = Effect.fn("dispatchThreadWorktreeCleanup")(function* (
+    threadId: CleanupJob["threadId"],
+    cleanup: ThreadWorktreeCleanup | null,
+  ) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.worktree-cleanup.update",
+      commandId: yield* serverCommandId("worktree-cleanup-update"),
+      threadId,
+      cleanup,
+    });
+  });
+
+  const cleanupPersistenceRetrySchedule = Schedule.exponential("1 second").pipe(
+    Schedule.modifyDelay(({ duration }) =>
+      Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+    ),
+  );
+  const dispatchCleanupWithRetry = (
+    threadId: CleanupJob["threadId"],
+    cleanup: ThreadWorktreeCleanup | null,
+  ) =>
+    dispatchCleanup(threadId, cleanup).pipe(
+      Effect.retry({ schedule: cleanupPersistenceRetrySchedule }),
+    );
+
+  const clearFailedThreadTeardown = (threadId: CleanupJob["threadId"]) =>
+    Ref.update(failedThreadTeardownIdsRef, (threadIds) => {
+      const next = new Set(threadIds);
+      next.delete(threadId);
+      return next;
+    });
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -85,6 +122,14 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  const stopProviderSessionStrict = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    providerService
+      .stopSession({ threadId })
+      .pipe(Effect.catchTag("ProviderSessionNotFoundError", () => Effect.void));
+
+  const closeThreadTerminalsStrict = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    terminalManager.close({ threadId, deleteHistory: true });
+
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
     event: ThreadDeletedEvent,
   ) {
@@ -93,38 +138,61 @@ const make = Effect.gen(function* () {
     yield* closeThreadTerminals(threadId);
   });
 
-  const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>
-    processThreadDeleted(event).pipe(
+  const processThreadDeletedSafely = (event: ThreadDeletedEvent) => {
+    const cleanup = event.payload.worktreeCleanup;
+    const hasPendingWorktreeCleanup = cleanup != null && cleanup.status !== "failed";
+    const teardown = hasPendingWorktreeCleanup
+      ? Effect.gen(function* () {
+          yield* stopProviderSessionStrict(event.payload.threadId);
+          yield* closeThreadTerminalsStrict(event.payload.threadId);
+        })
+      : processThreadDeleted(event);
+
+    return teardown.pipe(
+      Effect.tap(() =>
+        hasPendingWorktreeCleanup ? clearFailedThreadTeardown(event.payload.threadId) : Effect.void,
+      ),
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
+          return Effect.interrupt;
         }
-        return Effect.logWarning("thread deletion reactor failed to process event", {
-          eventType: event.type,
-          threadId: event.payload.threadId,
-          cause: Cause.pretty(cause),
+        if (!hasPendingWorktreeCleanup || cleanup == null) {
+          return Effect.logWarning("thread deletion reactor failed to process event", {
+            eventType: event.type,
+            threadId: event.payload.threadId,
+            cause: Cause.pretty(cause),
+          });
+        }
+        return Effect.gen(function* () {
+          yield* Ref.update(failedThreadTeardownIdsRef, (threadIds) => {
+            const next = new Set(threadIds);
+            next.add(event.payload.threadId);
+            return next;
+          });
+          const failedAt = yield* nowIso;
+          yield* dispatchCleanupWithRetry(event.payload.threadId, {
+            status: "failed",
+            repositoryRoot: cleanup.repositoryRoot,
+            ...(cleanup.repositoryKey === undefined
+              ? {}
+              : { repositoryKey: cleanup.repositoryKey }),
+            worktreePath: cleanup.worktreePath,
+            startedAt: cleanup.status === "deleting" ? cleanup.startedAt : failedAt,
+            failedAt,
+            error: Cause.pretty(cause),
+          });
         });
       }),
     );
+  };
 
   const worker = yield* makeDrainableWorker(processThreadDeletedSafely);
 
-  const dispatchCleanup = Effect.fn("dispatchThreadWorktreeCleanup")(function* (
-    threadId: CleanupJob["threadId"],
-    cleanup: ThreadWorktreeCleanup | null,
-  ) {
-    yield* orchestrationEngine.dispatch({
-      type: "thread.worktree-cleanup.update",
-      commandId: yield* serverCommandId("worktree-cleanup-update"),
-      threadId,
-      cleanup,
-    });
-  });
-
   const processCleanup = Effect.fn("processThreadWorktreeCleanup")(function* (job: CleanupJob) {
     if (job.needsTeardown) {
-      yield* stopProviderSession(job.threadId);
-      yield* closeThreadTerminals(job.threadId);
+      yield* stopProviderSessionStrict(job.threadId);
+      yield* closeThreadTerminalsStrict(job.threadId);
+      yield* clearFailedThreadTeardown(job.threadId);
     }
 
     const projected = yield* projectionThreads.getById({ threadId: job.threadId });
@@ -136,6 +204,7 @@ const make = Effect.gen(function* () {
     const deleting = {
       status: "deleting" as const,
       repositoryRoot: current.repositoryRoot,
+      ...(current.repositoryKey === undefined ? {} : { repositoryKey: current.repositoryKey }),
       worktreePath: current.worktreePath,
       startedAt: current.status === "deleting" ? current.startedAt : startedAt,
     };
@@ -174,15 +243,7 @@ const make = Effect.gen(function* () {
     const alreadyRemoved =
       Result.isFailure(removal) && !(yield* fileSystem.exists(deleting.worktreePath));
     if (Result.isSuccess(removal) || alreadyRemoved) {
-      yield* dispatchCleanup(job.threadId, null).pipe(
-        Effect.retry({
-          schedule: Schedule.exponential("1 second").pipe(
-            Schedule.modifyDelay(({ duration }) =>
-              Effect.succeed(Duration.min(duration, Duration.seconds(30))),
-            ),
-          ),
-        }),
-      );
+      yield* dispatchCleanupWithRetry(job.threadId, null);
       return;
     }
 
@@ -202,23 +263,17 @@ const make = Effect.gen(function* () {
         const detail = Cause.pretty(cause);
         return Effect.gen(function* () {
           const failedAt = yield* nowIso;
-          yield* dispatchCleanup(job.threadId, {
+          yield* dispatchCleanupWithRetry(job.threadId, {
             status: "failed",
             repositoryRoot: job.cleanup.repositoryRoot,
+            ...(job.cleanup.repositoryKey === undefined
+              ? {}
+              : { repositoryKey: job.cleanup.repositoryKey }),
             worktreePath: job.cleanup.worktreePath,
             startedAt: job.cleanup.status === "deleting" ? job.cleanup.startedAt : failedAt,
             failedAt,
             error: detail,
-          }).pipe(
-            Effect.catchCause((dispatchCause) =>
-              Effect.logWarning("thread worktree cleanup failure could not be persisted", {
-                threadId: job.threadId,
-                worktreePath: job.cleanup.worktreePath,
-                cleanupCause: detail,
-                dispatchCause: Cause.pretty(dispatchCause),
-              }),
-            ),
-          );
+          });
         });
       }),
     );
@@ -230,10 +285,35 @@ const make = Effect.gen(function* () {
       return next;
     });
 
-  const getCleanupWorker = Effect.fn("getThreadWorktreeCleanupWorker")(function* (
-    repositoryRoot: string,
+  const resolveCleanupRepositoryKey = Effect.fn("resolveCleanupRepositoryKey")(function* (
+    cleanup: PendingCleanup,
   ) {
-    const repositoryKey = normalizeProjectPathForComparison(repositoryRoot);
+    const persistedKey = cleanup.repositoryKey;
+
+    if (Option.isNone(vcsDriverRegistry)) {
+      return normalizeProjectPathForComparison(persistedKey ?? cleanup.repositoryRoot);
+    }
+
+    const handle = yield* vcsDriverRegistry.value
+      .resolve({ cwd: cleanup.repositoryRoot })
+      .pipe(Effect.option);
+    const metadataPath = Option.isNone(handle) ? null : handle.value.repository.metadataPath;
+    if (metadataPath === null) {
+      return normalizeProjectPathForComparison(persistedKey ?? cleanup.repositoryRoot);
+    }
+    const resolvedMetadataPath = path.isAbsolute(metadataPath)
+      ? path.normalize(metadataPath)
+      : path.resolve(cleanup.repositoryRoot, metadataPath);
+    const canonicalMetadataPath = yield* fileSystem
+      .realPath(resolvedMetadataPath)
+      .pipe(Effect.orElseSucceed(() => resolvedMetadataPath));
+    return normalizeProjectPathForComparison(canonicalMetadataPath);
+  });
+
+  const getCleanupWorker = Effect.fn("getThreadWorktreeCleanupWorker")(function* (
+    cleanup: PendingCleanup,
+  ) {
+    const repositoryKey = yield* resolveCleanupRepositoryKey(cleanup);
     const existing = (yield* Ref.get(cleanupWorkersRef)).get(repositoryKey);
     if (existing) return existing;
     const created = yield* makeDrainableWorker((job: CleanupJob) =>
@@ -257,7 +337,7 @@ const make = Effect.gen(function* () {
     });
     if (!accepted) return;
 
-    const cleanupWorker = yield* getCleanupWorker(job.cleanup.repositoryRoot);
+    const cleanupWorker = yield* getCleanupWorker(job.cleanup);
     yield* cleanupWorker.enqueue(job);
   });
 
@@ -274,13 +354,15 @@ const make = Effect.gen(function* () {
     }
     if (event.type === "thread.worktree-cleanup-updated") {
       const cleanup = event.payload.cleanup;
-      return cleanup == null || cleanup.status === "failed"
-        ? Effect.void
-        : enqueueCleanup({
-            threadId: event.payload.threadId,
-            cleanup,
-            needsTeardown: false,
-          });
+      if (cleanup == null || cleanup.status === "failed") return Effect.void;
+      return enqueueCleanup({
+        threadId: event.payload.threadId,
+        cleanup,
+        // Cleanup updates include retries after a persisted teardown failure.
+        // Repeating idempotent teardown is safer than relying on process-local
+        // memory, especially when the retry arrives after a server restart.
+        needsTeardown: true,
+      });
     }
     return Effect.void;
   };
@@ -298,7 +380,18 @@ const make = Effect.gen(function* () {
         if (event.type === "thread.deleted") {
           return worker
             .enqueue(event)
-            .pipe(Effect.andThen(worker.drain), Effect.andThen(enqueueCleanupFromEvent(event)));
+            .pipe(
+              Effect.andThen(worker.drain),
+              Effect.andThen(
+                Ref.get(failedThreadTeardownIdsRef).pipe(
+                  Effect.flatMap((failedThreadIds) =>
+                    failedThreadIds.has(event.payload.threadId)
+                      ? Effect.void
+                      : enqueueCleanupFromEvent(event),
+                  ),
+                ),
+              ),
+            );
         }
         return enqueueCleanupFromEvent(event);
       }),

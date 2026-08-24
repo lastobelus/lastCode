@@ -213,6 +213,66 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
     }),
   );
 
+  it.effect("queues cleanups from different checkouts that share a Git common directory", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedReadModel;
+      const firstReadModel = {
+        ...seeded,
+        threads: seeded.threads.map((thread, index) => ({
+          ...thread,
+          projectId: index === 1 ? asProjectId("project-delete-sibling") : thread.projectId,
+          branch: `sibling-cleanup-${index + 1}`,
+          worktreePath: `/tmp/sibling-worktrees/cleanup-${index + 1}`,
+        })),
+        projects: [
+          ...seeded.projects,
+          {
+            ...seeded.projects[0]!,
+            id: asProjectId("project-delete-sibling"),
+            workspaceRoot: "/tmp/project-delete-sibling",
+          },
+        ],
+      };
+
+      const first = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.delete",
+          commandId: asCommandId("cmd-sibling-delete-1"),
+          threadId: asThreadId("thread-delete-1"),
+          deleteWorktree: true,
+          repositoryKey: "/tmp/shared-repository/.git",
+        },
+        readModel: firstReadModel,
+      });
+      const firstEvent = (Array.isArray(first) ? first[0] : first) as PlannedThreadDeletedEvent;
+      const afterFirst = yield* projectEvent(firstReadModel, { ...firstEvent, sequence: 4 });
+
+      const second = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.delete",
+          commandId: asCommandId("cmd-sibling-delete-2"),
+          threadId: asThreadId("thread-delete-2"),
+          deleteWorktree: true,
+          repositoryKey: "/tmp/shared-repository/.git",
+        },
+        readModel: afterFirst,
+      });
+      const secondEvent = (Array.isArray(second) ? second[0] : second) as PlannedThreadDeletedEvent;
+
+      expect(firstEvent.payload.worktreeCleanup).toMatchObject({
+        status: "deleting",
+        repositoryRoot: "/tmp/project-delete",
+        repositoryKey: "/tmp/shared-repository/.git",
+      });
+      expect(secondEvent.payload.worktreeCleanup).toMatchObject({
+        status: "queued",
+        repositoryRoot: "/tmp/project-delete-sibling",
+        repositoryKey: "/tmp/shared-repository/.git",
+        blockedByThreadId: asThreadId("thread-delete-1"),
+      });
+    }),
+  );
+
   it.effect("refuses to delete a worktree still owned by another live thread", () =>
     Effect.gen(function* () {
       const seeded = yield* seedReadModel;
