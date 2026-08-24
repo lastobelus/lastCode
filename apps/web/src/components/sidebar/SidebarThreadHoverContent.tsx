@@ -140,7 +140,7 @@ export function SidebarThreadCleanupHoverContent(props: {
       {cleanup.status === "deleting" ? (
         <>
           <div className="font-medium">Deleting worktree</div>
-          <div className="mt-1 break-all font-mono text-[10px] text-wrap opacity-80">
+          <div className="mt-1 break-all font-mono text-[10px] text-left [text-wrap-style:auto] opacity-80">
             {cleanup.worktreePath}
           </div>
         </>
