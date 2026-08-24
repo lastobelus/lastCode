@@ -1510,9 +1510,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       visibleProjectThreads.map((thread) => resolveProjectThreadStatus(thread)),
     );
     return {
-      orderedProjectThreadKeys: visibleProjectThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
+      orderedProjectThreadKeys: visibleProjectThreads
+        .filter((thread) => thread.worktreeCleanup == null)
+        .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
       projectStatus,
       visibleProjectThreads,
     };
@@ -2022,12 +2022,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (!api) return;
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
       if (threadKeys.length === 0) return;
-      const count = threadKeys.length;
       const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
         const threadRef = parseScopedThreadKey(threadKey);
         const thread = threadRef ? readThreadShell(threadRef) : null;
-        return threadRef && thread ? [{ threadKey, threadRef, thread }] : [];
+        if (!threadRef || !thread || thread.worktreeCleanup != null) return [];
+        return [{ threadKey, threadRef, thread }];
       });
+      const count = selectedThreadEntries.length;
+      if (count === 0) return;
       const hasRunningThread = selectedThreadEntries.some(
         ({ thread }) => thread.session?.status === "running" && thread.session.activeTurnId != null,
       );

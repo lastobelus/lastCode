@@ -1,6 +1,7 @@
 import type { SidebarThreadSummary } from "../types";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
+import { ensureLocalApi } from "../localApi";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -32,6 +33,22 @@ export function WorktreeCleanupFailureDialog(props: {
     "",
     cleanup.error,
   ].join("\n");
+  const keepWorktree = async () => {
+    const confirmed = await ensureLocalApi().dialogs.confirm(
+      [
+        "Keep this worktree?",
+        "LastCode will stop trying to remove it and dismiss this cleanup failure.",
+        "You can still remove the worktree manually later.",
+      ].join("\n"),
+      { variant: "destructive" },
+    );
+    if (!confirmed) return;
+    const result = await abandon({
+      environmentId: props.thread.environmentId,
+      input: { threadId: props.thread.id },
+    });
+    if (result._tag === "Success") props.onOpenChange(false);
+  };
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -56,18 +73,7 @@ export function WorktreeCleanupFailureDialog(props: {
           </pre>
         </DialogPanel>
         <DialogFooter className="sm:flex-wrap">
-          <Button
-            type="button"
-            variant="destructive-outline"
-            onClick={() => {
-              void abandon({
-                environmentId: props.thread.environmentId,
-                input: { threadId: props.thread.id },
-              }).then((result) => {
-                if (result._tag === "Success") props.onOpenChange(false);
-              });
-            }}
-          >
+          <Button type="button" variant="destructive-outline" onClick={() => void keepWorktree()}>
             Keep worktree
           </Button>
           <Button

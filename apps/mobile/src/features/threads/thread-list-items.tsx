@@ -741,7 +741,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         <ControlPillMenu
           actions={cleanupPending ? [] : menuActions}
           onPressAction={handleMenuAction}
-          shouldOpenOnLongPress
+          shouldOpenOnLongPress={!cleanupPending}
         >
           {rowContent(close)}
         </ControlPillMenu>

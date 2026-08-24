@@ -1004,7 +1004,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                         : cardMenuActions
             }
             onPressAction={handleMenuAction}
-            shouldOpenOnLongPress
+            shouldOpenOnLongPress={!cleanupPending}
           >
             {rowContent(close)}
           </ControlPillMenu>

@@ -2175,7 +2175,10 @@ export default function Sidebar() {
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   const searchableThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads],
+    () =>
+      [...pinnedThreads, ...activeThreads, ...snoozedThreads, ...settledThreads].filter(
+        (thread) => thread.worktreeCleanup == null,
+      ),
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
@@ -2905,7 +2908,7 @@ export default function Sidebar() {
       // thread deletion elsewhere) and the menu labels must count only what
       // the actions will touch.
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys].filter(
-        (threadKey) => threadByKeyRef.current.has(threadKey),
+        (threadKey) => threadByKeyRef.current.get(threadKey)?.worktreeCleanup == null,
       );
       if (threadKeys.length === 0) return;
       const count = threadKeys.length;
