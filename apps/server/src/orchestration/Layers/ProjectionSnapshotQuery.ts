@@ -1969,7 +1969,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         }),
       );
 
-  const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
+  const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = (options = {}) =>
     sql
       .withTransaction(
         Effect.all([
@@ -2059,7 +2059,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   : Result.failVoid,
               ),
               threads: Arr.filterMap(threadRows, (row) =>
-                row.deletedAt === null || row.worktreeCleanup != null
+                row.deletedAt === null ||
+                (options.includeWorktreeCleanupTombstones === true && row.worktreeCleanup != null)
                   ? Result.succeed({
                       id: row.threadId,
                       projectId: row.projectId,

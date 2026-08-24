@@ -508,6 +508,10 @@ const EnvironmentOrchestrationThreadSnapshotQuery = {
   beforeCursor: Schema.optional(TrimmedNonEmptyString),
 };
 
+const EnvironmentOrchestrationShellSnapshotQuery = {
+  includeWorktreeCleanupTombstones: Schema.optional(Schema.Literal("true")),
+};
+
 export const ThreadWaitHandle = Schema.Struct({
   kind: Schema.Literal("wait-handle"),
   environmentId: EnvironmentId,
@@ -556,6 +560,7 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
   .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OptionalBearerHeaders,
+      payload: EnvironmentOrchestrationShellSnapshotQuery,
       success: OrchestrationShellSnapshot,
       error: EnvironmentOrchestrationSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

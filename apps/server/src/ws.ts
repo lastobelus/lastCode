@@ -1299,6 +1299,20 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
+              const includeWorktreeCleanupTombstones =
+                input.includeWorktreeCleanupTombstones === true;
+              const adaptShellItemForClient = (
+                item: OrchestrationShellStreamItem,
+              ): OrchestrationShellStreamItem =>
+                !includeWorktreeCleanupTombstones &&
+                item.kind === "thread-upserted" &&
+                item.thread.worktreeCleanup != null
+                  ? {
+                      kind: "thread-removed",
+                      sequence: item.sequence,
+                      threadId: item.thread.id,
+                    }
+                  : item;
               // Coalesce the live shell stream per aggregate over a small window
               // so bursts of high-frequency events (streaming message deltas,
               // activity appends) collapse into a single shell refetch and never
@@ -1321,18 +1335,22 @@ const makeWsRpcLayer = (
               );
               const bufferedLiveStream = coalesceShellLiveStream(Stream.fromQueue(liveBuffer));
 
-              const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
-                Effect.tapError((cause) =>
-                  Effect.logError("orchestration shell snapshot load failed", { cause }),
-                ),
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationGetSnapshotError({
-                      message: "Failed to load orchestration shell snapshot",
-                      cause,
-                    }),
-                ),
-              );
+              const loadSnapshot = projectionSnapshotQuery
+                .getShellSnapshot({
+                  includeWorktreeCleanupTombstones: includeWorktreeCleanupTombstones,
+                })
+                .pipe(
+                  Effect.tapError((cause) =>
+                    Effect.logError("orchestration shell snapshot load failed", { cause }),
+                  ),
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to load orchestration shell snapshot",
+                        cause,
+                      }),
+                  ),
+                );
 
               // Offer the completion marker into the same queue as live events.
               // Anything buffered while snapshot/replay work was in flight is
@@ -1371,7 +1389,7 @@ const makeWsRpcLayer = (
                   return Stream.concat(
                     Stream.make({ kind: "snapshot" as const, snapshot }),
                     synchronizedThenLive,
-                  );
+                  ).pipe(Stream.map(adaptShellItemForClient));
                 }
                 const catchUpStream = coalesceShellStream(
                   // Replay only through the head captured above. Newer events
@@ -1388,7 +1406,9 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-                return Stream.concat(catchUpStream, synchronizedThenLive);
+                return Stream.concat(catchUpStream, synchronizedThenLive).pipe(
+                  Stream.map(adaptShellItemForClient),
+                );
               }
 
               const snapshot = yield* loadSnapshot;
@@ -1398,7 +1418,7 @@ const makeWsRpcLayer = (
                   snapshot,
                 }),
                 synchronizedThenLive,
-              );
+              ).pipe(Stream.map(adaptShellItemForClient));
             }),
             { "rpc.aggregate": "orchestration" },
           ),

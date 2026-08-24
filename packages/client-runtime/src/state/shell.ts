@@ -190,10 +190,18 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       ORCHESTRATION_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         yield* Ref.set(activeSubscriptionSession, session);
-        const supportsCompletionMarker = yield* session.initialConfig.pipe(
-          Effect.map((config) => config.shellResumeCompletionMarker === true),
-          Effect.orElseSucceed(() => false),
+        const shellCapabilities = yield* session.initialConfig.pipe(
+          Effect.map((config) => ({
+            completionMarker: config.shellResumeCompletionMarker === true,
+            worktreeCleanupTombstones:
+              config.environment.capabilities.threadWorktreeCleanup === true,
+          })),
+          Effect.orElseSucceed(() => ({
+            completionMarker: false,
+            worktreeCleanupTombstones: false,
+          })),
         );
+        const supportsCompletionMarker = shellCapabilities.completionMarker;
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* setSynchronizing;
 
@@ -218,7 +226,9 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
               }),
             ),
           );
-          const httpSnapshot = yield* snapshotLoader.load(prepared);
+          const httpSnapshot = yield* snapshotLoader.load(prepared, {
+            includeWorktreeCleanupTombstones: shellCapabilities.worktreeCleanupTombstones,
+          });
           if (Option.isSome(httpSnapshot)) {
             yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
             canResume = true;
@@ -229,7 +239,12 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         // If the authoritative refresh failed, omit the cached cursor so the
         // socket fallback sends a complete snapshot for this new session.
         if (!canResume || Option.isNone(current.snapshot)) {
-          return supportsCompletionMarker ? { requestCompletionMarker: true as const } : {};
+          return {
+            ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+            ...(shellCapabilities.worktreeCleanupTombstones
+              ? { includeWorktreeCleanupTombstones: true as const }
+              : {}),
+          };
         }
         if (!supportsCompletionMarker) {
           // Without a completion marker there is no synchronized signal for a
@@ -243,6 +258,9 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         return {
           afterSequence: current.snapshot.value.snapshotSequence,
           ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          ...(shellCapabilities.worktreeCleanupTombstones
+            ? { includeWorktreeCleanupTombstones: true as const }
+            : {}),
         };
       }),
       {

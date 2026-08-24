@@ -6893,6 +6893,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("hides cleanup tombstones from legacy shell subscribers", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-cleanup-tombstone");
+      const now = "2026-01-01T00:00:00.000Z";
+      const event = {
+        sequence: 1,
+        eventId: EventId.make("event-cleanup-tombstone"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.deleted",
+        payload: { threadId, deletedAt: now },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+      const tombstone = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        worktreeCleanup: {
+          status: "deleting",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/thread-cleanup-tombstone",
+          startedAt: now,
+        },
+      });
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(1),
+            readEvents: () => Stream.make(event),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: () => Effect.succeed(Option.some(tombstone)),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const legacyItem = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
+            Stream.runHead,
+          ),
+        ),
+      );
+      const capableItem = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+            afterSequence: 0,
+            includeWorktreeCleanupTombstones: true,
+          }).pipe(Stream.runHead),
+        ),
+      );
+
+      assert.deepEqual(Option.getOrThrow(legacyItem), {
+        kind: "thread-removed",
+        sequence: 1,
+        threadId,
+      });
+      assert.equal(Option.getOrThrow(capableItem).kind, "thread-upserted");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("subscribeShell coalesces live bursts after the synchronization marker", () =>
     Effect.gen(function* () {
       const busyThreadId = ThreadId.make("thread-live-busy");

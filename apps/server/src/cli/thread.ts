@@ -758,7 +758,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
           const headers = { authorization: `Bearer ${token}` };
           const sourceResult = yield* Effect.result(
             client.orchestration
-              .shellSnapshot({ headers })
+              .shellSnapshot({ headers, payload: {} })
               .pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
           );
           if (sourceResult._tag === "Failure") {
@@ -888,7 +888,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
       withSendSession(auth, (token) =>
         Effect.gen(function* () {
           const headers = { authorization: `Bearer ${token}` };
-          const shell = yield* client.orchestration.shellSnapshot({ headers }).pipe(
+          const shell = yield* client.orchestration.shellSnapshot({ headers, payload: {} }).pipe(
             Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
             Effect.mapError(
               (cause) => new ThreadCliError({ operation: "live send target lookup", cause }),
