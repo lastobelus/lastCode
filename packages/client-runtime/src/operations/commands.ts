@@ -33,6 +33,8 @@ export type UpdateProjectInput = CommandInput<"project.meta.update">;
 export type DeleteProjectInput = CommandInput<"project.delete">;
 export type CreateThreadInput = CommandInput<"thread.create">;
 export type DeleteThreadInput = CommandInput<"thread.delete">;
+export type RetryThreadWorktreeCleanupInput = CommandInput<"thread.worktree-cleanup.retry">;
+export type AbandonThreadWorktreeCleanupInput = CommandInput<"thread.worktree-cleanup.abandon">;
 export type ArchiveThreadInput = CommandInput<"thread.archive">;
 export type UnarchiveThreadInput = CommandInput<"thread.unarchive">;
 export type SettleThreadInput = CommandInput<"thread.settle">;
@@ -142,6 +144,27 @@ export const deleteThread: (input: DeleteThreadInput) => CommandEffect = Effect.
     commandId: yield* commandId(input),
   });
 });
+
+export const retryThreadWorktreeCleanup: (input: RetryThreadWorktreeCleanupInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.retryThreadWorktreeCleanup")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.worktree-cleanup.retry",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const abandonThreadWorktreeCleanup: (
+  input: AbandonThreadWorktreeCleanupInput,
+) => CommandEffect = Effect.fn("EnvironmentCommands.abandonThreadWorktreeCleanup")(
+  function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.worktree-cleanup.abandon",
+      commandId: yield* commandId(input),
+    });
+  },
+);
 
 export const archiveThread: (input: ArchiveThreadInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.archiveThread",
