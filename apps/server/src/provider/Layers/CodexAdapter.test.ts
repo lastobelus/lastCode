@@ -510,6 +510,42 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("keeps the default POSIX command path when the parent path is empty", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: { PATH: "" },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-thread-path-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("lastcode-default-command-path"),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(
+        runtime.options.environment?.PATH,
+        `${NodePath.join(config.stateDir, "bin")}:/usr/bin:/bin`,
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("injects LastCode identity without a POSIX wrapper on Windows", () => {
     const runtimeFactory = makeRuntimeFactory();
     const layer = Layer.effect(

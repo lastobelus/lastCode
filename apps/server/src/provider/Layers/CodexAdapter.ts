@@ -1696,7 +1696,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               );
         const codexEnvironment = {
           ...runtimeEnvironment,
-          ...(threadTool ? { PATH: `${threadTool.binDir}:${runtimeEnvironment.PATH ?? ""}` } : {}),
+          ...(threadTool
+            ? { PATH: `${threadTool.binDir}:${runtimeEnvironment.PATH || "/usr/bin:/bin"}` }
+            : {}),
           T3CODE_THREAD_ID: input.threadId,
           T3CODE_HOME: serverConfig.baseDir,
         };
