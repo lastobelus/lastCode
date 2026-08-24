@@ -17,13 +17,14 @@ import {
   buildThreadListV2Items,
   buildThreadListV2ListItems,
   resolveThreadListV2Enabled,
+  resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   sortThreadsForListV2,
 } from "./threadListV2";
-import { resolveThreadStatus } from "./threadPresentation";
+import { resolveThreadStatus, resolveWorktreeCleanupStatus } from "./threadPresentation";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -127,6 +128,53 @@ describe("resolveThreadListV2Enabled", () => {
 });
 
 describe("resolveThreadListV2Status", () => {
+  it("shows durable cleanup before agent status", () => {
+    const deleting = makeThread({
+      id: ThreadId.make("cleanup"),
+      title: "Cleanup",
+      worktreeCleanup: {
+        status: "deleting",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+      },
+    });
+    expect(resolveThreadStatus(deleting)).toMatchObject({
+      kind: "cleanup-deleting",
+      label: "Deleting",
+      pulse: false,
+    });
+    expect(resolveWorktreeCleanupStatus(deleting)).toMatchObject({
+      kind: "cleanup-deleting",
+      label: "Deleting",
+    });
+    expect(
+      resolveThreadStatus({
+        ...deleting,
+        worktreeCleanup: {
+          status: "failed",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/cleanup",
+          startedAt: NOW,
+          failedAt: NOW,
+          error: "permission denied",
+        },
+      }),
+    ).toMatchObject({ kind: "cleanup-failed", label: "Cleanup failed" });
+    expect(
+      resolveWorktreeCleanupStatus({
+        ...deleting,
+        worktreeCleanup: {
+          status: "queued",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/cleanup",
+          queuedAt: NOW,
+          blockedByThreadId: ThreadId.make("blocking"),
+        },
+      }),
+    ).toMatchObject({ kind: "cleanup-queued", label: "Deleting (Queued)" });
+  });
+
   it("prioritizes approval over a running session", () => {
     const thread = makeThread({
       id: ThreadId.make("t"),
@@ -166,6 +214,41 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",
     );
+  });
+});
+
+describe("resolveThreadListV2CleanupActions", () => {
+  it("keeps failed cleanup tombstones recoverable from the mobile menu", () => {
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "failed",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+        failedAt: NOW,
+        error: "permission denied",
+      }),
+    ).toEqual(["retry-worktree-cleanup", "keep-worktree"]);
+  });
+
+  it("keeps queued and active cleanup tombstones menu-inert", () => {
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "queued",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        queuedAt: NOW,
+        blockedByThreadId: ThreadId.make("blocking"),
+      }),
+    ).toEqual([]);
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "deleting",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/cleanup",
+        startedAt: NOW,
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -280,6 +363,75 @@ describe("sortThreadsForListV2", () => {
 });
 
 describe("buildThreadListV2Items", () => {
+  it("keeps all cleanup tombstones in the visible active block", () => {
+    const cleanupTombstones = [
+      makeThread({
+        id: ThreadId.make("cleanup-queued"),
+        title: "Queued cleanup",
+        pinnedAt: NOW,
+        settledOverride: "settled",
+        settledAt: NOW,
+        snoozedUntil: "2026-06-03T09:00:00.000Z",
+        snoozedAt: NOW,
+        worktreeCleanup: {
+          status: "queued",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/queued",
+          queuedAt: NOW,
+          blockedByThreadId: ThreadId.make("cleanup-blocker"),
+        },
+      }),
+      makeThread({
+        id: ThreadId.make("cleanup-deleting"),
+        title: "Deleting cleanup",
+        pinnedAt: NOW,
+        settledOverride: "settled",
+        settledAt: NOW,
+        snoozedUntil: "2026-06-03T09:00:00.000Z",
+        snoozedAt: NOW,
+        worktreeCleanup: {
+          status: "deleting",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/deleting",
+          startedAt: NOW,
+        },
+      }),
+      makeThread({
+        id: ThreadId.make("cleanup-failed"),
+        title: "Failed cleanup",
+        pinnedAt: NOW,
+        settledOverride: "settled",
+        settledAt: NOW,
+        snoozedUntil: "2026-06-03T09:00:00.000Z",
+        snoozedAt: NOW,
+        worktreeCleanup: {
+          status: "failed",
+          repositoryRoot: "/repo",
+          worktreePath: "/repo-worktrees/failed",
+          startedAt: NOW,
+          failedAt: NOW,
+          error: "permission denied",
+        },
+      }),
+    ];
+    const layout = buildThreadListV2Items({
+      threads: cleanupTombstones,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(layout.items.map((item) => item.thread.id)).toEqual([
+      "cleanup-deleting",
+      "cleanup-failed",
+      "cleanup-queued",
+    ]);
+    expect(layout.items.map((item) => item.variant)).toEqual(["card", "card", "card"]);
+    expect(layout.items.map((item) => item.pinned)).toEqual([false, false, false]);
+    expect(layout.snoozedCount).toBe(0);
+    expect(layout.settledCount).toBe(0);
+  });
+
   it("keeps a merged thread active when auto-settle on merge is off", () => {
     const merged = makeThread({ id: ThreadId.make("merged"), title: "Merged" });
     const layout = buildThreadListV2Items({
