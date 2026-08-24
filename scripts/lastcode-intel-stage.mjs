@@ -294,7 +294,36 @@ function readInstalledVersion(appPath = "/Applications/LastCode.app") {
   ]);
 }
 
+export function readRemoteInstalledVersion(host, runCommand = run) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(host)) {
+    fail("Maximum-version host must be an SSH host name or alias.");
+  }
+  return runCommand("ssh", [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "--",
+    host,
+    "/usr/libexec/PlistBuddy",
+    "-c",
+    "Print:CFBundleShortVersionString",
+    "/Applications/LastCode.app/Contents/Info.plist",
+  ]);
+}
+
 export async function stageIntelUpdate(options, dependencies = {}) {
+  const maximumVersion = options.maximumVersionHost
+    ? await (dependencies.readRemoteInstalledVersion ?? readRemoteInstalledVersion)(
+        options.maximumVersionHost,
+      )
+    : undefined;
+  const maximum = maximumVersion === undefined ? undefined : parseInstalledVersion(maximumVersion);
+  if (maximumVersion !== undefined && !maximum) {
+    fail(
+      `Maximum version '${maximumVersion}' from ${options.maximumVersionHost} is not a LastCode nightly.`,
+    );
+  }
   const repository = options.repository ?? DEFAULT_REPOSITORY;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
     fail("GitHub repository must be owner/name.");
@@ -313,6 +342,7 @@ export async function stageIntelUpdate(options, dependencies = {}) {
       repository,
       root,
       candidatesDirectory,
+      maximum,
     );
   } finally {
     releaseLock();
@@ -325,6 +355,7 @@ async function stageIntelUpdateLocked(
   repository,
   root,
   candidatesDirectory,
+  maximum,
 ) {
   cleanupIncompleteCandidates(root);
   let pending = readPending(root);
@@ -333,6 +364,10 @@ async function stageIntelUpdateLocked(
   const current = parseInstalledVersion(currentVersion);
   if (!current) fail(`Installed version '${currentVersion}' is not a LastCode nightly.`);
   if (pending && compareInstallables(parseInstallableTag(pending.tag), current) <= 0) {
+    clearPending(root);
+    pending = undefined;
+  }
+  if (pending && maximum && compareInstallables(parseInstallableTag(pending.tag), maximum) > 0) {
     clearPending(root);
     pending = undefined;
   }
@@ -351,6 +386,7 @@ async function stageIntelUpdateLocked(
       const parsed = parseInstallableTag(release.tagName);
       return parsed ? [parsed] : [];
     })
+    .filter((release) => !maximum || compareInstallables(release, maximum) <= 0)
     .toSorted((left, right) => compareInstallables(right, left));
   const target = available[0];
   if (!target || compareInstallables(target, current) <= 0) {
@@ -445,7 +481,15 @@ export function parseStageOptions(argv) {
   const options = { command };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (!["--app", "--current-version", "--home-dir", "--repository"].includes(arg)) {
+    if (
+      ![
+        "--app",
+        "--current-version",
+        "--home-dir",
+        "--maximum-version-host",
+        "--repository",
+      ].includes(arg)
+    ) {
       fail(`Unknown argument '${arg}'.`);
     }
     const value = argv[index + 1];
@@ -453,6 +497,7 @@ export function parseStageOptions(argv) {
     if (arg === "--app") options.appPath = NodePath.resolve(value);
     else if (arg === "--current-version") options.currentVersion = value;
     else if (arg === "--home-dir") options.homeDirectory = NodePath.resolve(value);
+    else if (arg === "--maximum-version-host") options.maximumVersionHost = value;
     else options.repository = value;
     index += 1;
   }
