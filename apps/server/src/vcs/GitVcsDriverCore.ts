@@ -2991,6 +2991,29 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       args.push("--force");
     }
     args.push(input.path);
+    if (input.allowMissing === true) {
+      const result = yield* executeGitWithStableDiagnostics(
+        "GitVcsDriver.removeWorktree",
+        input.cwd,
+        args,
+        {
+          allowNonZeroExit: true,
+          timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
+        },
+      );
+      if (result.exitCode === 0 || result.stderr.includes("is not a working tree")) return;
+      return yield* new GitCommandError({
+        ...gitCommandContext({
+          operation: "GitVcsDriver.removeWorktree",
+          cwd: input.cwd,
+          args,
+        }),
+        detail: "git worktree remove failed",
+        ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
+    }
     yield* executeGit("GitVcsDriver.removeWorktree", input.cwd, args, {
       timeoutMs: WORKTREE_REMOVE_TIMEOUT_MS,
       fallbackErrorDetail: "git worktree remove failed",
