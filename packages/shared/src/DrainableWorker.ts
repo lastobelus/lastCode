@@ -10,7 +10,7 @@
  */
 import * as Scope from "effect/Scope";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
@@ -50,10 +50,13 @@ export const makeDrainableWorker = <A, E, R>(
   process: (item: A) => Effect.Effect<void, E, R>,
 ): Effect.Effect<DrainableWorker<A>, never, Scope.Scope | R> =>
   Effect.gen(function* () {
-    const queue = yield* Effect.acquireRelease(TxQueue.unbounded<A>(), TxQueue.shutdown);
+    const workerScope = yield* Scope.make("sequential");
+    yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void).pipe(Effect.ignore));
+    const queue = yield* TxQueue.unbounded<A>();
+    yield* Scope.addFinalizer(workerScope, TxQueue.shutdown(queue).pipe(Effect.asVoid));
     const outstanding = yield* TxRef.make(0);
 
-    const workerFiber = yield* TxQueue.take(queue).pipe(
+    yield* TxQueue.take(queue).pipe(
       Effect.tap((a) =>
         Effect.ensuring(
           process(a),
@@ -61,7 +64,7 @@ export const makeDrainableWorker = <A, E, R>(
         ),
       ),
       Effect.forever,
-      Effect.forkScoped,
+      Effect.forkIn(workerScope),
     );
 
     const drain: DrainableWorker<A>["drain"] = TxRef.get(outstanding).pipe(
@@ -69,13 +72,18 @@ export const makeDrainableWorker = <A, E, R>(
       Effect.tx,
     );
 
-    const enqueue = (element: A): Effect.Effect<boolean, never, never> =>
+    const enqueue = (element: A): Effect.Effect<void, never, never> =>
       TxQueue.offer(queue, element).pipe(
-        Effect.tap(() => TxRef.update(outstanding, (n) => n + 1)),
+        Effect.tap((accepted) =>
+          accepted ? TxRef.update(outstanding, (n) => n + 1) : Effect.void,
+        ),
+        Effect.asVoid,
         Effect.tx,
       );
 
-    const shutdown = Fiber.interrupt(workerFiber).pipe(Effect.asVoid);
+    // Closing the child scope interrupts the worker and shuts down the queue.
+    // The parent scope also closes it, and Scope.close is idempotent.
+    const shutdown = Scope.close(workerScope, Exit.void).pipe(Effect.ignore);
 
     return { enqueue, drain, shutdown } satisfies DrainableWorker<A>;
   });
