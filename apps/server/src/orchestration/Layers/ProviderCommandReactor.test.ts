@@ -157,9 +157,9 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly turnRequestResolutionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
-  readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
-  readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
-  readonly createSecondThread?: boolean;
+    readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly createSecondThread?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
