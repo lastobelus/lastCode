@@ -192,7 +192,19 @@ export async function runDailyUpdate(options = {}, dependencies) {
 
     let updateError;
     try {
-      await dependencies.stopService();
+      try {
+        await dependencies.stopService();
+      } catch (error) {
+        try {
+          await dependencies.restartService();
+        } catch (restartError) {
+          const stopDetail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Could not restore the server after shutdown failed: ${stopDetail}`, {
+            cause: restartError,
+          });
+        }
+        throw error;
+      }
       await dependencies.replaceApp(prepared, staged.pending.version);
     } catch (error) {
       updateError = error;
@@ -304,6 +316,10 @@ function defaultDependencies(home) {
         "10 minutes",
       ]),
     stageUpdate: (stageOptions) => stageIntelUpdate(stageOptions),
+    restartService: () => {
+      const expectedVersion = readInstalledLastCodeVersion({ home });
+      return restartHeadlessService({ expectedVersion, home });
+    },
     stopService: () => stopHeadlessService({ home }),
   };
 }

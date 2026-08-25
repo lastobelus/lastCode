@@ -43,6 +43,7 @@ function fixture(overrides = {}) {
         return { prepared: true };
       },
       replaceApp: async () => calls.push("replace"),
+      restartService: async () => calls.push("restart"),
       resumeThread: async (threadId) => calls.push(`resume:${threadId}`),
       savePendingResumes: (pending) => {
         pendingResumes = pending;
@@ -124,6 +125,20 @@ describe("LastCode daily updater", () => {
 
     await expect(runDailyUpdate({}, test.dependencies)).rejects.toThrow("did not confirm");
     expect(test.calls).toEqual(["stage", "prepare", "resume:one", "cleanup"]);
+  });
+
+  it("restores the current service when shutdown does not finish", async () => {
+    const test = fixture({
+      stopService: async () => {
+        test.calls.push("stop");
+        throw new Error("stop timed out");
+      },
+    });
+
+    await expect(runDailyUpdate({ bootstrap: true }, test.dependencies)).rejects.toThrow(
+      "stop timed out",
+    );
+    expect(test.calls).toEqual(["stage", "prepare", "stop", "restart", "cleanup"]);
   });
 
   it("does nothing when no eligible update is pending", async () => {
