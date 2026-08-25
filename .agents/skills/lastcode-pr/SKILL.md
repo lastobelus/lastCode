@@ -47,9 +47,9 @@ current GitHub thread and review-query mechanics.
 1. Inspect comments and thread-level review state newer than the latest push.
 2. Verify each bot finding against the source. Fix real defects; reply with a
    concrete reason when a finding is false. Resolve only addressed threads.
-   When rejecting a top-level issue-comment finding without pushing a fix or
-   resolving an inline thread, post the exact handled marker documented in the
-   external-review reference before relaunching `Wait for PR`.
+   When rejecting a top-level issue-comment or body-only formal finding without
+   pushing a fix or resolving an inline thread, post the exact handled marker
+   documented in the external-review reference before relaunching `Wait for PR`.
 3. After each fix push, request review using the exact-head format in
    `../_references/external-review-mechanics.md`. Do not merge until Codex gives
    an explicit clean result or every finding for the exact current head has a

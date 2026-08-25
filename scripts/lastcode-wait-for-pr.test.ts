@@ -137,6 +137,22 @@ describe("lastcode-wait-for-pr", () => {
     ).toMatchObject({ kind: "wake", reason: "ready" });
   });
 
+  it("waits for definitive mergeability before reporting ready", () => {
+    const baseline = observation({ review: handledReview });
+    expect(
+      decideWaitForPr(
+        baseline,
+        observation({ ci: "success", review: handledReview, mergeable: "UNKNOWN" }),
+      ),
+    ).toEqual({ kind: "wait", reason: "mergeability-pending" });
+    expect(
+      decideWaitForPr(
+        baseline,
+        observation({ ci: "success", review: handledReview, mergeStateStatus: "UNKNOWN" }),
+      ),
+    ).toEqual({ kind: "wait", reason: "mergeability-pending" });
+  });
+
   it("wakes when the exact head or base drifts", () => {
     const baseline = observation();
     expect(decideWaitForPr(baseline, observation({ head: "2".repeat(40) }))).toMatchObject({
@@ -267,7 +283,7 @@ describe("lastcode-wait-for-pr", () => {
           state: "COMMENTED",
           commit_id: HEAD,
           submitted_at: "2026-08-24T10:03:00Z",
-          body: `### Codex Review\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
+          body: `### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
         },
       ],
       issueComments: [
@@ -283,6 +299,56 @@ describe("lastcode-wait-for-pr", () => {
     });
     expect(review).toMatchObject({ requestPresent: true, pending: true });
     expect(review.terminalArtifacts).toEqual([]);
+  });
+
+  it("records a body-only formal finding until a maintainer handles it", () => {
+    const formalReviews = [
+      {
+        id: 25,
+        user: { login: "chatgpt-codex-connector[bot]" },
+        state: "COMMENTED",
+        commit_id: HEAD,
+        submitted_at: "2026-08-24T10:03:00Z",
+        body: "The retry path can report success before the replacement run finishes.",
+      },
+    ];
+    const issueComments = [
+      {
+        id: 26,
+        user: { login: "lastobelus" },
+        body: reviewRequest(),
+        created_at: "2026-08-24T10:00:00Z",
+      },
+    ];
+    const finding = deriveReviewState({
+      headSha: HEAD,
+      formalReviews,
+      issueComments,
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(finding).toMatchObject({ pending: false, ready: false });
+    expect(finding.terminalArtifacts).toEqual([
+      { key: "review:25", observedAt: "2026-08-24T10:03:00Z" },
+    ]);
+
+    const handled = deriveReviewState({
+      headSha: HEAD,
+      formalReviews,
+      issueComments: [
+        ...issueComments,
+        {
+          id: 27,
+          user: { login: "lastobelus" },
+          author_association: "OWNER",
+          body: `<!-- lastcode-review-handled: review:25 head: ${HEAD} -->`,
+          created_at: "2026-08-24T10:04:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(handled).toMatchObject({ pending: false, ready: true });
   });
 
   it("accepts exact-head formal, inline, and typographic clean-comment artifacts", () => {

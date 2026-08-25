@@ -94,7 +94,10 @@ export interface WaitObservation {
 }
 
 export type WaitDecision =
-  | { readonly kind: "wait"; readonly reason: "ci-pending" | "review-pending" }
+  | {
+      readonly kind: "wait";
+      readonly reason: "ci-pending" | "mergeability-pending" | "review-pending";
+    }
   | {
       readonly kind: "wake";
       readonly reason:
@@ -258,14 +261,19 @@ const cleanReviewedCommitFromBody = (body: string | undefined): string | null =>
   return reviewedCommitFromBody(body);
 };
 
+const isGenericFormalReviewWrapper = (body: string | undefined): boolean =>
+  (body ?? "").includes("### 💡 Codex Review") &&
+  (body ?? "").includes("Here are some automated review suggestions for this pull request.");
+
 const requestedHeadFromBody = (body: string | undefined): string | null =>
   /^@codex review\s*\n<!-- lastcode-review-head: ([0-9a-f]{40}) -->\s*$/iu.exec(body ?? "")?.[1] ??
   null;
 
 const handledArtifactFromBody = (body: string | undefined, headSha: string): string | null => {
-  const match = /^<!-- lastcode-review-handled: (comment:\d+) head: ([0-9a-f]{40}) -->$/iu.exec(
-    body ?? "",
-  );
+  const match =
+    /^<!-- lastcode-review-handled: ((?:comment|review):\d+) head: ([0-9a-f]{40}) -->$/iu.exec(
+      body ?? "",
+    );
   return match?.[2] === headSha ? (match[1] ?? null) : null;
 };
 
@@ -299,18 +307,20 @@ export function deriveReviewState(input: {
 
   for (const review of input.formalReviews) {
     const machineReadableCleanCommit = cleanReviewedCommitFromBody(review.body);
+    const isClean =
+      review.state === "APPROVED" || currentHeadMatches(machineReadableCleanCommit, input.headSha);
     if (
       review.user?.login === CODEX_BOT_LOGIN &&
       review.state !== "PENDING" &&
       currentHeadMatches(review.commit_id, input.headSha) &&
-      (review.state === "APPROVED" || currentHeadMatches(machineReadableCleanCommit, input.headSha))
+      (isClean || (Boolean(review.body?.trim()) && !isGenericFormalReviewWrapper(review.body)))
     ) {
       const key = `review:${review.id}`;
       artifacts.push({
         key,
         observedAt: review.submitted_at ?? "",
       });
-      readyArtifacts.add(key);
+      if (isClean) readyArtifacts.add(key);
     }
   }
 
@@ -474,6 +484,9 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       reason: "review-unhandled",
       detail: `Pull request #${pullRequest.number} has an unhandled top-level Codex finding.`,
     };
+  }
+  if (pullRequest.mergeable === "UNKNOWN" || pullRequest.mergeStateStatus === "UNKNOWN") {
+    return { kind: "wait", reason: "mergeability-pending" };
   }
   if (current.ci === "success" && !current.review.pending && current.review.ready) {
     return {
