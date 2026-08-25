@@ -891,6 +891,28 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               </TooltipPopup>
             </Tooltip>
           )}
+          {thread.actionResume?.outcome === "running" && threadStatus?.label !== "Waiting" ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    aria-label={`Waiting for ${thread.actionResume.actionName}`}
+                    className="inline-flex size-3.5 shrink-0 items-center justify-center text-yellow-700 dark:text-yellow-300"
+                  />
+                }
+              >
+                <span
+                  data-legacy-sidebar-unscaled-content
+                  className={
+                    props.compactStatusIndicators
+                      ? "size-[9px] rounded-full bg-yellow-500 dark:bg-yellow-300"
+                      : "size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300"
+                  }
+                />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Waiting for {thread.actionResume.actionName}</TooltipPopup>
+            </Tooltip>
+          ) : null}
           {threadStatus && (
             <ThreadStatusLabel status={threadStatus} compact={props.compactStatusIndicators} />
           )}
