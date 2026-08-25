@@ -12,6 +12,11 @@
       "name": "Wait for PR",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
       "icon": "test"
+    },
+    {
+      "name": "Run Full CI",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --full",
+      "icon": "test"
     }
   ]
 }
