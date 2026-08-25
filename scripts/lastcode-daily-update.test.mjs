@@ -8,6 +8,7 @@ import {
   installDailyUpdateService,
   isMissingThreadError,
   parseDailyUpdateOptions,
+  replacePreparedHeadlessApp,
   renderDailyUpdatePlist,
   runDailyUpdate,
 } from "./lastcode-daily-update.mjs";
@@ -41,8 +42,8 @@ function fixture(overrides = {}) {
         calls.push("prepare");
         return { prepared: true };
       },
-      quitApp: async () => calls.push("quit"),
       replaceApp: async () => calls.push("replace"),
+      restartService: async () => calls.push("restart"),
       resumeThread: async (threadId) => calls.push(`resume:${threadId}`),
       savePendingResumes: (pending) => {
         pendingResumes = pending;
@@ -61,6 +62,7 @@ function fixture(overrides = {}) {
           },
         };
       },
+      stopService: () => calls.push("stop"),
       ...overrides,
     },
     working,
@@ -94,7 +96,7 @@ describe("LastCode daily updater", () => {
       "pause:one",
       "list:1",
       "pause:two",
-      "quit",
+      "stop",
       "replace",
       "resume:one",
       "resume:two",
@@ -102,7 +104,7 @@ describe("LastCode daily updater", () => {
     ]);
   });
 
-  it("does not quit when a working thread does not confirm it paused", async () => {
+  it("does not stop the service when a working thread does not confirm it paused", async () => {
     let send = 0;
     const test = fixture({
       listThreads: async () => ({
@@ -123,6 +125,20 @@ describe("LastCode daily updater", () => {
 
     await expect(runDailyUpdate({}, test.dependencies)).rejects.toThrow("did not confirm");
     expect(test.calls).toEqual(["stage", "prepare", "resume:one", "cleanup"]);
+  });
+
+  it("restores the current service when shutdown does not finish", async () => {
+    const test = fixture({
+      stopService: async () => {
+        test.calls.push("stop");
+        throw new Error("stop timed out");
+      },
+    });
+
+    await expect(runDailyUpdate({ bootstrap: true }, test.dependencies)).rejects.toThrow(
+      "stop timed out",
+    );
+    expect(test.calls).toEqual(["stage", "prepare", "stop", "restart", "cleanup"]);
   });
 
   it("does nothing when no eligible update is pending", async () => {
@@ -179,6 +195,43 @@ describe("LastCode daily updater", () => {
     expect(test.calls.filter((call) => call === "resume:one")).toHaveLength(2);
   });
 
+  it("restarts the restored app with the restored version after a failed update", async () => {
+    const targetPath = NodePath.join(temporaryDirectory(), "LastCode.app");
+    NodeFS.mkdirSync(targetPath);
+    const prepared = { oldAppMoved: false, targetPath };
+    const versions = [];
+    let versionRead = 0;
+    await replacePreparedHeadlessApp(prepared, "2.0.0", {
+      readVersion: () => (versionRead++ === 0 ? "2.0.0" : "1.0.0"),
+      replaceApp: async (_prepared, options) => {
+        prepared.oldAppMoved = true;
+        await expect(options.launchApp("/Applications/LastCode.app")).rejects.toThrow(
+          "new server failed",
+        );
+        prepared.oldAppMoved = false;
+        await options.launchApp("/Applications/LastCode.app");
+      },
+      restartService: async ({ expectedVersion }) => {
+        versions.push(expectedVersion);
+        if (versions.length === 1) throw new Error("new server failed");
+      },
+    });
+
+    expect(versions).toEqual(["2.0.0", "1.0.0"]);
+  });
+
+  it("recognizes rollback when the candidate rename fails before its first launch", async () => {
+    const targetPath = NodePath.join(temporaryDirectory(), "LastCode.app");
+    NodeFS.mkdirSync(targetPath);
+    const versions = [];
+    await replacePreparedHeadlessApp({ oldAppMoved: false, targetPath }, "2.0.0", {
+      readVersion: () => "1.0.0",
+      replaceApp: async (_prepared, options) => options.launchApp("/Applications/LastCode.app"),
+      restartService: async ({ expectedVersion }) => versions.push(expectedVersion),
+    });
+    expect(versions).toEqual(["1.0.0"]);
+  });
+
   it("discards a queued resume when the thread no longer exists", async () => {
     const test = fixture({ stageUpdate: async () => ({ status: "up-to-date" }) });
     test.dependencies.loadPendingResumes = () => [test.working("gone")];
@@ -220,7 +273,7 @@ describe("LastCode daily updater", () => {
     await expect(runDailyUpdate({ bootstrap: true }, test.dependencies)).resolves.toMatchObject({
       status: "updated",
     });
-    expect(test.calls).toEqual(["stage", "prepare", "quit", "replace", "cleanup"]);
+    expect(test.calls).toEqual(["stage", "prepare", "stop", "replace", "cleanup"]);
   });
 
   it("installs a daily LaunchAgent backed by standalone copied modules", () => {
@@ -235,6 +288,9 @@ describe("LastCode daily updater", () => {
     expect(NodeFS.readFileSync(installed.plistPath, "utf8")).toContain("/managed/node");
     expect(
       NodeFS.existsSync(NodePath.join(installed.moduleDirectory, "lastcode-intel-stage.mjs")),
+    ).toBe(true);
+    expect(
+      NodeFS.existsSync(NodePath.join(installed.moduleDirectory, "lastcode-headless-service.mjs")),
     ).toBe(true);
     expect(calls).toEqual([
       { command: "plutil", args: ["-lint", installed.plistPath], options: undefined },
