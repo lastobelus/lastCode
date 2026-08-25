@@ -12,6 +12,7 @@ import {
   parseHeadlessServiceOptions,
   readPackagedServerVersion,
   renderHeadlessServicePlist,
+  restoreDesktopApp,
   startHeadlessService,
   stopDesktopApp,
   stopHeadlessService,
@@ -159,6 +160,56 @@ describe("LastCode headless service", () => {
     ).resolves.toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].command).toBe("osascript");
+  });
+
+  it("restores the desktop when first installation cannot start the service", async () => {
+    const home = temporaryDirectory();
+    const events = [];
+    let desktopRunning = true;
+    await expect(
+      installHeadlessService({
+        expectedVersion: "1.2.3",
+        fetchDescriptor: async () => {
+          throw new Error("not ready");
+        },
+        home,
+        isDesktopRunning: () => desktopRunning,
+        now: (() => {
+          let value = 0;
+          return () => (value += 31_000);
+        })(),
+        readAppVersion: () => "1.2.3",
+        readServerVersion: () => "0.9.0",
+        restoreDesktop: async () => events.push("restore-desktop"),
+        runCommand: (command, args) => {
+          events.push(`${command} ${args[0]}`);
+          if (command === "osascript") desktopRunning = false;
+          return {
+            status: command === "launchctl" && args[0] === "print" ? 1 : 0,
+            stdout: "",
+          };
+        },
+        uid: 501,
+        wait: async () => {},
+      }),
+    ).rejects.toThrow("did not become ready");
+    expect(events).toContain("restore-desktop");
+  });
+
+  it("unloads the headless job before reopening the desktop", async () => {
+    const calls = [];
+    await restoreDesktopApp({
+      home: "/Users/me",
+      runCommand: (command, args, options) => {
+        calls.push({ args, command, options });
+        return { status: command === "launchctl" && args[0] === "print" ? 1 : 0 };
+      },
+      uid: 501,
+    });
+    expect(calls.at(-1)).toMatchObject({
+      args: ["-n", "-a", "/Applications/LastCode.app"],
+      command: "open",
+    });
   });
 
   it("waits until the exact version is serving", async () => {

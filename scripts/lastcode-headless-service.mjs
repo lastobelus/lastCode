@@ -244,6 +244,15 @@ export async function stopDesktopApp(options = {}) {
   return true;
 }
 
+export async function restoreDesktopApp(options = {}) {
+  await stopHeadlessService(options);
+  const paths = headlessServicePaths(options.home, options.appPath);
+  const environment = { ...(options.environment ?? process.env) };
+  delete environment.ELECTRON_RUN_AS_NODE;
+  const runCommand = options.runCommand ?? run;
+  runCommand("open", ["-n", "-a", paths.appPath], { environment });
+}
+
 export async function startHeadlessService(options = {}) {
   const home = options.home ?? NodeOS.homedir();
   const paths = headlessServicePaths(home, options.appPath);
@@ -307,11 +316,28 @@ export async function installHeadlessService(options = {}) {
   runCommand("plutil", ["-lint", paths.plistPath]);
   if (options.start === false) return { ...paths, service: serviceTarget(options) };
   const expectedVersion = options.expectedVersion ?? readInstalledLastCodeVersion(options);
-  await restartHeadlessService({
-    ...options,
-    afterBootstrap: () => stopDesktopApp(options),
-    expectedVersion,
-  });
+  let desktopStopped = false;
+  try {
+    await restartHeadlessService({
+      ...options,
+      afterBootstrap: async () => {
+        desktopStopped = await stopDesktopApp(options);
+      },
+      expectedVersion,
+    });
+  } catch (error) {
+    if (desktopStopped) {
+      const restoreDesktop = options.restoreDesktop ?? restoreDesktopApp;
+      try {
+        await restoreDesktop(options);
+      } catch (restoreError) {
+        throw new Error("Headless installation failed and the desktop could not be restored.", {
+          cause: restoreError,
+        });
+      }
+    }
+    throw error;
+  }
   return { ...paths, service: serviceTarget(options) };
 }
 
