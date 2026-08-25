@@ -220,7 +220,7 @@ const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$end
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
       reviewThreads(first:100,after:$endCursor){
-        nodes{isResolved}
+        nodes{id isResolved}
         pageInfo{hasNextPage endCursor}
       }
     }
@@ -293,6 +293,7 @@ export function latestCodexReviewTrigger(
       .filter(
         (comment) =>
           comment.user?.login !== CODEX_BOT_LOGIN &&
+          TRUSTED_AUTHOR_ASSOCIATIONS.has(comment.author_association ?? "") &&
           currentHeadMatches(requestedHeadFromBody(comment.body), headSha),
       )
       .sort(
@@ -548,25 +549,31 @@ type ReviewThreadsPage = {
     readonly repository?: {
       readonly pullRequest?: {
         readonly reviewThreads?: {
-          readonly nodes?: ReadonlyArray<{ readonly isResolved?: boolean }>;
+          readonly nodes?: ReadonlyArray<{ readonly id?: string; readonly isResolved?: boolean }>;
         };
       };
     };
   };
 };
 
-function unresolvedReviewThreadCount(repository: string, pullRequestNumber: number): number {
+function reviewThreadsSnapshot(
+  repository: string,
+  pullRequestNumber: number,
+): { readonly unresolvedCount: number; readonly fingerprint: string } {
   const pages = runGhJson<ReadonlyArray<ReviewThreadsPage>>(
     reviewThreadsArgs(repository, pullRequestNumber),
   );
-  return pages.reduce(
-    (count, page) =>
-      count +
-      (page.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).filter(
-        ({ isResolved }) => isResolved === false,
-      ).length,
-    0,
-  );
+  return {
+    unresolvedCount: pages.reduce(
+      (count, page) =>
+        count +
+        (page.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).filter(
+          ({ isResolved }) => isResolved === false,
+        ).length,
+      0,
+    ),
+    fingerprint: JSON.stringify(pages),
+  };
 }
 
 function currentBranch(): string {
@@ -584,43 +591,88 @@ function currentBranch(): string {
   return branch;
 }
 
+type ReviewDataSnapshot = {
+  readonly review: ReviewState;
+  readonly unresolvedReviewThreads: number;
+  readonly fingerprint: string;
+};
+
+function readReviewData(repository: string, pullRequest: PullRequestState): ReviewDataSnapshot {
+  const issueComments = paginatedGhApi<IssueComment>(
+    `repos/${repository}/issues/${pullRequest.number}/comments?per_page=100`,
+  );
+  const latestTrigger = latestCodexReviewTrigger(issueComments, pullRequest.headRefOid);
+  const latestTriggerReactions = latestTrigger
+    ? paginatedGhApi<CommentReaction>(
+        `repos/${repository}/issues/comments/${latestTrigger.id}/reactions?per_page=100`,
+      )
+    : [];
+  const formalReviews = paginatedGhApi<FormalReview>(
+    `repos/${repository}/pulls/${pullRequest.number}/reviews?per_page=100`,
+  );
+  const reviewComments = paginatedGhApi<ReviewComment>(
+    `repos/${repository}/pulls/${pullRequest.number}/comments?per_page=100`,
+  );
+  const reviewThreads = reviewThreadsSnapshot(repository, pullRequest.number);
+  return {
+    review: deriveReviewState({
+      headSha: pullRequest.headRefOid,
+      formalReviews,
+      issueComments,
+      reviewComments,
+      latestTriggerReactions,
+    }),
+    unresolvedReviewThreads: reviewThreads.unresolvedCount,
+    fingerprint: JSON.stringify({
+      issueComments,
+      latestTriggerReactions,
+      formalReviews,
+      reviewComments,
+      reviewThreads: reviewThreads.fingerprint,
+    }),
+  };
+}
+
+export function requiresReadyConfirmation(observation: WaitObservation): boolean {
+  return (
+    observation.ci === "success" &&
+    !observation.review.pending &&
+    observation.review.ready &&
+    observation.unresolvedReviewThreads === 0
+  );
+}
+
+const observationFrom = (
+  pullRequest: PullRequestState,
+  reviewData: ReviewDataSnapshot,
+): WaitObservation => ({
+  pullRequest,
+  ci: classifyStatusChecks(pullRequest.statusCheckRollup),
+  review: reviewData.review,
+  unresolvedReviewThreads: reviewData.unresolvedReviewThreads,
+});
+
 function readObservation(repository: string, branch: string): WaitObservation {
   while (true) {
     const initialPullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
-    const issueComments = paginatedGhApi<IssueComment>(
-      `repos/${repository}/issues/${initialPullRequest.number}/comments?per_page=100`,
-    );
-    const latestTrigger = latestCodexReviewTrigger(issueComments, initialPullRequest.headRefOid);
-    const latestTriggerReactions = latestTrigger
-      ? paginatedGhApi<CommentReaction>(
-          `repos/${repository}/issues/comments/${latestTrigger.id}/reactions?per_page=100`,
-        )
-      : [];
-    const formalReviews = paginatedGhApi<FormalReview>(
-      `repos/${repository}/pulls/${initialPullRequest.number}/reviews?per_page=100`,
-    );
-    const reviewComments = paginatedGhApi<ReviewComment>(
-      `repos/${repository}/pulls/${initialPullRequest.number}/comments?per_page=100`,
-    );
-    const unresolvedReviewThreads = unresolvedReviewThreadCount(
-      repository,
-      initialPullRequest.number,
-    );
+    const initialReviewData = readReviewData(repository, initialPullRequest);
     const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
     if (!samePullRequestRevision(initialPullRequest, pullRequest)) continue;
 
-    return {
-      pullRequest,
-      ci: classifyStatusChecks(pullRequest.statusCheckRollup),
-      unresolvedReviewThreads,
-      review: deriveReviewState({
-        headSha: pullRequest.headRefOid,
-        formalReviews,
-        issueComments,
-        reviewComments,
-        latestTriggerReactions,
-      }),
-    };
+    const observation = observationFrom(pullRequest, initialReviewData);
+    if (!requiresReadyConfirmation(observation)) return observation;
+
+    const confirmedReviewData = readReviewData(repository, pullRequest);
+    const confirmedPullRequest = runGhJson<PullRequestState>(
+      pullRequestViewArgs(repository, branch),
+    );
+    if (
+      !samePullRequestRevision(pullRequest, confirmedPullRequest) ||
+      initialReviewData.fingerprint !== confirmedReviewData.fingerprint
+    ) {
+      continue;
+    }
+    return observationFrom(confirmedPullRequest, confirmedReviewData);
   }
 }
 

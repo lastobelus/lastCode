@@ -7,6 +7,7 @@ import {
   deriveReviewState,
   latestCodexReviewTrigger,
   pullRequestViewArgs,
+  requiresReadyConfirmation,
   reviewThreadsArgs,
   samePullRequestRevision,
   type ReviewState,
@@ -91,6 +92,20 @@ describe("lastcode-wait-for-pr", () => {
     ).toBe(false);
     expect(
       samePullRequestRevision(initial, observation({ base: "3".repeat(40) }).pullRequest),
+    ).toBe(false);
+  });
+
+  it("requires a matching second review snapshot before returning ready", () => {
+    expect(
+      requiresReadyConfirmation(
+        observation({ ci: "success", review: handledReview, unresolvedReviewThreads: 0 }),
+      ),
+    ).toBe(true);
+    expect(requiresReadyConfirmation(observation({ review: handledReview }))).toBe(false);
+    expect(
+      requiresReadyConfirmation(
+        observation({ ci: "success", review: handledReview, unresolvedReviewThreads: 1 }),
+      ),
     ).toBe(false);
   });
 
@@ -208,6 +223,7 @@ describe("lastcode-wait-for-pr", () => {
       {
         id: 10,
         user: { login: "lastobelus" },
+        author_association: "OWNER",
         body: reviewRequest(),
         created_at: "2026-08-24T10:00:00Z",
       },
@@ -254,12 +270,14 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 10,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: reviewRequest(),
           created_at: "2026-08-24T10:00:00Z",
         },
         {
           id: 11,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: reviewRequest(),
           created_at: "2026-08-24T10:00:00Z",
         },
@@ -267,6 +285,29 @@ describe("lastcode-wait-for-pr", () => {
       HEAD,
     );
     expect(latest?.id).toBe(11);
+  });
+
+  it("ignores exact-head review triggers from untrusted commenters", () => {
+    const latest = latestCodexReviewTrigger(
+      [
+        {
+          id: 10,
+          user: { login: "lastobelus" },
+          author_association: "OWNER",
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+        {
+          id: 11,
+          user: { login: "outsider" },
+          author_association: "CONTRIBUTOR",
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:05:00Z",
+        },
+      ],
+      HEAD,
+    );
+    expect(latest?.id).toBe(10);
   });
 
   it("keeps same-timestamp terminal evidence pending unless it is a matched reaction", () => {
@@ -285,6 +326,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 21,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: reviewRequest(),
           created_at: "2026-08-24T10:00:00Z",
         },
@@ -312,6 +354,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 24,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: reviewRequest(),
           created_at: "2026-08-24T10:00:00Z",
         },
@@ -338,6 +381,7 @@ describe("lastcode-wait-for-pr", () => {
       {
         id: 26,
         user: { login: "lastobelus" },
+        author_association: "OWNER",
         body: reviewRequest(),
         created_at: "2026-08-24T10:00:00Z",
       },
@@ -416,6 +460,7 @@ describe("lastcode-wait-for-pr", () => {
       {
         id: 30,
         user: { login: "lastobelus" },
+        author_association: "OWNER",
         body: reviewRequest(),
         created_at: "2026-08-24T10:00:00Z",
       },
@@ -524,12 +569,14 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 40,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: "@codex review",
           created_at: "2026-08-24T10:00:00Z",
         },
         {
           id: 41,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: reviewRequest("abcdef1234567890abcdef1234567890abcdef12"),
           created_at: "2026-08-24T10:02:00Z",
         },
