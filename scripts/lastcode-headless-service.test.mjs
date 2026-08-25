@@ -11,6 +11,7 @@ import {
   parseHeadlessServiceOptions,
   renderHeadlessServicePlist,
   startHeadlessService,
+  verifyHeadlessListener,
   waitForHeadlessService,
 } from "./lastcode-headless-service.mjs";
 
@@ -73,6 +74,7 @@ describe("LastCode headless service", () => {
         return { status: command === "launchctl" && args[0] === "print" ? 1 : 0, stdout: "" };
       },
       uid: 501,
+      verifyListenerOwnership: () => true,
     });
 
     expect(NodeFS.readFileSync(installed.plistPath, "utf8")).toContain(
@@ -113,9 +115,30 @@ describe("LastCode headless service", () => {
           return () => value++;
         })(),
         timeoutMs: 20,
+        verifyListenerOwnership: () => true,
         wait: async () => {},
       }),
     ).resolves.toMatchObject({ serverVersion: "0.9.0" });
+  });
+
+  it("requires port 3773 to belong to the LaunchAgent process", () => {
+    const outputs = new Map([
+      ["launchctl", { status: 0, stdout: "state = running\n\tpid = 4321\n" }],
+      ["lsof", { status: 0, stdout: "p4321\n" }],
+    ]);
+    expect(
+      verifyHeadlessListener({
+        runCommand: (command) => outputs.get(command),
+        uid: 501,
+      }),
+    ).toBe(true);
+    outputs.set("lsof", { status: 0, stdout: "p9876\n" });
+    expect(
+      verifyHeadlessListener({
+        runCommand: (command) => outputs.get(command),
+        uid: 501,
+      }),
+    ).toBe(false);
   });
 
   it("does not start when the installed app is not the expected build", async () => {

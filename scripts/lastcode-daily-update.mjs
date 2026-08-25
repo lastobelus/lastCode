@@ -14,7 +14,11 @@ import {
   prepareDmgInstall,
   replacePreparedApp,
 } from "./lastcode-install.mjs";
-import { restartHeadlessService, stopHeadlessService } from "./lastcode-headless-service.mjs";
+import {
+  readInstalledLastCodeVersion,
+  restartHeadlessService,
+  stopHeadlessService,
+} from "./lastcode-headless-service.mjs";
 import { stageIntelUpdate } from "./lastcode-intel-stage.mjs";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -205,6 +209,20 @@ export async function runDailyUpdate(options = {}, dependencies) {
   }
 }
 
+export async function replacePreparedHeadlessApp(prepared, expectedVersion, dependencies = {}) {
+  const replaceApp = dependencies.replaceApp ?? replacePreparedApp;
+  const restartService = dependencies.restartService ?? restartHeadlessService;
+  const readVersion = dependencies.readVersion ?? readInstalledLastCodeVersion;
+  let installingCandidate = true;
+  return replaceApp(prepared, {
+    launchApp: async (appPath) => {
+      const version = installingCandidate ? expectedVersion : readVersion({ appPath });
+      installingCandidate = false;
+      return restartService({ appPath, expectedVersion: version });
+    },
+  });
+}
+
 async function threadCommand(threadTool, args) {
   const { stdout } = await execFile(threadTool, [...args, "--json"], {
     encoding: "utf8",
@@ -263,8 +281,9 @@ function defaultDependencies(home) {
     },
     prepareInstall: prepareDmgInstall,
     replaceApp: (prepared, expectedVersion) =>
-      replacePreparedApp(prepared, {
-        launchApp: (appPath) => restartHeadlessService({ appPath, expectedVersion, home }),
+      replacePreparedHeadlessApp(prepared, expectedVersion, {
+        readVersion: (serviceOptions) => readInstalledLastCodeVersion({ ...serviceOptions, home }),
+        restartService: (serviceOptions) => restartHeadlessService({ ...serviceOptions, home }),
       }),
     resumeThread: (threadId, message) => resumeThread(threadTool, threadId, message),
     savePendingResumes: (pending) => {

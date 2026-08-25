@@ -160,6 +160,10 @@ export async function waitForHeadlessService(options = {}) {
       if (descriptor?.platform?.os !== "darwin" || descriptor?.platform?.arch !== "x64") {
         throw new Error("readiness did not report the htulo macOS x64 server");
       }
+      const verifyListenerOwnership = options.verifyListenerOwnership ?? verifyHeadlessListener;
+      if (!verifyListenerOwnership(options)) {
+        throw new Error("the process listening on port 3773 is not the headless LaunchAgent");
+      }
       return descriptor;
     } catch (error) {
       lastError = error;
@@ -169,6 +173,24 @@ export async function waitForHeadlessService(options = {}) {
   throw new Error(
     `LastCode server ${expectedServerVersion} did not become ready on port ${String(HEADLESS_SERVICE_PORT)} within ${(options.timeoutMs ?? START_TIMEOUT_MS) / 1_000} seconds: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
   );
+}
+
+export function verifyHeadlessListener(options = {}) {
+  const runCommand = options.runCommand ?? run;
+  const service = runCommand("launchctl", ["print", serviceTarget(options)], {
+    allowFailure: true,
+    capture: true,
+  });
+  if (service.status !== 0) return false;
+  const servicePid = /^\s*pid = (\d+)\s*$/mu.exec(service.stdout)?.[1];
+  if (!servicePid) return false;
+  const listener = runCommand(
+    "lsof",
+    ["-nP", `-iTCP:${String(HEADLESS_SERVICE_PORT)}`, "-sTCP:LISTEN", "-Fp"],
+    { allowFailure: true, capture: true },
+  );
+  if (listener.status !== 0) return false;
+  return listener.stdout.split(/\r?\n/u).includes(`p${servicePid}`);
 }
 
 export async function startHeadlessService(options = {}) {

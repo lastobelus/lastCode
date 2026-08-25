@@ -8,6 +8,7 @@ import {
   installDailyUpdateService,
   isMissingThreadError,
   parseDailyUpdateOptions,
+  replacePreparedHeadlessApp,
   renderDailyUpdatePlist,
   runDailyUpdate,
 } from "./lastcode-daily-update.mjs";
@@ -177,6 +178,25 @@ describe("LastCode daily updater", () => {
       status: "up-to-date",
     });
     expect(test.calls.filter((call) => call === "resume:one")).toHaveLength(2);
+  });
+
+  it("restarts the restored app with the restored version after a failed update", async () => {
+    const versions = [];
+    await replacePreparedHeadlessApp({ prepared: true }, "2.0.0", {
+      readVersion: () => "1.0.0",
+      replaceApp: async (_prepared, options) => {
+        await expect(options.launchApp("/Applications/LastCode.app")).rejects.toThrow(
+          "new server failed",
+        );
+        await options.launchApp("/Applications/LastCode.app");
+      },
+      restartService: async ({ expectedVersion }) => {
+        versions.push(expectedVersion);
+        if (versions.length === 1) throw new Error("new server failed");
+      },
+    });
+
+    expect(versions).toEqual(["2.0.0", "1.0.0"]);
   });
 
   it("discards a queued resume when the thread no longer exists", async () => {
