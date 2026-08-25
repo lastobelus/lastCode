@@ -140,7 +140,7 @@ describe("lastcode-wait-for-pr", () => {
     });
   });
 
-  it("treats eyes or an unanswered trigger as pending and a thumbs-up as terminal", () => {
+  it("keeps reaction-only requests pending because reactions do not identify the reviewed head", () => {
     const issueComments = [
       {
         id: 10,
@@ -165,7 +165,7 @@ describe("lastcode-wait-for-pr", () => {
     });
     expect(pending).toMatchObject({ requestPresent: true, pending: true });
 
-    const terminal = deriveReviewState({
+    const thumbsUp = deriveReviewState({
       headSha: HEAD,
       formalReviews: [],
       issueComments,
@@ -179,8 +179,8 @@ describe("lastcode-wait-for-pr", () => {
         },
       ],
     });
-    expect(terminal).toMatchObject({ requestPresent: true, pending: false });
-    expect(terminal.terminalArtifacts.map(({ key }) => key)).toEqual(["reaction:12"]);
+    expect(thumbsUp).toMatchObject({ requestPresent: true, pending: true });
+    expect(thumbsUp.terminalArtifacts).toEqual([]);
   });
 
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {

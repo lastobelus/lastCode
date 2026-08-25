@@ -223,15 +223,6 @@ export function deriveReviewState(input: {
   const relevantReactions = latestTrigger
     ? input.latestTriggerReactions.filter((reaction) => reaction.user?.login === CODEX_BOT_LOGIN)
     : [];
-  for (const reaction of relevantReactions) {
-    if (reaction.content === "+1") {
-      artifacts.push({
-        key: `reaction:${reaction.id}`,
-        observedAt: reaction.created_at ?? "",
-      });
-    }
-  }
-
   const latestTerminalAt = Math.max(0, ...artifacts.map(({ observedAt }) => timestamp(observedAt)));
   const latestPendingAt = Math.max(
     timestamp(latestTrigger?.created_at),
