@@ -8,11 +8,11 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("046_ProjectionThreadWorktreeCleanup", (it) => {
+layer("047_ProjectionThreadWorktreeCleanup", (it) => {
   it.effect("adds nullable cleanup state without changing existing rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 44 });
+      yield* runMigrations({ toMigrationInclusive: 46 });
       yield* sql`
         INSERT INTO projection_threads (
           thread_id,
@@ -36,7 +36,7 @@ layer("046_ProjectionThreadWorktreeCleanup", (it) => {
         )
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 46 });
+      yield* runMigrations({ toMigrationInclusive: 47 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_threads)

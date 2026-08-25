@@ -15,6 +15,7 @@ import {
   ListPendingWorktreeCleanupThreadsInput,
   ProjectionThread,
   ProjectionThreadRepository,
+  UpsertProjectionThreadInput,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
 import {
@@ -38,7 +39,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const upsertProjectionThreadRow = SqlSchema.void({
-    Request: ProjectionThread,
+    Request: UpsertProjectionThreadInput,
     execute: (row) =>
       sql`
         INSERT INTO projection_threads (
@@ -94,9 +95,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.pinOrderKey ?? null},
           ${row.titleRegenerationRequestId ?? null},
           ${row.titleRegenerationStartedAt ?? null},
-          ${row.annotation === null ? null : JSON.stringify(row.annotation)},
+          ${row.annotation == null ? null : JSON.stringify(row.annotation)},
           ${row.worktreeCleanup == null ? null : JSON.stringify(row.worktreeCleanup)},
-          ${row.latestUserMessageId},
+          ${row.latestUserMessageId ?? null},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},

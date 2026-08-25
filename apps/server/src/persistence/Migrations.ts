@@ -60,6 +60,7 @@ import Migration0044 from "./Migrations/044_UpdateDrain.ts";
 import Migration0045 from "./Migrations/045_UpdateDrainClaim.ts";
 import Migration0046 from "./Migrations/046_ProjectionTurnRequestCorrelations.ts";
 import Migration0047 from "./Migrations/047_ProjectionThreadWorktreeCleanup.ts";
+import Migration0048 from "./Migrations/048_ProjectionThreadLinkedPullRequest.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -119,6 +120,7 @@ export const migrationEntries = [
   [45, "UpdateDrainClaim", Migration0045],
   [46, "ProjectionTurnRequestCorrelations", Migration0046],
   [47, "ProjectionThreadWorktreeCleanup", Migration0047],
+  [48, "ProjectionThreadLinkedPullRequest", Migration0048],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
