@@ -125,8 +125,14 @@ Accept Codex as clean only when its result was produced after the latest relevan
 push, identifies the exact `headRefOid` (for a formal review, its `commit_id`
 matches), and gives an explicit no-issues result or terminal clean reaction. A
 generic review wrapper, silence, or absence of inline findings is insufficient by
-itself. After a push, request `@codex review` once unless a current request is
-already active.
+itself. After a push, request review once unless a current request is already
+active. Bind the request to the full current head SHA using exactly these two
+lines so resumable PR actions can distinguish it from an older request:
+
+```text
+@codex review
+<!-- lastcode-review-head: HEAD_SHA -->
+```
 
 Read all review threads with GraphQL pagination. `gh api --paginate` supplies the
 next `$endCursor`; keep `pageInfo` in the query so it cannot silently truncate at
