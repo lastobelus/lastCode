@@ -173,7 +173,10 @@ export function latestCodexReviewTrigger(
           comment.user?.login !== CODEX_BOT_LOGIN &&
           currentHeadMatches(requestedHeadFromBody(comment.body), headSha),
       )
-      .sort((left, right) => timestamp(right.created_at) - timestamp(left.created_at))[0] ?? null
+      .sort(
+        (left, right) =>
+          timestamp(right.created_at) - timestamp(left.created_at) || right.id - left.id,
+      )[0] ?? null
   );
 }
 
@@ -238,6 +241,7 @@ export function deriveReviewState(input: {
     }
   }
 
+  const matchedCleanReaction = relevantReactions.some(({ content }) => content === "+1");
   const latestTerminalAt = Math.max(0, ...artifacts.map(({ observedAt }) => timestamp(observedAt)));
   const latestPendingAt = Math.max(
     timestamp(latestTrigger?.created_at),
@@ -250,7 +254,7 @@ export function deriveReviewState(input: {
   return {
     terminalArtifacts: artifacts,
     requestPresent,
-    pending: requestPresent && latestTerminalAt < latestPendingAt,
+    pending: requestPresent && !matchedCleanReaction && latestTerminalAt <= latestPendingAt,
     latestTriggerId: latestTrigger?.id ?? null,
   };
 }

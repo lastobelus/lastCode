@@ -5,6 +5,7 @@ import {
   classifyStatusChecks,
   decideWaitForPr,
   deriveReviewState,
+  latestCodexReviewTrigger,
   pullRequestViewArgs,
   type ReviewState,
   type WaitObservation,
@@ -185,6 +186,53 @@ describe("lastcode-wait-for-pr", () => {
     expect(thumbsUp.terminalArtifacts).toEqual([
       { key: "reaction:12", observedAt: "2026-08-24T10:00:00Z" },
     ]);
+  });
+
+  it("selects the newer exact-head request when GitHub timestamps tie", () => {
+    const latest = latestCodexReviewTrigger(
+      [
+        {
+          id: 10,
+          user: { login: "lastobelus" },
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+        {
+          id: 11,
+          user: { login: "lastobelus" },
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      HEAD,
+    );
+    expect(latest?.id).toBe(11);
+  });
+
+  it("keeps same-timestamp terminal evidence pending unless it is a matched reaction", () => {
+    const review = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [
+        {
+          id: 20,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          state: "COMMENTED",
+          commit_id: HEAD,
+          submitted_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      issueComments: [
+        {
+          id: 21,
+          user: { login: "lastobelus" },
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(review).toMatchObject({ requestPresent: true, pending: true });
   });
 
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
