@@ -236,8 +236,10 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
     ...source,
     favorites,
     providerModelPreferences,
+    environmentIconColors: destination.environmentIconColors,
     legacySidebarScale: destination.legacySidebarScale,
     roundedProjectIcons: destination.roundedProjectIcons,
+    showLocalEnvironmentIcon: destination.showLocalEnvironmentIcon,
   })}\n`;
 }
 
