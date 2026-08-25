@@ -234,6 +234,19 @@ export function LastCodeSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          {...searchableSetting("compact-status-indicators")}
+          description="Show colored dot only for agent status, hiding labels like “Working” and “Completed.”"
+          control={
+            <Switch
+              checked={clientSettings.compactLegacySidebarStatuses}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ compactLegacySidebarStatuses: Boolean(checked) })
+              }
+              aria-label="Compact status indicators"
+            />
+          }
+        />
       </SettingsSection>
       <SettingsSection
         id="environment-icons"
