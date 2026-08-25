@@ -380,7 +380,7 @@ export function deriveReviewState(input: {
     terminalArtifacts: artifacts,
     requestPresent,
     pending: requestPresent && !matchedCleanReaction && latestTerminalAt <= latestPendingAt,
-    ready: readyArtifacts.size > 0,
+    ready: artifacts.length > 0 && artifacts.every(({ key }) => readyArtifacts.has(key)),
     latestTriggerId: latestTrigger?.id ?? null,
   };
 }

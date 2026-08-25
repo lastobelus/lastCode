@@ -383,6 +383,29 @@ describe("lastcode-wait-for-pr", () => {
         observation({ ci: "success", review: handled }),
       ),
     ).toMatchObject({ kind: "wake", reason: "ready" });
+
+    const partlyHandled = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [],
+      issueComments: [
+        ...issueComments,
+        {
+          id: 32,
+          user: { login: "lastobelus" },
+          body: `<!-- lastcode-review-handled: comment:31 head: ${HEAD} -->`,
+          created_at: "2026-08-24T10:06:00Z",
+        },
+        {
+          id: 33,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          body: `Codex Review: Another finding. **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
+          created_at: "2026-08-24T10:07:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(partlyHandled).toMatchObject({ pending: false, ready: false });
   });
 
   it("does not treat a plain or older-head review request as current", () => {
