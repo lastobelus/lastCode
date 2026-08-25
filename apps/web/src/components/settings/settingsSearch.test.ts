@@ -46,6 +46,9 @@ describe("searchSettings", () => {
   it("matches normalized title substrings", () => {
     expect(searchSettings("  WORD   WRAP  ", ITEMS).map((item) => item.id)).toEqual(["word-wrap"]);
     expect(searchSettings("glass").map((item) => item.id)).toEqual(["setting-glass-opacity"]);
+    expect(searchSettings("compact status").map((item) => item.id)).toEqual([
+      "compact-status-indicators",
+    ]);
     expect(searchSettings("xyzzy")).toEqual([]);
   });
 
