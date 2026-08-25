@@ -8,6 +8,7 @@ import {
   latestCodexReviewTrigger,
   pullRequestViewArgs,
   reviewThreadsArgs,
+  samePullRequestRevision,
   type ReviewState,
   type WaitObservation,
 } from "./lastcode-wait-for-pr.ts";
@@ -80,6 +81,17 @@ describe("lastcode-wait-for-pr", () => {
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
       "requires a checked-out branch",
     );
+  });
+
+  it("discards review observations when the head or base changes during collection", () => {
+    const initial = observation().pullRequest;
+    expect(samePullRequestRevision(initial, observation().pullRequest)).toBe(true);
+    expect(
+      samePullRequestRevision(initial, observation({ head: "2".repeat(40) }).pullRequest),
+    ).toBe(false);
+    expect(
+      samePullRequestRevision(initial, observation({ base: "3".repeat(40) }).pullRequest),
+    ).toBe(false);
   });
 
   it("paginates review threads for the exact pull request", () => {

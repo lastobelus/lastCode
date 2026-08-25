@@ -209,6 +209,13 @@ export function pullRequestViewArgs(repository: string, branch: string): Readonl
   ];
 }
 
+export function samePullRequestRevision(
+  initial: Pick<PullRequestState, "headRefOid" | "baseRefOid">,
+  final: Pick<PullRequestState, "headRefOid" | "baseRefOid">,
+): boolean {
+  return initial.headRefOid === final.headRefOid && initial.baseRefOid === final.baseRefOid;
+}
+
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
@@ -578,34 +585,43 @@ function currentBranch(): string {
 }
 
 function readObservation(repository: string, branch: string): WaitObservation {
-  const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
-  const issueComments = paginatedGhApi<IssueComment>(
-    `repos/${repository}/issues/${pullRequest.number}/comments?per_page=100`,
-  );
-  const latestTrigger = latestCodexReviewTrigger(issueComments, pullRequest.headRefOid);
-  const latestTriggerReactions = latestTrigger
-    ? paginatedGhApi<CommentReaction>(
-        `repos/${repository}/issues/comments/${latestTrigger.id}/reactions?per_page=100`,
-      )
-    : [];
-  const formalReviews = paginatedGhApi<FormalReview>(
-    `repos/${repository}/pulls/${pullRequest.number}/reviews?per_page=100`,
-  );
-  const reviewComments = paginatedGhApi<ReviewComment>(
-    `repos/${repository}/pulls/${pullRequest.number}/comments?per_page=100`,
-  );
-  return {
-    pullRequest,
-    ci: classifyStatusChecks(pullRequest.statusCheckRollup),
-    unresolvedReviewThreads: unresolvedReviewThreadCount(repository, pullRequest.number),
-    review: deriveReviewState({
-      headSha: pullRequest.headRefOid,
-      formalReviews,
-      issueComments,
-      reviewComments,
-      latestTriggerReactions,
-    }),
-  };
+  while (true) {
+    const initialPullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
+    const issueComments = paginatedGhApi<IssueComment>(
+      `repos/${repository}/issues/${initialPullRequest.number}/comments?per_page=100`,
+    );
+    const latestTrigger = latestCodexReviewTrigger(issueComments, initialPullRequest.headRefOid);
+    const latestTriggerReactions = latestTrigger
+      ? paginatedGhApi<CommentReaction>(
+          `repos/${repository}/issues/comments/${latestTrigger.id}/reactions?per_page=100`,
+        )
+      : [];
+    const formalReviews = paginatedGhApi<FormalReview>(
+      `repos/${repository}/pulls/${initialPullRequest.number}/reviews?per_page=100`,
+    );
+    const reviewComments = paginatedGhApi<ReviewComment>(
+      `repos/${repository}/pulls/${initialPullRequest.number}/comments?per_page=100`,
+    );
+    const unresolvedReviewThreads = unresolvedReviewThreadCount(
+      repository,
+      initialPullRequest.number,
+    );
+    const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
+    if (!samePullRequestRevision(initialPullRequest, pullRequest)) continue;
+
+    return {
+      pullRequest,
+      ci: classifyStatusChecks(pullRequest.statusCheckRollup),
+      unresolvedReviewThreads,
+      review: deriveReviewState({
+        headSha: pullRequest.headRefOid,
+        formalReviews,
+        issueComments,
+        reviewComments,
+        latestTriggerReactions,
+      }),
+    };
+  }
 }
 
 const summary = (observation: WaitObservation): string =>
