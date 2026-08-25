@@ -54,11 +54,13 @@ import Migration0038 from "./Migrations/038_ProjectionThreadsPinOrderKey.ts";
 import Migration0039 from "./Migrations/039_ProjectionProjectsDefaultThreadEnvMode.ts";
 import Migration0040 from "./Migrations/040_ProjectionProjectFaviconPath.ts";
 import Migration0041 from "./Migrations/041_AuthSessionClientConnection.ts";
-import Migration0042 from "./Migrations/042_ProjectionThreadAnnotation.ts";
-import Migration0043 from "./Migrations/043_UpdateDrain.ts";
-import Migration0044 from "./Migrations/044_UpdateDrainClaim.ts";
-import Migration0045 from "./Migrations/045_ProjectionTurnRequestCorrelations.ts";
-import Migration0046 from "./Migrations/046_ProjectionThreadWorktreeCleanup.ts";
+import Migration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts";
+import Migration0043 from "./Migrations/043_ProjectionThreadAnnotation.ts";
+import Migration0044 from "./Migrations/044_UpdateDrain.ts";
+import Migration0045 from "./Migrations/045_UpdateDrainClaim.ts";
+import Migration0046 from "./Migrations/046_ProjectionTurnRequestCorrelations.ts";
+import Migration0047 from "./Migrations/047_ProjectionThreadWorktreeCleanup.ts";
+import Migration0048 from "./Migrations/048_ProjectionThreadLinkedPullRequest.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -112,11 +114,13 @@ export const migrationEntries = [
   [39, "ProjectionProjectsDefaultThreadEnvMode", Migration0039],
   [40, "ProjectionProjectFaviconPath", Migration0040],
   [41, "AuthSessionClientConnection", Migration0041],
-  [42, "ProjectionThreadAnnotation", Migration0042],
-  [43, "UpdateDrain", Migration0043],
-  [44, "UpdateDrainClaim", Migration0044],
-  [45, "ProjectionTurnRequestCorrelations", Migration0045],
-  [46, "ProjectionThreadWorktreeCleanup", Migration0046],
+  [42, "ProjectionThreadLinkedPullRequest", Migration0042],
+  [43, "ProjectionThreadAnnotation", Migration0043],
+  [44, "UpdateDrain", Migration0044],
+  [45, "UpdateDrainClaim", Migration0045],
+  [46, "ProjectionTurnRequestCorrelations", Migration0046],
+  [47, "ProjectionThreadWorktreeCleanup", Migration0047],
+  [48, "ProjectionThreadLinkedPullRequest", Migration0048],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
