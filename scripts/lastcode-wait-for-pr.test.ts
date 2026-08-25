@@ -236,7 +236,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 20,
           user: { login: "chatgpt-codex-connector[bot]" },
-          state: "COMMENTED",
+          state: "APPROVED",
           commit_id: HEAD,
           submitted_at: "2026-08-24T10:00:00Z",
         },
@@ -255,6 +255,34 @@ describe("lastcode-wait-for-pr", () => {
     expect(review).toMatchObject({ requestPresent: true, pending: true });
   });
 
+  it("does not treat a generic formal review wrapper as clean", () => {
+    const review = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [
+        {
+          id: 23,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          state: "COMMENTED",
+          commit_id: HEAD,
+          submitted_at: "2026-08-24T10:03:00Z",
+          body: `### Codex Review\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
+        },
+      ],
+      issueComments: [
+        {
+          id: 24,
+          user: { login: "lastobelus" },
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(review).toMatchObject({ requestPresent: true, pending: true });
+    expect(review.terminalArtifacts).toEqual([]);
+  });
+
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
     const review = deriveReviewState({
       headSha: HEAD,
@@ -262,7 +290,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 20,
           user: { login: "chatgpt-codex-connector[bot]" },
-          state: "COMMENTED",
+          state: "APPROVED",
           commit_id: HEAD,
           submitted_at: "2026-08-24T10:03:00Z",
         },

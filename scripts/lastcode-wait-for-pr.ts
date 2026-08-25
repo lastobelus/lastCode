@@ -42,6 +42,7 @@ type GitHubActor = {
 type FormalReview = {
   readonly id: number;
   readonly user?: GitHubActor;
+  readonly body?: string;
   readonly state?: string;
   readonly commit_id?: string | null;
   readonly submitted_at?: string | null;
@@ -280,10 +281,12 @@ export function deriveReviewState(input: {
   const artifacts: ReviewArtifact[] = [];
 
   for (const review of input.formalReviews) {
+    const machineReadableCleanCommit = reviewedCommitFromBody(review.body);
     if (
       review.user?.login === CODEX_BOT_LOGIN &&
       review.state !== "PENDING" &&
-      currentHeadMatches(review.commit_id, input.headSha)
+      currentHeadMatches(review.commit_id, input.headSha) &&
+      (review.state === "APPROVED" || currentHeadMatches(machineReadableCleanCommit, input.headSha))
     ) {
       artifacts.push({
         key: `review:${review.id}`,
