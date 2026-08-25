@@ -12,7 +12,8 @@ import {
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const BASE = "abcdef1234567890abcdef1234567890abcdef12";
-const HEAD_COMMITTED_AT = "2026-08-24T09:00:00Z";
+const reviewRequest = (head = HEAD): string =>
+  `@codex review\n<!-- lastcode-review-head: ${head} -->`;
 
 const pendingReview: ReviewState = {
   terminalArtifacts: [],
@@ -52,7 +53,6 @@ function observation(
       baseRefName: input.baseRefName ?? "lastcode/main",
       mergeable: input.mergeable ?? "MERGEABLE",
       mergeStateStatus: input.mergeStateStatus ?? "BLOCKED",
-      commits: [{ oid: input.head ?? HEAD, committedDate: HEAD_COMMITTED_AT }],
       statusCheckRollup: [],
     },
     ci: input.ci ?? "pending",
@@ -69,7 +69,7 @@ describe("lastcode-wait-for-pr", () => {
       "--repo",
       "lastobelus/lastCode",
       "--json",
-      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,commits,statusCheckRollup",
+      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
     ]);
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
       "requires a checked-out branch",
@@ -147,13 +147,12 @@ describe("lastcode-wait-for-pr", () => {
       {
         id: 10,
         user: { login: "lastobelus" },
-        body: "@codex review",
+        body: reviewRequest(),
         created_at: "2026-08-24T10:00:00Z",
       },
     ];
     const pending = deriveReviewState({
       headSha: HEAD,
-      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments,
       reviewComments: [],
@@ -170,7 +169,6 @@ describe("lastcode-wait-for-pr", () => {
 
     const thumbsUp = deriveReviewState({
       headSha: HEAD,
-      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments,
       reviewComments: [],
@@ -190,7 +188,6 @@ describe("lastcode-wait-for-pr", () => {
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
     const review = deriveReviewState({
       headSha: HEAD,
-      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [
         {
           id: 20,
@@ -229,13 +226,12 @@ describe("lastcode-wait-for-pr", () => {
   it("leaves ambiguous Codex prose pending instead of guessing", () => {
     const review = deriveReviewState({
       headSha: HEAD,
-      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments: [
         {
           id: 30,
           user: { login: "lastobelus" },
-          body: "@codex review",
+          body: reviewRequest(),
           created_at: "2026-08-24T10:00:00Z",
         },
         {
@@ -252,10 +248,9 @@ describe("lastcode-wait-for-pr", () => {
     expect(review.terminalArtifacts).toEqual([]);
   });
 
-  it("does not treat a review request from an older head as current", () => {
+  it("does not treat a plain or older-head review request as current", () => {
     const review = deriveReviewState({
       headSha: HEAD,
-      headCommittedAt: "2026-08-24T10:01:00Z",
       formalReviews: [],
       issueComments: [
         {
@@ -263,6 +258,12 @@ describe("lastcode-wait-for-pr", () => {
           user: { login: "lastobelus" },
           body: "@codex review",
           created_at: "2026-08-24T10:00:00Z",
+        },
+        {
+          id: 41,
+          user: { login: "lastobelus" },
+          body: reviewRequest("abcdef1234567890abcdef1234567890abcdef12"),
+          created_at: "2026-08-24T10:02:00Z",
         },
       ],
       reviewComments: [],
