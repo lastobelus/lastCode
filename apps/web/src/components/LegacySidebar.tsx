@@ -1048,7 +1048,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                       trigger={
                         <span
                           aria-label={`${jumpLabel}; annotated`}
-                          className="inline-flex h-5 items-center rounded-full border border-dotted border-yellow-500/65 bg-accent/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-accent-foreground shadow-sm"
+                          className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-[10px] font-medium tracking-tight text-warning-foreground shadow-sm"
                         >
                           {jumpLabel}
                         </span>
@@ -1082,7 +1082,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                     threadRef={threadRef}
                     trigger={
                       <span
-                        className={`border-b border-dotted border-yellow-500/65 text-[10px] tabular-nums ${
+                        className={`border-b border-dotted border-warning text-[10px] tabular-nums ${
                           isHighlighted ? "text-foreground" : "text-secondary-label"
                         }`}
                         data-legacy-sidebar-unscaled-content
