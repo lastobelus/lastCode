@@ -116,6 +116,33 @@ describe("ClientSettings environment identification", () => {
   });
 });
 
+describe("ClientSettings environment icons", () => {
+  it("defaults to semantic colors with the local icon hidden", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.environmentIconColors).toEqual({});
+    expect(settings.showLocalEnvironmentIcon).toBe(false);
+  });
+
+  it("accepts per-environment hex colors and the local icon opt-in", () => {
+    const input = {
+      environmentIconColors: { primary: "#2563eb", remote: "#7C3AED" },
+      showLocalEnvironmentIcon: true,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["blue", "#123", "#12345678", "#gg0000"])(
+    "rejects an invalid environment icon color: %s",
+    (color) => {
+      expect(() => decodeClientSettings({ environmentIconColors: { primary: color } })).toThrow();
+      expect(() =>
+        decodeClientSettingsPatch({ environmentIconColors: { primary: color } }),
+      ).toThrow();
+    },
+  );
+});
+
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar with automatic merge and inactivity settling", () => {
     const settings = decodeClientSettings({});
