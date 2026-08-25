@@ -196,6 +196,11 @@ pnpm lastcode:headless-service stop
 pnpm lastcode:headless-service start
 ```
 
+The first `install` writes and loads the LaunchAgent, then quits a running
+LastCode desktop once so the headless server can take ownership of the normal
+LastCode home. Launchd keeps the new service armed while the desktop exits.
+Later service starts and daily updates do not launch or quit the desktop.
+
 The service executes the server entry inside `/Applications/LastCode.app`, so
 the running server is always the version installed on htulo. Do not launch the
 desktop app against `~/.lastcode` while this service owns that home.

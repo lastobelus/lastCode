@@ -9,6 +9,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 
 export const HEADLESS_SERVICE_LABEL = "codes.lastobelus.lastcode.server";
 export const HEADLESS_SERVICE_PORT = 3773;
+const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const STOP_TIMEOUT_MS = 10_000;
 const START_TIMEOUT_MS = 30_000;
@@ -206,6 +207,39 @@ export function verifyHeadlessListener(options = {}) {
   return listener.stdout.split(/\r?\n/u).includes(`p${servicePid}`);
 }
 
+export function desktopAppIsRunning(options = {}) {
+  const runCommand = options.runCommand ?? run;
+  const result = runCommand("osascript", ["-e", `application id "${APP_BUNDLE_ID}" is running`], {
+    capture: true,
+  });
+  return result.stdout.trim() === "true";
+}
+
+export async function stopDesktopApp(options = {}) {
+  const isRunning = options.isDesktopRunning ?? (() => desktopAppIsRunning(options));
+  if (!isRunning()) return false;
+  const runCommand = options.runCommand ?? run;
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const now = options.now ?? Date.now;
+  const timeoutMs = options.desktopStopTimeoutMs ?? STOP_TIMEOUT_MS;
+  runCommand("osascript", [
+    "-e",
+    "ignoring application responses",
+    "-e",
+    `tell application id "${APP_BUNDLE_ID}" to quit`,
+    "-e",
+    "end ignoring",
+  ]);
+  const deadline = now() + timeoutMs;
+  while (isRunning()) {
+    if (now() >= deadline) {
+      fail(`LastCode desktop did not quit within ${timeoutMs / 1_000} seconds.`);
+    }
+    await wait(100);
+  }
+  return true;
+}
+
 export async function startHeadlessService(options = {}) {
   const home = options.home ?? NodeOS.homedir();
   const paths = headlessServicePaths(home, options.appPath);
@@ -217,7 +251,9 @@ export async function startHeadlessService(options = {}) {
   }
   const readServerVersion = options.readServerVersion ?? readPackagedServerVersion;
   const expectedServerVersion = options.expectedServerVersion ?? readServerVersion(options);
+  runCommand("launchctl", ["enable", serviceTarget(options)]);
   runCommand("launchctl", ["bootstrap", `gui/${options.uid ?? uid()}`, paths.plistPath]);
+  await options.afterBootstrap?.();
   return waitForHeadlessService({ ...options, expectedServerVersion });
 }
 
@@ -266,7 +302,11 @@ export async function installHeadlessService(options = {}) {
   runCommand("plutil", ["-lint", paths.plistPath]);
   if (options.start === false) return { ...paths, service: serviceTarget(options) };
   const expectedVersion = options.expectedVersion ?? readInstalledLastCodeVersion(options);
-  await restartHeadlessService({ ...options, expectedVersion });
+  await restartHeadlessService({
+    ...options,
+    afterBootstrap: () => stopDesktopApp(options),
+    expectedVersion,
+  });
   return { ...paths, service: serviceTarget(options) };
 }
 

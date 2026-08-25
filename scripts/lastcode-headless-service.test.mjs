@@ -12,6 +12,7 @@ import {
   parseHeadlessServiceOptions,
   renderHeadlessServicePlist,
   startHeadlessService,
+  stopDesktopApp,
   stopHeadlessService,
   verifyHeadlessListener,
   waitForHeadlessService,
@@ -70,6 +71,7 @@ describe("LastCode headless service", () => {
         status: 200,
       }),
       home,
+      isDesktopRunning: () => false,
       readAppVersion: () => "1.2.3",
       readServerVersion: () => "0.9.0",
       runCommand: (command, args, options) => {
@@ -97,10 +99,64 @@ describe("LastCode headless service", () => {
       },
       {
         command: "launchctl",
+        args: ["enable", `gui/501/${HEADLESS_SERVICE_LABEL}`],
+        options: undefined,
+      },
+      {
+        command: "launchctl",
         args: ["bootstrap", "gui/501", installed.plistPath],
         options: undefined,
       },
     ]);
+  });
+
+  it("arms launchd before quitting the desktop during first installation", async () => {
+    const home = temporaryDirectory();
+    const events = [];
+    let desktopRunning = true;
+    await installHeadlessService({
+      expectedVersion: "1.2.3",
+      fetchDescriptor: async () => ({
+        json: async () => descriptor("0.9.0"),
+        ok: true,
+        status: 200,
+      }),
+      home,
+      isDesktopRunning: () => desktopRunning,
+      readAppVersion: () => "1.2.3",
+      readServerVersion: () => "0.9.0",
+      runCommand: (command, args) => {
+        events.push(`${command} ${args[0]}`);
+        if (command === "osascript") desktopRunning = false;
+        return {
+          status: command === "launchctl" && args[0] === "print" ? 1 : 0,
+          stdout: "",
+        };
+      },
+      uid: 501,
+      verifyListenerOwnership: () => true,
+      wait: async () => {},
+    });
+
+    expect(events.indexOf("launchctl bootstrap")).toBeLessThan(events.indexOf("osascript -e"));
+  });
+
+  it("waits for the desktop to quit once asked", async () => {
+    const calls = [];
+    let checks = 0;
+    await expect(
+      stopDesktopApp({
+        isDesktopRunning: () => checks++ < 2,
+        now: (() => {
+          let value = 0;
+          return () => value++;
+        })(),
+        runCommand: (command, args) => calls.push({ args, command }),
+        wait: async () => {},
+      }),
+    ).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].command).toBe("osascript");
   });
 
   it("waits until the exact version is serving", async () => {
