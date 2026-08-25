@@ -59,7 +59,7 @@ be selected again. The option is hidden when the connected environment needs a s
 ## Legacy sidebar scale in LastCode
 
 When the legacy sidebar is enabled, LastCode can make its project and thread rows more compact.
-Open **Settings -> LastCode** and adjust **Scale legacy sidebar** from 50% through 100%. The 75%
+Open **Settings -> LastCode -> Appearance** and adjust **Scale legacy sidebar** from 50% through 100%. The 75%
 mark is labeled as a useful compact reference point. The default is 100%, and your selection is
 stored locally and retained when LastCode restarts.
 
@@ -68,3 +68,16 @@ status icons, remote cloud indicators, and relative timestamps at their standard
 LastCode header, Search field, Projects heading, drafts, status notices, and footer also stay at
 their standard size. On desktop, **View -> Actual Size**, **Zoom In**, and **Zoom Out** continue to
 zoom the whole application and compose with the legacy sidebar scale.
+
+## Environment icons in LastCode
+
+Open **Settings -> LastCode -> Environments** to choose the icon color for the primary machine and
+each saved remote environment. **Default** preserves the semantic icon treatment for each surface;
+a custom color is shown at full strength in sidebar rows, project headings, and thread details. The
+icon beside each environment name previews the selection.
+
+Remote environments use a Server icon. The primary machine uses a Monitor icon, which can be shown
+or hidden in thread cards and legacy thread rows with **Show local icon**. Legacy rows reserve the
+same icon space either way so their columns stay aligned. Mixed legacy project groups always show
+one icon for every environment in the group, including the primary machine, with duplicate
+environments collapsed to one icon.
