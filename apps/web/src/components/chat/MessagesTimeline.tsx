@@ -948,7 +948,7 @@ function TimelineMinimap({
                 {annotation?.anchorMessageId === item.messageId ? (
                   <button
                     aria-label="Thread annotation"
-                    className="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
+                    className="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
                     data-thread-annotation-marker
                     type="button"
                     onClick={(event) => {
@@ -972,7 +972,7 @@ function TimelineMinimap({
               }}
             >
               {activeItemHasAnnotation && annotation && threadRef ? (
-                <span className="block rounded-xl border border-border/80 bg-accent p-3 text-left text-accent-foreground shadow-xl shadow-black/25">
+                <span className="block rounded-xl border border-border/80 bg-warning/10 p-3 text-left text-warning-foreground shadow-xl shadow-black/25">
                   <ThreadAnnotationBody
                     annotation={annotation}
                     className="max-h-52 overflow-y-auto"
@@ -1031,14 +1031,14 @@ function TimelineMinimap({
           >
             <button
               aria-label="Annotation attached to an earlier message"
-              className="size-1.5 rounded-full bg-yellow-400 ring-1 ring-background/70 dark:bg-yellow-300"
+              className="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
               type="button"
               onClick={() => setOverflowAnnotationOpen((open) => !open)}
               onFocus={() => setOverflowAnnotationOpen(true)}
             />
             {overflowAnnotationOpen ? (
-              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-border/80 bg-accent p-3 text-left text-accent-foreground shadow-xl shadow-black/25">
-                <div className="mb-2 text-[11px] font-medium text-accent-foreground/55">
+              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-border/80 bg-warning/10 p-3 text-left text-warning-foreground shadow-xl shadow-black/25">
+                <div className="mb-2 text-[11px] font-medium text-warning-foreground">
                   Attached to an earlier message
                 </div>
                 <ThreadAnnotationBody
