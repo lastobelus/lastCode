@@ -185,7 +185,27 @@ password prompt.
 
 ### Daily htulo updates
 
-Htulo's external updater can be installed as a login LaunchAgent:
+Htulo runs the packaged LastCode server as a login LaunchAgent on the fixed
+loopback port `3773`. It uses the normal LastCode home and does not launch an
+Electron window, renderer, or GPU process:
+
+```bash
+pnpm lastcode:headless-service install
+pnpm lastcode:headless-service status
+pnpm lastcode:headless-service stop
+pnpm lastcode:headless-service start
+```
+
+The first `install` writes and loads the LaunchAgent, then quits a running
+LastCode desktop once so the headless server can take ownership of the normal
+LastCode home. Launchd keeps the new service armed while the desktop exits.
+Later service starts and daily updates do not launch or quit the desktop.
+
+The service executes the server entry inside `/Applications/LastCode.app`, so
+the running server is always the version installed on htulo. Do not launch the
+desktop app against `~/.lastcode` while this service owns that home.
+
+Htulo's external updater is a second login LaunchAgent:
 
 ```bash
 pnpm lastcode:daily-update install
@@ -197,10 +217,14 @@ At 04:00 each day it prepares and validates the newest eligible Intel app before
 interrupting work. If an update is ready, it uses htulo's local
 `lastcode-thread` command to ask every working thread to pause, waits for the
 explicit `PAUSED FOR LASTCODE UPDATE` replies, checks once for a newly started
-thread, quits LastCode once, swaps the app, launches it once, and tells the
-paused threads to resume. A missing reply leaves the prepared update in place
-for the next run and does not quit LastCode. Threads that may already have
-paused are always queued for a resume; undelivered resumes are kept in
+thread, stops the headless server, swaps the app, starts the same service on
+port `3773`, verifies the exact installed x64 build plus its packaged server
+through the public environment descriptor, and tells the paused threads to
+resume. If the new service does not become ready, the installer restores the
+previous app and restarts its server.
+A missing pause reply leaves the prepared update in place for the next run and
+does not stop the server. Threads that may already have paused are always
+queued for a resume; undelivered resumes are kept in
 `~/.lastcode/daily-update/pending-resumes.json` and retried before the next
 daily update check.
 
@@ -213,6 +237,19 @@ pnpm lastcode:daily-update run --bootstrap
 
 `--bootstrap` is never present in the scheduled LaunchAgent. Remove the schedule
 with `pnpm lastcode:daily-update uninstall`.
+
+For occasional desktop UI QA on htulo, stop any prior QA instance and run one
+isolated desktop process. Its state and port are deliberately separate from the
+production server:
+
+```bash
+T3CODE_HOME="$HOME/.lastcode-qa" \
+T3CODE_PORT=4773 \
+  /Applications/LastCode.app/Contents/MacOS/LastCode
+```
+
+Quit that desktop when QA is complete. Airy and browser clients continue to use
+the production htulo environment on port `3773` throughout.
 
 State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
 credential-free handoff contract for later drain and activation work. It names
