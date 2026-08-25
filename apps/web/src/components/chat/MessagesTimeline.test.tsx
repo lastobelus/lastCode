@@ -1,5 +1,6 @@
 import { CheckpointRef, EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
 import { codexFeedbackMessage } from "@t3tools/client-runtime/state/threads";
+import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
@@ -237,6 +238,28 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("initially collapses completed Action output to its header and final line", () => {
+    const actionText = formatActionResumeFollowUp({
+      actionName: "Run Full CI",
+      actionId: "run-full-ci",
+      validatedStatus: "succeeded",
+      exitCode: 0,
+      output: "full output hidden while collapsed\n[lastcode:ci] Summary: all checks passed",
+    });
+    const entry = buildAssistantTimelineEntry(actionText);
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[{ ...entry, message: { ...entry.message, role: "system" as const } }]}
+      />,
+    );
+
+    expect(markup).toContain("Action completed: Run Full CI Status: 0");
+    expect(markup).toContain("[lastcode:ci] Summary: all checks passed");
+    expect(markup).not.toContain("full output hidden while collapsed");
+    expect(markup).toContain('aria-expanded="false"');
+  });
+
   it("renders a feedback command and its pending response as normal thread messages", () => {
     const submission = {
       id: MessageId.make("feedback-command"),

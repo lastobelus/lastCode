@@ -4,6 +4,7 @@ import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
+import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
 import { SymbolView } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
@@ -1037,6 +1038,20 @@ function renderFeedEntry(
 
   if (entry.type === "message") {
     const { message } = entry;
+    const actionFollowUp =
+      message.role === "system" ? parseActionResumeFollowUp(message.text) : null;
+    if (actionFollowUp) {
+      return (
+        <ActionFollowUpCard
+          actionName={actionFollowUp.actionName}
+          exitCode={actionFollowUp.exitCode}
+          lastOutputLine={actionFollowUp.lastOutputLine}
+          output={actionFollowUp.output}
+          iconColor={iconSubtleColor}
+        />
+      );
+    }
+
     const isUser = message.role === "user";
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
@@ -1189,6 +1204,54 @@ function renderFeedEntry(
     />
   );
 }
+
+const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
+  readonly actionName: string;
+  readonly exitCode: number | null;
+  readonly lastOutputLine: string;
+  readonly output: string;
+  readonly iconColor: string | ColorValue;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const status = props.exitCode ?? "unavailable";
+
+  return (
+    <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+        className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+        onPress={() => setExpanded((value) => !value)}
+      >
+        <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
+        <Text
+          className="min-w-0 flex-1 font-t3-medium text-xs text-amber-800 dark:text-amber-200"
+          numberOfLines={1}
+        >
+          Action completed: {props.actionName} Status: {status}
+        </Text>
+        <SymbolView
+          name={expanded ? "chevron.down" : "chevron.right"}
+          size={14}
+          tintColor={props.iconColor}
+          type="monochrome"
+        />
+      </Pressable>
+      {expanded ? (
+        <ScrollView className="max-h-96 px-3 pb-2.5 pt-2">
+          <Text selectable className="font-mono text-xs text-foreground">
+            {props.output}
+          </Text>
+        </ScrollView>
+      ) : (
+        <Text className="px-3 pb-2.5 pt-1 text-sm text-foreground" numberOfLines={1}>
+          {props.lastOutputLine}
+        </Text>
+      )}
+    </View>
+  );
+});
 
 const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly startedAt: string }) {
   const [nowMs, setNowMs] = useState(() => Date.now());

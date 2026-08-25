@@ -7,6 +7,8 @@ import {
   decideWaitForPr,
   decideWaitTimeout,
   deriveReviewState,
+  formatWaitForPrFailureSummary,
+  formatWaitForPrSummary,
   latestCodexReviewTrigger,
   MERGE_RECOMPUTE_TIMEOUT_MS,
   pullRequestViewArgs,
@@ -94,6 +96,20 @@ function observation(
 }
 
 describe("lastcode-wait-for-pr", () => {
+  it("formats a concise final summary for resumable output", () => {
+    const current = observation({ ci: satisfiedCi, review: handledReview });
+    const decision = decideWaitForPr(observation(), current);
+    expect(decision.kind).toBe("wake");
+    if (decision.kind !== "wake") return;
+
+    expect(formatWaitForPrSummary(decision, current)).toContain(
+      '[wait-for-pr] Summary: {"reason":"ready"',
+    );
+    expect(formatWaitForPrFailureSummary(new Error("gh failed\nrequest timed out"))).toBe(
+      "[wait-for-pr] Summary: failed: gh failed request timed out",
+    );
+  });
+
   it("passes the checked-out branch explicitly when resolving its pull request", () => {
     expect(pullRequestViewArgs("lastobelus/lastCode", "lastcode/wait-for-pr")).toEqual([
       "pr",

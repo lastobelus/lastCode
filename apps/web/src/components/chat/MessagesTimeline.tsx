@@ -16,6 +16,7 @@ import {
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
+import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import {
   createContext,
   Fragment,
@@ -1330,6 +1331,42 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
 function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const [actionOutputExpanded, setActionOutputExpanded] = useState(false);
+  const actionFollowUp = parseActionResumeFollowUp(row.message.text);
+
+  if (actionFollowUp) {
+    const status = actionFollowUp.exitCode ?? "unavailable";
+    return (
+      <div className="mx-1 overflow-hidden rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06]">
+        <button
+          type="button"
+          aria-expanded={actionOutputExpanded}
+          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
+          onClick={() => setActionOutputExpanded((expanded) => !expanded)}
+        >
+          <BotIcon aria-hidden className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            Action completed: {actionFollowUp.actionName} Status: {status}
+          </span>
+          {actionOutputExpanded ? (
+            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+          ) : (
+            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+          )}
+        </button>
+        {actionOutputExpanded ? (
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words px-3 pb-2.5 pt-2 font-mono text-xs text-foreground/90">
+            {actionFollowUp.output}
+          </pre>
+        ) : (
+          <p className="truncate px-3 pb-2.5 pt-1 text-sm text-foreground/90">
+            {actionFollowUp.lastOutputLine}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mx-1 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2.5">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-yellow-800 dark:text-yellow-200">
