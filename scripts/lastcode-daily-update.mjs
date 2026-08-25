@@ -11,11 +11,14 @@ import * as NodeUtil from "node:util";
 
 import {
   cleanupPreparedInstall,
-  launchApp,
   prepareDmgInstall,
-  quitApp,
   replacePreparedApp,
 } from "./lastcode-install.mjs";
+import {
+  readInstalledLastCodeVersion,
+  restartHeadlessService,
+  stopHeadlessService,
+} from "./lastcode-headless-service.mjs";
 import { stageIntelUpdate } from "./lastcode-intel-stage.mjs";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -28,6 +31,7 @@ const RESUME_MESSAGE =
   "LastCode has been updated and restarted. Resume from your paused checkpoint.";
 const COPIED_MODULES = [
   "lastcode-daily-update.mjs",
+  "lastcode-headless-service.mjs",
   "lastcode-install.mjs",
   "lastcode-intel-release.mjs",
   "lastcode-intel-stage.mjs",
@@ -188,8 +192,20 @@ export async function runDailyUpdate(options = {}, dependencies) {
 
     let updateError;
     try {
-      await dependencies.quitApp();
-      await dependencies.replaceApp(prepared);
+      try {
+        await dependencies.stopService();
+      } catch (error) {
+        try {
+          await dependencies.restartService();
+        } catch (restartError) {
+          const stopDetail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Could not restore the server after shutdown failed: ${stopDetail}`, {
+            cause: restartError,
+          });
+        }
+        throw error;
+      }
+      await dependencies.replaceApp(prepared, staged.pending.version);
     } catch (error) {
       updateError = error;
     }
@@ -203,6 +219,21 @@ export async function runDailyUpdate(options = {}, dependencies) {
       dependencies.cleanupInstall(prepared);
     }
   }
+}
+
+export async function replacePreparedHeadlessApp(prepared, expectedVersion, dependencies = {}) {
+  const replaceApp = dependencies.replaceApp ?? replacePreparedApp;
+  const restartService = dependencies.restartService ?? restartHeadlessService;
+  const readVersion = dependencies.readVersion ?? readInstalledLastCodeVersion;
+  const hadInstalledApp = NodeFS.existsSync(prepared.targetPath);
+  return replaceApp(prepared, {
+    launchApp: async (appPath) => {
+      const installedVersion = readVersion({ appPath });
+      const launchVersion =
+        prepared.oldAppMoved || !hadInstalledApp ? expectedVersion : installedVersion;
+      return restartService({ appPath, expectedVersion: launchVersion });
+    },
+  });
 }
 
 async function threadCommand(threadTool, args) {
@@ -262,10 +293,10 @@ function defaultDependencies(home) {
       }
     },
     prepareInstall: prepareDmgInstall,
-    quitApp,
-    replaceApp: (prepared) =>
-      replacePreparedApp(prepared, {
-        launchApp: (appPath) => launchApp(appPath, { maxLaunchAttempts: 1 }),
+    replaceApp: (prepared, expectedVersion) =>
+      replacePreparedHeadlessApp(prepared, expectedVersion, {
+        readVersion: (serviceOptions) => readInstalledLastCodeVersion({ ...serviceOptions, home }),
+        restartService: (serviceOptions) => restartHeadlessService({ ...serviceOptions, home }),
       }),
     resumeThread: (threadId, message) => resumeThread(threadTool, threadId, message),
     savePendingResumes: (pending) => {
@@ -285,6 +316,11 @@ function defaultDependencies(home) {
         "10 minutes",
       ]),
     stageUpdate: (stageOptions) => stageIntelUpdate(stageOptions),
+    restartService: () => {
+      const expectedVersion = readInstalledLastCodeVersion({ home });
+      return restartHeadlessService({ expectedVersion, home });
+    },
+    stopService: () => stopHeadlessService({ home }),
   };
 }
 
