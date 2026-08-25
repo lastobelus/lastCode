@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { EnvironmentId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
@@ -135,6 +135,9 @@ export const EnvironmentIdentificationMode = Schema.Literals(["artwork", "pill",
 export type EnvironmentIdentificationMode = typeof EnvironmentIdentificationMode.Type;
 export const DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE: EnvironmentIdentificationMode = "artwork";
 
+export const EnvironmentIconColor = TrimmedNonEmptyString.check(Schema.isPattern(/^#[\da-f]{6}$/i));
+export type EnvironmentIconColor = typeof EnvironmentIconColor.Type;
+
 /**
  * A user-chosen font family (a single name or a comma-separated list). Empty
  * means "use the app default"; clients compose their own fallback stacks.
@@ -184,6 +187,9 @@ export const ClientSettingsSchema = Schema.Struct({
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
+  ),
+  environmentIconColors: Schema.Record(EnvironmentId, EnvironmentIconColor).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
@@ -246,6 +252,7 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
   roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -922,6 +929,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
+  environmentIconColors: Schema.optionalKey(Schema.Record(EnvironmentId, EnvironmentIconColor)),
   glassOpacity: Schema.optionalKey(GlassOpacity),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),
@@ -958,6 +966,7 @@ export const ClientSettingsPatch = Schema.Struct({
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
   roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
+  showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
