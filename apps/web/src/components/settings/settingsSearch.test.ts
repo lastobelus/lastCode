@@ -60,6 +60,9 @@ describe("searchSettings", () => {
     } finally {
       localeLowerCase.mockRestore();
     }
+    expect(searchSettings("compact status").map((item) => item.id)).toEqual([
+      "compact-status-indicators",
+    ]);
     expect(searchSettings("xyzzy")).toEqual([]);
   });
 

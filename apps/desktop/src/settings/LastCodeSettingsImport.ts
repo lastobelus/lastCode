@@ -236,6 +236,7 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
     ...source,
     favorites,
     providerModelPreferences,
+    compactLegacySidebarStatuses: destination.compactLegacySidebarStatuses,
     environmentIconColors: destination.environmentIconColors,
     legacySidebarScale: destination.legacySidebarScale,
     roundedProjectIcons: destination.roundedProjectIcons,
