@@ -2,8 +2,6 @@ import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
-  CloudIcon,
-  ContainerIcon,
   FolderPlusIcon,
   Globe2Icon,
   LoaderIcon,
@@ -52,6 +50,7 @@ import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 import {
   type ContextMenuItem,
+  type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
@@ -127,6 +126,12 @@ import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { legacySidebarScaleStyle } from "../legacySidebarScale";
+import {
+  EnvironmentIcon,
+  legacyThreadEnvironmentPresentation,
+  projectEnvironmentIconEntries,
+  resolveEnvironmentIconColor,
+} from "../environmentIcons";
 
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
@@ -432,20 +437,35 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   });
   const environment = useEnvironment(thread.environmentId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const showLocalEnvironmentIcon = useClientSettings(
+    (settings) => settings.showLocalEnvironmentIcon,
+  );
+  const configuredEnvironmentIconColor = useClientSettings(
+    (settings) => settings.environmentIconColors[thread.environmentId],
+  );
   const isRemoteThread =
     primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
   const remoteEnvLabel = environment?.label ?? null;
   // A desktop-local secondary backend (e.g. the WSL backend) shows up as a
   // bearer environment whose connection id is prefixed "local:". It runs on the
-  // user's own machine, so the cloud icon is misleading — label it "Local" and
-  // suppress the cloud icon (the project header already shows a container icon
+  // user's own machine, so a remote-server icon is misleading — label it "Local" and
+  // suppress the row icon (the project header already shows a container icon
   // for desktop-local projects, see sidebarProjectGrouping).
   const isDesktopLocalThread =
     environment !== null && isDesktopLocalConnectionTarget(environment.entry.target);
-  const showsRemoteThreadIcon = isRemoteThread && !isDesktopLocalThread;
-  const threadEnvironmentLabel = isRemoteThread
-    ? (remoteEnvLabel ?? (isDesktopLocalThread ? "Local" : "Remote"))
-    : null;
+  const environmentPresentation = legacyThreadEnvironmentPresentation({
+    isPrimary: !isRemoteThread,
+    isDesktopLocal: isDesktopLocalThread,
+    showLocalEnvironmentIcon,
+    environmentLabel: remoteEnvLabel,
+  });
+  const showsThreadEnvironmentIcon = environmentPresentation.showRowIcon;
+  const threadEnvironmentLabel = environmentPresentation.hoverLabel;
+  const threadEnvironmentIconKind = environmentPresentation.kind;
+  const environmentIconColor = resolveEnvironmentIconColor(
+    configuredEnvironmentIconColor,
+    environment !== null && !isDesktopLocalThread,
+  );
   // For grouped projects, the thread may belong to a different environment
   // than the representative project.  Look up the thread's own project cwd
   // so git status (and thus PR detection) queries the correct path.
@@ -534,6 +554,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     <SidebarThreadHoverContent
       branchMismatch={branchMismatch}
       environmentLabel={threadEnvironmentLabel}
+      environmentIconKind={threadEnvironmentIconKind}
+      environmentIconColor={environmentIconColor}
       modelInstanceId={modelInstanceId}
       modelLabel={modelLabel}
       projectCwd={threadProjectCwd ?? props.projectCwd}
@@ -936,24 +958,31 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               isRemoteThread ? "max-sm:min-w-24" : "max-sm:min-w-20"
             }`}
           >
-            {showsRemoteThreadIcon && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <span
-                      aria-label={threadEnvironmentLabel ?? "Remote"}
-                      className={`inline-flex shrink-0 items-center justify-center ${
-                        isConfirmingArchive ? "invisible" : ""
-                      }`}
-                      data-legacy-sidebar-unscaled-content
+            <span className="inline-flex size-3 shrink-0 items-center justify-center">
+              {showsThreadEnvironmentIcon ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span
+                        aria-label={threadEnvironmentLabel ?? "Remote"}
+                        className={`inline-flex shrink-0 items-center justify-center ${
+                          isConfirmingArchive ? "invisible" : ""
+                        }`}
+                        data-legacy-sidebar-unscaled-content
+                      />
+                    }
+                  >
+                    <EnvironmentIcon
+                      kind={threadEnvironmentIconKind}
+                      context="legacy-row"
+                      color={environmentIconColor}
+                      className="size-3"
                     />
-                  }
-                >
-                  <CloudIcon className="size-3 text-muted-foreground/40" />
-                </TooltipTrigger>
-                <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
-              </Tooltip>
-            )}
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+                </Tooltip>
+              ) : null}
+            </span>
             {isConfirmingArchive ? (
               <button
                 ref={handleConfirmArchiveRef}
@@ -1314,6 +1343,8 @@ interface SidebarProjectItemProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
+  desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
+  knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1366,6 +1397,26 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     (settings) => settings.confirmThreadArchive,
   );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const environmentIconColors = useClientSettings((settings) => settings.environmentIconColors);
+  const showLocalEnvironmentIcon = useClientSettings(
+    (settings) => settings.showLocalEnvironmentIcon,
+  );
+  const projectEnvironmentIcons = useMemo(
+    () =>
+      projectEnvironmentIconEntries({
+        members: project.memberProjects,
+        primaryEnvironmentId,
+        desktopLocalEnvironmentIds: props.desktopLocalEnvironmentIds,
+        showLocalEnvironmentIcon,
+      }),
+    [
+      primaryEnvironmentId,
+      project.memberProjects,
+      props.desktopLocalEnvironmentIds,
+      showLocalEnvironmentIcon,
+    ],
+  );
   const deleteProject = useAtomCommand(projectEnvironment.delete, {
     reportFailure: false,
   });
@@ -2584,6 +2635,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           className={`pr-8 group-hover/project-header:bg-sidebar-row-hover group-hover/project-header:text-sidebar-foreground max-sm:pr-14 ${
             isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : ""
           }`}
+          style={
+            projectEnvironmentIcons.length > 0
+              ? { paddingRight: `calc(2.25rem + ${projectEnvironmentIcons.length}rem)` }
+              : undefined
+          }
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.listeners : {})}
           onPointerDownCapture={handleProjectButtonPointerDownCapture}
@@ -2636,35 +2692,43 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ) : null}
           </span>
         </SidebarMenuButton>
-        {/* Environment badge – visible by default, crossfades with the
-            "new thread" button on hover using the same pointer-events +
-            opacity pattern as the thread row archive/timestamp swap. */}
-        {project.environmentPresence === "remote-only" && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <span
-                  aria-label={
-                    project.allRemoteMembersAreDesktopLocal
-                      ? "Local sandbox project"
-                      : "Remote project"
+        {/* Environment badges stay left of the New thread action so mixed
+            groups remain inspectable without overlapping the action or title. */}
+        {projectEnvironmentIcons.length > 0 && (
+          <span
+            aria-label={`Project environments: ${projectEnvironmentIcons.map((entry) => entry.label).join(", ")}`}
+            className="pointer-events-none absolute top-1 right-8 inline-flex h-5 items-center justify-center gap-1 rounded-md"
+          >
+            {projectEnvironmentIcons.map((entry) => (
+              <Tooltip key={entry.environmentId}>
+                <TooltipTrigger
+                  render={
+                    <span
+                      role="img"
+                      tabIndex={0}
+                      aria-label={entry.label}
+                      className="pointer-events-auto inline-flex size-3 items-center justify-center"
+                    />
                   }
-                  className="pointer-events-none absolute top-1 right-1.5 inline-flex size-5 items-center justify-center rounded-md text-icon-muted transition-opacity duration-150 max-sm:right-7 group-hover/project-header:opacity-0 group-focus-within/project-header:opacity-0 max-sm:group-hover/project-header:opacity-100 max-sm:group-focus-within/project-header:opacity-100"
-                />
-              }
-            >
-              {project.allRemoteMembersAreDesktopLocal ? (
-                <ContainerIcon className="size-3" />
-              ) : (
-                <CloudIcon className="size-3" />
-              )}
-            </TooltipTrigger>
-            <TooltipPopup side="top">
-              {project.allRemoteMembersAreDesktopLocal
-                ? `Local sandbox: ${project.remoteEnvironmentLabels.join(", ")}`
-                : `Remote environment: ${project.remoteEnvironmentLabels.join(", ")}`}
-            </TooltipPopup>
-          </Tooltip>
+                >
+                  <EnvironmentIcon
+                    kind={entry.kind}
+                    context="project"
+                    color={
+                      entry.kind === "container"
+                        ? undefined
+                        : resolveEnvironmentIconColor(
+                            environmentIconColors[entry.environmentId],
+                            props.knownEnvironmentIds.has(entry.environmentId),
+                          )
+                    }
+                    className="size-3"
+                  />
+                </TooltipTrigger>
+                <TooltipPopup side="top">{entry.label}</TooltipPopup>
+              </Tooltip>
+            ))}
+          </span>
         )}
         <Tooltip>
           <TooltipTrigger
@@ -3148,6 +3212,8 @@ interface SidebarProjectsContentProps {
   legacySidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
+  desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
+  knownEnvironmentIds: ReadonlySet<EnvironmentId>;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -3259,6 +3325,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     legacySidebarScale,
     projectTreeScaleStyle,
     providerEntriesByEnvironmentId,
+    desktopLocalEnvironmentIds,
+    knownEnvironmentIds,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3388,6 +3456,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         legacySidebarScale={legacySidebarScale}
                         scaleStyle={projectTreeScaleStyle}
                         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
+                        desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
+                        knownEnvironmentIds={knownEnvironmentIds}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3424,6 +3494,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 legacySidebarScale={legacySidebarScale}
                 scaleStyle={projectTreeScaleStyle}
                 providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
+                desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
+                knownEnvironmentIds={knownEnvironmentIds}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3552,6 +3624,10 @@ export default function LegacySidebar() {
           .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
           .map((environment) => environment.environmentId),
       ),
+    [environments],
+  );
+  const knownEnvironmentIds = useMemo(
+    () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
   const orderedProjects = useMemo(() => {
@@ -4160,6 +4236,8 @@ export default function LegacySidebar() {
         legacySidebarScale={legacySidebarScale}
         projectTreeScaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
+        desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
+        knownEnvironmentIds={knownEnvironmentIds}
       />
       <SidebarChromeFooter />
     </>
