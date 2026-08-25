@@ -8,16 +8,22 @@ import {
   MAX_LEGACY_SIDEBAR_SCALE,
   MIN_LEGACY_SIDEBAR_SCALE,
 } from "@t3tools/contracts/settings";
-import { DownloadIcon, MoonStarIcon } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useState } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 
+import { environmentCatalog } from "../../connection/catalog";
 import { isElectron } from "../../env";
-import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
+import { EnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
+import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { searchableSetting } from "./settingsSearch";
+import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
+import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
 import {
   SettingResetButton,
   SettingsPageContainer,
@@ -28,7 +34,9 @@ import {
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdatePrimarySettings();
+  const updateClientSettings = useUpdateClientSettings();
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
   const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -130,6 +138,14 @@ export function LastCodeSettingsPanel() {
     "--settings-slider-progress": `${legacySidebarScaleRatio * 100}%`,
     "--settings-slider-fill-offset": `${0.5 - legacySidebarScaleRatio}rem`,
   } as CSSProperties;
+  const environmentSettings = useMemo(
+    () =>
+      deriveLastCodeEnvironmentSettingEntries({
+        entries: catalog.entries,
+        primaryEnvironmentId,
+      }),
+    [catalog.entries, primaryEnvironmentId],
+  );
 
   return (
     <SettingsPageContainer>
@@ -149,6 +165,8 @@ export function LastCodeSettingsPanel() {
             />
           }
         />
+      </SettingsSection>
+      <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
         <SettingsRow
           {...searchableSetting("scale-legacy-sidebar")}
           description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
@@ -216,6 +234,70 @@ export function LastCodeSettingsPanel() {
             />
           }
         />
+      </SettingsSection>
+      <SettingsSection
+        id="environment-icons"
+        title="Environments"
+        icon={<ServerIcon className="size-5" />}
+      >
+        {environmentSettings.map((environment) => {
+          const color = clientSettings.environmentIconColors[environment.environmentId];
+          const isLocal = environment.kind === "local";
+          return (
+            <SettingsRow
+              key={environment.environmentId}
+              title={
+                <span className="inline-flex min-w-0 items-center gap-2">
+                  <EnvironmentIcon
+                    kind={isLocal ? "monitor" : "server"}
+                    context="settings"
+                    color={color}
+                    className="size-4 shrink-0"
+                  />
+                  <span className="truncate">{environment.label}</span>
+                </span>
+              }
+              description={isLocal ? "Primary machine" : "Saved remote environment"}
+            >
+              <div className="space-y-4 px-0 pb-3 sm:px-4">
+                <ProviderAccentColorPicker
+                  displayName={environment.label}
+                  value={color}
+                  label="Icon color"
+                  defaultOptionLabel="Default"
+                  commitDelayMs={120}
+                  onCommit={(value) =>
+                    updateClientSettings((settings) => ({
+                      environmentIconColors: updateEnvironmentIconColors(
+                        settings.environmentIconColors,
+                        environment.environmentId,
+                        value,
+                      ),
+                    }))
+                  }
+                  description="Used for this environment in sidebars and thread details."
+                />
+                {isLocal ? (
+                  <div className="flex items-center justify-between gap-6 border-border/70 border-t pt-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-xs font-medium text-foreground">Show local icon</div>
+                      <p className="max-w-xl text-xs leading-[1.45] text-muted-foreground">
+                        Show a Monitor icon for local threads. Legacy rows always reserve its space.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={clientSettings.showLocalEnvironmentIcon}
+                      onCheckedChange={(checked) =>
+                        updateClientSettings({ showLocalEnvironmentIcon: Boolean(checked) })
+                      }
+                      aria-label="Show local icon"
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </SettingsRow>
+          );
+        })}
       </SettingsSection>
       <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
         <SettingsRow
