@@ -13,6 +13,7 @@ const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const STOP_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 30_000;
+const READINESS_REQUEST_TIMEOUT_MS = 2_000;
 const VERSION_TIMEOUT_MS = 10_000;
 
 function fail(message) {
@@ -161,7 +162,9 @@ export async function waitForHeadlessService(options = {}) {
   let lastError;
   while (now() < deadline) {
     try {
-      const response = await fetchDescriptor(Math.max(1, deadline - now()));
+      const response = await fetchDescriptor(
+        Math.min(READINESS_REQUEST_TIMEOUT_MS, Math.max(1, deadline - now())),
+      );
       if (!response.ok) throw new Error(`readiness returned HTTP ${String(response.status)}`);
       const descriptor = await response.json();
       if (descriptor?.serverVersion !== expectedServerVersion) {
