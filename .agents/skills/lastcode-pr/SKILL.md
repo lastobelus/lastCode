@@ -47,9 +47,13 @@ current GitHub thread and review-query mechanics.
 1. Inspect comments and thread-level review state newer than the latest push.
 2. Verify each bot finding against the source. Fix real defects; reply with a
    concrete reason when a finding is false. Resolve only addressed threads.
-3. Request `@codex review` after each fix push. Do not merge until Codex gives an
-   explicit clean result for the exact current head and no review thread remains
-   unresolved.
+   When rejecting a top-level issue-comment or body-only formal finding without
+   pushing a fix or resolving an inline thread, post the exact handled marker
+   documented in the external-review reference before relaunching `Wait for PR`.
+3. After each fix push, request review using the exact-head format in
+   `../_references/external-review-mechanics.md`. Do not merge until Codex gives
+   an explicit clean result or every finding for the exact current head has a
+   durable handled state, and no review thread remains unresolved.
 4. Run `pnpm lastcode:ci` from a clean branch. Its full-CI stamp must match the
    exact head and fetched `origin/lastcode/main` base.
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
