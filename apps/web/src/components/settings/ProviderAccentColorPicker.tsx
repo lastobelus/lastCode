@@ -82,6 +82,7 @@ function hsvToHex(hue: number, saturation: number, value: number) {
 
 function ProviderCustomColorPanel(props: {
   readonly value: string;
+  readonly label: string;
   readonly onCommit: (value: string) => void;
 }) {
   const { onCommit } = props;
@@ -170,7 +171,7 @@ function ProviderCustomColorPanel(props: {
             props.onCommit(nextColor);
           }}
           className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-ring"
-          aria-label="Custom hex accent color"
+          aria-label={`Custom hex ${props.label.toLowerCase()}`}
           spellCheck={false}
         />
       </div>
@@ -180,6 +181,7 @@ function ProviderCustomColorPanel(props: {
 
 function ProviderCustomColorPicker(props: {
   readonly displayName: string;
+  readonly label: string;
   readonly value: string | undefined;
   readonly selected: boolean;
   readonly onCommit: (value: string) => void;
@@ -204,7 +206,7 @@ function ProviderCustomColorPicker(props: {
                   }
                 : {}),
             }}
-            aria-label={`Choose custom accent color for ${props.displayName}`}
+            aria-label={`Choose custom ${props.label.toLowerCase()} for ${props.displayName}`}
           >
             <PipetteIcon className="size-3 text-foreground/25" aria-hidden />
           </button>
@@ -216,7 +218,11 @@ function ProviderCustomColorPicker(props: {
         sideOffset={6}
         className="overflow-hidden rounded-md p-0 [--viewport-inline-padding:0px] [&_[data-slot=popover-viewport]]:p-0"
       >
-        <ProviderCustomColorPanel value={normalized} onCommit={props.onCommit} />
+        <ProviderCustomColorPanel
+          value={normalized}
+          label={props.label}
+          onCommit={props.onCommit}
+        />
       </PopoverPopup>
     </Popover>
   );
@@ -226,10 +232,20 @@ export function ProviderAccentColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
+  readonly label?: string;
+  readonly defaultOptionLabel?: string;
   readonly description?: string;
   readonly commitDelayMs?: number;
 }) {
-  const { commitDelayMs = 0, description, displayName, onCommit, value } = props;
+  const {
+    commitDelayMs = 0,
+    defaultOptionLabel,
+    description,
+    displayName,
+    label = "Accent color",
+    onCommit,
+    value,
+  } = props;
   const [optimisticValue, setOptimisticValue] = useState(() => value ?? "");
   const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingCommitRef = useRef<string | null>(null);
@@ -297,14 +313,27 @@ export function ProviderAccentColorPicker(props: {
 
   return (
     <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">Accent color</span>
+      <span className="text-xs font-medium text-foreground">{label}</span>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <ProviderCustomColorPicker
           displayName={displayName}
+          label={label}
           value={normalized}
           selected={customSelected}
           onCommit={commitAccentColor}
         />
+        {defaultOptionLabel ? (
+          <button
+            type="button"
+            className={cn(
+              "size-6 shrink-0 cursor-pointer rounded-full bg-muted-foreground transition-transform duration-200 hover:scale-105 active:scale-90",
+              normalized === undefined &&
+                "ring-2 ring-muted-foreground ring-offset-2 ring-offset-card",
+            )}
+            onClick={() => commitAccentColor("")}
+            aria-label={`${defaultOptionLabel} icon color for ${displayName}`}
+          />
+        ) : null}
         <ColorSelector
           key={selectedValue}
           colors={[...PROVIDER_ACCENT_SWATCHES]}
@@ -313,21 +342,23 @@ export function ProviderAccentColorPicker(props: {
           onColorSelect={commitAccentColor}
           className="flex-wrap gap-1.5"
         />
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className={cn(
-            "size-7 shrink-0 text-muted-foreground transition-opacity",
-            normalized ? "opacity-100" : "pointer-events-none opacity-0",
-          )}
-          onClick={() => commitAccentColor("")}
-          aria-label={`Clear accent color for ${displayName}`}
-          aria-hidden={!normalized}
-          tabIndex={normalized ? 0 : -1}
-        >
-          <XIcon className="size-3.5" aria-hidden />
-        </Button>
+        {defaultOptionLabel ? null : (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className={cn(
+              "size-7 shrink-0 text-muted-foreground transition-opacity",
+              normalized ? "opacity-100" : "pointer-events-none opacity-0",
+            )}
+            onClick={() => commitAccentColor("")}
+            aria-label={`Clear accent color for ${displayName}`}
+            aria-hidden={!normalized}
+            tabIndex={normalized ? 0 : -1}
+          >
+            <XIcon className="size-3.5" aria-hidden />
+          </Button>
+        )}
       </div>
       {description ? <span className="text-xs text-muted-foreground">{description}</span> : null}
     </div>
