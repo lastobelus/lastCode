@@ -177,13 +177,13 @@ describe("lastcode-wait-for-pr", () => {
           id: 12,
           user: { login: "chatgpt-codex-connector[bot]" },
           content: "+1",
-          created_at: "2026-08-24T10:02:00Z",
+          created_at: "2026-08-24T10:00:00Z",
         },
       ],
     });
     expect(thumbsUp).toMatchObject({ requestPresent: true, pending: false });
     expect(thumbsUp.terminalArtifacts).toEqual([
-      { key: "reaction:12", observedAt: "2026-08-24T10:02:00Z" },
+      { key: "reaction:12", observedAt: "2026-08-24T10:00:00Z" },
     ]);
   });
 

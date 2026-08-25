@@ -250,7 +250,7 @@ export function deriveReviewState(input: {
   return {
     terminalArtifacts: artifacts,
     requestPresent,
-    pending: requestPresent && latestTerminalAt <= latestPendingAt,
+    pending: requestPresent && latestTerminalAt < latestPendingAt,
     latestTriggerId: latestTrigger?.id ?? null,
   };
 }
