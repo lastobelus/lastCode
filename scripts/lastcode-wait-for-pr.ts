@@ -488,6 +488,18 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
   if (pullRequest.mergeable === "UNKNOWN" || pullRequest.mergeStateStatus === "UNKNOWN") {
     return { kind: "wait", reason: "mergeability-pending" };
   }
+  if (
+    current.ci === "success" &&
+    !current.review.pending &&
+    current.review.ready &&
+    pullRequest.mergeStateStatus === "BLOCKED"
+  ) {
+    return {
+      kind: "wake",
+      reason: "merge-blocked",
+      detail: `Pull request #${pullRequest.number} is blocked by a repository merge requirement.`,
+    };
+  }
   if (current.ci === "success" && !current.review.pending && current.review.ready) {
     return {
       kind: "wake",

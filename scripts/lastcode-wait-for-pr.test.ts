@@ -57,7 +57,7 @@ function observation(
       baseRefOid: input.base ?? BASE,
       baseRefName: input.baseRefName ?? "lastcode/main",
       mergeable: input.mergeable ?? "MERGEABLE",
-      mergeStateStatus: input.mergeStateStatus ?? "BLOCKED",
+      mergeStateStatus: input.mergeStateStatus ?? "CLEAN",
       statusCheckRollup: [],
     },
     ci: input.ci ?? "pending",
@@ -166,8 +166,8 @@ describe("lastcode-wait-for-pr", () => {
   });
 
   it("wakes for blocked mergeability without treating ordinary BLOCKED status as a conflict", () => {
-    const baseline = observation();
-    expect(decideWaitForPr(baseline, observation())).toEqual({
+    const baseline = observation({ mergeStateStatus: "BLOCKED" });
+    expect(decideWaitForPr(baseline, observation({ mergeStateStatus: "BLOCKED" }))).toEqual({
       kind: "wait",
       reason: "review-pending",
     });
@@ -179,6 +179,16 @@ describe("lastcode-wait-for-pr", () => {
       kind: "wake",
       reason: "merge-blocked",
     });
+    expect(
+      decideWaitForPr(
+        observation({ review: handledReview, mergeStateStatus: "BLOCKED" }),
+        observation({
+          ci: "success",
+          review: handledReview,
+          mergeStateStatus: "BLOCKED",
+        }),
+      ),
+    ).toMatchObject({ kind: "wake", reason: "merge-blocked" });
   });
 
   it("keeps eyes pending and accepts thumbs-up on an exact-head request", () => {
