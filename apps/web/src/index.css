@@ -2178,10 +2178,10 @@ code {
   color: var(--contrast-muted-foreground);
 }
 
-/* Annotation previews sit inside the sidebar's compact thread hover. Match
-   that surface instead of inheriting conversation-scale Markdown headings. */
+/* Annotation previews sit on warning-tinted surfaces. Match that foreground
+   instead of inheriting conversation-scale Markdown headings. */
 .chat-markdown.thread-annotation-compact {
-  color: color-mix(in oklab, var(--accent-foreground) 75%, transparent);
+  color: var(--warning-foreground);
   font-size: var(--text-xs);
   line-height: var(--text-xs--line-height);
 }
@@ -2193,7 +2193,7 @@ code {
 .chat-markdown.thread-annotation-compact h5,
 .chat-markdown.thread-annotation-compact h6 {
   margin: 0.5rem 0 0.25rem;
-  color: var(--accent-foreground);
+  color: var(--warning-foreground);
   font-size: var(--text-xs);
   line-height: 1;
 }
