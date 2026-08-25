@@ -31,7 +31,7 @@ import {
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import type { EnvironmentIconColor, TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
@@ -626,6 +626,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   currentEnvironmentId: string | null;
   environmentLabel: string | null;
   environmentKnown: boolean;
+  showLocalEnvironmentIcon: boolean;
+  configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
   projectFaviconPath: string | null;
   projectTitle: string | null;
@@ -904,14 +906,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
 
   const isRemote =
     props.currentEnvironmentId !== null && thread.environmentId !== props.currentEnvironmentId;
-  const showLocalEnvironmentIcon = useClientSettings(
-    (settings) => settings.showLocalEnvironmentIcon,
-  );
-  const configuredEnvironmentIconColor = useClientSettings(
-    (settings) => settings.environmentIconColors[thread.environmentId],
-  );
   const environmentIconColor = resolveEnvironmentIconColor(
-    configuredEnvironmentIconColor,
+    props.configuredEnvironmentIconColor,
     props.environmentKnown,
   );
   const environmentIconKind = isRemote ? "server" : "monitor";
@@ -1628,7 +1624,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
-                {showV2ThreadCardEnvironmentIcon(!isRemote, showLocalEnvironmentIcon) ? (
+                {showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon) ? (
                   <span className="inline-flex shrink-0 items-center">
                     <EnvironmentIcon
                       aria-hidden
@@ -1688,6 +1684,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   projectTitle: string | null;
   environmentLabel: string | null;
   environmentKnown: boolean;
+  configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1697,11 +1694,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 }) {
   const { thread } = props;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const configuredEnvironmentIconColor = useClientSettings(
-    (settings) => settings.environmentIconColors[thread.environmentId],
-  );
   const environmentIconColor = resolveEnvironmentIconColor(
-    configuredEnvironmentIconColor,
+    props.configuredEnvironmentIconColor,
     props.environmentKnown,
   );
   // Same details tooltip as the regular rows: a search hit is still a thread,
@@ -1812,6 +1806,8 @@ export default function Sidebar() {
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
+  const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
   const {
     settleThread,
     unsettleThread,
@@ -3761,6 +3757,7 @@ export default function Sidebar() {
                         }
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         environmentKnown={environmentLabelById.has(thread.environmentId)}
+                        configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                         providerEntryByInstanceId={
                           providerEntriesByEnvironment.get(thread.environmentId) ??
                           EMPTY_PROVIDER_ENTRIES
@@ -3861,6 +3858,8 @@ export default function Sidebar() {
                         currentEnvironmentId={primaryEnvironmentId}
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         environmentKnown={environmentLabelById.has(thread.environmentId)}
+                        showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                        configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                         projectCwd={
                           projectCwdByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
                         }

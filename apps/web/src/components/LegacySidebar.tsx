@@ -74,6 +74,7 @@ import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
+  type EnvironmentIconColor,
   type LegacySidebarScale,
   type SidebarProjectSortOrder,
   type SidebarThreadPreviewCount,
@@ -339,6 +340,8 @@ function buildThreadJumpLabelMap(input: {
 
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
+  showLocalEnvironmentIcon: boolean;
+  configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   orderedProjectThreadKeys: readonly string[];
@@ -437,12 +440,6 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   });
   const environment = useEnvironment(thread.environmentId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const showLocalEnvironmentIcon = useClientSettings(
-    (settings) => settings.showLocalEnvironmentIcon,
-  );
-  const configuredEnvironmentIconColor = useClientSettings(
-    (settings) => settings.environmentIconColors[thread.environmentId],
-  );
   const isRemoteThread =
     primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
   const remoteEnvLabel = environment?.label ?? null;
@@ -456,14 +453,14 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const environmentPresentation = legacyThreadEnvironmentPresentation({
     isPrimary: !isRemoteThread,
     isDesktopLocal: isDesktopLocalThread,
-    showLocalEnvironmentIcon,
+    showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
     environmentLabel: remoteEnvLabel,
   });
   const showsThreadEnvironmentIcon = environmentPresentation.showRowIcon;
   const threadEnvironmentLabel = environmentPresentation.hoverLabel;
   const threadEnvironmentIconKind = environmentPresentation.kind;
   const environmentIconColor = resolveEnvironmentIconColor(
-    configuredEnvironmentIconColor,
+    props.configuredEnvironmentIconColor,
     environment !== null && !isDesktopLocalThread,
   );
   // For grouped projects, the thread may belong to a different environment
@@ -1142,6 +1139,8 @@ interface SidebarProjectThreadListProps {
   legacySidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
+  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
+  showLocalEnvironmentIcon: boolean;
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
@@ -1204,6 +1203,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     legacySidebarScale,
     scaleStyle,
     providerEntriesByEnvironmentId,
+    environmentIconColors,
+    showLocalEnvironmentIcon,
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
@@ -1270,6 +1271,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             <SidebarThreadRow
               key={threadKey}
               thread={thread}
+              showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+              configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
               projectCwd={projectCwd}
               providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
               orderedProjectThreadKeys={orderedProjectThreadKeys}
@@ -1345,6 +1348,8 @@ interface SidebarProjectItemProps {
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
+  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
+  showLocalEnvironmentIcon: boolean;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -1398,23 +1403,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const environmentIconColors = useClientSettings((settings) => settings.environmentIconColors);
-  const showLocalEnvironmentIcon = useClientSettings(
-    (settings) => settings.showLocalEnvironmentIcon,
-  );
   const projectEnvironmentIcons = useMemo(
     () =>
       projectEnvironmentIconEntries({
         members: project.memberProjects,
         primaryEnvironmentId,
         desktopLocalEnvironmentIds: props.desktopLocalEnvironmentIds,
-        showLocalEnvironmentIcon,
+        showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
       }),
     [
       primaryEnvironmentId,
       project.memberProjects,
       props.desktopLocalEnvironmentIds,
-      showLocalEnvironmentIcon,
+      props.showLocalEnvironmentIcon,
     ],
   );
   const deleteProject = useAtomCommand(projectEnvironment.delete, {
@@ -2718,7 +2719,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                       entry.kind === "container"
                         ? undefined
                         : resolveEnvironmentIconColor(
-                            environmentIconColors[entry.environmentId],
+                            props.environmentIconColors[entry.environmentId],
                             props.knownEnvironmentIds.has(entry.environmentId),
                           )
                     }
@@ -2756,6 +2757,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         legacySidebarScale={legacySidebarScale}
         scaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
+        environmentIconColors={props.environmentIconColors}
+        showLocalEnvironmentIcon={props.showLocalEnvironmentIcon}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
@@ -3214,6 +3217,8 @@ interface SidebarProjectsContentProps {
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
+  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
+  showLocalEnvironmentIcon: boolean;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -3327,6 +3332,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     providerEntriesByEnvironmentId,
     desktopLocalEnvironmentIds,
     knownEnvironmentIds,
+    environmentIconColors,
+    showLocalEnvironmentIcon,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3458,6 +3465,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                         knownEnvironmentIds={knownEnvironmentIds}
+                        environmentIconColors={environmentIconColors}
+                        showLocalEnvironmentIcon={showLocalEnvironmentIcon}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3496,6 +3505,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                 knownEnvironmentIds={knownEnvironmentIds}
+                environmentIconColors={environmentIconColors}
+                showLocalEnvironmentIcon={showLocalEnvironmentIcon}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3546,6 +3557,8 @@ export default function LegacySidebar() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
+  const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
+  const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const scaleStyle = useMemo(
     () => legacySidebarScaleStyle(legacySidebarScale),
@@ -4238,6 +4251,8 @@ export default function LegacySidebar() {
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
         knownEnvironmentIds={knownEnvironmentIds}
+        environmentIconColors={environmentIconColors}
+        showLocalEnvironmentIcon={showLocalEnvironmentIcon}
       />
       <SidebarChromeFooter />
     </>
