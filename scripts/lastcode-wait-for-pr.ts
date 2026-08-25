@@ -27,6 +27,7 @@ type StatusCheck = {
   readonly name?: string;
   readonly context?: string;
   readonly workflowName?: string | null;
+  readonly detailsUrl?: string | null;
   readonly startedAt?: string | null;
   readonly completedAt?: string | null;
   readonly status?: string;
@@ -85,6 +86,7 @@ export interface WaitObservation {
   readonly pullRequest: PullRequestState;
   readonly ci: CiState;
   readonly review: ReviewState;
+  readonly unresolvedReviewThreads: number;
 }
 
 export type WaitDecision =
@@ -101,11 +103,33 @@ export type WaitDecision =
         | "ready"
         | "review-completed"
         | "review-not-requested"
+        | "review-unresolved"
         | "unexpected-base";
       readonly detail: string;
     };
 
 const successfulCheckConclusions = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+const checkProvider = (detailsUrl: string | null | undefined): string | null => {
+  if (!detailsUrl) return null;
+  try {
+    const url = new URL(detailsUrl);
+    const pathIdentity = url.pathname.split("/").filter(Boolean).slice(0, 2).join("/");
+    return `${url.origin}/${pathIdentity}`;
+  } catch {
+    return null;
+  }
+};
+
+const checkIdentity = (check: StatusCheck, index: number): string => {
+  const kind = check.__typename ?? (check.context ? "StatusContext" : "CheckRun");
+  const name = check.name ?? check.context;
+  if (!name) return `nameless\u0000${index}`;
+  if (kind === "StatusContext") return `${kind}\u0000${name}`;
+  if (check.workflowName) return `${kind}\u0000${check.workflowName}\u0000${name}`;
+  const provider = checkProvider(check.detailsUrl);
+  return provider ? `${kind}\u0000${provider}\u0000${name}` : `${kind}\u0000${name}\u0000${index}`;
+};
 
 const checkTimestamp = (check: StatusCheck): number | null => {
   for (const value of [check.completedAt, check.startedAt]) {
@@ -123,8 +147,7 @@ const latestStatusChecks = (checks: ReadonlyArray<StatusCheck>): ReadonlyArray<S
     { readonly check: StatusCheck; readonly at: number | null }
   >();
   for (const [index, check] of checks.entries()) {
-    const name = check.name ?? check.context;
-    const identity = name ? `${check.workflowName ?? ""}\u0000${name}` : `nameless\u0000${index}`;
+    const identity = checkIdentity(check, index);
     const candidate = { check, at: checkTimestamp(check) };
     const kept = newestByIdentity.get(identity);
     if (
@@ -175,6 +198,40 @@ export function pullRequestViewArgs(repository: string, branch: string): Readonl
     repository,
     "--json",
     "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+  ];
+}
+
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      reviewThreads(first:100,after:$endCursor){
+        nodes{isResolved}
+        pageInfo{hasNextPage endCursor}
+      }
+    }
+  }
+}`;
+
+export function reviewThreadsArgs(
+  repository: string,
+  pullRequestNumber: number,
+): ReadonlyArray<string> {
+  const [owner, name, ...rest] = repository.split("/");
+  if (!owner || !name || rest.length > 0)
+    throw new Error(`Invalid GitHub repository: ${repository}`);
+  return [
+    "api",
+    "graphql",
+    "--paginate",
+    "--slurp",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `number=${pullRequestNumber}`,
+    "-f",
+    `query=${reviewThreadsQuery}`,
   ];
 }
 
@@ -366,6 +423,13 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `No current-head Codex review request or terminal result was found for pull request #${pullRequest.number}.`,
     };
   }
+  if (current.unresolvedReviewThreads > 0) {
+    return {
+      kind: "wake",
+      reason: "review-unresolved",
+      detail: `Pull request #${pullRequest.number} has ${current.unresolvedReviewThreads} unresolved review thread${current.unresolvedReviewThreads === 1 ? "" : "s"}.`,
+    };
+  }
   if (
     current.ci === "success" &&
     !current.review.pending &&
@@ -406,6 +470,32 @@ function paginatedGhApi<T>(endpoint: string): ReadonlyArray<T> {
   return pages.flat();
 }
 
+type ReviewThreadsPage = {
+  readonly data?: {
+    readonly repository?: {
+      readonly pullRequest?: {
+        readonly reviewThreads?: {
+          readonly nodes?: ReadonlyArray<{ readonly isResolved?: boolean }>;
+        };
+      };
+    };
+  };
+};
+
+function unresolvedReviewThreadCount(repository: string, pullRequestNumber: number): number {
+  const pages = runGhJson<ReadonlyArray<ReviewThreadsPage>>(
+    reviewThreadsArgs(repository, pullRequestNumber),
+  );
+  return pages.reduce(
+    (count, page) =>
+      count +
+      (page.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).filter(
+        ({ isResolved }) => isResolved === false,
+      ).length,
+    0,
+  );
+}
+
 function currentBranch(): string {
   const result = NodeChildProcess.spawnSync("git", ["branch", "--show-current"], {
     encoding: "utf8",
@@ -441,6 +531,7 @@ function readObservation(repository: string, branch: string): WaitObservation {
   return {
     pullRequest,
     ci: classifyStatusChecks(pullRequest.statusCheckRollup),
+    unresolvedReviewThreads: unresolvedReviewThreadCount(repository, pullRequest.number),
     review: deriveReviewState({
       headSha: pullRequest.headRefOid,
       formalReviews,
@@ -462,6 +553,7 @@ const summary = (observation: WaitObservation): string =>
       : observation.review.terminalArtifacts.length > 0
         ? "completed"
         : "missing",
+    unresolvedReviewThreads: observation.unresolvedReviewThreads,
   });
 
 const sleep = (durationMs: number): Promise<void> =>

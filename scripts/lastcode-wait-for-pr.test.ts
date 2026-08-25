@@ -7,6 +7,7 @@ import {
   deriveReviewState,
   latestCodexReviewTrigger,
   pullRequestViewArgs,
+  reviewThreadsArgs,
   type ReviewState,
   type WaitObservation,
 } from "./lastcode-wait-for-pr.ts";
@@ -41,6 +42,7 @@ function observation(
     readonly mergeable?: string;
     readonly mergeStateStatus?: string;
     readonly baseRefName?: string;
+    readonly unresolvedReviewThreads?: number;
   } = {},
 ): WaitObservation {
   return {
@@ -58,6 +60,7 @@ function observation(
     },
     ci: input.ci ?? "pending",
     review: input.review ?? pendingReview,
+    unresolvedReviewThreads: input.unresolvedReviewThreads ?? 0,
   };
 }
 
@@ -75,6 +78,16 @@ describe("lastcode-wait-for-pr", () => {
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
       "requires a checked-out branch",
     );
+  });
+
+  it("paginates review threads for the exact pull request", () => {
+    const args = reviewThreadsArgs("lastobelus/lastCode", 88);
+    expect(args).toContain("--paginate");
+    expect(args).toContain("owner=lastobelus");
+    expect(args).toContain("name=lastCode");
+    expect(args).toContain("number=88");
+    expect(args.at(-1)).toContain("reviewThreads(first:100,after:$endCursor)");
+    expect(() => reviewThreadsArgs("invalid", 88)).toThrow("Invalid GitHub repository");
   });
 
   it("keeps waiting when CI succeeds while the current-head review is pending", () => {
@@ -106,6 +119,13 @@ describe("lastcode-wait-for-pr", () => {
       kind: "wake",
       reason: "ci-failed",
     });
+  });
+
+  it("wakes for an existing unresolved review thread even while CI is pending", () => {
+    const handled = observation({ review: handledReview });
+    expect(
+      decideWaitForPr(handled, observation({ review: handledReview, unresolvedReviewThreads: 2 })),
+    ).toMatchObject({ kind: "wake", reason: "review-unresolved" });
   });
 
   it("returns ready after CI succeeds with a previously handled review", () => {
@@ -371,5 +391,42 @@ describe("lastcode-wait-for-pr", () => {
         },
       ]),
     ).toBe("pending");
+  });
+
+  it("keeps same-named checks from distinct kinds and providers", () => {
+    expect(
+      classifyStatusChecks([
+        {
+          __typename: "StatusContext",
+          context: "build",
+          state: "FAILURE",
+        },
+        {
+          __typename: "CheckRun",
+          name: "build",
+          status: "COMPLETED",
+          conclusion: "SUCCESS",
+          startedAt: "2026-08-24T10:00:00Z",
+        },
+      ]),
+    ).toBe("failure");
+    expect(
+      classifyStatusChecks([
+        {
+          __typename: "CheckRun",
+          name: "verify",
+          detailsUrl: "https://checks.example-a.com/runs/1",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+        },
+        {
+          __typename: "CheckRun",
+          name: "verify",
+          detailsUrl: "https://checks.example-b.com/runs/2",
+          status: "COMPLETED",
+          conclusion: "SUCCESS",
+        },
+      ]),
+    ).toBe("failure");
   });
 });
