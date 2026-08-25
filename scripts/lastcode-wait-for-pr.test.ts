@@ -142,7 +142,7 @@ describe("lastcode-wait-for-pr", () => {
     });
   });
 
-  it("keeps reaction-only requests pending because reactions do not identify the reviewed head", () => {
+  it("keeps eyes pending and accepts thumbs-up on an exact-head request", () => {
     const issueComments = [
       {
         id: 10,
@@ -181,8 +181,10 @@ describe("lastcode-wait-for-pr", () => {
         },
       ],
     });
-    expect(thumbsUp).toMatchObject({ requestPresent: true, pending: true });
-    expect(thumbsUp.terminalArtifacts).toEqual([]);
+    expect(thumbsUp).toMatchObject({ requestPresent: true, pending: false });
+    expect(thumbsUp.terminalArtifacts).toEqual([
+      { key: "reaction:12", observedAt: "2026-08-24T10:02:00Z" },
+    ]);
   });
 
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
@@ -267,10 +269,18 @@ describe("lastcode-wait-for-pr", () => {
         },
       ],
       reviewComments: [],
-      latestTriggerReactions: [],
+      latestTriggerReactions: [
+        {
+          id: 42,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          content: "+1",
+          created_at: "2026-08-24T10:03:00Z",
+        },
+      ],
     });
     expect(review).toMatchObject({ requestPresent: false, pending: false });
     expect(review.latestTriggerId).toBeNull();
+    expect(review.terminalArtifacts).toEqual([]);
   });
 
   it("classifies check runs and status contexts without accepting cancellations", () => {
