@@ -10,6 +10,7 @@ import {
   fetchHeadlessDescriptor,
   installHeadlessService,
   parseHeadlessServiceOptions,
+  readPackagedServerVersion,
   renderHeadlessServicePlist,
   startHeadlessService,
   stopDesktopApp,
@@ -242,6 +243,22 @@ describe("LastCode headless service", () => {
       }),
     ).rejects.toThrow("Installed LastCode is 1.2.2, expected 1.2.3");
     expect(calls).toEqual([]);
+  });
+
+  it("bounds the packaged server version probe", () => {
+    let invocation;
+    expect(
+      readPackagedServerVersion({
+        runCommand: (command, args, options) => {
+          invocation = { args, command, options };
+          return { stdout: "LastCode server v0.9.0\n" };
+        },
+      }),
+    ).toBe("0.9.0");
+    expect(invocation.options).toMatchObject({
+      capture: true,
+      timeoutMs: 10_000,
+    });
   });
 
   it("rejects unknown commands and extra arguments", () => {

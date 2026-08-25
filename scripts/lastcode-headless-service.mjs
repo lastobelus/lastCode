@@ -13,6 +13,7 @@ const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const STOP_TIMEOUT_MS = 10_000;
 const START_TIMEOUT_MS = 30_000;
+const VERSION_TIMEOUT_MS = 10_000;
 
 function fail(message) {
   throw new Error(message);
@@ -31,6 +32,7 @@ function run(command, args, options = {}) {
   const result = NodeChildProcess.spawnSync(command, args, {
     encoding: "utf8",
     ...(options.environment ? { env: options.environment } : {}),
+    ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -286,6 +288,7 @@ export function readPackagedServerVersion(options = {}) {
   const result = runCommand(paths.executablePath, [paths.serverPath, "--version"], {
     capture: true,
     environment: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    timeoutMs: VERSION_TIMEOUT_MS,
   });
   const version = /\bv(\S+)\s*$/u.exec(result.stdout)?.[1];
   if (!version) fail(`Could not read the packaged server version from '${result.stdout.trim()}'.`);
