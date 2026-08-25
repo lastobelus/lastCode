@@ -6,6 +6,7 @@ import * as NodeChildProcess from "node:child_process";
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
 const CODEX_BOT_LOGIN = "chatgpt-codex-connector[bot]";
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const POLL_INTERVAL_MS = 60_000;
 const GH_TIMEOUT_MS = 30_000;
 
@@ -51,6 +52,7 @@ type FormalReview = {
 type IssueComment = {
   readonly id: number;
   readonly user?: GitHubActor;
+  readonly author_association?: string;
   readonly body?: string;
   readonly created_at?: string;
 };
@@ -361,7 +363,7 @@ export function deriveReviewState(input: {
 
   const artifactKeys = new Set(artifacts.map(({ key }) => key));
   for (const comment of input.issueComments) {
-    if (comment.user?.login === CODEX_BOT_LOGIN) continue;
+    if (!TRUSTED_AUTHOR_ASSOCIATIONS.has(comment.author_association ?? "")) continue;
     const handledArtifact = handledArtifactFromBody(comment.body, input.headSha);
     if (handledArtifact && artifactKeys.has(handledArtifact)) readyArtifacts.add(handledArtifact);
   }

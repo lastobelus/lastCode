@@ -369,6 +369,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 32,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: `<!-- lastcode-review-handled: comment:31 head: ${HEAD} -->`,
           created_at: "2026-08-24T10:06:00Z",
         },
@@ -392,6 +393,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 32,
           user: { login: "lastobelus" },
+          author_association: "OWNER",
           body: `<!-- lastcode-review-handled: comment:31 head: ${HEAD} -->`,
           created_at: "2026-08-24T10:06:00Z",
         },
@@ -406,6 +408,24 @@ describe("lastcode-wait-for-pr", () => {
       latestTriggerReactions: [],
     });
     expect(partlyHandled).toMatchObject({ pending: false, ready: false });
+
+    const outsiderMarker = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [],
+      issueComments: [
+        ...issueComments,
+        {
+          id: 32,
+          user: { login: "untrusted-contributor" },
+          author_association: "CONTRIBUTOR",
+          body: `<!-- lastcode-review-handled: comment:31 head: ${HEAD} -->`,
+          created_at: "2026-08-24T10:06:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(outsiderMarker).toMatchObject({ pending: false, ready: false });
   });
 
   it("does not treat a plain or older-head review request as current", () => {
