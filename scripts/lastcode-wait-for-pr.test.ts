@@ -335,7 +335,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 31,
           user: { login: "chatgpt-codex-connector[bot]" },
-          body: "No more suggestions from me today.",
+          body: `Codex Review: I found something worth addressing. **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
           created_at: "2026-08-24T10:05:00Z",
         },
       ],

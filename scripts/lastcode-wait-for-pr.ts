@@ -244,8 +244,8 @@ const timestamp = (value: string | null | undefined): number => {
 const currentHeadMatches = (candidate: string | null | undefined, headSha: string): boolean =>
   typeof candidate === "string" && candidate.length >= 7 && headSha.startsWith(candidate);
 
-const reviewedCommitFromBody = (body: string | undefined): string | null => {
-  if (!body?.includes("Codex Review:")) return null;
+const cleanReviewedCommitFromBody = (body: string | undefined): string | null => {
+  if (!body?.startsWith("Codex Review: Didn't find any major issues.")) return null;
   return /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/iu.exec(body)?.[1] ?? null;
 };
 
@@ -281,7 +281,7 @@ export function deriveReviewState(input: {
   const artifacts: ReviewArtifact[] = [];
 
   for (const review of input.formalReviews) {
-    const machineReadableCleanCommit = reviewedCommitFromBody(review.body);
+    const machineReadableCleanCommit = cleanReviewedCommitFromBody(review.body);
     if (
       review.user?.login === CODEX_BOT_LOGIN &&
       review.state !== "PENDING" &&
@@ -308,7 +308,7 @@ export function deriveReviewState(input: {
   }
 
   for (const comment of input.issueComments) {
-    const reviewedCommit = reviewedCommitFromBody(comment.body);
+    const reviewedCommit = cleanReviewedCommitFromBody(comment.body);
     if (
       comment.user?.login === CODEX_BOT_LOGIN &&
       currentHeadMatches(reviewedCommit, input.headSha)
