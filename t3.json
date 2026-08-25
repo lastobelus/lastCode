@@ -7,6 +7,11 @@
       "command": "vp i && ln -sf $T3CODE_PROJECT_ROOT/.env .env && ln -sf $T3CODE_PROJECT_ROOT/infra/relay/.env infra/relay/.env && node apps/web/scripts/warm-dep-cache.ts",
       "icon": "configure",
       "runOnWorktreeCreate": true
+    },
+    {
+      "name": "Wait for PR",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
+      "icon": "test"
     }
   ]
 }
