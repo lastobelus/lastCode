@@ -105,6 +105,8 @@ describe("LastCodeSettingsImport", () => {
       ...DEFAULT_CLIENT_SETTINGS,
       legacySidebarScale: 75,
       roundedProjectIcons: true,
+      environmentIconColors: { primary: "#2563eb", remote: "#7c3aed" },
+      showLocalEnvironmentIcon: true,
       favorites: [{ provider: lastCodeCustom, model: "lastcode-model" }],
       providerModelPreferences: {
         [lastCodeCustom]: { hiddenModels: [], modelOrder: ["lastcode-model"] },
@@ -215,6 +217,11 @@ describe("LastCodeSettingsImport", () => {
     assert.equal(importedClient.fontSizeInterface, 17);
     assert.equal(importedClient.legacySidebarScale, 75);
     assert.equal(importedClient.roundedProjectIcons, true);
+    assert.deepEqual(importedClient.environmentIconColors, {
+      primary: "#2563eb",
+      remote: "#7c3aed",
+    });
+    assert.equal(importedClient.showLocalEnvironmentIcon, true);
     assert.deepEqual(importedClient.favorites, [
       { provider: "lastcode_custom", model: "lastcode-model" },
       { provider: "codex", model: "gpt-source" },

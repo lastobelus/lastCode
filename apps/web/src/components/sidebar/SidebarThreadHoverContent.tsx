@@ -1,4 +1,5 @@
-import { CircleAlertIcon, GitBranchIcon, ServerIcon, TerminalIcon } from "lucide-react";
+import { CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
+import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SidebarThreadSummary } from "../../types";
@@ -6,6 +7,7 @@ import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { EnvironmentIcon } from "../../environmentIcons";
 
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
@@ -13,6 +15,8 @@ export interface SidebarThreadHoverContentProps {
   projectCwd: string | null;
   projectFaviconPath: string | null;
   environmentLabel: string | null;
+  environmentIconKind?: "monitor" | "server";
+  environmentIconColor?: EnvironmentIconColor | undefined;
   providerEntry: ProviderInstanceEntry | null;
   showInstanceBadge: boolean;
   modelInstanceId: string;
@@ -53,7 +57,12 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {props.environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            <ServerIcon className="size-3 shrink-0 stroke-muted-foreground" />
+            <EnvironmentIcon
+              kind={props.environmentIconKind ?? "server"}
+              context="hover"
+              color={props.environmentIconColor}
+              className="size-3 shrink-0"
+            />
             <div className="min-w-0 truncate text-foreground/75">{props.environmentLabel}</div>
           </div>
         ) : null}
