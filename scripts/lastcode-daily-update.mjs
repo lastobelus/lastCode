@@ -213,12 +213,13 @@ export async function replacePreparedHeadlessApp(prepared, expectedVersion, depe
   const replaceApp = dependencies.replaceApp ?? replacePreparedApp;
   const restartService = dependencies.restartService ?? restartHeadlessService;
   const readVersion = dependencies.readVersion ?? readInstalledLastCodeVersion;
-  let installingCandidate = true;
+  const hadInstalledApp = NodeFS.existsSync(prepared.targetPath);
   return replaceApp(prepared, {
     launchApp: async (appPath) => {
-      const version = installingCandidate ? expectedVersion : readVersion({ appPath });
-      installingCandidate = false;
-      return restartService({ appPath, expectedVersion: version });
+      const installedVersion = readVersion({ appPath });
+      const launchVersion =
+        prepared.oldAppMoved || !hadInstalledApp ? expectedVersion : installedVersion;
+      return restartService({ appPath, expectedVersion: launchVersion });
     },
   });
 }

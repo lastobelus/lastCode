@@ -108,7 +108,7 @@ export function renderHeadlessServicePlist({ executablePath, home, logDirectory,
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Interactive</string>
   <key>WorkingDirectory</key>
   <string>${xml(home)}</string>
   <key>StandardOutPath</key>
@@ -141,15 +141,14 @@ export async function waitForHeadlessService(options = {}) {
   const expectedServerVersion = options.expectedServerVersion;
   if (!expectedServerVersion) fail("Expected packaged server version is required.");
   const fetchDescriptor =
-    options.fetchDescriptor ??
-    (() => fetch(`http://127.0.0.1:${String(HEADLESS_SERVICE_PORT)}/.well-known/t3/environment`));
+    options.fetchDescriptor ?? ((timeoutMs) => fetchHeadlessDescriptor(timeoutMs));
   const wait = options.wait ?? NodeTimersPromises.setTimeout;
   const now = options.now ?? Date.now;
   const deadline = now() + (options.timeoutMs ?? START_TIMEOUT_MS);
   let lastError;
   while (now() < deadline) {
     try {
-      const response = await fetchDescriptor();
+      const response = await fetchDescriptor(Math.max(1, deadline - now()));
       if (!response.ok) throw new Error(`readiness returned HTTP ${String(response.status)}`);
       const descriptor = await response.json();
       if (descriptor?.serverVersion !== expectedServerVersion) {
@@ -175,6 +174,12 @@ export async function waitForHeadlessService(options = {}) {
   );
 }
 
+export function fetchHeadlessDescriptor(timeoutMs, fetchImpl = fetch) {
+  return fetchImpl(`http://127.0.0.1:${String(HEADLESS_SERVICE_PORT)}/.well-known/t3/environment`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
 export function verifyHeadlessListener(options = {}) {
   const runCommand = options.runCommand ?? run;
   const service = runCommand("launchctl", ["print", serviceTarget(options)], {
@@ -185,7 +190,7 @@ export function verifyHeadlessListener(options = {}) {
   const servicePid = /^\s*pid = (\d+)\s*$/mu.exec(service.stdout)?.[1];
   if (!servicePid) return false;
   const listener = runCommand(
-    "lsof",
+    "/usr/sbin/lsof",
     ["-nP", `-iTCP:${String(HEADLESS_SERVICE_PORT)}`, "-sTCP:LISTEN", "-Fp"],
     { allowFailure: true, capture: true },
   );

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   HEADLESS_SERVICE_LABEL,
   HEADLESS_SERVICE_PORT,
+  fetchHeadlessDescriptor,
   installHeadlessService,
   parseHeadlessServiceOptions,
   renderHeadlessServicePlist,
@@ -52,6 +53,7 @@ describe("LastCode headless service", () => {
     expect(plist).toContain("<key>ELECTRON_RUN_AS_NODE</key>");
     expect(plist).toContain("<string>serve</string>");
     expect(plist).toContain("<string>--no-browser</string>");
+    expect(plist).toContain("<key>ProcessType</key>\n  <string>Interactive</string>");
     expect(plist).toContain("/Users/me &amp; you/.lastcode");
     expect(plist).not.toContain("open -a");
   });
@@ -102,14 +104,18 @@ describe("LastCode headless service", () => {
 
   it("waits until the exact version is serving", async () => {
     const versions = ["0.8.0", "0.9.0"];
+    const requestTimeouts = [];
     await expect(
       waitForHeadlessService({
         expectedServerVersion: "0.9.0",
-        fetchDescriptor: async () => ({
-          json: async () => descriptor(versions.shift()),
-          ok: true,
-          status: 200,
-        }),
+        fetchDescriptor: async (timeoutMs) => {
+          requestTimeouts.push(timeoutMs);
+          return {
+            json: async () => descriptor(versions.shift()),
+            ok: true,
+            status: 200,
+          };
+        },
         now: (() => {
           let value = 0;
           return () => value++;
@@ -119,12 +125,23 @@ describe("LastCode headless service", () => {
         wait: async () => {},
       }),
     ).resolves.toMatchObject({ serverVersion: "0.9.0" });
+    expect(requestTimeouts.every((timeoutMs) => timeoutMs > 0 && timeoutMs <= 20)).toBe(true);
+  });
+
+  it("applies the remaining startup deadline to the descriptor request", async () => {
+    let request;
+    await fetchHeadlessDescriptor(123, async (url, options) => {
+      request = { options, url };
+      return { ok: true };
+    });
+    expect(request.url).toBe("http://127.0.0.1:3773/.well-known/t3/environment");
+    expect(request.options.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("requires port 3773 to belong to the LaunchAgent process", () => {
     const outputs = new Map([
       ["launchctl", { status: 0, stdout: "state = running\n\tpid = 4321\n" }],
-      ["lsof", { status: 0, stdout: "p4321\n" }],
+      ["/usr/sbin/lsof", { status: 0, stdout: "p4321\n" }],
     ]);
     expect(
       verifyHeadlessListener({
@@ -132,7 +149,7 @@ describe("LastCode headless service", () => {
         uid: 501,
       }),
     ).toBe(true);
-    outputs.set("lsof", { status: 0, stdout: "p9876\n" });
+    outputs.set("/usr/sbin/lsof", { status: 0, stdout: "p9876\n" });
     expect(
       verifyHeadlessListener({
         runCommand: (command) => outputs.get(command),

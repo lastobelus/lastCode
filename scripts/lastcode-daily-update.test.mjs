@@ -181,13 +181,19 @@ describe("LastCode daily updater", () => {
   });
 
   it("restarts the restored app with the restored version after a failed update", async () => {
+    const targetPath = NodePath.join(temporaryDirectory(), "LastCode.app");
+    NodeFS.mkdirSync(targetPath);
+    const prepared = { oldAppMoved: false, targetPath };
     const versions = [];
-    await replacePreparedHeadlessApp({ prepared: true }, "2.0.0", {
-      readVersion: () => "1.0.0",
+    let versionRead = 0;
+    await replacePreparedHeadlessApp(prepared, "2.0.0", {
+      readVersion: () => (versionRead++ === 0 ? "2.0.0" : "1.0.0"),
       replaceApp: async (_prepared, options) => {
+        prepared.oldAppMoved = true;
         await expect(options.launchApp("/Applications/LastCode.app")).rejects.toThrow(
           "new server failed",
         );
+        prepared.oldAppMoved = false;
         await options.launchApp("/Applications/LastCode.app");
       },
       restartService: async ({ expectedVersion }) => {
@@ -197,6 +203,18 @@ describe("LastCode daily updater", () => {
     });
 
     expect(versions).toEqual(["2.0.0", "1.0.0"]);
+  });
+
+  it("recognizes rollback when the candidate rename fails before its first launch", async () => {
+    const targetPath = NodePath.join(temporaryDirectory(), "LastCode.app");
+    NodeFS.mkdirSync(targetPath);
+    const versions = [];
+    await replacePreparedHeadlessApp({ oldAppMoved: false, targetPath }, "2.0.0", {
+      readVersion: () => "1.0.0",
+      replaceApp: async (_prepared, options) => options.launchApp("/Applications/LastCode.app"),
+      restartService: async ({ expectedVersion }) => versions.push(expectedVersion),
+    });
+    expect(versions).toEqual(["1.0.0"]);
   });
 
   it("discards a queued resume when the thread no longer exists", async () => {
