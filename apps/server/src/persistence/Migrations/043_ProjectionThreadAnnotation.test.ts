@@ -8,12 +8,12 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("042_ProjectionThreadAnnotation", (it) => {
+layer("043_ProjectionThreadAnnotation", (it) => {
   it.effect("adds annotation and latest user marker fields to thread projections", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* runMigrations({ toMigrationInclusive: 42 });
 
       yield* sql`
         INSERT INTO projection_threads (
@@ -67,7 +67,7 @@ layer("042_ProjectionThreadAnnotation", (it) => {
             '2026-02-24T00:01:00.000Z'
           )
       `;
-      yield* runMigrations({ toMigrationInclusive: 42 });
+      yield* runMigrations({ toMigrationInclusive: 43 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_threads)
