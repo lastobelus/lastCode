@@ -160,6 +160,15 @@ still stop for review. Automatic continuation also stops if Git rejects
 or signing key fails), preserving the recovery worktree for operator action
 instead of retrying in a loop.
 
+Migration numbers are part of deployed database history, not just filenames.
+When upstream claims a number already used by LastCode, reserve that number for
+upstream in the source manifest, shift the LastCode migrations forward, and add
+a new highest-numbered idempotent bridge for any upstream schema change that an
+already-upgraded LastCode database would otherwise skip. The checkpoint smoke
+gate runs the bridge regression and typechecks the server so broken migration
+imports, incompatible projection fixtures, and invalid upgrade paths stop before
+a checkpoint tag is published.
+
 No later nightly is checkpointed after a failure, because each failure should be
 understood before the sequence continues.
 
