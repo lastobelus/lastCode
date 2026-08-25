@@ -150,7 +150,7 @@ export function ThreadAnnotationEditorDialog(props: {
 function AnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
   return (
-    <span className="text-[11px] text-accent-foreground/55">
+    <span className="text-[11px] text-warning-foreground">
       {annotation.resolvedAt ? "Resolved" : "Edited"} {formatRelativeTimeLabel(timestamp)}
     </span>
   );
@@ -177,7 +177,7 @@ export function ThreadAnnotationBody(props: {
   return (
     <div className={props.className}>
       <ChatMarkdown
-        className={props.compact ? "thread-annotation-compact" : "text-sm text-accent-foreground"}
+        className={props.compact ? "thread-annotation-compact" : "text-sm text-warning-foreground"}
         cwd={props.cwd}
         onTaskListChange={onTaskListChange}
         parseRawHtml={false}
@@ -201,7 +201,7 @@ export function ThreadAnnotationActions(props: {
   return (
     <div className="flex items-center gap-3 text-xs">
       <button
-        className="font-medium text-accent-foreground/75 underline-offset-2 hover:underline disabled:opacity-50"
+        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
         disabled={props.pending}
         type="button"
         onClick={props.onEdit}
@@ -209,7 +209,7 @@ export function ThreadAnnotationActions(props: {
         Edit
       </button>
       <button
-        className="font-medium text-accent-foreground/75 underline-offset-2 hover:underline disabled:opacity-50"
+        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
         disabled={props.pending}
         type="button"
         onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
@@ -233,7 +233,7 @@ export function ThreadAnnotationPostIt(props: {
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   return (
-    <div className="mx-auto mb-1.5 w-full max-w-3xl rounded-xl border border-border/80 bg-accent px-3.5 py-2.5 text-accent-foreground shadow-sm">
+    <div className="mx-auto mb-1.5 w-full max-w-3xl rounded-xl border border-border/80 bg-warning/10 px-3.5 py-2.5 text-warning-foreground shadow-sm">
       <ThreadAnnotationBody
         annotation={props.annotation}
         className="max-h-48 overflow-y-auto"
@@ -249,11 +249,7 @@ export function ThreadAnnotationPostIt(props: {
           onResolve={props.onResolve}
           pending={props.pending || bodyChangePending}
         />
-        <button
-          className="text-xs text-accent-foreground/55 hover:text-accent-foreground"
-          type="button"
-          onClick={props.onDismiss}
-        >
+        <button className="text-xs text-warning-foreground" type="button" onClick={props.onDismiss}>
           Dismiss
         </button>
       </div>
@@ -355,7 +351,7 @@ export function ThreadAnnotationHoverPopover(props: {
       >
         <div className="flex min-w-0 w-80 max-w-80 flex-col">
           {props.threadDetails}
-          <div className="border-t border-border/70 bg-accent p-[var(--floating-content-inset)] text-accent-foreground">
+          <div className="border-t border-border/70 bg-warning/10 p-[var(--floating-content-inset)] text-warning-foreground">
             <ThreadAnnotationBody
               annotation={props.annotation}
               className="max-h-64 overflow-y-auto"
