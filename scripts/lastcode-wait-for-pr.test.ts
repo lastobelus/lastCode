@@ -12,6 +12,7 @@ import {
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const BASE = "abcdef1234567890abcdef1234567890abcdef12";
+const HEAD_COMMITTED_AT = "2026-08-24T09:00:00Z";
 
 const pendingReview: ReviewState = {
   terminalArtifacts: [],
@@ -51,6 +52,7 @@ function observation(
       baseRefName: input.baseRefName ?? "lastcode/main",
       mergeable: input.mergeable ?? "MERGEABLE",
       mergeStateStatus: input.mergeStateStatus ?? "BLOCKED",
+      commits: [{ oid: input.head ?? HEAD, committedDate: HEAD_COMMITTED_AT }],
       statusCheckRollup: [],
     },
     ci: input.ci ?? "pending",
@@ -67,7 +69,7 @@ describe("lastcode-wait-for-pr", () => {
       "--repo",
       "lastobelus/lastCode",
       "--json",
-      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,commits,statusCheckRollup",
     ]);
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
       "requires a checked-out branch",
@@ -151,6 +153,7 @@ describe("lastcode-wait-for-pr", () => {
     ];
     const pending = deriveReviewState({
       headSha: HEAD,
+      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments,
       reviewComments: [],
@@ -167,6 +170,7 @@ describe("lastcode-wait-for-pr", () => {
 
     const thumbsUp = deriveReviewState({
       headSha: HEAD,
+      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments,
       reviewComments: [],
@@ -186,6 +190,7 @@ describe("lastcode-wait-for-pr", () => {
   it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
     const review = deriveReviewState({
       headSha: HEAD,
+      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [
         {
           id: 20,
@@ -224,6 +229,7 @@ describe("lastcode-wait-for-pr", () => {
   it("leaves ambiguous Codex prose pending instead of guessing", () => {
     const review = deriveReviewState({
       headSha: HEAD,
+      headCommittedAt: HEAD_COMMITTED_AT,
       formalReviews: [],
       issueComments: [
         {
@@ -244,6 +250,26 @@ describe("lastcode-wait-for-pr", () => {
     });
     expect(review).toMatchObject({ requestPresent: true, pending: true });
     expect(review.terminalArtifacts).toEqual([]);
+  });
+
+  it("does not treat a review request from an older head as current", () => {
+    const review = deriveReviewState({
+      headSha: HEAD,
+      headCommittedAt: "2026-08-24T10:01:00Z",
+      formalReviews: [],
+      issueComments: [
+        {
+          id: 40,
+          user: { login: "lastobelus" },
+          body: "@codex review",
+          created_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(review).toMatchObject({ requestPresent: false, pending: false });
+    expect(review.latestTriggerId).toBeNull();
   });
 
   it("classifies check runs and status contexts without accepting cancellations", () => {

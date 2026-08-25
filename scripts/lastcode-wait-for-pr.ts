@@ -19,6 +19,10 @@ type PullRequestState = {
   readonly baseRefName: string;
   readonly mergeable: string;
   readonly mergeStateStatus: string;
+  readonly commits: ReadonlyArray<{
+    readonly oid: string;
+    readonly committedDate: string;
+  }>;
   readonly statusCheckRollup: ReadonlyArray<StatusCheck> | null;
 };
 
@@ -141,7 +145,7 @@ export function pullRequestViewArgs(repository: string, branch: string): Readonl
     "--repo",
     repository,
     "--json",
-    "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,commits,statusCheckRollup",
   ];
 }
 
@@ -160,13 +164,15 @@ const reviewedCommitFromBody = (body: string | undefined): string | null => {
 
 export function latestCodexReviewTrigger(
   comments: ReadonlyArray<IssueComment>,
+  headCommittedAt: string,
 ): IssueComment | null {
   return (
     comments
       .filter(
         (comment) =>
           comment.user?.login !== CODEX_BOT_LOGIN &&
-          comment.body?.trim().toLowerCase() === "@codex review",
+          comment.body?.trim().toLowerCase() === "@codex review" &&
+          timestamp(comment.created_at) >= timestamp(headCommittedAt),
       )
       .sort((left, right) => timestamp(right.created_at) - timestamp(left.created_at))[0] ?? null
   );
@@ -174,6 +180,7 @@ export function latestCodexReviewTrigger(
 
 export function deriveReviewState(input: {
   readonly headSha: string;
+  readonly headCommittedAt: string;
   readonly formalReviews: ReadonlyArray<FormalReview>;
   readonly issueComments: ReadonlyArray<IssueComment>;
   readonly reviewComments: ReadonlyArray<ReviewComment>;
@@ -219,7 +226,7 @@ export function deriveReviewState(input: {
     }
   }
 
-  const latestTrigger = latestCodexReviewTrigger(input.issueComments);
+  const latestTrigger = latestCodexReviewTrigger(input.issueComments, input.headCommittedAt);
   const relevantReactions = latestTrigger
     ? input.latestTriggerReactions.filter((reaction) => reaction.user?.login === CODEX_BOT_LOGIN)
     : [];
@@ -371,10 +378,16 @@ function currentBranch(): string {
 
 function readObservation(repository: string, branch: string): WaitObservation {
   const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
+  const headCommit = pullRequest.commits.find(({ oid }) => oid === pullRequest.headRefOid);
+  if (!headCommit) {
+    throw new Error(
+      `GitHub did not return the head commit for pull request #${pullRequest.number}.`,
+    );
+  }
   const issueComments = paginatedGhApi<IssueComment>(
     `repos/${repository}/issues/${pullRequest.number}/comments?per_page=100`,
   );
-  const latestTrigger = latestCodexReviewTrigger(issueComments);
+  const latestTrigger = latestCodexReviewTrigger(issueComments, headCommit.committedDate);
   const latestTriggerReactions = latestTrigger
     ? paginatedGhApi<CommentReaction>(
         `repos/${repository}/issues/comments/${latestTrigger.id}/reactions?per_page=100`,
@@ -391,6 +404,7 @@ function readObservation(repository: string, branch: string): WaitObservation {
     ci: classifyStatusChecks(pullRequest.statusCheckRollup),
     review: deriveReviewState({
       headSha: pullRequest.headRefOid,
+      headCommittedAt: headCommit.committedDate,
       formalReviews,
       issueComments,
       reviewComments,
