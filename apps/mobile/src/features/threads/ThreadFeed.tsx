@@ -1239,8 +1239,8 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
         />
       </Pressable>
       {expanded ? (
-        <ScrollView className="max-h-96 px-3 pb-2.5 pt-2">
-          <Text selectable className="font-mono text-xs text-foreground">
+        <ScrollView className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-black/10 bg-neutral-950 px-3 py-2.5 dark:border-white/10">
+          <Text selectable className="font-mono text-xs leading-5 text-neutral-100">
             {props.output}
           </Text>
         </ScrollView>

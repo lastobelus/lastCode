@@ -1355,7 +1355,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
           )}
         </button>
         {actionOutputExpanded ? (
-          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words px-3 pb-2.5 pt-2 font-mono text-xs text-foreground/90">
+          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
             {actionFollowUp.output}
           </pre>
         ) : (
