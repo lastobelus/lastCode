@@ -41,7 +41,6 @@ function fixture(overrides = {}) {
         calls.push("prepare");
         return { prepared: true };
       },
-      quitApp: async () => calls.push("quit"),
       replaceApp: async () => calls.push("replace"),
       resumeThread: async (threadId) => calls.push(`resume:${threadId}`),
       savePendingResumes: (pending) => {
@@ -61,6 +60,7 @@ function fixture(overrides = {}) {
           },
         };
       },
+      stopService: () => calls.push("stop"),
       ...overrides,
     },
     working,
@@ -94,7 +94,7 @@ describe("LastCode daily updater", () => {
       "pause:one",
       "list:1",
       "pause:two",
-      "quit",
+      "stop",
       "replace",
       "resume:one",
       "resume:two",
@@ -102,7 +102,7 @@ describe("LastCode daily updater", () => {
     ]);
   });
 
-  it("does not quit when a working thread does not confirm it paused", async () => {
+  it("does not stop the service when a working thread does not confirm it paused", async () => {
     let send = 0;
     const test = fixture({
       listThreads: async () => ({
@@ -220,7 +220,7 @@ describe("LastCode daily updater", () => {
     await expect(runDailyUpdate({ bootstrap: true }, test.dependencies)).resolves.toMatchObject({
       status: "updated",
     });
-    expect(test.calls).toEqual(["stage", "prepare", "quit", "replace", "cleanup"]);
+    expect(test.calls).toEqual(["stage", "prepare", "stop", "replace", "cleanup"]);
   });
 
   it("installs a daily LaunchAgent backed by standalone copied modules", () => {
@@ -235,6 +235,9 @@ describe("LastCode daily updater", () => {
     expect(NodeFS.readFileSync(installed.plistPath, "utf8")).toContain("/managed/node");
     expect(
       NodeFS.existsSync(NodePath.join(installed.moduleDirectory, "lastcode-intel-stage.mjs")),
+    ).toBe(true);
+    expect(
+      NodeFS.existsSync(NodePath.join(installed.moduleDirectory, "lastcode-headless-service.mjs")),
     ).toBe(true);
     expect(calls).toEqual([
       { command: "plutil", args: ["-lint", installed.plistPath], options: undefined },

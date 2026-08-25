@@ -11,11 +11,10 @@ import * as NodeUtil from "node:util";
 
 import {
   cleanupPreparedInstall,
-  launchApp,
   prepareDmgInstall,
-  quitApp,
   replacePreparedApp,
 } from "./lastcode-install.mjs";
+import { restartHeadlessService, stopHeadlessService } from "./lastcode-headless-service.mjs";
 import { stageIntelUpdate } from "./lastcode-intel-stage.mjs";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -28,6 +27,7 @@ const RESUME_MESSAGE =
   "LastCode has been updated and restarted. Resume from your paused checkpoint.";
 const COPIED_MODULES = [
   "lastcode-daily-update.mjs",
+  "lastcode-headless-service.mjs",
   "lastcode-install.mjs",
   "lastcode-intel-release.mjs",
   "lastcode-intel-stage.mjs",
@@ -188,8 +188,8 @@ export async function runDailyUpdate(options = {}, dependencies) {
 
     let updateError;
     try {
-      await dependencies.quitApp();
-      await dependencies.replaceApp(prepared);
+      dependencies.stopService();
+      await dependencies.replaceApp(prepared, staged.pending.version);
     } catch (error) {
       updateError = error;
     }
@@ -262,10 +262,9 @@ function defaultDependencies(home) {
       }
     },
     prepareInstall: prepareDmgInstall,
-    quitApp,
-    replaceApp: (prepared) =>
+    replaceApp: (prepared, expectedVersion) =>
       replacePreparedApp(prepared, {
-        launchApp: (appPath) => launchApp(appPath, { maxLaunchAttempts: 1 }),
+        launchApp: (appPath) => restartHeadlessService({ appPath, expectedVersion, home }),
       }),
     resumeThread: (threadId, message) => resumeThread(threadTool, threadId, message),
     savePendingResumes: (pending) => {
@@ -285,6 +284,7 @@ function defaultDependencies(home) {
         "10 minutes",
       ]),
     stageUpdate: (stageOptions) => stageIntelUpdate(stageOptions),
+    stopService: () => stopHeadlessService({ home }),
   };
 }
 
