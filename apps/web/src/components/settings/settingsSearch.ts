@@ -261,6 +261,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "compact-status-indicators",
+    title: "Compact status indicators",
+    to: "/settings/lastcode",
+  },
+  {
     id: "rounded-project-icons",
     title: "Rounded project icons",
     to: "/settings/lastcode",
