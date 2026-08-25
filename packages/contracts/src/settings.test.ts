@@ -146,6 +146,7 @@ describe("ClientSettings environment icons", () => {
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar with automatic merge and inactivity settling", () => {
     const settings = decodeClientSettings({});
+    expect(settings.compactLegacySidebarStatuses).toBe(false);
     expect(settings.legacySidebarEnabled).toBe(false);
     expect(settings.legacySidebarScale).toBe(100);
     expect(settings.sidebarAutoSettleAfterDays).toBe(3);
@@ -167,6 +168,16 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettingsPatch({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(
       true,
     );
+  });
+
+  it("preserves compact legacy sidebar status indicators", () => {
+    expect(
+      decodeClientSettings({ compactLegacySidebarStatuses: true }).compactLegacySidebarStatuses,
+    ).toBe(true);
+    expect(
+      decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
+        .compactLegacySidebarStatuses,
+    ).toBe(true);
   });
 
   it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
