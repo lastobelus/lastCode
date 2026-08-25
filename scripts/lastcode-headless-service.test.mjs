@@ -12,6 +12,7 @@ import {
   parseHeadlessServiceOptions,
   renderHeadlessServicePlist,
   startHeadlessService,
+  stopHeadlessService,
   verifyHeadlessListener,
   waitForHeadlessService,
 } from "./lastcode-headless-service.mjs";
@@ -156,6 +157,23 @@ describe("LastCode headless service", () => {
         uid: 501,
       }),
     ).toBe(false);
+  });
+
+  it("waits for launchd to finish stopping the exact service", async () => {
+    let prints = 0;
+    await stopHeadlessService({
+      now: (() => {
+        let value = 0;
+        return () => value++;
+      })(),
+      runCommand: (_command, args) => ({
+        status: args[0] === "print" && prints++ === 0 ? 0 : 1,
+      }),
+      stopTimeoutMs: 20,
+      uid: 501,
+      wait: async () => {},
+    });
+    expect(prints).toBe(2);
   });
 
   it("does not start when the installed app is not the expected build", async () => {

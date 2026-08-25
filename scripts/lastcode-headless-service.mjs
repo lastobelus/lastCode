@@ -10,6 +10,7 @@ import * as NodeTimersPromises from "node:timers/promises";
 export const HEADLESS_SERVICE_LABEL = "codes.lastobelus.lastcode.server";
 export const HEADLESS_SERVICE_PORT = 3773;
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
+const STOP_TIMEOUT_MS = 10_000;
 const START_TIMEOUT_MS = 30_000;
 
 function fail(message) {
@@ -124,17 +125,24 @@ function serviceTarget(options = {}) {
   return `gui/${options.uid ?? uid()}/${HEADLESS_SERVICE_LABEL}`;
 }
 
-export function stopHeadlessService(options = {}) {
+export async function stopHeadlessService(options = {}) {
   const runCommand = options.runCommand ?? run;
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const now = options.now ?? Date.now;
   const target = serviceTarget(options);
   runCommand("launchctl", ["bootout", target], { allowFailure: true });
-  const remaining = runCommand("launchctl", ["print", target], {
-    allowFailure: true,
-    capture: true,
-  });
-  if (remaining.status === 0) {
-    fail(`Could not stop ${target}.`);
+  const deadline = now() + (options.stopTimeoutMs ?? STOP_TIMEOUT_MS);
+  while (now() < deadline) {
+    const remaining = runCommand("launchctl", ["print", target], {
+      allowFailure: true,
+      capture: true,
+    });
+    if (remaining.status !== 0) return;
+    await wait(100);
   }
+  fail(
+    `Could not stop ${target} within ${(options.stopTimeoutMs ?? STOP_TIMEOUT_MS) / 1_000} seconds.`,
+  );
 }
 
 export async function waitForHeadlessService(options = {}) {
@@ -214,7 +222,7 @@ export async function startHeadlessService(options = {}) {
 }
 
 export async function restartHeadlessService(options = {}) {
-  stopHeadlessService(options);
+  await stopHeadlessService(options);
   return startHeadlessService(options);
 }
 
@@ -282,11 +290,11 @@ async function main(argv) {
     return;
   }
   if (command === "stop") {
-    stopHeadlessService({ home });
+    await stopHeadlessService({ home });
     return;
   }
   if (command === "uninstall") {
-    stopHeadlessService({ home });
+    await stopHeadlessService({ home });
     NodeFS.rmSync(headlessServicePaths(home).plistPath, { force: true });
     return;
   }

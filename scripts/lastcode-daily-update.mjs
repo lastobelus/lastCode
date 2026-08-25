@@ -192,7 +192,7 @@ export async function runDailyUpdate(options = {}, dependencies) {
 
     let updateError;
     try {
-      dependencies.stopService();
+      await dependencies.stopService();
       await dependencies.replaceApp(prepared, staged.pending.version);
     } catch (error) {
       updateError = error;
