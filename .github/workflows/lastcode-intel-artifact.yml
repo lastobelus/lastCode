@@ -139,6 +139,30 @@ jobs:
           echo "Exact-tag Intel release is already complete; skipping CI and packaging."
           echo "needs_build=false" >> "$GITHUB_OUTPUT"
 
+      - name: Restore local upstream tag
+        if: steps.release.outputs.needs_build == 'true'
+        shell: bash
+        working-directory: target
+        run: |
+          set -euo pipefail
+
+          metadata="$(git for-each-ref --format='%(contents)' "refs/tags/${INSTALLABLE_TAG}")"
+          upstream_tag="$(printf '%s\n' "$metadata" | awk -F': ' '$1 == "Upstream-Tag" { print $2 }')"
+          upstream_commit="$(printf '%s\n' "$metadata" | awk -F': ' '$1 == "Upstream-Commit" { print $2 }')"
+          if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+$ ]]; then
+            echo "Installable metadata has an invalid upstream tag: $upstream_tag" >&2
+            exit 1
+          fi
+          if [[ ! "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Installable metadata has an invalid upstream commit: $upstream_commit" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$upstream_commit" "$INSTALLABLE_COMMIT"; then
+            echo "Recorded upstream commit is not an ancestor of the installable commit." >&2
+            exit 1
+          fi
+          git tag "$upstream_tag" "$upstream_commit"
+
       - name: Setup Vite+
         if: steps.release.outputs.needs_build == 'true'
         uses: voidzero-dev/setup-vp@v1

@@ -133,11 +133,20 @@ describe("immutable Intel release validation", () => {
 
     const artifactDownload = publishJob.indexOf("- name: Download isolated build assets");
     const targetCheckoutIndex = buildJob.indexOf("- name: Checkout exact installable");
+    const upstreamTagRestore = buildJob.indexOf("- name: Restore local upstream tag");
+    const checkpointGate = buildJob.indexOf("- name: Run full checkpoint gate");
     const artifactValidation = publishJob.indexOf("- name: Validate isolated build assets");
     const tagFetch = publishJob.indexOf("git fetch --force --no-tags origin");
     const tagComparison = publishJob.indexOf('if [[ "$publish_commit" != "$INSTALLABLE_COMMIT" ]]');
     const releaseCreate = publishJob.indexOf('gh release create "$INSTALLABLE_TAG"');
     expect(targetCheckoutIndex).toBeGreaterThan(-1);
+    expect(upstreamTagRestore).toBeGreaterThan(targetCheckoutIndex);
+    expect(checkpointGate).toBeGreaterThan(upstreamTagRestore);
+    expect(buildJob).toContain("git for-each-ref --format='%(contents)'");
+    expect(buildJob).toContain(
+      'git merge-base --is-ancestor "$upstream_commit" "$INSTALLABLE_COMMIT"',
+    );
+    expect(buildJob).toContain('git tag "$upstream_tag" "$upstream_commit"');
     expect(artifactDownload).toBeGreaterThan(-1);
     expect(artifactValidation).toBeGreaterThan(artifactDownload);
     expect(tagFetch).toBeGreaterThan(-1);
