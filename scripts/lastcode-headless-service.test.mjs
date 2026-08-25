@@ -196,10 +196,37 @@ describe("LastCode headless service", () => {
     expect(events).toContain("restore-desktop");
   });
 
+  it("unloads the armed service when the desktop quit request times out", async () => {
+    const home = temporaryDirectory();
+    const events = [];
+    await expect(
+      installHeadlessService({
+        expectedVersion: "1.2.3",
+        home,
+        isDesktopRunning: () => true,
+        now: (() => {
+          let calls = 0;
+          return () => (++calls < 4 ? calls : 200_000);
+        })(),
+        readAppVersion: () => "1.2.3",
+        readServerVersion: () => "0.9.0",
+        restoreDesktop: async () => events.push("restore-desktop"),
+        runCommand: (_command, args) => ({
+          status: args[0] === "print" ? 1 : 0,
+          stdout: "",
+        }),
+        uid: 501,
+        wait: async () => {},
+      }),
+    ).rejects.toThrow("desktop did not quit");
+    expect(events).toEqual(["restore-desktop"]);
+  });
+
   it("unloads the headless job before reopening the desktop", async () => {
     const calls = [];
     await restoreDesktopApp({
       home: "/Users/me",
+      isDesktopRunning: () => false,
       runCommand: (command, args, options) => {
         calls.push({ args, command, options });
         return { status: command === "launchctl" && args[0] === "print" ? 1 : 0 };
@@ -210,6 +237,19 @@ describe("LastCode headless service", () => {
       args: ["-n", "-a", "/Applications/LastCode.app"],
       command: "open",
     });
+  });
+
+  it("does not open a second desktop when the original is still running", async () => {
+    const calls = [];
+    await restoreDesktopApp({
+      isDesktopRunning: () => true,
+      runCommand: (command, args) => {
+        calls.push({ args, command });
+        return { status: command === "launchctl" && args[0] === "print" ? 1 : 0 };
+      },
+      uid: 501,
+    });
+    expect(calls.some((call) => call.command === "open")).toBe(false);
   });
 
   it("waits until the exact version is serving", async () => {

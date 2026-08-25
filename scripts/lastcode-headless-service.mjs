@@ -246,6 +246,8 @@ export async function stopDesktopApp(options = {}) {
 
 export async function restoreDesktopApp(options = {}) {
   await stopHeadlessService(options);
+  const isRunning = options.isDesktopRunning ?? (() => desktopAppIsRunning(options));
+  if (isRunning()) return;
   const paths = headlessServicePaths(options.home, options.appPath);
   const environment = { ...(options.environment ?? process.env) };
   delete environment.ELECTRON_RUN_AS_NODE;
@@ -316,17 +318,19 @@ export async function installHeadlessService(options = {}) {
   runCommand("plutil", ["-lint", paths.plistPath]);
   if (options.start === false) return { ...paths, service: serviceTarget(options) };
   const expectedVersion = options.expectedVersion ?? readInstalledLastCodeVersion(options);
-  let desktopStopped = false;
+  let desktopHandoffAttempted = false;
   try {
     await restartHeadlessService({
       ...options,
       afterBootstrap: async () => {
-        desktopStopped = await stopDesktopApp(options);
+        const isRunning = options.isDesktopRunning ?? (() => desktopAppIsRunning(options));
+        desktopHandoffAttempted = isRunning();
+        await stopDesktopApp({ ...options, isDesktopRunning: isRunning });
       },
       expectedVersion,
     });
   } catch (error) {
-    if (desktopStopped) {
+    if (desktopHandoffAttempted) {
       const restoreDesktop = options.restoreDesktop ?? restoreDesktopApp;
       try {
         await restoreDesktop(options);
