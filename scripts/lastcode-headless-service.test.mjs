@@ -278,6 +278,30 @@ describe("LastCode headless service", () => {
     expect(requestTimeouts.every((timeoutMs) => timeoutMs > 0 && timeoutMs <= 20)).toBe(true);
   });
 
+  it("retries after one readiness request stalls", async () => {
+    const requestTimeouts = [];
+    let attempts = 0;
+    await expect(
+      waitForHeadlessService({
+        expectedServerVersion: "0.9.0",
+        fetchDescriptor: async (timeoutMs) => {
+          requestTimeouts.push(timeoutMs);
+          attempts += 1;
+          if (attempts === 1) throw new Error("request timed out");
+          return {
+            json: async () => descriptor("0.9.0"),
+            ok: true,
+            status: 200,
+          };
+        },
+        timeoutMs: 30_000,
+        verifyListenerOwnership: () => true,
+        wait: async () => {},
+      }),
+    ).resolves.toMatchObject({ serverVersion: "0.9.0" });
+    expect(requestTimeouts).toEqual([2_000, 2_000]);
+  });
+
   it("applies the remaining startup deadline to the descriptor request", async () => {
     let request;
     await fetchHeadlessDescriptor(123, async (url, options) => {
