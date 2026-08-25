@@ -72,6 +72,7 @@ function hsvToHex(hue: number, saturation: number, value: number) {
 
 function ProviderCustomColorPanel(props: {
   readonly value: string;
+  readonly label: string;
   readonly onCommit: (value: string) => void;
 }) {
   const { onCommit } = props;
@@ -163,7 +164,7 @@ function ProviderCustomColorPanel(props: {
           }}
           onBlur={() => setHexDraft(null)}
           className="h-8 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground outline-none transition-colors focus:border-ring"
-          aria-label="Custom hex accent color"
+          aria-label={`Custom hex ${props.label.toLowerCase()}`}
           spellCheck={false}
         />
       </div>
@@ -173,9 +174,11 @@ function ProviderCustomColorPanel(props: {
 
 function ProviderCustomColorPicker(props: {
   readonly displayName: string;
+  readonly label: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
   readonly onClear: () => void;
+  readonly clearLabel?: string;
 }) {
   const normalized = normalizeProviderAccentColor(props.value) ?? FALLBACK_ACCENT_COLOR;
 
@@ -190,7 +193,7 @@ function ProviderCustomColorPicker(props: {
               "hover:scale-105 hover:border-ring/60",
             )}
             style={{ backgroundColor: normalized }}
-            aria-label={`Choose accent color for ${props.displayName}`}
+            aria-label={`Choose custom ${props.label.toLowerCase()} for ${props.displayName}`}
           >
             <PipetteIcon className="size-3 text-white/70 drop-shadow-sm" aria-hidden />
           </button>
@@ -202,7 +205,11 @@ function ProviderCustomColorPicker(props: {
         sideOffset={6}
         className="overflow-hidden rounded-md p-0 [--viewport-inline-padding:0px] [&_[data-slot=popover-viewport]]:p-0"
       >
-        <ProviderCustomColorPanel value={normalized} onCommit={props.onCommit} />
+        <ProviderCustomColorPanel
+          value={normalized}
+          label={props.label}
+          onCommit={props.onCommit}
+        />
         <PopoverClose
           render={
             <Button
@@ -214,7 +221,7 @@ function ProviderCustomColorPicker(props: {
               disabled={!props.value}
             >
               <XIcon className="size-3.5" aria-hidden />
-              Clear color
+              {props.clearLabel ?? "Clear color"}
             </Button>
           }
         />
@@ -227,6 +234,8 @@ export function ProviderAccentColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
+  readonly label?: string;
+  readonly defaultOptionLabel?: string;
   readonly description?: string;
   readonly commitDelayMs?: number;
   /** `inline` renders only the swatch row, for callers that supply their own label. */
@@ -234,8 +243,10 @@ export function ProviderAccentColorPicker(props: {
 }) {
   const {
     commitDelayMs = 0,
+    defaultOptionLabel,
     description,
     displayName,
+    label = "Accent color",
     layout = "stacked",
     onCommit,
     value,
@@ -301,9 +312,11 @@ export function ProviderAccentColorPicker(props: {
   const picker = (
     <ProviderCustomColorPicker
       displayName={displayName}
+      label={label}
       value={normalized}
       onCommit={commitAccentColor}
       onClear={() => commitAccentColor("")}
+      {...(defaultOptionLabel ? { clearLabel: defaultOptionLabel } : {})}
     />
   );
 
@@ -313,7 +326,7 @@ export function ProviderAccentColorPicker(props: {
 
   return (
     <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">Accent color</span>
+      <span className="text-xs font-medium text-foreground">{label}</span>
       {picker}
       {description ? <span className="text-xs text-muted-foreground">{description}</span> : null}
     </div>
