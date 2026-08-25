@@ -244,9 +244,14 @@ const timestamp = (value: string | null | undefined): number => {
 const currentHeadMatches = (candidate: string | null | undefined, headSha: string): boolean =>
   typeof candidate === "string" && candidate.length >= 7 && headSha.startsWith(candidate);
 
-const cleanReviewedCommitFromBody = (body: string | undefined): string | null => {
-  if (!body?.startsWith("Codex Review: Didn't find any major issues.")) return null;
+const reviewedCommitFromBody = (body: string | undefined): string | null => {
+  if (!body?.startsWith("Codex Review:")) return null;
   return /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/iu.exec(body)?.[1] ?? null;
+};
+
+const cleanReviewedCommitFromBody = (body: string | undefined): string | null => {
+  if (!/^Codex Review: Didn['’]t find any major issues\./u.test(body ?? "")) return null;
+  return reviewedCommitFromBody(body);
 };
 
 const requestedHeadFromBody = (body: string | undefined): string | null =>
@@ -308,7 +313,7 @@ export function deriveReviewState(input: {
   }
 
   for (const comment of input.issueComments) {
-    const reviewedCommit = cleanReviewedCommitFromBody(comment.body);
+    const reviewedCommit = reviewedCommitFromBody(comment.body);
     if (
       comment.user?.login === CODEX_BOT_LOGIN &&
       currentHeadMatches(reviewedCommit, input.headSha)
@@ -436,7 +441,7 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
   if (
     current.ci === "success" &&
     !current.review.pending &&
-    current.review.terminalArtifacts.length > 0
+    baseline.review.terminalArtifacts.length > 0
   ) {
     return {
       kind: "wake",

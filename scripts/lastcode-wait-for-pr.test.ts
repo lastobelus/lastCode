@@ -283,7 +283,7 @@ describe("lastcode-wait-for-pr", () => {
     expect(review.terminalArtifacts).toEqual([]);
   });
 
-  it("accepts exact-head formal, inline, and clean-comment review artifacts", () => {
+  it("accepts exact-head formal, inline, and typographic clean-comment artifacts", () => {
     const review = deriveReviewState({
       headSha: HEAD,
       formalReviews: [
@@ -299,7 +299,7 @@ describe("lastcode-wait-for-pr", () => {
         {
           id: 21,
           user: { login: "chatgpt-codex-connector[bot]" },
-          body: `Codex Review: Didn't find any major issues. Surprise wording! **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
+          body: `Codex Review: Didn’t find any major issues. Surprise wording! **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
           created_at: "2026-08-24T10:04:00Z",
         },
       ],
@@ -321,7 +321,7 @@ describe("lastcode-wait-for-pr", () => {
     ]);
   });
 
-  it("leaves ambiguous Codex prose pending instead of guessing", () => {
+  it("wakes for a current-head top-level finding without treating it as prehandled", () => {
     const review = deriveReviewState({
       headSha: HEAD,
       formalReviews: [],
@@ -342,8 +342,16 @@ describe("lastcode-wait-for-pr", () => {
       reviewComments: [],
       latestTriggerReactions: [],
     });
-    expect(review).toMatchObject({ requestPresent: true, pending: true });
-    expect(review.terminalArtifacts).toEqual([]);
+    expect(review).toMatchObject({ requestPresent: true, pending: false });
+    expect(review.terminalArtifacts).toEqual([
+      { key: "comment:31", observedAt: "2026-08-24T10:05:00Z" },
+    ]);
+
+    const baseline = observation();
+    expect(decideWaitForPr(baseline, observation({ ci: "success", review }))).toMatchObject({
+      kind: "wake",
+      reason: "review-completed",
+    });
   });
 
   it("does not treat a plain or older-head review request as current", () => {
