@@ -303,6 +303,7 @@ describe("ClientSettings environment icons", () => {
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar", () => {
     const settings = decodeClientSettings({});
+    expect(settings.compactLegacySidebarStatuses).toBe(false);
     expect(settings.legacySidebarEnabled).toBe(false);
     expect(settings.legacySidebarScale).toBe(100);
   });
@@ -328,6 +329,16 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
     expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+
+  it("preserves compact legacy sidebar status indicators", () => {
+    expect(
+      decodeClientSettings({ compactLegacySidebarStatuses: true }).compactLegacySidebarStatuses,
+    ).toBe(true);
+    expect(
+      decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
+        .compactLegacySidebarStatuses,
+    ).toBe(true);
   });
 
   it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
