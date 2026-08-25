@@ -21,6 +21,7 @@ const pendingReview: ReviewState = {
   terminalArtifacts: [],
   requestPresent: true,
   pending: true,
+  ready: false,
   latestTriggerId: 10,
 };
 
@@ -28,6 +29,7 @@ const handledReview: ReviewState = {
   terminalArtifacts: [{ key: "comment:20", observedAt: "2026-08-24T10:05:00Z" }],
   requestPresent: true,
   pending: false,
+  ready: true,
   latestTriggerId: 10,
 };
 
@@ -202,7 +204,7 @@ describe("lastcode-wait-for-pr", () => {
         },
       ],
     });
-    expect(thumbsUp).toMatchObject({ requestPresent: true, pending: false });
+    expect(thumbsUp).toMatchObject({ requestPresent: true, pending: false, ready: true });
     expect(thumbsUp.terminalArtifacts).toEqual([
       { key: "reaction:12", observedAt: "2026-08-24T10:00:00Z" },
     ]);
@@ -313,7 +315,7 @@ describe("lastcode-wait-for-pr", () => {
       ],
       latestTriggerReactions: [],
     });
-    expect(review.pending).toBe(false);
+    expect(review).toMatchObject({ pending: false, ready: true });
     expect(review.terminalArtifacts.map(({ key }) => key)).toEqual([
       "review:20",
       "review-comment:22",
@@ -322,27 +324,28 @@ describe("lastcode-wait-for-pr", () => {
   });
 
   it("wakes for a current-head top-level finding without treating it as prehandled", () => {
+    const issueComments = [
+      {
+        id: 30,
+        user: { login: "lastobelus" },
+        body: reviewRequest(),
+        created_at: "2026-08-24T10:00:00Z",
+      },
+      {
+        id: 31,
+        user: { login: "chatgpt-codex-connector[bot]" },
+        body: `Codex Review: I found something worth addressing. **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
+        created_at: "2026-08-24T10:05:00Z",
+      },
+    ];
     const review = deriveReviewState({
       headSha: HEAD,
       formalReviews: [],
-      issueComments: [
-        {
-          id: 30,
-          user: { login: "lastobelus" },
-          body: reviewRequest(),
-          created_at: "2026-08-24T10:00:00Z",
-        },
-        {
-          id: 31,
-          user: { login: "chatgpt-codex-connector[bot]" },
-          body: `Codex Review: I found something worth addressing. **Reviewed commit:** \`${HEAD.slice(0, 10)}\``,
-          created_at: "2026-08-24T10:05:00Z",
-        },
-      ],
+      issueComments,
       reviewComments: [],
       latestTriggerReactions: [],
     });
-    expect(review).toMatchObject({ requestPresent: true, pending: false });
+    expect(review).toMatchObject({ requestPresent: true, pending: false, ready: false });
     expect(review.terminalArtifacts).toEqual([
       { key: "comment:31", observedAt: "2026-08-24T10:05:00Z" },
     ]);
@@ -352,6 +355,34 @@ describe("lastcode-wait-for-pr", () => {
       kind: "wake",
       reason: "review-completed",
     });
+
+    expect(decideWaitForPr(observation({ review }), observation({ review }))).toMatchObject({
+      kind: "wake",
+      reason: "review-unhandled",
+    });
+
+    const handled = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [],
+      issueComments: [
+        ...issueComments,
+        {
+          id: 32,
+          user: { login: "lastobelus" },
+          body: `<!-- lastcode-review-handled: comment:31 head: ${HEAD} -->`,
+          created_at: "2026-08-24T10:06:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(handled).toMatchObject({ pending: false, ready: true });
+    expect(
+      decideWaitForPr(
+        observation({ review: handled }),
+        observation({ ci: "success", review: handled }),
+      ),
+    ).toMatchObject({ kind: "wake", reason: "ready" });
   });
 
   it("does not treat a plain or older-head review request as current", () => {

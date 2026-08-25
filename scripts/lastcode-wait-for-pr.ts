@@ -80,6 +80,7 @@ export interface ReviewState {
   readonly terminalArtifacts: ReadonlyArray<ReviewArtifact>;
   readonly requestPresent: boolean;
   readonly pending: boolean;
+  readonly ready: boolean;
   readonly latestTriggerId: number | null;
 }
 
@@ -104,6 +105,7 @@ export type WaitDecision =
         | "ready"
         | "review-completed"
         | "review-not-requested"
+        | "review-unhandled"
         | "review-unresolved"
         | "unexpected-base";
       readonly detail: string;
@@ -258,6 +260,13 @@ const requestedHeadFromBody = (body: string | undefined): string | null =>
   /^@codex review\s*\n<!-- lastcode-review-head: ([0-9a-f]{40}) -->\s*$/iu.exec(body ?? "")?.[1] ??
   null;
 
+const handledArtifactFromBody = (body: string | undefined, headSha: string): string | null => {
+  const match = /^<!-- lastcode-review-handled: (comment:\d+) head: ([0-9a-f]{40}) -->$/iu.exec(
+    body ?? "",
+  );
+  return match?.[2] === headSha ? (match[1] ?? null) : null;
+};
+
 export function latestCodexReviewTrigger(
   comments: ReadonlyArray<IssueComment>,
   headSha: string,
@@ -284,6 +293,7 @@ export function deriveReviewState(input: {
   readonly latestTriggerReactions: ReadonlyArray<CommentReaction>;
 }): ReviewState {
   const artifacts: ReviewArtifact[] = [];
+  const readyArtifacts = new Set<string>();
 
   for (const review of input.formalReviews) {
     const machineReadableCleanCommit = cleanReviewedCommitFromBody(review.body);
@@ -293,10 +303,12 @@ export function deriveReviewState(input: {
       currentHeadMatches(review.commit_id, input.headSha) &&
       (review.state === "APPROVED" || currentHeadMatches(machineReadableCleanCommit, input.headSha))
     ) {
+      const key = `review:${review.id}`;
       artifacts.push({
-        key: `review:${review.id}`,
+        key,
         observedAt: review.submitted_at ?? "",
       });
+      readyArtifacts.add(key);
     }
   }
 
@@ -305,10 +317,12 @@ export function deriveReviewState(input: {
       comment.user?.login === CODEX_BOT_LOGIN &&
       currentHeadMatches(comment.commit_id, input.headSha)
     ) {
+      const key = `review-comment:${comment.id}`;
       artifacts.push({
-        key: `review-comment:${comment.id}`,
+        key,
         observedAt: comment.created_at ?? "",
       });
+      readyArtifacts.add(key);
     }
   }
 
@@ -318,10 +332,14 @@ export function deriveReviewState(input: {
       comment.user?.login === CODEX_BOT_LOGIN &&
       currentHeadMatches(reviewedCommit, input.headSha)
     ) {
+      const key = `comment:${comment.id}`;
       artifacts.push({
-        key: `comment:${comment.id}`,
+        key,
         observedAt: comment.created_at ?? "",
       });
+      if (currentHeadMatches(cleanReviewedCommitFromBody(comment.body), input.headSha)) {
+        readyArtifacts.add(key);
+      }
     }
   }
 
@@ -332,11 +350,20 @@ export function deriveReviewState(input: {
 
   for (const reaction of relevantReactions) {
     if (reaction.content === "+1") {
+      const key = `reaction:${reaction.id}`;
       artifacts.push({
-        key: `reaction:${reaction.id}`,
+        key,
         observedAt: reaction.created_at ?? "",
       });
+      readyArtifacts.add(key);
     }
+  }
+
+  const artifactKeys = new Set(artifacts.map(({ key }) => key));
+  for (const comment of input.issueComments) {
+    if (comment.user?.login === CODEX_BOT_LOGIN) continue;
+    const handledArtifact = handledArtifactFromBody(comment.body, input.headSha);
+    if (handledArtifact && artifactKeys.has(handledArtifact)) readyArtifacts.add(handledArtifact);
   }
 
   const matchedCleanReaction = relevantReactions.some(({ content }) => content === "+1");
@@ -353,6 +380,7 @@ export function deriveReviewState(input: {
     terminalArtifacts: artifacts,
     requestPresent,
     pending: requestPresent && !matchedCleanReaction && latestTerminalAt <= latestPendingAt,
+    ready: readyArtifacts.size > 0,
     latestTriggerId: latestTrigger?.id ?? null,
   };
 }
@@ -438,11 +466,14 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `Pull request #${pullRequest.number} has ${current.unresolvedReviewThreads} unresolved review thread${current.unresolvedReviewThreads === 1 ? "" : "s"}.`,
     };
   }
-  if (
-    current.ci === "success" &&
-    !current.review.pending &&
-    baseline.review.terminalArtifacts.length > 0
-  ) {
+  if (!current.review.pending && !current.review.ready) {
+    return {
+      kind: "wake",
+      reason: "review-unhandled",
+      detail: `Pull request #${pullRequest.number} has an unhandled top-level Codex finding.`,
+    };
+  }
+  if (current.ci === "success" && !current.review.pending && current.review.ready) {
     return {
       kind: "wake",
       reason: "ready",
@@ -558,9 +589,11 @@ const summary = (observation: WaitObservation): string =>
     ci: observation.ci,
     review: observation.review.pending
       ? "pending"
-      : observation.review.terminalArtifacts.length > 0
+      : observation.review.ready
         ? "completed"
-        : "missing",
+        : observation.review.terminalArtifacts.length > 0
+          ? "unhandled"
+          : "missing",
     unresolvedReviewThreads: observation.unresolvedReviewThreads,
   });
 
@@ -587,6 +620,7 @@ async function main(): Promise<void> {
           base: current.pullRequest.baseRefOid,
           ci: current.ci,
           reviewPending: current.review.pending,
+          reviewReady: current.review.ready,
           reviewArtifacts: current.review.terminalArtifacts.map(({ key }) => key),
         })}`,
       );

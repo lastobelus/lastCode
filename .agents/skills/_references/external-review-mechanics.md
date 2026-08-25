@@ -187,9 +187,23 @@ gh api graphql \
   }'
 ```
 
+When a current-head finding exists only as a top-level issue comment and the
+agent rejects it without pushing a fix, record that judgement with this exact
+single-line issue comment before relaunching `Wait for PR`. Use the finding
+comment's numeric ID and the full current head SHA:
+
+```text
+<!-- lastcode-review-handled: comment:COMMENT_ID head: HEAD_SHA -->
+```
+
+The marker is unnecessary after a fix push because the new head invalidates the
+old finding, and unnecessary for inline findings because thread resolution is
+the durable handled state.
+
 Before merge, take a fresh snapshot and require all of these on the same head:
 
-- terminal-clean Codex result;
+- terminal-clean Codex result, or durable handled evidence for every exact-head
+  finding;
 - zero unresolved review threads, including outdated threads;
 - required checks and local validation are green;
 - mergeability is clean and the expected base SHA has not moved.
