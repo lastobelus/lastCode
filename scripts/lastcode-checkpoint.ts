@@ -26,6 +26,7 @@ import {
 const DEFAULT_SOURCE_REF = "refs/remotes/origin/lastcode/main";
 const DEFAULT_UPSTREAM_REMOTE = "upstream";
 const DEFAULT_PUSH_REMOTE = "origin";
+const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const CHECKPOINT_TAG_GLOB = "lastcode/checkpoint/v*-nightly.*";
 const REVISION_TAG_GLOB = "lastcode/revision/v*-nightly.*";
 
@@ -812,24 +813,27 @@ function publishRevisionIfNeeded(
   return true;
 }
 
+export function openPullRequestListArgs(
+  repository: string = LASTCODE_GITHUB_REPOSITORY,
+): ReadonlyArray<string> {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    repository,
+    "--base",
+    "lastcode/main",
+    "--state",
+    "open",
+    "--json",
+    "number",
+    "--jq",
+    "length",
+  ];
+}
+
 function openPullRequestCount(repoRoot: string): number {
-  const value = run(
-    repoRoot,
-    "gh",
-    [
-      "pr",
-      "list",
-      "--base",
-      "lastcode/main",
-      "--state",
-      "open",
-      "--json",
-      "number",
-      "--jq",
-      "length",
-    ],
-    { capture: true },
-  );
+  const value = run(repoRoot, "gh", openPullRequestListArgs(), { capture: true });
   const count = Number(value);
   if (!Number.isSafeInteger(count) || count < 0) throw new Error(`Invalid gh PR count '${value}'.`);
   return count;
