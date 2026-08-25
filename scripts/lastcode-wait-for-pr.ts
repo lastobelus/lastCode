@@ -26,6 +26,9 @@ type StatusCheck = {
   readonly __typename?: string;
   readonly name?: string;
   readonly context?: string;
+  readonly workflowName?: string | null;
+  readonly startedAt?: string | null;
+  readonly completedAt?: string | null;
   readonly status?: string;
   readonly conclusion?: string | null;
   readonly state?: string;
@@ -104,11 +107,41 @@ export type WaitDecision =
 
 const successfulCheckConclusions = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
+const checkTimestamp = (check: StatusCheck): number | null => {
+  for (const value of [check.completedAt, check.startedAt]) {
+    if (value) {
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+    }
+  }
+  return null;
+};
+
+const latestStatusChecks = (checks: ReadonlyArray<StatusCheck>): ReadonlyArray<StatusCheck> => {
+  const newestByIdentity = new Map<
+    string,
+    { readonly check: StatusCheck; readonly at: number | null }
+  >();
+  for (const [index, check] of checks.entries()) {
+    const name = check.name ?? check.context;
+    const identity = name ? `${check.workflowName ?? ""}\u0000${name}` : `nameless\u0000${index}`;
+    const candidate = { check, at: checkTimestamp(check) };
+    const kept = newestByIdentity.get(identity);
+    if (
+      kept === undefined ||
+      (candidate.at === null ? kept.at === null : kept.at === null || candidate.at >= kept.at)
+    ) {
+      newestByIdentity.set(identity, candidate);
+    }
+  }
+  return [...newestByIdentity.values()].map(({ check }) => check);
+};
+
 export function classifyStatusChecks(checks: PullRequestState["statusCheckRollup"]): CiState {
   if (!checks || checks.length === 0) return "pending";
 
   let pending = false;
-  for (const check of checks) {
+  for (const check of latestStatusChecks(checks)) {
     if (check.status !== undefined) {
       if (check.status !== "COMPLETED") {
         pending = true;

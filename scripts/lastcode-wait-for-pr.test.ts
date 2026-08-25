@@ -349,4 +349,27 @@ describe("lastcode-wait-for-pr", () => {
       ]),
     ).toBe("failure");
   });
+
+  it("classifies only the newest run when a failed check is rerun", () => {
+    expect(
+      classifyStatusChecks([
+        {
+          name: "build",
+          workflowName: "CI",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          startedAt: "2026-08-24T10:00:00Z",
+          completedAt: "2026-08-24T10:01:00Z",
+        },
+        {
+          name: "build",
+          workflowName: "CI",
+          status: "IN_PROGRESS",
+          conclusion: null,
+          startedAt: "2026-08-24T10:02:00Z",
+          completedAt: "0001-01-01T00:00:00Z",
+        },
+      ]),
+    ).toBe("pending");
+  });
 });
