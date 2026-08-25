@@ -317,11 +317,14 @@ export function deriveReviewState(input: {
     const machineReadableCleanCommit = cleanReviewedCommitFromBody(review.body);
     const isClean =
       review.state === "APPROVED" || currentHeadMatches(machineReadableCleanCommit, input.headSha);
+    const isFindingVerdict = review.state === "CHANGES_REQUESTED";
     if (
       review.user?.login === CODEX_BOT_LOGIN &&
       review.state !== "PENDING" &&
       currentHeadMatches(review.commit_id, input.headSha) &&
-      (isClean || (Boolean(review.body?.trim()) && !isGenericFormalReviewWrapper(review.body)))
+      (isClean ||
+        isFindingVerdict ||
+        (Boolean(review.body?.trim()) && !isGenericFormalReviewWrapper(review.body)))
     ) {
       const key = `review:${review.id}`;
       artifacts.push({

@@ -439,6 +439,37 @@ describe("lastcode-wait-for-pr", () => {
     expect(handled).toMatchObject({ pending: false, ready: true });
   });
 
+  it("records a bodyless changes-requested verdict as an unhandled artifact", () => {
+    const review = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [
+        {
+          id: 28,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          state: "CHANGES_REQUESTED",
+          commit_id: HEAD,
+          submitted_at: "2026-08-24T10:03:00Z",
+          body: "",
+        },
+      ],
+      issueComments: [
+        {
+          id: 29,
+          user: { login: "lastobelus" },
+          author_association: "OWNER",
+          body: reviewRequest(),
+          created_at: "2026-08-24T10:00:00Z",
+        },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(review).toMatchObject({ requestPresent: true, pending: false, ready: false });
+    expect(review.terminalArtifacts).toEqual([
+      { key: "review:28", observedAt: "2026-08-24T10:03:00Z" },
+    ]);
+  });
+
   it("accepts exact-head formal, inline, and typographic clean-comment artifacts", () => {
     const review = deriveReviewState({
       headSha: HEAD,
