@@ -11,7 +11,7 @@ export const HEADLESS_SERVICE_LABEL = "codes.lastobelus.lastcode.server";
 export const HEADLESS_SERVICE_PORT = 3773;
 const APP_BUNDLE_ID = "codes.lastobelus.lastcode";
 const DEFAULT_APP_PATH = "/Applications/LastCode.app";
-const STOP_TIMEOUT_MS = 10_000;
+const STOP_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 10_000;
 
@@ -111,6 +111,8 @@ export function renderHeadlessServicePlist({ executablePath, home, logDirectory,
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>WorkingDirectory</key>

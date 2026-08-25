@@ -56,6 +56,7 @@ describe("LastCode headless service", () => {
     expect(plist).toContain("<key>ELECTRON_RUN_AS_NODE</key>");
     expect(plist).toContain("<string>serve</string>");
     expect(plist).toContain("<string>--no-browser</string>");
+    expect(plist).toContain("<key>ExitTimeOut</key>\n  <integer>90</integer>");
     expect(plist).toContain("<key>ProcessType</key>\n  <string>Interactive</string>");
     expect(plist).toContain("/Users/me &amp; you/.lastcode");
     expect(plist).not.toContain("open -a");
@@ -231,6 +232,18 @@ describe("LastCode headless service", () => {
       wait: async () => {},
     });
     expect(prints).toBe(2);
+  });
+
+  it("allows launchd's graceful exit window before stop times out", async () => {
+    let time = 0;
+    await expect(
+      stopHeadlessService({
+        now: () => (time += 120_001),
+        runCommand: () => ({ status: 0 }),
+        uid: 501,
+        wait: async () => {},
+      }),
+    ).rejects.toThrow("within 120 seconds");
   });
 
   it("does not start when the installed app is not the expected build", async () => {
