@@ -386,7 +386,21 @@ export function deriveReviewState(input: {
     if (handledArtifact && artifactKeys.has(handledArtifact)) readyArtifacts.add(handledArtifact);
   }
 
-  const matchedCleanReaction = relevantReactions.some(({ content }) => content === "+1");
+  const newestReaction = (content: string): CommentReaction | null =>
+    relevantReactions
+      .filter((reaction) => reaction.content === content)
+      .sort(
+        (left, right) =>
+          timestamp(right.created_at) - timestamp(left.created_at) || right.id - left.id,
+      )[0] ?? null;
+  const latestCleanReaction = newestReaction("+1");
+  const latestEyesReaction = newestReaction("eyes");
+  const matchedCleanReaction =
+    latestCleanReaction !== null &&
+    (latestEyesReaction === null ||
+      timestamp(latestCleanReaction.created_at) > timestamp(latestEyesReaction.created_at) ||
+      (timestamp(latestCleanReaction.created_at) === timestamp(latestEyesReaction.created_at) &&
+        latestCleanReaction.id >= latestEyesReaction.id));
   const latestTerminalAt = Math.max(0, ...artifacts.map(({ observedAt }) => timestamp(observedAt)));
   const latestPendingAt = Math.max(
     timestamp(latestTrigger?.created_at),

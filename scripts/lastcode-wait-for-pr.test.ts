@@ -262,6 +262,28 @@ describe("lastcode-wait-for-pr", () => {
     expect(thumbsUp.terminalArtifacts).toEqual([
       { key: "reaction:12", observedAt: "2026-08-24T10:00:00Z" },
     ]);
+
+    const restarted = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [],
+      issueComments,
+      reviewComments: [],
+      latestTriggerReactions: [
+        {
+          id: 12,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          content: "+1",
+          created_at: "2026-08-24T10:01:00Z",
+        },
+        {
+          id: 13,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          content: "eyes",
+          created_at: "2026-08-24T10:01:00Z",
+        },
+      ],
+    });
+    expect(restarted).toMatchObject({ requestPresent: true, pending: true });
   });
 
   it("selects the newer exact-head request when GitHub timestamps tie", () => {
