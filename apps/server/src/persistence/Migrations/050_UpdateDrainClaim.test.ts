@@ -8,11 +8,23 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
+<<<<<<<< HEAD:apps/server/src/persistence/Migrations/050_UpdateDrainClaim.test.ts
 layer("050_UpdateDrainClaim", (it) => {
+|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/044_UpdateDrainClaim.test.ts
+layer("044_UpdateDrainClaim", (it) => {
+========
+layer("045_UpdateDrainClaim", (it) => {
+>>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/045_UpdateDrainClaim.test.ts
   it.effect("preserves drain history and accepts one claimed transition", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+<<<<<<<< HEAD:apps/server/src/persistence/Migrations/050_UpdateDrainClaim.test.ts
       yield* runMigrations({ toMigrationInclusive: 49 });
+|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/044_UpdateDrainClaim.test.ts
+      yield* runMigrations({ toMigrationInclusive: 43 });
+========
+      yield* runMigrations({ toMigrationInclusive: 44 });
+>>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/045_UpdateDrainClaim.test.ts
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status
@@ -21,7 +33,13 @@ layer("050_UpdateDrainClaim", (it) => {
           '2026-08-21T00:00:00.000Z', 'request-1', '1.2.3', 'draining'
         )
       `;
+<<<<<<<< HEAD:apps/server/src/persistence/Migrations/050_UpdateDrainClaim.test.ts
       yield* runMigrations({ toMigrationInclusive: 50 });
+|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/044_UpdateDrainClaim.test.ts
+      yield* runMigrations({ toMigrationInclusive: 44 });
+========
+      yield* runMigrations({ toMigrationInclusive: 45 });
+>>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/045_UpdateDrainClaim.test.ts
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status
