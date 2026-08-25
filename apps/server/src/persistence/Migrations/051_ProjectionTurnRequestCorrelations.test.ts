@@ -15,7 +15,13 @@ const layer = it.layer(
   ),
 );
 
+<<<<<<<< HEAD:apps/server/src/persistence/Migrations/051_ProjectionTurnRequestCorrelations.test.ts
 layer("051_ProjectionTurnRequestCorrelations", (it) => {
+|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/045_ProjectionTurnRequestCorrelations.test.ts
+layer("045_ProjectionTurnRequestCorrelations", (it) => {
+========
+layer("046_ProjectionTurnRequestCorrelations", (it) => {
+>>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/046_ProjectionTurnRequestCorrelations.test.ts
   it.effect("inserts once, resolves once, and deletes by owning thread", () =>
     Effect.gen(function* () {
       yield* runMigrations();

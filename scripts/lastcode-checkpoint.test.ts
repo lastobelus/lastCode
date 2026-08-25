@@ -86,10 +86,11 @@ it("removes the Electron host mode from checkpoint smoke subprocesses", () => {
   );
 });
 
-it("typechecks shared client commands before publishing a checkpoint", () => {
+it("typechecks checkpoint automation, shared clients, and the server before publishing", () => {
   assert.deepStrictEqual(checkpointSmokeTypecheckCommands(), [
     ["run", "--filter", "@t3tools/scripts", "typecheck"],
     ["run", "--filter", "@t3tools/client-runtime", "typecheck"],
+    ["run", "--filter", "t3", "typecheck"],
   ]);
 });
 
