@@ -9,6 +9,7 @@ import {
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
+  openPullRequestListArgs,
   promotionNeeded,
   rerereRebaseMadeProgress,
   resolveCheckpointPlan,
@@ -22,6 +23,23 @@ import {
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
 import { parseNightlyTag } from "./lastcode-nightly.ts";
+
+it("scopes checkpoint PR queries to the configured LastCode repository", () => {
+  expect(openPullRequestListArgs("example/fork")).toEqual([
+    "pr",
+    "list",
+    "--repo",
+    "example/fork",
+    "--base",
+    "lastcode/main",
+    "--state",
+    "open",
+    "--json",
+    "number",
+    "--jq",
+    "length",
+  ]);
+});
 
 function nightly(tag: string) {
   const value = parseNightlyTag(tag);
