@@ -113,6 +113,11 @@ status icons, remote cloud indicators, and relative timestamps at their standard
 LastCode header, Search field, Projects heading, drafts, status notices, and footer also stay at
 their standard size. On desktop, **View → Actual Size**, **Zoom In**, and **Zoom Out** continue to
 zoom the whole application and compose with the legacy sidebar scale.
+To keep the same status colors while using less horizontal space, enable **Compact status
+indicators** in **Settings → LastCode → Appearance**. Legacy thread rows then show only the
+colored status dot; the full status remains available as a tooltip. This preference is off by
+default.
+
 ## Environment icons in LastCode
 
 Open **Settings → LastCode → Environments** to choose the icon color for the primary machine and
