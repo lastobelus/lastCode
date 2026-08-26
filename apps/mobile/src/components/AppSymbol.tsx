@@ -115,6 +115,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   "checkmark.circle": IconCircleCheck,
   clock: IconClock,
   cloud: IconCloud,
+  "clock.arrow.circlepath": IconRefresh,
   cube: IconBox,
   "chevron.down": IconChevronDown,
   "chevron.left": IconChevronLeft,
