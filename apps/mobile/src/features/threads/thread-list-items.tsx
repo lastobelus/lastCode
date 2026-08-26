@@ -31,7 +31,7 @@ import { useThreadPr, type ThreadPr } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
-import { resolveThreadStatus } from "./threadPresentation";
+import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -470,7 +470,14 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
-  const threadAccessibilityLabel = pr ? `${thread.title}, ${pr.accessibilityLabel}` : thread.title;
+  const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status?.kind ?? null);
+  const threadAccessibilityLabel = [
+    thread.title,
+    showActionWaitingIndicator && runningAction ? `Waiting for ${runningAction.actionName}` : null,
+    pr?.accessibilityLabel ?? null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(", ");
   const subtitleParts = [props.environmentLabel, thread.branch].filter((part): part is string =>
     Boolean(part),
   );
@@ -606,6 +613,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       </Text>
     </View>
   ) : null;
+  const actionStatusIndicator =
+    showActionWaitingIndicator && runningAction ? (
+      <View
+        accessibilityLabel={`Waiting for ${runningAction.actionName}`}
+        className="size-3 items-center justify-center"
+      >
+        <View className="size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300" />
+      </View>
+    ) : null;
 
   const subtitleRow =
     subtitleParts.length > 0 || pr !== null ? (
@@ -686,6 +702,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
                 {thread.title}
               </Text>
               <View className="flex-row items-center gap-2">
+                {actionStatusIndicator}
                 {statusPill}
                 <Text className="text-base tabular-nums text-foreground-tertiary">{timestamp}</Text>
                 <SymbolView
@@ -751,6 +768,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               {thread.title}
             </Text>
             <View className="flex-row items-center gap-2">
+              {actionStatusIndicator}
               {statusPill}
               <Text
                 className={cn(
