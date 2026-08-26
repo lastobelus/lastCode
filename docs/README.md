@@ -6,6 +6,7 @@
 - [Permission modes](./user/permission-modes.md)
 - [Keyboard shortcuts](./user/keybindings.md)
 - [Organizing threads](./user/thread-sidebar.md)
+- [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
 - [Review usage](./user/usage.md)
 - [Anonymous usage data](./user/telemetry.md)
 - [Customize a project icon](./user/project-settings.md)

@@ -544,6 +544,7 @@ const make = Effect.gen(function* () {
       projectId: project.id,
       actionId: script.id,
       actionName: script.name,
+      command: script.command,
       terminalId,
       outcome: "running",
       delivery: "armed",

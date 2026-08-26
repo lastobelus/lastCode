@@ -52,6 +52,7 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
+import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
 import {
   memo,
   useCallback,
@@ -1547,10 +1548,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             />
                           }
                         >
-                          <span
-                            aria-hidden
-                            className="size-2 shrink-0 rounded-full bg-yellow-500 dark:bg-yellow-300"
-                          />
+                          <RotateCcwClockIcon aria-hidden className="size-4 shrink-0" />
                           <span role="status">Waiting</span>
                         </PopoverTrigger>
                         <PopoverPopup
@@ -1608,6 +1606,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           topStatus.className,
                         )}
                       >
+                        {actionResume?.outcome === "running" && status !== "waiting" ? (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <span
+                                  aria-label={`Waiting for ${actionResume.actionName}`}
+                                  className="inline-flex shrink-0 items-center text-yellow-700 dark:text-yellow-300"
+                                />
+                              }
+                            >
+                              <RotateCcwClockIcon aria-hidden className="size-4 shrink-0" />
+                            </TooltipTrigger>
+                            <TooltipPopup side="top">
+                              Waiting for {actionResume.actionName}
+                            </TooltipPopup>
+                          </Tooltip>
+                        ) : null}
                         {topStatus.icon === "working" || topStatus.icon === "cleanup" ? (
                           <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
                         ) : topStatus.icon === "waiting" ? (
