@@ -35,6 +35,13 @@ export const THREAD_STATUS_NEUTRAL_ICON = {
   iconBackground: "rgba(142,142,147,0.22)",
 } as const;
 
+export function shouldShowActionWaitingIndicator(
+  thread: Pick<EnvironmentThreadShell, "actionResume">,
+  primaryStatus: string | null,
+): boolean {
+  return thread.actionResume?.outcome === "running" && primaryStatus !== "waiting";
+}
+
 function isLatestTurnSettled(
   latestTurn: OrchestrationLatestTurn | null,
   session: OrchestrationSession | null,
