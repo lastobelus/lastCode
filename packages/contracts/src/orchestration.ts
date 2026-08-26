@@ -313,6 +313,8 @@ export const ActionResumeState = Schema.Struct({
   projectId: ProjectId,
   actionId: TrimmedNonEmptyString,
   actionName: TrimmedNonEmptyString,
+  /** Exact command captured at launch; absent on states persisted by older servers. */
+  command: Schema.optional(TrimmedNonEmptyString),
   terminalId: TrimmedNonEmptyString,
   outcome: ActionResumeOutcome,
   delivery: ActionResumeDelivery,
