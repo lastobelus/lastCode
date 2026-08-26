@@ -652,6 +652,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   environmentLabel: string | null;
   environmentKnown: boolean;
   showLocalEnvironmentIcon: boolean;
+  showWorktreeIndicators: boolean;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
   projectFaviconPath: string | null;
@@ -1710,7 +1711,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   branch, so the row lost its most stable identifier. */}
               {thread.branch ? (
                 <>
-                  <ThreadWorktreeIndicator thread={thread} />
+                  {props.showWorktreeIndicators ? (
+                    <ThreadWorktreeIndicator thread={thread} />
+                  ) : null}
                   <span className="min-w-0 flex-1 truncate whitespace-nowrap text-muted-foreground/40">
                     {thread.branch}
                   </span>
@@ -1927,6 +1930,7 @@ export default function Sidebar() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
+  const showWorktreeIndicators = useClientSettings((s) => s.showThreadWorktreeIndicators);
   const {
     settleThread,
     unsettleThread,
@@ -4078,6 +4082,7 @@ export default function Sidebar() {
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         environmentKnown={environmentLabelById.has(thread.environmentId)}
                         showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                        showWorktreeIndicators={showWorktreeIndicators}
                         configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                         projectCwd={
                           projectCwdByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
