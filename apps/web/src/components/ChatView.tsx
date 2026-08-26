@@ -5523,6 +5523,42 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const [isResumingInterruptedAction, setIsResumingInterruptedAction] = useState(false);
   const [isDiscardingInterruptedAction, setIsDiscardingInterruptedAction] = useState(false);
+  const runningResumableAction =
+    activeThreadShell?.actionResume?.outcome === "running" ? activeThreadShell.actionResume : null;
+  const activeComposerResumableAction = useMemo(
+    () =>
+      runningResumableAction === null
+        ? null
+        : {
+            action: runningResumableAction,
+          },
+    [runningResumableAction],
+  );
+  const handleOpenResumableActionTerminal = useCallback(() => {
+    if (activeThreadRef === null || runningResumableAction === null) return;
+    storeEnsureTerminal(activeThreadRef, runningResumableAction.terminalId, {
+      open: true,
+      active: true,
+    });
+    setTerminalFocusRequestId((value) => value + 1);
+  }, [activeThreadRef, runningResumableAction, storeEnsureTerminal]);
+  const handleCancelResumableAction = useCallback(async () => {
+    if (activeThreadRef === null || runningResumableAction === null) return;
+    const result = await closeTerminalMutation({
+      environmentId: activeThreadRef.environmentId,
+      input: {
+        threadId: activeThreadRef.threadId,
+        terminalId: runningResumableAction.terminalId,
+      },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setThreadError(
+        activeThreadRef.threadId,
+        error instanceof Error ? error.message : "Failed to cancel the running Action.",
+      );
+    }
+  }, [activeThreadRef, closeTerminalMutation, runningResumableAction, setThreadError]);
   const interruptedAction =
     activeThreadShell?.actionResume?.delivery === "available"
       ? activeThreadShell.actionResume
@@ -8219,6 +8255,7 @@ export default function ChatView(props: ChatViewProps) {
                             activeTasksProgress={activeComposerTasksProgress}
                             activeTaskSteps={activeComposerTaskSteps}
                             threadSyncPhase={activeEnvironmentUnavailable ? null : threadSyncPhase}
+                            activeResumableAction={activeComposerResumableAction}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
@@ -8258,6 +8295,8 @@ export default function ChatView(props: ChatViewProps) {
                             onSend={onSend}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
+                            onOpenResumableActionTerminal={handleOpenResumableActionTerminal}
+                            onCancelResumableAction={handleCancelResumableAction}
                             onRespondToApproval={onRespondToApproval}
                             onSelectActivePendingUserInputOption={
                               onSelectActivePendingUserInputOption
