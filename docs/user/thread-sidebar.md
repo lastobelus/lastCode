@@ -77,6 +77,9 @@ indicators** in **Settings -> LastCode -> Appearance**. Legacy thread rows then 
 colored status dot; the full status remains available as a tooltip. This preference is off by
 default.
 
+To hide the worktree icon beside threads that use a dedicated worktree, turn off **Show worktree
+indicators** in **Settings -> LastCode -> Appearance**. The icon remains visible by default.
+
 ## Environment icons in LastCode
 
 Open **Settings -> LastCode -> Environments** to choose the icon color for the primary machine and
