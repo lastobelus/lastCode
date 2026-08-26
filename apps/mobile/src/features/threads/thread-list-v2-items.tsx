@@ -26,7 +26,10 @@ import { useThreadPr } from "../../state/use-thread-pr";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
-import { resolveWorktreeCleanupStatus } from "./threadPresentation";
+import {
+  resolveWorktreeCleanupStatus,
+  shouldShowActionWaitingIndicator,
+} from "./threadPresentation";
 import {
   resolveThreadListV2ChangeRequestState,
   resolveThreadListV2CleanupActions,
@@ -444,16 +447,24 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const drawerColor = useThemeColor("--color-drawer");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
   const selectedBackgroundColor = useThemeColor("--color-user-bubble");
+  const selectedForegroundColor = useThemeColor("--color-user-bubble-foreground");
   const pinTintColor = useThemeColor("--color-foreground-muted");
   const sidebarPane = props.pane === "sidebar";
   const selected = props.selected === true;
 
   const status = resolveThreadListV2Status(thread);
+  const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status);
   const cleanupStatus = resolveWorktreeCleanupStatus(thread);
   const statusLabel = cleanupStatus
     ? { label: cleanupStatus.label, className: cleanupStatus.textClassName }
     : STATUS_LABEL_BY_STATUS[status];
   const timeLabel = threadTimeLabel(thread);
+  const threadAccessibilityLabel = [
+    thread.title,
+    showActionWaitingIndicator && runningAction ? `Waiting for ${runningAction.actionName}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(", ");
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRegenerateTitle = useCallback(
@@ -815,16 +826,27 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {pinnedRow ? (
           <SymbolView name="pin" size={11} tintColor={pinTintColor} type="monochrome" />
         ) : null}
-        <Text
-          className={cn(
-            "text-xs tabular-nums",
-            selected
-              ? "text-user-bubble-foreground"
-              : (statusLabel?.className ?? "text-foreground-tertiary"),
-          )}
-        >
-          {statusLabel?.label ?? timeLabel}
-        </Text>
+        <View className="flex-row items-center gap-1">
+          {showActionWaitingIndicator && runningAction ? (
+            <SymbolView
+              accessibilityLabel={`Waiting for ${runningAction.actionName}`}
+              name="clock.arrow.circlepath"
+              size={12}
+              tintColor={selected ? String(selectedForegroundColor) : "#eab308"}
+              type="monochrome"
+            />
+          ) : null}
+          <Text
+            className={cn(
+              "text-xs tabular-nums",
+              selected
+                ? "text-user-bubble-foreground"
+                : (statusLabel?.className ?? "text-foreground-tertiary"),
+            )}
+          >
+            {statusLabel?.label ?? timeLabel}
+          </Text>
+        </View>
       </View>
       <Text
         className={cn(
@@ -916,7 +938,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "card" ? (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={thread.title}
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ disabled: cleanupPending, selected }}
         disabled={cleanupPending}
@@ -957,7 +979,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ) : (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={thread.title}
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ disabled: cleanupPending, selected }}
         disabled={cleanupPending}
