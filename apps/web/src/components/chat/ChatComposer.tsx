@@ -74,6 +74,11 @@ import {
   type ComposerTasksProgress,
 } from "./ComposerTasksBadge";
 import {
+  ComposerActionResumeBadge,
+  ComposerActionResumeDrawer,
+  type ComposerResumableAction,
+} from "./ComposerActionResume";
+import {
   compressImageForStash,
   isHeicImageFile,
   prepareImageForAttachment,
@@ -604,6 +609,7 @@ export interface ChatComposerProps {
   activeProposedPlan: Thread["proposedPlans"][number] | null;
   activeTasksProgress: ComposerTasksProgress | null;
   activeTaskSteps: readonly ComposerTaskStep[] | null;
+  activeResumableAction: ComposerResumableAction | null;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -639,6 +645,8 @@ export interface ChatComposerProps {
   onSend: (e?: { preventDefault: () => void }, intent?: ComposerSubmissionIntent) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
+  onOpenResumableActionTerminal: () => void;
+  onCancelResumableAction: () => Promise<void>;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -706,6 +714,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProposedPlan,
     activeTasksProgress,
     activeTaskSteps,
+    activeResumableAction,
     runtimeMode,
     interactionMode,
     lockedProvider,
@@ -729,6 +738,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onSend,
     onInterrupt,
     onImplementPlanInNewThread,
+    onOpenResumableActionTerminal,
+    onCancelResumableAction,
     onRespondToApproval,
     onSelectActivePendingUserInputOption,
     onAdvanceActivePendingUserInput,
@@ -1059,6 +1070,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
+  const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
+  const [isCancellingAction, setIsCancellingAction] = useState(false);
+  const activeResumableActionRunId = activeResumableAction?.action.runId ?? null;
   const [dismissedTasksTurnId, setDismissedTasksTurnId] = useState<TurnId | null>(null);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -1085,6 +1099,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const stashPulseKeyRef = useRef(0);
   const stashPulseTimeoutRef = useRef<number | null>(null);
+  const activeResumableActionRunIdRef = useRef(activeResumableActionRunId);
+  activeResumableActionRunIdRef.current = activeResumableActionRunId;
   /**
    * Snapshots currently being encoded, keyed by target+prompt+image ids.
    * Keyed rather than boolean so a genuinely different prompt (or a different
@@ -2491,8 +2507,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleStashMenu();
   }, [expandMobileComposer, isComposerCollapsedMobile, toggleStashMenu]);
   const toggleTasksDrawer = useCallback(() => {
-    setIsTasksDrawerOpen((open) => !open);
+    setIsTasksDrawerOpen((open) => {
+      if (!open) setIsActionDrawerOpen(false);
+      return !open;
+    });
   }, []);
+  const toggleActionDrawer = useCallback(() => {
+    setIsActionDrawerOpen((open) => {
+      if (!open) {
+        setIsTasksDrawerOpen(false);
+        setIsStashMenuOpen(false);
+      }
+      return !open;
+    });
+  }, []);
+  const cancelResumableAction = useCallback(async () => {
+    const cancellingRunId = activeResumableActionRunId;
+    if (isCancellingAction || cancellingRunId === null) return;
+    setIsCancellingAction(true);
+    try {
+      await onCancelResumableAction();
+    } finally {
+      if (activeResumableActionRunIdRef.current === cancellingRunId) {
+        setIsCancellingAction(false);
+      }
+    }
+  }, [activeResumableActionRunId, isCancellingAction, onCancelResumableAction]);
   const activeTasksTurnId = activeThread?.latestTurn?.turnId ?? null;
   const tasksDismissedForActiveTurn =
     activeTasksTurnId !== null && dismissedTasksTurnId === activeTasksTurnId;
@@ -2512,6 +2552,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (props.externalDrawerAttached ||
       showComposerTopDrawer ||
       isTasksDrawerOpen ||
+      isActionDrawerOpen ||
+      activeResumableAction !== null ||
       isComposerCollapsedMobile);
   const inlineStashBadge = showInlineStashBadge ? (
     <ComposerStashBadge
@@ -2528,7 +2570,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     visibleTaskSteps !== null &&
     !isTasksDrawerOpen &&
     !hasBlockingComposerTopDrawer &&
-    (props.externalDrawerAttached || showComposerTopDrawer || isComposerCollapsedMobile);
+    (props.externalDrawerAttached ||
+      showComposerTopDrawer ||
+      isActionDrawerOpen ||
+      activeResumableAction !== null ||
+      isComposerCollapsedMobile);
   const inlineTasksBadge = showInlineTasksBadge ? (
     <ComposerTasksBadge
       expanded={false}
@@ -2539,14 +2585,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       steps={visibleTaskSteps}
     />
   ) : null;
+  const showInlineActionBadge =
+    activeResumableAction !== null &&
+    !isActionDrawerOpen &&
+    (props.externalDrawerAttached ||
+      showComposerTopDrawer ||
+      isTasksDrawerOpen ||
+      isComposerCollapsedMobile);
+  const inlineActionBadge = showInlineActionBadge ? (
+    <ComposerActionResumeBadge
+      action={activeResumableAction}
+      disabled={hasBlockingComposerTopDrawer}
+      expanded={false}
+      onToggle={toggleActionDrawer}
+      placement="inline"
+    />
+  ) : null;
   const showShoulderTabs =
     !props.externalDrawerAttached &&
     !showComposerTopDrawer &&
     !isTasksDrawerOpen &&
+    !isActionDrawerOpen &&
     !isComposerCollapsedMobile;
   const hasShoulderTab =
     showShoulderTabs &&
-    (stashQueue.length > 0 ||
+    (activeResumableAction !== null ||
+      stashQueue.length > 0 ||
       (visibleTasksProgress !== null &&
         visibleTaskSteps !== null &&
         visibleTasksProgress.totalSteps > 0));
@@ -2559,12 +2623,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     if (hasBlockingComposerTopDrawer) {
       setIsTasksDrawerOpen(false);
+      setIsActionDrawerOpen(false);
     }
   }, [hasBlockingComposerTopDrawer]);
 
   useEffect(() => {
     setIsTasksDrawerOpen(false);
-  }, [activeThreadId]);
+    setIsActionDrawerOpen(false);
+    setIsCancellingAction(false);
+  }, [activeResumableActionRunId, activeThreadId]);
+
+  useEffect(() => {
+    if (activeResumableAction === null) {
+      setIsActionDrawerOpen(false);
+    }
+  }, [activeResumableAction]);
 
   // Close the stash menu whenever the trigger-driven command menu opens so
   // the two popovers never stack in the same layer, and when the user
@@ -3094,6 +3167,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {activePendingProgress?.customAnswer || "Write custom answer"}
                   </button>
+                  {inlineActionBadge}
                   {inlineTasksBadge}
                   {inlineStashBadge}
                   {activePendingProgress?.activeQuestion?.multiSelect ? (
@@ -3125,6 +3199,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
         </div>
       ) : null}
+      {isActionDrawerOpen && !hasBlockingComposerTopDrawer && activeResumableAction ? (
+        <ComposerActionResumeDrawer
+          action={activeResumableAction}
+          cancelling={isCancellingAction}
+          onCancel={() => void cancelResumableAction()}
+          onCollapse={toggleActionDrawer}
+          onOpenTerminal={onOpenResumableActionTerminal}
+        />
+      ) : null}
       {isTasksDrawerOpen &&
       !hasBlockingComposerTopDrawer &&
       visibleTasksProgress &&
@@ -3137,7 +3220,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         />
       ) : null}
       <div className="relative">
-        {showShoulderTabs && visibleTasksProgress && visibleTaskSteps ? (
+        {showShoulderTabs && activeResumableAction ? (
+          <ComposerActionResumeBadge
+            action={activeResumableAction}
+            expanded={false}
+            onToggle={toggleActionDrawer}
+          />
+        ) : null}
+        {showShoulderTabs &&
+        activeResumableAction === null &&
+        visibleTasksProgress &&
+        visibleTaskSteps ? (
           <ComposerTasksBadge
             expanded={false}
             hasTrailingShoulder={stashQueue.length > 0}
@@ -3147,7 +3240,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             steps={visibleTaskSteps}
           />
         ) : null}
-        {showShoulderTabs ? (
+        {showShoulderTabs && activeResumableAction === null ? (
           <ComposerStashBadge
             count={stashQueue.length}
             menuOpen={isStashMenuOpen}
@@ -3194,6 +3287,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     : prompt.trim() ||
                       (noProviderAvailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
+                {inlineActionBadge}
                 {inlineTasksBadge}
                 {inlineStashBadge}
                 <button
@@ -3475,6 +3569,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     data-chat-composer-mobile-pending-actions="true"
                     className="absolute bottom-0 right-0 flex items-center justify-end gap-1"
                   >
+                    {inlineActionBadge}
                     {inlineTasksBadge}
                     {inlineStashBadge}
                     <ComposerPrimaryActions
@@ -3600,6 +3695,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   }
                   className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                 >
+                  {showMobilePendingAnswerActions ? null : inlineActionBadge}
                   {showMobilePendingAnswerActions ? null : inlineTasksBadge}
                   {showMobilePendingAnswerActions ? null : inlineStashBadge}
                   <ComposerFooterPrimaryActions
