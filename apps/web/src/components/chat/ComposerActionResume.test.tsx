@@ -54,6 +54,21 @@ describe("ComposerActionResumeBadge", () => {
     expect(markup).toContain("Deploy preview");
     expect(markup).not.toContain("chat-composer-shoulder-tab");
   });
+
+  it("cannot open while a blocking composer drawer is active", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerActionResumeBadge
+        action={action}
+        disabled
+        expanded={false}
+        onToggle={() => undefined}
+        placement="inline"
+      />,
+    );
+
+    expect(markup).toContain("disabled");
+    expect(markup).toContain('aria-expanded="false"');
+  });
 });
 
 describe("ComposerActionResumeDrawer", () => {

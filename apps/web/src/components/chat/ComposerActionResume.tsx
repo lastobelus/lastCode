@@ -32,11 +32,13 @@ function ActionElapsed({ startedAt }: { readonly startedAt: string }) {
 
 export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge({
   action,
+  disabled = false,
   expanded,
   onToggle,
   placement = "tab",
 }: {
   readonly action: ComposerResumableAction;
+  readonly disabled?: boolean;
   readonly expanded: boolean;
   readonly onToggle: () => void;
   readonly placement?: "inline" | "tab";
@@ -50,6 +52,7 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
         variant="ghost-muted"
         aria-expanded={expanded}
         aria-label={label}
+        disabled={disabled}
         className="shrink-0 gap-1 px-1.5 text-yellow-700 dark:text-yellow-300"
         onClick={onToggle}
         onPointerDown={(event) => event.preventDefault()}

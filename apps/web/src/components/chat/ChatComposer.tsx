@@ -2516,6 +2516,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const inlineActionBadge = showInlineActionBadge ? (
     <ComposerActionResumeBadge
       action={activeResumableAction}
+      disabled={hasBlockingComposerTopDrawer}
       expanded={false}
       onToggle={toggleActionDrawer}
       placement="inline"
