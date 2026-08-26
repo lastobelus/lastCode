@@ -92,6 +92,7 @@ describe("LastCodeSettingsImport", () => {
     const lastCodeCustom = ProviderInstanceId.make("lastcode_custom");
     const sourceClient = { ...DEFAULT_CLIENT_SETTINGS, fontSizeInterface: 17 };
     Reflect.deleteProperty(sourceClient, "compactLegacySidebarStatuses");
+    Reflect.deleteProperty(sourceClient, "showThreadWorktreeIndicators");
     Reflect.deleteProperty(sourceClient, "legacySidebarScale");
     Reflect.deleteProperty(sourceClient, "roundedProjectIcons");
     sourceClient.favorites = [
@@ -105,6 +106,7 @@ describe("LastCodeSettingsImport", () => {
     const destinationClient = {
       ...DEFAULT_CLIENT_SETTINGS,
       compactLegacySidebarStatuses: true,
+      showThreadWorktreeIndicators: false,
       legacySidebarScale: 75,
       roundedProjectIcons: true,
       environmentIconColors: { primary: "#2563eb", remote: "#7c3aed" },
@@ -218,6 +220,7 @@ describe("LastCodeSettingsImport", () => {
     );
     assert.equal(importedClient.fontSizeInterface, 17);
     assert.equal(importedClient.compactLegacySidebarStatuses, true);
+    assert.equal(importedClient.showThreadWorktreeIndicators, false);
     assert.equal(importedClient.legacySidebarScale, 75);
     assert.equal(importedClient.roundedProjectIcons, true);
     assert.deepEqual(importedClient.environmentIconColors, {
