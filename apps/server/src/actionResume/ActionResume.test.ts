@@ -237,6 +237,14 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       "qa",
     );
     assert.equal(running.outcome, "running");
+    assert.equal(running.command, "vp test run");
+    const launchedActivity = dispatched.findLast(
+      (command) => command.type === "thread.activity.append",
+    );
+    assert.equal(launchedActivity?.type, "thread.activity.append");
+    if (launchedActivity?.type === "thread.activity.append") {
+      assert.deepInclude(launchedActivity.activity.payload, { command: "vp test run" });
+    }
     assert.equal(opened.length, 2);
     assert.equal(written.length, 2);
     assert.isBelow(
