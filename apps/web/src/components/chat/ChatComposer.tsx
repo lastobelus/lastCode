@@ -104,6 +104,11 @@ import {
   type ComposerBannerStackContent,
   type ComposerBannerStackItem,
 } from "./ComposerBannerStack";
+import {
+  ComposerActionResumeBadge,
+  ComposerActionResumeDrawer,
+  type ComposerResumableAction,
+} from "./ComposerActionResume";
 import { compressImageForStash, prepareImageForAttachment } from "../../lib/imageCompression";
 import {
   fileAttachmentTooLargeMessage,
@@ -5522,6 +5527,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       </Tooltip>
                     </>
                   ) : null}
+                  {showMobilePendingAnswerActions ? null : inlineActionBadge}
+                  {showMobilePendingAnswerActions ? null : inlineTasksBadge}
+                  {showMobilePendingAnswerActions ? null : inlineStashBadge}
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     activeContextWindow={

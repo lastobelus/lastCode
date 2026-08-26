@@ -24,6 +24,13 @@ export interface ThreadStatusPresentation extends StatusTone {
   readonly pulse: boolean;
 }
 
+export function shouldShowActionWaitingIndicator(
+  thread: Pick<EnvironmentThreadShell, "actionResume">,
+  primaryStatus: string | null,
+): boolean {
+  return thread.actionResume?.outcome === "running" && primaryStatus !== "waiting";
+}
+
 function isLatestTurnSettled(
   latestTurn: OrchestrationLatestTurn | null,
   session: OrchestrationSession | null,
