@@ -20,6 +20,7 @@ import {
   type TailscaleServeError,
   type TailscaleStderrDiagnostic,
 } from "@t3tools/tailscale";
+import { SHARED_DEV_LOOPBACK_HOST } from "@t3tools/shared/devProxy";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { ChildProcessSpawner } from "effect/unstable/process";
@@ -130,7 +131,11 @@ export const unshareDevServer = (
   never,
   ChildProcessSpawner.ChildProcessSpawner
 > =>
-  disableTailscaleServe({ localPort: webPort, servePort: webPort }).pipe(
+  disableTailscaleServe({
+    localHost: SHARED_DEV_LOOPBACK_HOST,
+    localPort: webPort,
+    servePort: webPort,
+  }).pipe(
     Effect.as({ cleared: true } as const),
     Effect.catch((error: TailscaleServeError) =>
       Effect.succeed(
@@ -169,7 +174,11 @@ export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (in
     return yield* new TailnetNameMissingError();
   }
 
-  yield* ensureTailscaleServe({ localPort: input.webPort, servePort: input.webPort }).pipe(
+  yield* ensureTailscaleServe({
+    localHost: SHARED_DEV_LOOPBACK_HOST,
+    localPort: input.webPort,
+    servePort: input.webPort,
+  }).pipe(
     Effect.mapError((error) => {
       const explanation = explainCommandFailure(error);
       return new DevServeFailedError({
