@@ -1051,6 +1051,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
   const [isCancellingAction, setIsCancellingAction] = useState(false);
+  const activeResumableActionRunId = activeResumableAction?.action.runId ?? null;
   const [dismissedTasksTurnId, setDismissedTasksTurnId] = useState<TurnId | null>(null);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -1077,6 +1078,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const stashPulseKeyRef = useRef(0);
   const stashPulseTimeoutRef = useRef<number | null>(null);
+  const activeResumableActionRunIdRef = useRef(activeResumableActionRunId);
+  activeResumableActionRunIdRef.current = activeResumableActionRunId;
   /**
    * Snapshots currently being encoded, keyed by target+prompt+image ids.
    * Keyed rather than boolean so a genuinely different prompt (or a different
@@ -2446,20 +2449,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
   }, []);
   const cancelResumableAction = useCallback(async () => {
-    if (isCancellingAction) return;
+    const cancellingRunId = activeResumableActionRunId;
+    if (isCancellingAction || cancellingRunId === null) return;
     setIsCancellingAction(true);
     try {
       await onCancelResumableAction();
     } finally {
-      setIsCancellingAction(false);
+      if (activeResumableActionRunIdRef.current === cancellingRunId) {
+        setIsCancellingAction(false);
+      }
     }
-  }, [isCancellingAction, onCancelResumableAction]);
+  }, [activeResumableActionRunId, isCancellingAction, onCancelResumableAction]);
   const activeTasksTurnId = activeThread?.latestTurn?.turnId ?? null;
   const tasksDismissedForActiveTurn =
     activeTasksTurnId !== null && dismissedTasksTurnId === activeTasksTurnId;
   const visibleTasksProgress = tasksDismissedForActiveTurn ? null : activeTasksProgress;
   const visibleTaskSteps = tasksDismissedForActiveTurn ? null : activeTaskSteps;
-  const activeResumableActionRunId = activeResumableAction?.action.runId ?? null;
   const hasBlockingComposerTopDrawer =
     activePendingApproval !== null || pendingUserInputs.length > 0;
   const dismissTasks = useCallback(() => {
