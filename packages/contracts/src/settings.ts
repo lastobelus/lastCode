@@ -255,6 +255,9 @@ export const ClientSettingsSchema = Schema.Struct({
   compactLegacySidebarStatuses: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  showThreadWorktreeIndicators: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -1021,6 +1024,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
+  showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   environmentIconColors: Schema.optionalKey(Schema.Record(EnvironmentId, EnvironmentIconColor)),

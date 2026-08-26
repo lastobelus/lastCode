@@ -218,6 +218,7 @@ describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar", () => {
     const settings = decodeClientSettings({});
     expect(settings.compactLegacySidebarStatuses).toBe(false);
+    expect(settings.showThreadWorktreeIndicators).toBe(true);
     expect(settings.legacySidebarEnabled).toBe(false);
     expect(settings.legacySidebarScale).toBe(100);
   });
@@ -253,6 +254,16 @@ describe("ClientSettings sidebar", () => {
       decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
         .compactLegacySidebarStatuses,
     ).toBe(true);
+  });
+
+  it("preserves an explicit worktree indicator preference", () => {
+    expect(
+      decodeClientSettings({ showThreadWorktreeIndicators: false }).showThreadWorktreeIndicators,
+    ).toBe(false);
+    expect(
+      decodeClientSettingsPatch({ showThreadWorktreeIndicators: false })
+        .showThreadWorktreeIndicators,
+    ).toBe(false);
   });
 
   it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
