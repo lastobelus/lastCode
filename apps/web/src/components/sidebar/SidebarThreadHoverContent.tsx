@@ -8,6 +8,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { EnvironmentIcon } from "../../environmentIcons";
+import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
@@ -110,6 +111,14 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
             />
             <div className="min-w-0 truncate text-foreground/75">
               {terminalProcessLabel(props.terminalProcessCount)}
+            </div>
+          </div>
+        ) : null}
+        {props.thread.actionResume?.outcome === "running" ? (
+          <div className="flex min-w-0 items-center gap-2 text-yellow-700 dark:text-yellow-300">
+            <RotateCcwClockIcon aria-hidden className="size-3 shrink-0" />
+            <div className="min-w-0 truncate">
+              Waiting for {props.thread.actionResume.actionName}
             </div>
           </div>
         ) : null}
