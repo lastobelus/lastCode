@@ -577,10 +577,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     />
   );
   const threadMetaClassName = isConfirmingArchive
-    ? "pointer-events-none opacity-0"
+    ? "pointer-events-none inline-flex w-12 justify-end opacity-0"
     : !isThreadRunning
-      ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
-      : "pointer-events-none";
+      ? "pointer-events-none inline-flex w-12 justify-end transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
+      : "pointer-events-none inline-flex w-12 justify-end";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
@@ -937,7 +937,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {cleanup === null && discoveredPorts.length > 0 && (
+          {cleanup === null && discoveredPorts.length > 0 ? (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -956,9 +956,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 {discoveredPorts.length > 1 ? ` (+${discoveredPorts.length - 1})` : ""}
               </TooltipPopup>
             </Tooltip>
-          )}
-          {props.showWorktreeIndicators ? <ThreadWorktreeIndicator thread={thread} /> : null}
-          {terminalStatus && (
+          ) : null}
+          {terminalStatus ? (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -975,13 +974,24 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               </TooltipTrigger>
               <TooltipPopup side="top">{terminalStatus.label}</TooltipPopup>
             </Tooltip>
-          )}
+          ) : null}
+          {/* These fixed tracks are the scanning columns for every thread row.
+              Empty local/worktree cells stay mounted, and the timestamp cannot
+              widen the grid and push either icon sideways. */}
           <div
-            className={`flex min-w-12 items-center justify-end gap-1 ${
-              isRemoteThread ? "max-sm:min-w-24" : "max-sm:min-w-20"
-            }`}
+            className="grid shrink-0 grid-cols-[repeat(2,0.75rem)_3rem] items-center gap-x-1 max-sm:grid-cols-[repeat(2,0.75rem)_3rem_1.5rem]"
+            data-testid={`thread-metadata-grid-${thread.id}`}
           >
-            <span className="inline-flex size-3 shrink-0 items-center justify-center">
+            <span
+              className="inline-flex size-3 items-center justify-center"
+              data-thread-metadata-column="worktree"
+            >
+              {props.showWorktreeIndicators ? <ThreadWorktreeIndicator thread={thread} /> : null}
+            </span>
+            <span
+              className="inline-flex size-3 items-center justify-center"
+              data-thread-metadata-column="environment"
+            >
               {showsThreadEnvironmentIcon ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -1057,7 +1067,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 </Tooltip>
               )
             ) : null}
-            <span className={threadMetaClassName}>
+            <span className={threadMetaClassName} data-thread-metadata-column="timestamp">
               <span className="inline-flex items-center gap-1">
                 {jumpLabel ? (
                   hasActiveAnnotation && thread.annotation ? (
