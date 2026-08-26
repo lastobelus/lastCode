@@ -2459,6 +2459,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeTasksTurnId !== null && dismissedTasksTurnId === activeTasksTurnId;
   const visibleTasksProgress = tasksDismissedForActiveTurn ? null : activeTasksProgress;
   const visibleTaskSteps = tasksDismissedForActiveTurn ? null : activeTaskSteps;
+  const activeResumableActionRunId = activeResumableAction?.action.runId ?? null;
   const hasBlockingComposerTopDrawer =
     activePendingApproval !== null || pendingUserInputs.length > 0;
   const dismissTasks = useCallback(() => {
@@ -2551,12 +2552,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     setIsTasksDrawerOpen(false);
     setIsActionDrawerOpen(false);
-  }, [activeThreadId]);
+    setIsCancellingAction(false);
+  }, [activeResumableActionRunId, activeThreadId]);
 
   useEffect(() => {
     if (activeResumableAction === null) {
       setIsActionDrawerOpen(false);
-      setIsCancellingAction(false);
     }
   }, [activeResumableAction]);
 
