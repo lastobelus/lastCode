@@ -266,6 +266,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "show-worktree-indicators",
+    title: "Show worktree indicators",
+    to: "/settings/lastcode",
+  },
+  {
     id: "rounded-project-icons",
     title: "Rounded project icons",
     to: "/settings/lastcode",
