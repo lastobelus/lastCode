@@ -19,6 +19,7 @@ const clientSettings: ClientSettings = {
   browserDefaultAppearance: "dark",
   browserAutoShowFloatingPreview: false,
   compactLegacySidebarStatuses: false,
+  showThreadWorktreeIndicators: true,
   confirmQuit: true,
   confirmThreadArchive: true,
   confirmThreadDelete: false,

@@ -341,6 +341,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   compactStatusIndicators: boolean;
+  showWorktreeIndicators: boolean;
   showLocalEnvironmentIcon: boolean;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
@@ -934,7 +935,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               </TooltipPopup>
             </Tooltip>
           )}
-          <ThreadWorktreeIndicator thread={thread} />
+          {props.showWorktreeIndicators ? <ThreadWorktreeIndicator thread={thread} /> : null}
           {terminalStatus && (
             <Tooltip>
               <TooltipTrigger
@@ -1141,6 +1142,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 interface SidebarProjectThreadListProps {
   legacySidebarScale: LegacySidebarScale;
   compactStatusIndicators: boolean;
+  showWorktreeIndicators: boolean;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
@@ -1206,6 +1208,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     legacySidebarScale,
     compactStatusIndicators,
+    showWorktreeIndicators,
     scaleStyle,
     providerEntriesByEnvironmentId,
     environmentIconColors,
@@ -1277,6 +1280,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               key={threadKey}
               thread={thread}
               compactStatusIndicators={compactStatusIndicators}
+              showWorktreeIndicators={showWorktreeIndicators}
               showLocalEnvironmentIcon={showLocalEnvironmentIcon}
               configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
               projectCwd={projectCwd}
@@ -1351,6 +1355,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   legacySidebarScale: LegacySidebarScale;
   compactStatusIndicators: boolean;
+  showWorktreeIndicators: boolean;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
@@ -1380,6 +1385,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     legacySidebarScale,
     compactStatusIndicators,
+    showWorktreeIndicators,
     scaleStyle,
     providerEntriesByEnvironmentId,
     project,
@@ -2764,6 +2770,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarProjectThreadList
         legacySidebarScale={legacySidebarScale}
         compactStatusIndicators={compactStatusIndicators}
+        showWorktreeIndicators={showWorktreeIndicators}
         scaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         environmentIconColors={props.environmentIconColors}
@@ -3223,6 +3230,7 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   legacySidebarScale: LegacySidebarScale;
   compactStatusIndicators: boolean;
+  showWorktreeIndicators: boolean;
   projectTreeScaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
@@ -3339,6 +3347,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     legacySidebarScale,
     compactStatusIndicators,
+    showWorktreeIndicators,
     projectTreeScaleStyle,
     providerEntriesByEnvironmentId,
     desktopLocalEnvironmentIds,
@@ -3473,6 +3482,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         legacySidebarScale={legacySidebarScale}
                         compactStatusIndicators={compactStatusIndicators}
+                        showWorktreeIndicators={showWorktreeIndicators}
                         scaleStyle={projectTreeScaleStyle}
                         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
@@ -3514,6 +3524,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 legacySidebarScale={legacySidebarScale}
                 compactStatusIndicators={compactStatusIndicators}
+                showWorktreeIndicators={showWorktreeIndicators}
                 scaleStyle={projectTreeScaleStyle}
                 providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
@@ -3572,6 +3583,9 @@ export default function LegacySidebar() {
   const legacySidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
   const compactStatusIndicators = useClientSettings(
     (settings) => settings.compactLegacySidebarStatuses,
+  );
+  const showWorktreeIndicators = useClientSettings(
+    (settings) => settings.showThreadWorktreeIndicators,
   );
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
@@ -4264,6 +4278,7 @@ export default function LegacySidebar() {
         projectsLength={projects.length}
         legacySidebarScale={legacySidebarScale}
         compactStatusIndicators={compactStatusIndicators}
+        showWorktreeIndicators={showWorktreeIndicators}
         projectTreeScaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
