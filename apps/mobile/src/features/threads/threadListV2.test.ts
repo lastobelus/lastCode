@@ -25,7 +25,11 @@ import {
   resolveThreadListV2SwipeActions,
   sortThreadsForListV2,
 } from "./threadListV2";
-import { resolveThreadStatus, resolveWorktreeCleanupStatus } from "./threadPresentation";
+import {
+  resolveThreadStatus,
+  resolveWorktreeCleanupStatus,
+  shouldShowActionWaitingIndicator,
+} from "./threadPresentation";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -244,6 +248,7 @@ describe("resolveThreadListV2Status", () => {
     const waiting = makeThread({ id: ThreadId.make("waiting"), title: "Waiting", actionResume });
     expect(resolveThreadListV2Status(waiting)).toBe("waiting");
     expect(resolveThreadStatus(waiting)?.kind).toBe("waiting");
+    expect(shouldShowActionWaitingIndicator(waiting, "waiting")).toBe(false);
 
     expect(
       resolveThreadListV2Status({
@@ -251,6 +256,31 @@ describe("resolveThreadListV2Status", () => {
         hasPendingApprovals: true,
       }),
     ).toBe("approval");
+  });
+
+  it("keeps a secondary Action indicator while the primary status is Working", () => {
+    const actionResume = { outcome: "running" } as NonNullable<
+      EnvironmentThreadShell["actionResume"]
+    >;
+    const working = makeThread({
+      id: ThreadId.make("working-action"),
+      title: "Working with Action",
+      actionResume,
+      session: {
+        threadId: ThreadId.make("working-action"),
+        status: "running",
+        providerName: "Codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: NOW,
+      },
+    });
+
+    expect(resolveThreadListV2Status(working)).toBe("working");
+    expect(resolveThreadStatus(working)?.kind).toBe("working");
+    expect(shouldShowActionWaitingIndicator(working, "working")).toBe(true);
   });
 
   it("resolves ready for quiescent threads", () => {
