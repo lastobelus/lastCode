@@ -247,6 +247,19 @@ export function LastCodeSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          {...searchableSetting("show-worktree-indicators")}
+          description="Show the worktree icon beside threads that use a dedicated worktree."
+          control={
+            <Switch
+              checked={clientSettings.showThreadWorktreeIndicators}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ showThreadWorktreeIndicators: Boolean(checked) })
+              }
+              aria-label="Show worktree indicators"
+            />
+          }
+        />
       </SettingsSection>
       <SettingsSection
         id="environment-icons"
