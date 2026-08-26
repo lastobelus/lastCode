@@ -36,6 +36,14 @@ changed. Editing, resolving, or reopening the annotation moves that marker to th
 Resolved annotations disappear from the sidebar and composer but remain available from their
 yellow minimap marker, where they can be edited or reopened.
 
+## Resumable Project Actions in LastCode
+
+Threads with a running resumable Project Action keep a yellow waiting indicator beside any active
+**Working** status. When the agent becomes idle, the primary status changes to **Waiting**. Hover
+the indicator on web or desktop to see the Action name. See
+[Resumable Project Actions in LastCode](./resumable-project-actions.md) for the automatic follow-up
+behavior and the composer controls.
+
 ## Worktree cleanup in LastCode
 
 When you delete a thread and choose to delete its worktree, the thread stays in the sidebar until
