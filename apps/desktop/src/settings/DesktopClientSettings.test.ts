@@ -20,6 +20,7 @@ const clientSettings: ClientSettings = {
   browserRecordingFrameRate: 60,
   browserAutoShowFloatingPreview: false,
   compactLegacySidebarStatuses: false,
+  showThreadWorktreeIndicators: true,
   confirmQuit: true,
   confirmThreadArchive: true,
   confirmThreadDelete: false,
