@@ -26,6 +26,21 @@ describe("Action resume follow-up presentation", () => {
     expect(parseActionResumeFollowUp("Automated maintenance completed.")).toBeNull();
   });
 
+  it("round-trips action IDs containing parentheses", () => {
+    const text = formatActionResumeFollowUp({
+      actionName: "QA",
+      actionId: "qa(test)",
+      validatedStatus: "succeeded",
+      exitCode: 0,
+      output: "QA passed.",
+    });
+
+    expect(parseActionResumeFollowUp(text)).toMatchObject({
+      actionName: "QA",
+      actionId: "qa(test)",
+    });
+  });
+
   it("collapses action follow-ups persisted before exit codes were explicit", () => {
     expect(
       parseActionResumeFollowUp(

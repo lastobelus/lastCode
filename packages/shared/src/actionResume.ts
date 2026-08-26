@@ -38,7 +38,7 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
   const lines = text.split("\n");
   if (lines[0] !== ACTION_FOLLOW_UP_HEADER) return null;
 
-  const actionMatch = /^Action: (.*) \(([^()]*)\)$/.exec(lines[1] ?? "");
+  const actionMatch = /^Action: (.*) \((.*)\)$/.exec(lines[1] ?? "");
   const statusMatch = /^Validated status: (.*)\.$/.exec(lines[2] ?? "");
   if (!actionMatch || !statusMatch) return null;
 
