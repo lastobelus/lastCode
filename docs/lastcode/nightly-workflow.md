@@ -144,11 +144,14 @@ retains both:
 - the corresponding `sync/nightly/...` or `sync/revision/...` branch; and
 - the printed `lastcode-nightly-sync` worktree path.
 
-It also posts a macOS notification. Resolve the rebase or failure in that
-worktree, then release the retained worktree and generated recovery branch so
-the daemon can retry. `lastcode-checkpoints` prints the exact commands for the
-current state: it distinguishes an in-progress rebase, a rebase already
-completed by the operator, and a smoke-gate failure that must first be fixed on
+It also posts a macOS notification. When the service is configured with a
+maintenance thread, its supervisor durably sends one turn to that same thread
+for each distinct blocker and retries delivery if the LastCode server is
+temporarily unavailable. Resolve the rebase or failure in the retained
+worktree, then release the worktree and generated recovery branch so the daemon
+can retry. `lastcode-checkpoints` prints the exact commands for the current
+state: it distinguishes an in-progress rebase, a rebase already completed by
+the operator, and a smoke-gate failure that must first be fixed on
 `lastcode/main`. The final printed command runs the daemon immediately. The next
 automated run refuses to replace an existing recovery worktree until those
 cleanup steps are complete.
@@ -180,11 +183,28 @@ Install the per-user launch agent:
 pnpm lastcode:checkpoint:service install
 ```
 
+For unattended recovery, dedicate one durable LastCode thread to checkpoint
+maintenance and configure its thread ID once:
+
+```bash
+pnpm lastcode:checkpoint:service install --recovery-thread <thread-id>
+```
+
+The service reuses that thread instead of creating a new thread per failure. A
+standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
+execution; every run writes terminal state to
+`~/.lastcode/automation/checkpoint-service-state.json`. A failed alert remains
+pending until LastCode accepts it, and the same incident is not sent again after
+acknowledgement. When a later run succeeds, the supervisor sends one closure to
+the maintenance thread. The launch agent starts the pinned Node runtime without
+a login shell and clears inherited GUI-session variables before the supervisor
+runs. The macOS notification remains a secondary signal.
+
 The job runs at login and hourly while the Mac is awake. Missed intervals do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.
 When the latest checkpoint is already promoted, the job exits without running
 the local push gate or pushing an unchanged branch.
-The job executes:
+The supervisor executes the equivalent of:
 
 ```bash
 pnpm run lastcode:checkpoint -- \
