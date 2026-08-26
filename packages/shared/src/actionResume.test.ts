@@ -15,6 +15,7 @@ describe("Action resume follow-up presentation", () => {
     expect(parseActionResumeFollowUp(text)).toEqual({
       actionName: "Run Full CI",
       actionId: "run-full-ci",
+      validatedStatus: "succeeded",
       exitCode: 0,
       output: "first line\n[lastcode:ci] Summary: all checks passed\n",
       lastOutputLine: "[lastcode:ci] Summary: all checks passed",
@@ -52,6 +53,7 @@ describe("Action resume follow-up presentation", () => {
     });
 
     expect(parseActionResumeFollowUp(text)).toMatchObject({
+      validatedStatus: "was cancelled by the user",
       exitCode: null,
       lastOutputLine: "(No Action stdout/stderr was captured.)",
     });

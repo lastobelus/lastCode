@@ -1045,6 +1045,7 @@ function renderFeedEntry(
         <ActionFollowUpCard
           actionName={actionFollowUp.actionName}
           exitCode={actionFollowUp.exitCode}
+          validatedStatus={actionFollowUp.validatedStatus}
           lastOutputLine={actionFollowUp.lastOutputLine}
           output={actionFollowUp.output}
           iconColor={iconSubtleColor}
@@ -1208,12 +1209,13 @@ function renderFeedEntry(
 const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly actionName: string;
   readonly exitCode: number | null;
+  readonly validatedStatus: string;
   readonly lastOutputLine: string;
   readonly output: string;
   readonly iconColor: string | ColorValue;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const status = props.exitCode ?? "unavailable";
+  const status = props.exitCode ?? props.validatedStatus;
 
   return (
     <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">

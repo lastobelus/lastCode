@@ -1335,7 +1335,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
   const actionFollowUp = parseActionResumeFollowUp(row.message.text);
 
   if (actionFollowUp) {
-    const status = actionFollowUp.exitCode ?? "unavailable";
+    const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
     return (
       <div className="mx-1 overflow-hidden rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06]">
         <button

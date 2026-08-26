@@ -7,6 +7,7 @@ const ANSI_SGR_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g")
 export interface ActionResumeFollowUp {
   readonly actionName: string;
   readonly actionId: string;
+  readonly validatedStatus: string;
   readonly exitCode: number | null;
   readonly output: string;
   readonly lastOutputLine: string;
@@ -59,6 +60,7 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
   return {
     actionName: actionMatch[1]!,
     actionId: actionMatch[2]!,
+    validatedStatus: statusMatch[1]!,
     exitCode: exitCodeMatch
       ? exitCodeMatch[1] === "unavailable"
         ? null

@@ -260,6 +260,26 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('aria-expanded="false"');
   });
 
+  it("shows the validated outcome when an Action has no exit code", () => {
+    const actionText = formatActionResumeFollowUp({
+      actionName: "Wait for PR",
+      actionId: "wait-for-pr",
+      validatedStatus: "was cancelled by the user",
+      exitCode: null,
+      output: "Cancellation requested.",
+    });
+    const entry = buildAssistantTimelineEntry(actionText);
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[{ ...entry, message: { ...entry.message, role: "system" as const } }]}
+      />,
+    );
+
+    expect(markup).toContain("Action completed: Wait for PR Status: was cancelled by the user");
+    expect(markup).not.toContain("Status: unavailable");
+  });
+
   it("renders a feedback command and its pending response as normal thread messages", () => {
     const submission = {
       id: MessageId.make("feedback-command"),
