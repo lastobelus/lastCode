@@ -9,7 +9,6 @@ import { cn } from "~/lib/utils";
 
 export interface ComposerResumableAction {
   readonly action: ActionResumeState;
-  readonly command: string | null;
 }
 
 function ActionElapsed({ startedAt }: { readonly startedAt: string }) {
@@ -146,10 +145,10 @@ export const ComposerActionResumeDrawer = memo(function ComposerActionResumeDraw
           <code
             className={cn(
               "block min-w-0 truncate rounded-md border border-border/70 bg-background/45 px-2 py-1.5 font-mono text-[11px] text-foreground/80",
-              action.command === null && "italic text-muted-foreground",
+              action.action.command === undefined && "italic text-muted-foreground",
             )}
           >
-            {action.command ?? "Command unavailable"}
+            {action.action.command ?? "Command unavailable"}
           </code>
         </div>
         <div>

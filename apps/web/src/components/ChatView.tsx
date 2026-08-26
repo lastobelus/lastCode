@@ -4767,11 +4767,8 @@ function ChatViewContent(props: ChatViewProps) {
         ? null
         : {
             action: runningResumableAction,
-            command:
-              activeProject?.scripts.find((script) => script.id === runningResumableAction.actionId)
-                ?.command ?? null,
           },
-    [activeProject?.scripts, runningResumableAction],
+    [runningResumableAction],
   );
   const handleOpenResumableActionTerminal = useCallback(() => {
     if (activeThreadRef === null || runningResumableAction === null) return;

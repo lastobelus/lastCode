@@ -15,6 +15,7 @@ const action: ComposerResumableAction = {
     projectId: "project-1",
     actionId: "deploy-preview",
     actionName: "Deploy preview",
+    command: "vp run deploy:preview",
     terminalId: "terminal-1",
     outcome: "running",
     delivery: "armed",
@@ -23,7 +24,6 @@ const action: ComposerResumableAction = {
     exitCode: null,
     exitSignal: null,
   } as ActionResumeState,
-  command: "vp run deploy:preview",
 };
 
 describe("ComposerActionResumeBadge", () => {
@@ -94,9 +94,10 @@ describe("ComposerActionResumeDrawer", () => {
   });
 
   it("handles Actions whose configured command is no longer available", () => {
+    const { command: _command, ...legacyAction } = action.action;
     const markup = renderToStaticMarkup(
       <ComposerActionResumeDrawer
-        action={{ ...action, command: null }}
+        action={{ action: legacyAction }}
         cancelling={false}
         onCancel={() => undefined}
         onCollapse={() => undefined}
