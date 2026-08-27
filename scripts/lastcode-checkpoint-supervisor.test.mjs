@@ -183,6 +183,34 @@ describe("LastCode checkpoint supervisor", () => {
     expect(stillHealthy.messages).toEqual([]);
   });
 
+  it("sends an incident closure to the thread that received its alert", () => {
+    const previous = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-original" }),
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, previous.dependencies)).toThrow("fetch failed");
+    expect(previous.state.incident).toMatchObject({
+      alertDelivery: "sent",
+      deliveryThreadId: "thread-original",
+    });
+
+    const recovered = fixture({
+      state: previous.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0]).toMatchObject({ threadId: "thread-original" });
+    expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
+  });
+
   it("delivers the alert and closure when recovery precedes the alert retry", () => {
     const previous = fixture({
       dependencies: {

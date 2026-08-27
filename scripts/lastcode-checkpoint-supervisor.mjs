@@ -264,6 +264,7 @@ function durablePendingIncidents(state) {
 
 function attemptDelivery(state, config, dependencies) {
   if (!config?.recoveryThreadId) return state;
+  const recoveryThreadId = config.recoveryThreadId;
   let nextState = state;
   let pendingIncidents = [...durablePendingIncidents(state)];
   while (pendingIncidents.length > 0) {
@@ -281,14 +282,24 @@ function attemptDelivery(state, config, dependencies) {
     dependencies.writeState(nextState);
     try {
       dependencies.sendThread(
-        config.recoveryThreadId,
+        recoveryThreadId,
         checkpointFailureMessage(updatedIncident.failure, updatedIncident.fingerprint),
       );
       pendingIncidents = remaining;
+      const currentIncident = nextState.incident;
       nextState = Object.assign(
         {},
         nextState,
         pendingIncidents.length > 0 ? { pendingIncidents } : { pendingIncidents: undefined },
+        currentIncident?.fingerprint === updatedIncident.fingerprint
+          ? {
+              incident: {
+                ...currentIncident,
+                alertDelivery: "sent",
+                deliveryThreadId: recoveryThreadId,
+              },
+            }
+          : {},
       );
       dependencies.writeState(nextState);
     } catch (error) {
@@ -307,6 +318,9 @@ function attemptDelivery(state, config, dependencies) {
   const message = resolving
     ? checkpointResolvedMessage(incident)
     : checkpointFailureMessage(incident.failure, incident.fingerprint);
+  const deliveryThreadId = resolving
+    ? (incident.deliveryThreadId ?? recoveryThreadId)
+    : recoveryThreadId;
   const nextIncident = {
     ...incident,
     [key]: "pending",
@@ -316,8 +330,15 @@ function attemptDelivery(state, config, dependencies) {
   nextState = { ...nextState, incident: nextIncident };
   dependencies.writeState(nextState);
   try {
-    dependencies.sendThread(config.recoveryThreadId, message);
-    nextState = { ...nextState, incident: { ...nextIncident, [key]: "sent" } };
+    dependencies.sendThread(deliveryThreadId, message);
+    nextState = {
+      ...nextState,
+      incident: {
+        ...nextIncident,
+        [key]: "sent",
+        ...(!resolving ? { deliveryThreadId } : {}),
+      },
+    };
     dependencies.writeState(nextState);
   } catch (error) {
     console.error(
