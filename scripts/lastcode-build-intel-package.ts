@@ -240,7 +240,7 @@ function removeRequestFile(requestToken: string): void {
   if (current.requestToken === requestToken) NodeFS.rmSync(path);
 }
 
-function defaultDependencies(): BuildIntelDependencies {
+export function createBuildIntelDependencies(): BuildIntelDependencies {
   const repository = process.env.LASTCODE_GITHUB_REPOSITORY ?? DEFAULT_REPOSITORY;
   return {
     now: () => Date.now(),
@@ -386,7 +386,7 @@ async function waitForCompletion(
 }
 
 export async function runSelectedIntelBuild(
-  dependencies: BuildIntelDependencies = defaultDependencies(),
+  dependencies: BuildIntelDependencies = createBuildIntelDependencies(),
 ): Promise<BuildIntelResult> {
   dependencies.verifyWorkflow();
 
