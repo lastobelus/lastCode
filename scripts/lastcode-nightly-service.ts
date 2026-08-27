@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 
 const LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 const INTERVAL_SECONDS = 60 * 60;
+const SUPERVISOR_FILE = "lastcode-checkpoint-supervisor.mjs";
 
 function xml(value: string): string {
   return value
@@ -23,18 +24,10 @@ function xml(value: string): string {
 
 export function renderLaunchAgentPlist(input: {
   readonly logDirectory: string;
+  readonly nodePath: string;
   readonly repoRoot: string;
+  readonly supervisorPath: string;
 }): string {
-  const command = [
-    "git fetch origin +refs/heads/lastcode/main:refs/remotes/origin/lastcode/main",
-    "&amp;&amp; git checkout --detach --force refs/remotes/origin/lastcode/main",
-    "&amp;&amp; ./node_modules/.bin/vp install --frozen-lockfile",
-    "&amp;&amp;",
-    "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
-    "--push-tags",
-    "--promote-if-no-open-prs",
-    "--mirror-upstream-main",
-  ].join(" ");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -43,9 +36,9 @@ export function renderLaunchAgentPlist(input: {
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>${command}</string>
+    <string>${xml(input.nodePath)}</string>
+    <string>${xml(input.supervisorPath)}</string>
+    <string>run</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${xml(input.repoRoot)}</string>
@@ -67,6 +60,44 @@ export function renderLaunchAgentPlist(input: {
 </dict>
 </plist>
 `;
+}
+
+export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
+  readonly command: "install" | "run-now" | "status" | "uninstall";
+  readonly clearRecoveryThread?: boolean;
+  readonly recoveryThreadId?: string;
+} {
+  const command = argv[0];
+  if (
+    command !== "install" &&
+    command !== "run-now" &&
+    command !== "status" &&
+    command !== "uninstall"
+  ) {
+    throw new Error(
+      "Usage: pnpm lastcode:checkpoint:service <install|run-now|status|uninstall> [--recovery-thread <thread-id> | --no-recovery-thread]",
+    );
+  }
+  if (command !== "install") {
+    if (argv.length !== 1) {
+      throw new Error("--recovery-thread is accepted only by the install command.");
+    }
+    return { command } as const;
+  }
+  if (argv.length === 1) return { command } as const;
+  if (argv.length === 2 && argv[1] === "--no-recovery-thread") {
+    return { command, clearRecoveryThread: true } as const;
+  }
+  const recoveryThreadId = argv[2];
+  if (
+    argv.length !== 3 ||
+    argv[1] !== "--recovery-thread" ||
+    !recoveryThreadId ||
+    !/^[A-Za-z0-9-]{8,}$/u.test(recoveryThreadId)
+  ) {
+    throw new Error("install accepts only --recovery-thread followed by a valid thread ID.");
+  }
+  return { command, recoveryThreadId } as const;
 }
 
 export function runNowArguments(service: string): ReadonlyArray<string> {
@@ -91,14 +122,7 @@ function run(
 function main(argv: ReadonlyArray<string>): void {
   if (Effect.runSync(HostProcessPlatform) !== "darwin")
     throw new Error("LastCode nightly scheduling requires macOS launchd.");
-  const command = argv[0];
-  if (
-    !command ||
-    argv.length !== 1 ||
-    !["install", "run-now", "status", "uninstall"].includes(command)
-  ) {
-    throw new Error("Usage: pnpm lastcode:checkpoint:service <install|run-now|status|uninstall>");
-  }
+  const { clearRecoveryThread, command, recoveryThreadId } = parseNightlyServiceArgs(argv);
 
   const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: process.cwd(),
@@ -121,6 +145,9 @@ function main(argv: ReadonlyArray<string>): void {
   const home = NodeOS.homedir();
   const plistPath = NodePath.join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
   const logDirectory = NodePath.join(home, ".lastcode", "automation");
+  const supervisorDirectory = NodePath.join(logDirectory, "bin");
+  const supervisorPath = NodePath.join(supervisorDirectory, SUPERVISOR_FILE);
+  const supervisorConfigPath = NodePath.join(logDirectory, "checkpoint-supervisor.json");
   const getuid = process.getuid;
   if (!getuid) throw new Error("Could not resolve the current macOS user ID.");
   const domain = `gui/${getuid()}`;
@@ -141,6 +168,7 @@ function main(argv: ReadonlyArray<string>): void {
       NodeFS.renameSync(plistPath, backupPath);
       console.log(`[lastcode:service] Disabled plist retained at ${backupPath}.`);
     }
+    if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
     return;
   }
 
@@ -169,15 +197,41 @@ function main(argv: ReadonlyArray<string>): void {
   });
   NodeFS.mkdirSync(NodePath.dirname(plistPath), { recursive: true });
   NodeFS.mkdirSync(logDirectory, { recursive: true });
+  NodeFS.mkdirSync(supervisorDirectory, { recursive: true, mode: 0o700 });
+  NodeFS.copyFileSync(NodePath.join(repoRoot, "scripts", SUPERVISOR_FILE), supervisorPath);
+  NodeFS.chmodSync(supervisorPath, 0o700);
+  if (clearRecoveryThread) {
+    if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
+  } else if (recoveryThreadId) {
+    const temporaryConfigPath = `${supervisorConfigPath}.tmp`;
+    NodeFS.writeFileSync(
+      temporaryConfigPath,
+      `${JSON.stringify({ schemaVersion: 1, recoveryThreadId }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    NodeFS.renameSync(temporaryConfigPath, supervisorConfigPath);
+  }
   NodeFS.writeFileSync(
     plistPath,
-    renderLaunchAgentPlist({ logDirectory, repoRoot: automationWorktree }),
+    renderLaunchAgentPlist({
+      logDirectory,
+      nodePath: process.execPath,
+      repoRoot: automationWorktree,
+      supervisorPath,
+    }),
   );
   run("plutil", ["-lint", plistPath]);
   run("launchctl", ["bootout", service], { allowFailure: true });
   run("launchctl", ["bootstrap", domain, plistPath]);
   run("launchctl", ["kickstart", service]);
   console.log(`[lastcode:service] Installed ${LABEL}; it runs at login and hourly.`);
+  if (recoveryThreadId) {
+    console.log(
+      "[lastcode:service] Automatic recovery alerts use the configured maintenance thread.",
+    );
+  } else if (clearRecoveryThread) {
+    console.log("[lastcode:service] Automatic recovery thread delivery is disabled.");
+  }
 }
 
 if (import.meta.main) {
