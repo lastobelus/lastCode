@@ -67,6 +67,19 @@ export interface PreparedLocalCiRepository {
   readonly repoRoot: string;
 }
 
+export function formatLocalCiSummary(mode: LocalCiMode, commit?: string): string {
+  return mode === "full"
+    ? `[lastcode:ci] Summary: Full local CI passed${commit ? ` for ${commit}` : ""}.`
+    : "[lastcode:ci] Summary: Quick local CI passed.";
+}
+
+export function formatLocalCiFailureSummary(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/g, " ")
+    .trim();
+  return `[lastcode:ci] Summary: failed: ${message || "Unknown error."}`;
+}
+
 export function assertSupportedNodeVersion(version = process.versions.node): void {
   const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
   const supported = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
@@ -578,8 +591,9 @@ function executeLocalCi(
     });
     console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);
+    console.log(formatLocalCiSummary("full", commitBefore));
   } else {
-    console.log("\n[lastcode:ci] Quick local CI passed.");
+    console.log(`\n${formatLocalCiSummary("quick")}`);
   }
 }
 
@@ -604,7 +618,7 @@ if (import.meta.main) {
   try {
     runLocalCi(parseLocalCiOptions(process.argv.slice(2)));
   } catch (error) {
-    console.error(`[lastcode:ci] ${error instanceof Error ? error.message : String(error)}`);
+    console.error(formatLocalCiFailureSummary(error));
     process.exitCode = 1;
   }
 }
