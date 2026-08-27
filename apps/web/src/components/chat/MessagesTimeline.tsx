@@ -829,6 +829,7 @@ function TimelineAnnotationPopover({
       <PopoverPopup
         align="center"
         className="w-80 max-w-80 text-left shadow-xl shadow-black/25 before:hidden"
+        data-minimap-preview
         finalFocus={false}
         initialFocus={false}
         side="right"
