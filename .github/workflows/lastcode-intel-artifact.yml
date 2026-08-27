@@ -87,7 +87,16 @@ jobs:
             exit 1
           fi
 
-          git fetch --force --no-tags origin "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}"
+          version="${INSTALLABLE_TAG#lastcode/checkpoint/v}"
+          version="${version#lastcode/revision/v}"
+          upstream_tag="v${version}"
+          if [[ "$INSTALLABLE_TAG" == lastcode/revision/* ]]; then
+            upstream_tag="v${version%.*}"
+          fi
+
+          git fetch --force --no-tags origin \
+            "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}" \
+            "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
           resolved_commit="$(git rev-parse "${INSTALLABLE_TAG}^{commit}")"
           if [[ "$resolved_commit" != "$INSTALLABLE_COMMIT" ]]; then
             echo "Tag/commit mismatch: expected $INSTALLABLE_COMMIT, resolved $resolved_commit" >&2
@@ -98,8 +107,6 @@ jobs:
             exit 1
           fi
 
-          version="${INSTALLABLE_TAG#lastcode/checkpoint/v}"
-          version="${version#lastcode/revision/v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Reuse a validated exact-tag release
