@@ -350,6 +350,24 @@ describe("tailscale", () => {
     });
   });
 
+  it.effect("treats a null first-time serve status as unconfigured", () => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      return args[1] === "status" ? { stdout: "null" } : {};
+    });
+
+    return Effect.gen(function* () {
+      yield* ensureTailscaleServe({ localPort: 13773, servePort: 8443 }).pipe(
+        Effect.provide(layer),
+      );
+      assert.deepEqual(commands, [
+        ["serve", "status", "--json"],
+        ["serve", "--bg", "--https=8443", "http://127.0.0.1:13773"],
+      ]);
+    });
+  });
+
   it.effect("reuses only the exact existing handler", () => {
     const commands: ReadonlyArray<string>[] = [];
     const layer = mockSpawnerLayer((_command, args) => {
@@ -377,6 +395,26 @@ describe("tailscale", () => {
       );
       assert.instanceOf(error, TailscaleServePortOccupiedError);
       assert.equal(error.servePort, 8443);
+    });
+  });
+
+  it.effect("replaces a handler only when its environment was already verified", () => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      return { stdout: serveStatusJson(8443, "http://127.0.0.1:13773") };
+    });
+
+    return Effect.gen(function* () {
+      yield* ensureTailscaleServe({
+        localPort: 5733,
+        servePort: 8443,
+        replaceVerifiedHandler: true,
+      }).pipe(Effect.provide(layer));
+      assert.deepEqual(commands, [
+        ["serve", "status", "--json"],
+        ["serve", "--bg", "--https=8443", "http://127.0.0.1:5733"],
+      ]);
     });
   });
 
