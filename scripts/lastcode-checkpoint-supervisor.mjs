@@ -174,6 +174,30 @@ export function latestFailedCheckpointRun(path) {
   }
 }
 
+function sameCheckpointRun(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function retainedRecoveryMatches(repoRoot, checkpointRun, environment) {
+  if (!checkpointRun?.recoveryBranch) return false;
+  const worktree = NodePath.join(NodePath.dirname(repoRoot), "lastcode-nightly-sync");
+  if (!NodeFS.existsSync(worktree)) return false;
+  try {
+    return (
+      runCommand(
+        "history-correlation",
+        repoRoot,
+        "git",
+        ["-C", worktree, "branch", "--show-current"],
+        environment,
+        { capture: true },
+      ) === checkpointRun.recoveryBranch
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function refreshInstalledSupervisor(repoRoot, installedPath) {
   const sourcePath = NodePath.join(repoRoot, "scripts", "lastcode-checkpoint-supervisor.mjs");
   if (NodePath.resolve(sourcePath) === NodePath.resolve(installedPath)) return;
@@ -431,6 +455,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
     notify: (title, message) => notify(title, message, environment),
+    retainedRecoveryMatches: (checkpointRun) =>
+      retainedRecoveryMatches(repoRoot, checkpointRun, environment),
     refreshSupervisor: () => refreshInstalledSupervisor(repoRoot, installedSupervisorPath),
     runPhase: (phase, command, args) => runCommand(phase, repoRoot, command, args, environment),
     sendThread: (threadId, message) =>
@@ -443,6 +469,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   let config = null;
   let preflightError = null;
   let phase = "supervisor-state";
+  let checkpointHistoryBeforeRun = null;
+  let checkpointHistoryBaselineAvailable = false;
   try {
     previous = dependencies.loadState();
   } catch (error) {
@@ -479,13 +507,30 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       "--frozen-lockfile",
     ]);
     phase = "checkpoint";
+    try {
+      checkpointHistoryBeforeRun = dependencies.latestFailedCheckpointRun();
+      checkpointHistoryBaselineAvailable = true;
+    } catch (historyError) {
+      console.error(
+        `[lastcode:checkpoint-supervisor] Could not snapshot checkpoint history before the run: ${historyError instanceof Error ? historyError.message : String(historyError)}`,
+      );
+    }
     dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
     if (phase === "checkpoint") {
       try {
-        checkpointRun = dependencies.latestFailedCheckpointRun();
+        const latestCheckpointRun = dependencies.latestFailedCheckpointRun();
+        const writtenByCurrentInvocation =
+          checkpointHistoryBaselineAvailable &&
+          !sameCheckpointRun(checkpointHistoryBeforeRun, latestCheckpointRun);
+        if (
+          latestCheckpointRun &&
+          (writtenByCurrentInvocation || dependencies.retainedRecoveryMatches(latestCheckpointRun))
+        ) {
+          checkpointRun = latestCheckpointRun;
+        }
       } catch (historyError) {
         console.error(
           `[lastcode:checkpoint-supervisor] Could not enrich the incident from checkpoint history: ${historyError instanceof Error ? historyError.message : String(historyError)}`,

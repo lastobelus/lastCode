@@ -605,6 +605,74 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.messages).toHaveLength(1);
   });
 
+  it("does not enrich a checkpoint failure with stale history", () => {
+    const stale = {
+      status: "failed",
+      upstreamTag: "v0.0.35-nightly.stale",
+      recoveryBranch: "sync/nightly/v0.0.35-nightly.stale",
+      error: "old smoke failure",
+    };
+    const test = fixture({
+      dependencies: {
+        latestFailedCheckpointRun: () => stale,
+        retainedRecoveryMatches: () => false,
+        runPhase: (phase) => {
+          if (phase === "checkpoint") throw new Error("current planning failure");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "current planning failure",
+    );
+    expect(test.state.incident.failure).toMatchObject({ checkpointRun: null });
+    expect(test.messages[0]?.message).not.toContain("v0.0.35-nightly.stale");
+  });
+
+  it("uses a checkpoint history record written by the current invocation", () => {
+    const stale = { status: "failed", upstreamTag: "stale", error: "old failure" };
+    const current = { status: "failed", upstreamTag: "current", error: "current failure" };
+    const latestFailedCheckpointRun = vi
+      .fn()
+      .mockReturnValueOnce(stale)
+      .mockReturnValueOnce(current);
+    const test = fixture({
+      dependencies: {
+        latestFailedCheckpointRun,
+        retainedRecoveryMatches: () => false,
+        runPhase: (phase) => {
+          if (phase === "checkpoint") throw new Error("checkpoint failed");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow("checkpoint failed");
+    expect(test.state.incident.failure.checkpointRun).toEqual(current);
+  });
+
+  it("uses unchanged history only for the matching retained recovery", () => {
+    const retained = {
+      status: "failed",
+      upstreamTag: "v0.0.35-nightly.retained",
+      recoveryBranch: "sync/nightly/v0.0.35-nightly.retained",
+      error: "retained smoke failure",
+    };
+    const test = fixture({
+      dependencies: {
+        latestFailedCheckpointRun: () => retained,
+        retainedRecoveryMatches: () => true,
+        runPhase: (phase) => {
+          if (phase === "checkpoint") throw new Error("retained worktree blocks retry");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "retained worktree blocks retry",
+    );
+    expect(test.state.incident.failure.checkpointRun).toEqual(retained);
+  });
+
   it("turns corrupt durable state into a reportable supervisor incident", () => {
     const test = fixture({
       dependencies: {
