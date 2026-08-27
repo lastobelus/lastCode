@@ -22,7 +22,9 @@ import {
   renderCodexFileCitationsAsMarkdown,
   splitCodexArtifactTemplateMarkdown,
 } from "@t3tools/client-runtime/codex-markdown-directives";
+import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
+import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
 import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -1219,6 +1221,7 @@ function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
   props: Pick<ThreadFeedProps, "environmentId" | "onUseArtifactTemplate" | "skills"> & {
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
     readonly unsettledTurnId: TurnId | null;
@@ -1226,6 +1229,7 @@ function renderFeedEntry(
     readonly onToggleWorkGroup: (groupId: string) => void;
     readonly onToggleWorkRow: (rowId: string) => void;
     readonly onToggleTurnFold: (turnId: TurnId) => void;
+    readonly onToggleActionFollowUp: (rowId: string) => void;
     readonly onPressImage: (uri: string, headers?: Record<string, string>) => void;
     readonly onMarkdownLinkPress: (href: string) => void;
     readonly renderMarkdownImage: MarkdownImageRenderer;
@@ -1279,6 +1283,23 @@ function renderFeedEntry(
 
   if (entry.type === "message") {
     const { message } = entry;
+    const actionFollowUp =
+      message.role === "system" ? parseActionResumeFollowUp(message.text) : null;
+    if (actionFollowUp) {
+      return (
+        <ActionFollowUpCard
+          actionName={actionFollowUp.actionName}
+          exitCode={actionFollowUp.exitCode}
+          validatedStatus={actionFollowUp.validatedStatus}
+          lastOutputLine={actionFollowUp.lastOutputLine}
+          output={actionFollowUp.output}
+          iconColor={iconSubtleColor}
+          expanded={props.expandedActionRows[entry.id] ?? false}
+          onToggle={() => props.onToggleActionFollowUp(entry.id)}
+        />
+      );
+    }
+
     const isUser = message.role === "user";
     const renderedText = message.text;
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
@@ -1438,6 +1459,85 @@ function renderFeedEntry(
     />
   );
 }
+
+const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
+  readonly actionName: string;
+  readonly exitCode: number | null;
+  readonly validatedStatus: string;
+  readonly lastOutputLine: string;
+  readonly output: string;
+  readonly iconColor: string | ColorValue;
+  readonly expanded: boolean;
+  readonly onToggle: () => void;
+}) {
+  const status = props.exitCode ?? props.validatedStatus;
+
+  return (
+    <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: props.expanded }}
+        accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+        className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+        onPress={props.onToggle}
+      >
+        <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
+        <Text
+          className="min-w-0 flex-1 font-t3-medium text-xs text-amber-800 dark:text-amber-200"
+          numberOfLines={1}
+        >
+          Action completed: {props.actionName} Status: {status}
+        </Text>
+        <SymbolView
+          name={props.expanded ? "chevron.down" : "chevron.right"}
+          size={14}
+          tintColor={props.iconColor}
+          type="monochrome"
+        />
+      </Pressable>
+      {props.expanded ? (
+        <ScrollView
+          nestedScrollEnabled
+          className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-black/10 bg-neutral-950 px-3 py-2.5 dark:border-white/10"
+        >
+          <Text selectable className="font-mono text-xs leading-5 text-neutral-100">
+            {props.output}
+          </Text>
+        </ScrollView>
+      ) : (
+        <Text className="px-3 pb-2.5 pt-1 text-sm text-foreground" numberOfLines={1}>
+          {props.lastOutputLine}
+        </Text>
+      )}
+    </View>
+  );
+});
+
+const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly startedAt: string }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1_000);
+    return () => clearInterval(intervalId);
+  }, [props.startedAt]);
+
+  const durationLabel = formatElapsed(props.startedAt, new Date(nowMs).toISOString()) ?? "0s";
+
+  return (
+    <View className="mb-4 flex-row items-center gap-2 px-1.5 py-1">
+      <View className="flex-row items-center gap-1">
+        <View className="h-1 w-1 rounded-full bg-adaptive-neutral-400-500" />
+        <View className="h-1 w-1 rounded-full bg-adaptive-neutral-400-a80-500-a80" />
+        <View className="h-1 w-1 rounded-full bg-adaptive-neutral-400-a60-500-a60" />
+      </View>
+      <Text className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400">
+        Working for {durationLabel}
+      </Text>
+    </View>
+  );
+});
 
 function UserMessageContent(props: {
   readonly text: string;
@@ -1755,16 +1855,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly expandedTurnIds: ReadonlySet<TurnId>;
   }>({
     copiedRowId: null,
+    expandedActionRows: {},
     expandedWorkGroups: {},
     expandedWorkRows: {},
     expandedTurnIds: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedActionRows, expandedWorkGroups, expandedWorkRows, expandedTurnIds } =
+    interactionState;
   const [expandedImage, setExpandedImage] = useState<{
     uri: string;
     headers?: Record<string, string>;
@@ -2240,6 +2343,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     [suspendEndScrollMaintenanceForDisclosure],
   );
 
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setInteractionState((current) => ({
+        ...current,
+        expandedActionRows: {
+          ...current.expandedActionRows,
+          [rowId]: !(current.expandedActionRows[rowId] ?? false),
+        },
+      }));
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+
   const onPressImage = useCallback((uri: string, headers?: Record<string, string>) => {
     setExpandedImage({ uri, headers });
   }, []);
@@ -2284,6 +2401,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         {renderFeedEntry(info, {
           environmentId: props.environmentId,
           copiedRowId,
+          expandedActionRows,
           expandedWorkRows,
           terminalAssistantMessageIds,
           unsettledTurnId,
@@ -2291,6 +2409,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           onToggleWorkGroup,
           onToggleWorkRow,
           onToggleTurnFold,
+          onToggleActionFollowUp,
           onPressImage,
           onMarkdownLinkPress,
           renderMarkdownImage,
@@ -2308,6 +2427,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     [
       copiedRowId,
       disclosureEnteringEntryIds,
+      expandedActionRows,
       expandedWorkRows,
       terminalAssistantMessageIds,
       unsettledTurnId,
@@ -2321,6 +2441,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onMarkdownLinkPress,
       onPressImage,
       onToggleTurnFold,
+      onToggleActionFollowUp,
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,
