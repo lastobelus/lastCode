@@ -979,50 +979,55 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
             </Tooltip>
           ) : null}
           {/* These fixed tracks are the scanning columns for every thread row.
-              Empty local/worktree cells stay mounted, and the timestamp cannot
-              widen the grid and push either icon sideways. A transient jump
-              hint replaces all three tracks so a custom shortcut cannot paint
-              across visible metadata icons. */}
+              Empty local/worktree cells stay mounted for ordinary timestamps,
+              which cannot widen the grid and push either icon sideways. A
+              transient jump hint replaces all three cells and tracks so a
+              custom shortcut cannot paint across visible metadata icons or
+              create an implicit grid row. */}
           <div
             className="grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
             data-testid={`thread-metadata-grid-${thread.id}`}
           >
-            <span
-              className="inline-flex h-3 w-full items-center justify-center"
-              data-thread-metadata-column="worktree"
-            >
-              {jumpLabel === null && props.showWorktreeIndicators ? (
-                <ThreadWorktreeIndicator thread={thread} />
-              ) : null}
-            </span>
-            <span
-              className="inline-flex h-3 w-full items-center justify-center"
-              data-thread-metadata-column="environment"
-            >
-              {jumpLabel === null && showsThreadEnvironmentIcon ? (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <span
-                        aria-label={threadEnvironmentLabel ?? "Remote"}
-                        className={`inline-flex shrink-0 items-center justify-center ${
-                          isConfirmingArchive ? "invisible" : ""
-                        }`}
-                        data-legacy-sidebar-unscaled-content
-                      />
-                    }
-                  >
-                    <EnvironmentIcon
-                      kind={threadEnvironmentIconKind}
-                      context="legacy-row"
-                      color={environmentIconColor}
-                      className="size-3"
-                    />
-                  </TooltipTrigger>
-                  <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
-                </Tooltip>
-              ) : null}
-            </span>
+            {jumpLabel === null ? (
+              <>
+                <span
+                  className="inline-flex h-3 w-full items-center justify-center"
+                  data-thread-metadata-column="worktree"
+                >
+                  {props.showWorktreeIndicators ? (
+                    <ThreadWorktreeIndicator thread={thread} />
+                  ) : null}
+                </span>
+                <span
+                  className="inline-flex h-3 w-full items-center justify-center"
+                  data-thread-metadata-column="environment"
+                >
+                  {showsThreadEnvironmentIcon ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-label={threadEnvironmentLabel ?? "Remote"}
+                            className={`inline-flex shrink-0 items-center justify-center ${
+                              isConfirmingArchive ? "invisible" : ""
+                            }`}
+                            data-legacy-sidebar-unscaled-content
+                          />
+                        }
+                      >
+                        <EnvironmentIcon
+                          kind={threadEnvironmentIconKind}
+                          context="legacy-row"
+                          color={environmentIconColor}
+                          className="size-3"
+                        />
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+                    </Tooltip>
+                  ) : null}
+                </span>
+              </>
+            ) : null}
             {isConfirmingArchive ? (
               <button
                 ref={handleConfirmArchiveRef}
