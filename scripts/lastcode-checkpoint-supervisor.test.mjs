@@ -183,6 +183,48 @@ describe("LastCode checkpoint supervisor", () => {
     expect(stillHealthy.messages).toEqual([]);
   });
 
+  it("delivers the alert and closure when recovery precedes the alert retry", () => {
+    const previous = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, previous.dependencies)).toThrow("fetch failed");
+
+    const recovered = fixture({ state: previous.state });
+    expect(runCheckpointSupervisor({}, recovered.dependencies)).toMatchObject({
+      status: "success",
+      incident: { resolutionDelivery: "sent" },
+    });
+    expect(recovered.messages).toHaveLength(2);
+    expect(recovered.messages[0]?.message).toContain("maintenance alert");
+    expect(recovered.messages[1]?.message).toContain("maintenance resolved alert");
+    expect(recovered.state.pendingIncidents).toBeUndefined();
+  });
+
+  it("ignores a malformed durable incident backlog", () => {
+    const test = fixture({
+      state: { schemaVersion: 1, status: "success", pendingIncidents: "invalid" },
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow("fetch failed");
+    expect(test.messages).toHaveLength(1);
+    expect(test.state).toMatchObject({
+      status: "failed",
+      incident: { alertDelivery: "sent" },
+    });
+  });
+
   it("does not inherit unrelated or credential-bearing session variables", () => {
     expect(
       checkpointEnvironment(

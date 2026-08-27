@@ -258,10 +258,14 @@ function notify(title, message, environment) {
   return result.status === 0;
 }
 
+function durablePendingIncidents(state) {
+  return Array.isArray(state?.pendingIncidents) ? state.pendingIncidents : [];
+}
+
 function attemptDelivery(state, config, dependencies) {
   if (!config?.recoveryThreadId) return state;
   let nextState = state;
-  let pendingIncidents = [...(state.pendingIncidents ?? [])];
+  let pendingIncidents = [...durablePendingIncidents(state)];
   while (pendingIncidents.length > 0) {
     const [incident, ...remaining] = pendingIncidents;
     if (!incident) break;
@@ -416,7 +420,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
           fingerprint,
           openedAt: finishedAt,
         };
-    const pendingIncidents = [...(previous?.pendingIncidents ?? [])];
+    const pendingIncidents = [...durablePendingIncidents(previous)];
     if (
       !sameOpenIncident &&
       previous?.status === "failed" &&
@@ -453,7 +457,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
 
   const finishedAt = dependencies.now();
   let incident = previous?.incident;
-  const pendingIncidents = [...(previous?.pendingIncidents ?? [])];
+  const pendingIncidents = [...durablePendingIncidents(previous)];
   if (previous?.status === "failed" && incident) {
     if (
       incident.alertDelivery !== "sent" &&
@@ -466,7 +470,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     incident = {
       ...incident,
       resolvedAt: finishedAt,
-      resolutionDelivery: incident.alertDelivery === "sent" ? "pending" : "not-needed",
+      resolutionDelivery: "pending",
     };
   }
   let state = {
