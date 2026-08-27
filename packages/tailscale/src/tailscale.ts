@@ -155,7 +155,6 @@ const TailscaleServeStatusJson = Schema.Struct({
       Schema.String,
       Schema.Struct({
         HTTPS: Schema.optional(Schema.Unknown),
-        Funnel: Schema.optional(Schema.Unknown),
       }),
     ),
   ),
@@ -167,6 +166,7 @@ const TailscaleServeStatusJson = Schema.Struct({
       }),
     ),
   ),
+  AllowFunnel: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
 });
 
 type TailscaleServeStatusJson = typeof TailscaleServeStatusJson.Type;
@@ -404,6 +404,9 @@ function servePortState(
   const entries = Object.entries(status.Web ?? {}).filter(
     ([authority]) => authorityPort(authority) === input.servePort,
   );
+  const funnelEnabled = Object.entries(status.AllowFunnel ?? {}).some(
+    ([authority, enabled]) => authorityPort(authority) === input.servePort && enabled,
+  );
   if (entries.length === 0 && tcpEntries.length === 0) {
     return "absent";
   }
@@ -411,7 +414,7 @@ function servePortState(
     return "occupied";
   }
   const tcp = tcpEntries[0]?.[1];
-  if (tcp?.HTTPS !== true || tcp.Funnel === true) {
+  if (tcp?.HTTPS !== true || funnelEnabled) {
     return "occupied";
   }
 
