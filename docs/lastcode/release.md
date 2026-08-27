@@ -1,8 +1,8 @@
 # LastCode Local Release Workflow
 
-LastCode uses local validation and ad-hoc macOS releases. Ordinary branch CI
-remains local. The one GitHub-hosted packaging path is manually dispatched for
-an exact Intel checkpoint or revision; releases have no schedule.
+LastCode uses a local waste-prevention gate, GitHub-hosted pull-request CI, and
+ad-hoc macOS releases. The GitHub-hosted packaging path is manually dispatched
+for an exact Intel checkpoint or revision; releases have no schedule.
 
 Nightly source tracking is documented separately in
 [Nightly Checkpoint Workflow](nightly-workflow.md).
@@ -18,7 +18,7 @@ pnpm lastcode:ci:quick
 Quick CI is a local waste-prevention gate, not merge authority. It checks the
 exact branch diff for whitespace errors, repository formatting and lint, and
 workspace types. The implementing agent runs focused tests for changed behavior;
-GitHub CI and the transitional full local gate retain comprehensive tests,
+GitHub CI retains comprehensive tests,
 Electron setup, builds, Rust, native analysis, and release smoke coverage.
 
 Agents run the independent **Run Quick CI** Project Action before a push. A
@@ -80,17 +80,12 @@ case at a time. This takes longer than the task-runner defaults but avoids
 cross-suite state leaks plus memory and CPU contention between the web, mobile,
 desktop, and server suites on the single local build machine.
 
-Before merging a LastCode PR, run the full gate from a clean feature branch:
-
-```bash
-pnpm lastcode:ci
-```
-
-The full PR gate fetches `origin/lastcode/main`, verifies that the tested head
-contains that exact base commit, and runs formatting, linting, workspace
-typechecks and tests, desktop build assertions, Rust tests, native static
-analysis, and release smoke tests. Success writes a local stamp bound to both the
-head commit and tested base.
+The independent **Wait for PR** Project Action waits for both Codex review and
+the exact GitHub pull-request workflow run. GitHub CI records the PR number,
+head, base, and synthetic merge commit in the workflow run identity and exposes
+one stable aggregate `CI Gate`. Head or base drift invalidates the result and
+requires the agent to decide whether to rebase, republish, and request review
+again.
 
 Merge the current ready PR with:
 
@@ -98,10 +93,12 @@ Merge the current ready PR with:
 pnpm lastcode:merge
 ```
 
-The merge wrapper refuses dirty worktrees, unstamped commits, stale bases, draft
-or conflicting PRs, and PRs that do not target `lastcode/main`. It squash-merges
-with an exact-head guard, then requests an immediate checkpoint-daemon run. The
-daemon publishes a new installable LastCode revision when no new upstream
+The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
+stale bases, draft or non-clean PRs, and PRs that do not target
+`lastcode/main`. It fetches and checks the base again after reading CI, then
+squash-merges with an exact-head guard and requests an immediate
+checkpoint-daemon run. The daemon publishes a new installable LastCode revision
+when no new upstream
 nightly is waiting. Failure to start the service is reported without lying about
 the already-completed GitHub merge; the hourly service run remains the repair
 path. The request never terminates a daemon run already in progress.
