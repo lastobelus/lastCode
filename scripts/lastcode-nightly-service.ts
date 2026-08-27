@@ -23,7 +23,6 @@ function xml(value: string): string {
 }
 
 export function renderLaunchAgentPlist(input: {
-  readonly home: string;
   readonly logDirectory: string;
   readonly nodePath: string;
   readonly repoRoot: string;
@@ -37,10 +36,6 @@ export function renderLaunchAgentPlist(input: {
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>-i</string>
-    <string>HOME=${xml(input.home)}</string>
-    <string>PATH=${xml(`${NodePath.dirname(input.nodePath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`)}</string>
     <string>${xml(input.nodePath)}</string>
     <string>${xml(input.supervisorPath)}</string>
     <string>run</string>
@@ -212,7 +207,6 @@ function main(argv: ReadonlyArray<string>): void {
   NodeFS.writeFileSync(
     plistPath,
     renderLaunchAgentPlist({
-      home,
       logDirectory,
       nodePath: process.execPath,
       repoRoot: automationWorktree,

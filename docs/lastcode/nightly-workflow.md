@@ -197,8 +197,9 @@ execution; every run writes terminal state to
 pending until LastCode accepts it, and the same incident is not sent again after
 acknowledgement. When a later run succeeds, the supervisor sends one closure to
 the maintenance thread. The launch agent starts the pinned Node runtime without
-a login shell and clears inherited GUI-session variables before the supervisor
-runs. The macOS notification remains a secondary signal.
+a login shell; the supervisor passes only a narrow allowlist to child processes,
+including the launchd SSH agent socket needed for Git fetches. The macOS
+notification remains a secondary signal.
 
 The job runs at login and hourly while the Mac is awake. Missed intervals do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.

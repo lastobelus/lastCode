@@ -8,7 +8,6 @@ import {
 
 it("renders an hourly source-only launch agent with escaped durable paths", () => {
   const plist = renderLaunchAgentPlist({
-    home: "/Users/example",
     repoRoot: "/Users/example/LastCode & experiments",
     logDirectory: "/Users/example/.lastcode/automation",
     nodePath: "/Users/example/.local/share/mise/installs/node/24.13.1/bin/node",
@@ -18,9 +17,8 @@ it("renders an hourly source-only launch agent with escaped durable paths", () =
   expect(plist).toContain("<integer>3600</integer>");
   expect(plist).toContain("node/24.13.1/bin/node");
   expect(plist).toContain("checkpoint supervisor.mjs");
-  expect(plist).toContain("<string>/usr/bin/env</string>");
-  expect(plist).toContain("<string>-i</string>");
   expect(plist).not.toContain("/bin/zsh");
+  expect(plist).not.toContain("/usr/bin/env");
   expect(plist).not.toContain("mise exec");
   expect(plist).not.toContain("git checkout");
   expect(plist).not.toContain("vp install");
