@@ -95,6 +95,14 @@ function harness(input: {
       currentRequest = next;
     },
     removeRequest: (token) => calls.push(`remove:${token}`),
+    withRequestLock: (operation) => {
+      calls.push("lock:enter");
+      try {
+        return operation();
+      } finally {
+        calls.push("lock:exit");
+      }
+    },
     log: (message) => calls.push(`log:${message}`),
     registrationTimeoutMs: 20,
     registrationPollMs: 5,
@@ -185,6 +193,10 @@ describe("lastcode-build-intel-package", () => {
     });
     const result = await runSelectedIntelBuild(test.dependencies);
     expect(test.calls.filter((call) => call.startsWith("dispatch:"))).toHaveLength(1);
+    expect(test.calls.indexOf("lock:enter")).toBeLessThan(test.calls.indexOf("write"));
+    expect(test.calls.indexOf("lock:exit")).toBeGreaterThan(
+      test.calls.findIndex((call) => call.startsWith("dispatch:")),
+    );
     expect(test.getRequest().dispatchAttemptedAt).toBe("2026-08-27T00:02:00.000Z");
     expect(test.getRequest().workflowRunId).toBe(123);
     expect(result).toMatchObject({ tag, commit, runId: 123 });

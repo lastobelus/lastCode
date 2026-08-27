@@ -6,6 +6,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { acquirePortableLock } from "./lastcode-lock.mjs";
+
 const DEFAULT_REPOSITORY = "lastobelus/lastCode";
 const DEFAULT_REMOTE = "origin";
 const DEFAULT_BRANCH = "lastcode/main";
@@ -62,6 +64,7 @@ export interface BuildIntelDependencies {
   readonly readRequest: () => BuildRequest;
   readonly writeRequest: (request: BuildRequest) => void;
   readonly removeRequest: (requestToken: string) => void;
+  readonly withRequestLock: <T>(operation: () => T) => T;
   readonly log: (message: string) => void;
   readonly registrationTimeoutMs: number;
   readonly registrationPollMs: number;
@@ -293,6 +296,19 @@ function defaultDependencies(): BuildIntelDependencies {
     readRequest: readRequestFile,
     writeRequest: writeRequestFile,
     removeRequest: removeRequestFile,
+    withRequestLock: (operation) => {
+      const path = requestPath();
+      const release = acquirePortableLock(
+        NodePath.dirname(path),
+        "build-intel-package.lock",
+        "Intel package dispatch",
+      );
+      try {
+        return operation();
+      } finally {
+        release();
+      }
+    },
     log: (message) => console.log(message),
     registrationTimeoutMs: REGISTRATION_TIMEOUT_MS,
     registrationPollMs: REGISTRATION_POLL_MS,
@@ -367,27 +383,32 @@ async function waitForCompletion(
 export async function runSelectedIntelBuild(
   dependencies: BuildIntelDependencies = defaultDependencies(),
 ): Promise<BuildIntelResult> {
-  let request = dependencies.readRequest();
   dependencies.verifyWorkflow();
 
-  let run =
-    request.workflowRunId === null
-      ? findCorrelatedRun(request, dependencies.listWorkflowRuns())
-      : dependencies.readWorkflowRun(request.workflowRunId);
-  if (run && run.displayTitle !== workflowRunName(request)) {
-    fail(`Stored workflow run ${run.databaseId} does not match request ${request.requestToken}.`);
-  }
-  if (!run && request.dispatchAttemptedAt === null) {
-    request = { ...request, dispatchAttemptedAt: dependencies.nowIso() };
-    dependencies.writeRequest(request);
-    try {
-      dependencies.dispatchWorkflow(request);
-    } catch (error) {
-      dependencies.log(
-        `[build-intel] Dispatch returned an error; waiting for request-token registration before deciding whether it was accepted: ${error instanceof Error ? error.message : String(error)}`,
+  let { request, run } = dependencies.withRequestLock(() => {
+    let lockedRequest = dependencies.readRequest();
+    const lockedRun =
+      lockedRequest.workflowRunId === null
+        ? findCorrelatedRun(lockedRequest, dependencies.listWorkflowRuns())
+        : dependencies.readWorkflowRun(lockedRequest.workflowRunId);
+    if (lockedRun && lockedRun.displayTitle !== workflowRunName(lockedRequest)) {
+      fail(
+        `Stored workflow run ${lockedRun.databaseId} does not match request ${lockedRequest.requestToken}.`,
       );
     }
-  }
+    if (!lockedRun && lockedRequest.dispatchAttemptedAt === null) {
+      lockedRequest = { ...lockedRequest, dispatchAttemptedAt: dependencies.nowIso() };
+      dependencies.writeRequest(lockedRequest);
+      try {
+        dependencies.dispatchWorkflow(lockedRequest);
+      } catch (error) {
+        dependencies.log(
+          `[build-intel] Dispatch returned an error; waiting for request-token registration before deciding whether it was accepted: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return { request: lockedRequest, run: lockedRun };
+  });
   run ??= await waitForRegistration(request, dependencies);
   if (request.workflowRunId === null) {
     request = { ...request, workflowRunId: run.databaseId };
