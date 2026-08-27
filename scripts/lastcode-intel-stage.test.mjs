@@ -187,7 +187,7 @@ describe("LastCode Intel staging", () => {
       {
         currentVersion: "1.2.3-nightly.20260820.1",
         homeDirectory: root,
-        maximumVersionHost: "airy",
+        maximumVersionHost: "version-source.example",
       },
       dependencies(olderTag, commit, {
         listReleases: async () =>
@@ -198,7 +198,7 @@ describe("LastCode Intel staging", () => {
             isPrerelease: true,
           })),
         readRemoteInstalledVersion: async (host) => {
-          expect(host).toBe("airy");
+          expect(host).toBe("version-source.example");
           return "1.2.3-nightly.20260821.7";
         },
       }),
@@ -226,22 +226,22 @@ describe("LastCode Intel staging", () => {
         {
           currentVersion: "1.2.3-nightly.20260820.1",
           homeDirectory: root,
-          maximumVersionHost: "airy",
+          maximumVersionHost: "version-source.example",
         },
         dependencies(tag, commit, {
           readRemoteInstalledVersion: async () => {
-            throw new Error("airy is offline");
+            throw new Error("version source is offline");
           },
         }),
       ),
-    ).rejects.toThrow("airy is offline");
+    ).rejects.toThrow("version source is offline");
 
     expect(readPending(root)).toMatchObject({ candidateId: pending.candidateId, tag });
   });
 
   it("reads the installed LastCode version through one SSH command", () => {
     let invocation;
-    const version = readRemoteInstalledVersion("airy", (command, args) => {
+    const version = readRemoteInstalledVersion("version-source.example", (command, args) => {
       invocation = { args, command };
       return "1.2.3-nightly.20260821.7";
     });
@@ -255,7 +255,7 @@ describe("LastCode Intel staging", () => {
         "-o",
         "ConnectTimeout=10",
         "--",
-        "airy",
+        "version-source.example",
         "/usr/libexec/PlistBuddy",
         "-c",
         "Print:CFBundleShortVersionString",
@@ -543,11 +543,11 @@ describe("LastCode Intel staging", () => {
         "--repository",
         "lastobelus/lastCode",
         "--maximum-version-host",
-        "airy",
+        "version-source.example",
       ]),
     ).toMatchObject({
       command: "stage",
-      maximumVersionHost: "airy",
+      maximumVersionHost: "version-source.example",
       repository: "lastobelus/lastCode",
     });
     expect(parseStageOptions(["status", "--home-dir", "/tmp/intel"])).toMatchObject({
