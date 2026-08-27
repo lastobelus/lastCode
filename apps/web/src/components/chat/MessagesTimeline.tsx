@@ -150,6 +150,7 @@ interface TimelineRowSharedState {
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onToggleDisclosure: (anchorKey: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
@@ -545,6 +546,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
+      onToggleDisclosure: suspendEndScrollMaintenanceForDisclosure,
       onToggleTurnFold,
       onToggleWorkGroup,
       agentPanelModel,
@@ -561,6 +563,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
+      suspendEndScrollMaintenanceForDisclosure,
       onToggleTurnFold,
       onToggleWorkGroup,
       agentPanelModel,
@@ -1342,7 +1345,10 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
           type="button"
           aria-expanded={actionOutputExpanded}
           className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
-          onClick={() => setActionOutputExpanded((expanded) => !expanded)}
+          onClick={() => {
+            ctx.onToggleDisclosure(row.id);
+            setActionOutputExpanded((expanded) => !expanded);
+          }}
         >
           <BotIcon aria-hidden className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">

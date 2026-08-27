@@ -984,6 +984,7 @@ function renderFeedEntry(
     readonly onToggleWorkGroup: (groupId: string) => void;
     readonly onToggleWorkRow: (rowId: string) => void;
     readonly onToggleTurnFold: (turnId: TurnId) => void;
+    readonly onToggleActionFollowUp: (rowId: string) => void;
     readonly onPressImage: (uri: string, headers?: Record<string, string>) => void;
     readonly onMarkdownLinkPress: (href: string) => void;
     readonly renderMarkdownImage: MarkdownImageRenderer;
@@ -1049,6 +1050,7 @@ function renderFeedEntry(
           lastOutputLine={actionFollowUp.lastOutputLine}
           output={actionFollowUp.output}
           iconColor={iconSubtleColor}
+          onToggle={() => props.onToggleActionFollowUp(entry.id)}
         />
       );
     }
@@ -1213,6 +1215,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly lastOutputLine: string;
   readonly output: string;
   readonly iconColor: string | ColorValue;
+  readonly onToggle: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const status = props.exitCode ?? props.validatedStatus;
@@ -1224,7 +1227,10 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
         accessibilityState={{ expanded }}
         accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
         className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
-        onPress={() => setExpanded((value) => !value)}
+        onPress={() => {
+          props.onToggle();
+          setExpanded((value) => !value);
+        }}
       >
         <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
         <Text
@@ -2042,6 +2048,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     [suspendEndScrollMaintenanceForDisclosure],
   );
 
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+
   const onPressImage = useCallback((uri: string, headers?: Record<string, string>) => {
     setExpandedImage({ uri, headers });
   }, []);
@@ -2090,6 +2103,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         onToggleWorkGroup,
         onToggleWorkRow,
         onToggleTurnFold,
+        onToggleActionFollowUp,
         onPressImage,
         onMarkdownLinkPress,
         renderMarkdownImage,
@@ -2116,6 +2130,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onMarkdownLinkPress,
       onPressImage,
       onToggleTurnFold,
+      onToggleActionFollowUp,
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,
