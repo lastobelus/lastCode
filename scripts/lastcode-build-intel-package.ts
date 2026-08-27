@@ -411,8 +411,15 @@ export async function runSelectedIntelBuild(
   });
   run ??= await waitForRegistration(request, dependencies);
   if (request.workflowRunId === null) {
-    request = { ...request, workflowRunId: run.databaseId };
-    dependencies.writeRequest(request);
+    dependencies.withRequestLock(() => {
+      const current = dependencies.readRequest();
+      if (current.requestToken !== request.requestToken) return;
+      request = current;
+      if (request.workflowRunId === null) {
+        request = { ...request, workflowRunId: run.databaseId };
+        dependencies.writeRequest(request);
+      }
+    });
   }
   dependencies.log(
     `[build-intel] Registered ${workflowRunName(request)} as run ${run.databaseId}: ${run.url}`,

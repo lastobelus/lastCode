@@ -121,7 +121,7 @@ until LastCode intentionally publishes compatible releases.
 
 ## Intel Build Publication
 
-The resumable **Build Intel package** Project Action dispatches the manual
+The resumable **Build Intel package (macOS)** Project Action dispatches the manual
 **LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
 commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
@@ -135,7 +135,9 @@ pnpm lastcode:intel-build select \
   --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 
-Then run the imported **Build Intel package** Project Action. For agent-triggered
+Then run the imported **Build Intel package (macOS)** Project Action. The LastCode
+environment controlling this Action must run on macOS; the actual x64 build still
+runs on GitHub's hosted Intel runner. For agent-triggered
 one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
 Action in Project Settings. The Action attaches a unique request token to the
 dispatch, waits for only the matching workflow run, and returns to the thread on

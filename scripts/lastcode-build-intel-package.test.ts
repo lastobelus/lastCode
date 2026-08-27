@@ -109,7 +109,14 @@ function harness(input: {
     runTimeoutMs: 30,
     runPollMs: 10,
   };
-  return { calls, dependencies, getRequest: () => currentRequest };
+  return {
+    calls,
+    dependencies,
+    getRequest: () => currentRequest,
+    setRequest: (next: BuildRequest) => {
+      currentRequest = next;
+    },
+  };
 }
 
 describe("lastcode-build-intel-package", () => {
@@ -244,6 +251,21 @@ describe("lastcode-build-intel-package", () => {
     expect(test.calls.some((call) => call.includes("waiting for request-token registration"))).toBe(
       true,
     );
+  });
+
+  it("does not overwrite a newer selection when the old run registers", async () => {
+    const test = harness({ listedRuns: [[], [workflowRun()]] });
+    const newer = request({ requestToken: "intel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" });
+    const originalSleep = test.dependencies.sleep;
+    const dependencies: BuildIntelDependencies = {
+      ...test.dependencies,
+      sleep: async (milliseconds) => {
+        test.setRequest(newer);
+        await originalSleep(milliseconds);
+      },
+    };
+    await runSelectedIntelBuild(dependencies);
+    expect(test.getRequest()).toEqual(newer);
   });
 
   it("returns configuration, registration, failure, and cancellation as terminal errors", async () => {
