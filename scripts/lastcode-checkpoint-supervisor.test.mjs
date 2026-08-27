@@ -230,6 +230,51 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recovered.state.pendingResolutions).toBeUndefined();
   });
 
+  it("retains an undelivered closure when a later run fails", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("blocker A");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("blocker A");
+
+    const recoveredWithoutDelivery = fixture({
+      state: failed.state,
+      dependencies: {
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    runCheckpointSupervisor({}, recoveredWithoutDelivery.dependencies);
+    expect(recoveredWithoutDelivery.state).toMatchObject({
+      status: "success",
+      incident: { resolutionDelivery: "pending" },
+    });
+
+    const failedAgain = fixture({
+      state: recoveredWithoutDelivery.state,
+      dependencies: {
+        runPhase: () => {
+          throw new Error("blocker B");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failedAgain.dependencies)).toThrow("blocker B");
+    expect(failedAgain.messages).toHaveLength(1);
+    expect(failedAgain.state.pendingResolutions).toHaveLength(1);
+
+    const finallyRecovered = fixture({ state: failedAgain.state });
+    runCheckpointSupervisor({}, finallyRecovered.dependencies);
+    expect(finallyRecovered.messages).toHaveLength(2);
+    expect(
+      finallyRecovered.messages.every(({ message }) => message.includes("resolved alert")),
+    ).toBe(true);
+    expect(finallyRecovered.state.pendingResolutions).toBeUndefined();
+  });
+
   it("sends one closure after a failed incident recovers", () => {
     const previous = fixture({
       dependencies: {

@@ -481,6 +481,16 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     const fingerprint = checkpointIncidentFingerprint(failure);
     const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
     const pendingResolutions = [...durableIncidentList(previous, "pendingResolutions")];
+    if (
+      previous?.status === "success" &&
+      previous.incident &&
+      previous.incident.resolutionDelivery !== "sent" &&
+      !pendingResolutions.some(
+        (pendingIncident) => pendingIncident.fingerprint === previous.incident.fingerprint,
+      )
+    ) {
+      pendingResolutions.push(previous.incident);
+    }
     const sameOpenIncident =
       previous?.status === "failed" && previous.incident?.fingerprint === fingerprint;
     const pendingIncidentIndex = pendingIncidents.findIndex(
