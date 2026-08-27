@@ -44,6 +44,13 @@ environment type. Authentication remains the environment's responsibility for
 every route. See [environment authentication](./environment-auth.md) and the
 [T3 Connect trust boundary](./t3-connect.md).
 
+Serve configuration, rather than backend health, determines port ownership. T3
+reuses only an exact root handler for its loopback target, refuses to replace any
+other configured handler, and checks that a handler still exactly matches the
+target before requesting removal. Applications should not concurrently change
+the same HTTPS port because the status check and removal command are separate
+Tailscale operations.
+
 SSH can launch a server as well as forward a port. Desktop main owns that
 lifecycle because it can spawn SSH and handle authentication prompts. The
 renderer uses the forwarded endpoint through the shared connection runtime.
