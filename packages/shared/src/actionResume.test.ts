@@ -26,18 +26,18 @@ describe("Action resume follow-up presentation", () => {
     expect(parseActionResumeFollowUp("Automated maintenance completed.")).toBeNull();
   });
 
-  it("round-trips action IDs containing parentheses", () => {
+  it("round-trips action identities containing the legacy delimiter", () => {
     const text = formatActionResumeFollowUp({
-      actionName: "QA",
-      actionId: "qa(test)",
+      actionName: "QA (production)",
+      actionId: "qa) (test",
       validatedStatus: "succeeded",
       exitCode: 0,
       output: "QA passed.",
     });
 
     expect(parseActionResumeFollowUp(text)).toMatchObject({
-      actionName: "QA",
-      actionId: "qa(test)",
+      actionName: "QA (production)",
+      actionId: "qa) (test",
     });
   });
 

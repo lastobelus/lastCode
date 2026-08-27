@@ -22,7 +22,7 @@ export function formatActionResumeFollowUp(input: {
 }): string {
   return [
     ACTION_FOLLOW_UP_HEADER,
-    `Action: ${input.actionName} (${input.actionId})`,
+    `Action identity: ${JSON.stringify({ name: input.actionName, id: input.actionId })}`,
     `Validated status: ${input.validatedStatus}.`,
     `Exit code: ${input.exitCode ?? "unavailable"}`,
     ACTION_OUTPUT_HEADER,
@@ -38,9 +38,9 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
   const lines = text.split("\n");
   if (lines[0] !== ACTION_FOLLOW_UP_HEADER) return null;
 
-  const actionMatch = /^Action: (.*) \((.*)\)$/.exec(lines[1] ?? "");
+  const actionIdentity = parseActionIdentity(lines[1] ?? "");
   const statusMatch = /^Validated status: (.*)\.$/.exec(lines[2] ?? "");
-  if (!actionMatch || !statusMatch) return null;
+  if (!actionIdentity || !statusMatch) return null;
 
   const exitCodeMatch = /^Exit code: (-?\d+|unavailable)$/.exec(lines[3] ?? "");
   const outputStart = exitCodeMatch ? 5 : 4;
@@ -58,8 +58,8 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
       .findLast((line) => line.length > 0) ?? "(No Action stdout/stderr was captured.)";
 
   return {
-    actionName: actionMatch[1]!,
-    actionId: actionMatch[2]!,
+    actionName: actionIdentity.name,
+    actionId: actionIdentity.id,
     validatedStatus: statusMatch[1]!,
     exitCode: exitCodeMatch
       ? exitCodeMatch[1] === "unavailable"
@@ -73,4 +73,31 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
     output,
     lastOutputLine,
   };
+}
+
+function parseActionIdentity(line: string): { readonly name: string; readonly id: string } | null {
+  const encodedIdentity = line.startsWith("Action identity: ")
+    ? line.slice("Action identity: ".length)
+    : null;
+  if (encodedIdentity !== null) {
+    try {
+      const identity: unknown = JSON.parse(encodedIdentity);
+      if (
+        typeof identity === "object" &&
+        identity !== null &&
+        "name" in identity &&
+        typeof identity.name === "string" &&
+        "id" in identity &&
+        typeof identity.id === "string"
+      ) {
+        return { name: identity.name, id: identity.id };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const legacyMatch = /^Action: (.*) \((.*)\)$/.exec(line);
+  return legacyMatch ? { name: legacyMatch[1]!, id: legacyMatch[2]! } : null;
 }
