@@ -582,8 +582,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       ? "transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "";
   const threadMetaClassName = `pointer-events-none inline-flex w-full justify-end ${
-    jumpLabel ? "col-span-3 col-start-1 row-start-1 z-10" : ""
+    jumpLabel ? "col-start-1 row-start-1 z-10" : ""
   } ${threadMetaVisibilityClassName}`;
+  const threadMetadataGridClassName = jumpLabel
+    ? "grid shrink-0 grid-cols-[max-content] items-center"
+    : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
@@ -981,11 +984,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           {/* These fixed tracks are the scanning columns for every thread row.
               Empty local/worktree cells stay mounted for ordinary timestamps,
               which cannot widen the grid and push either icon sideways. A
-              transient jump hint replaces all three cells and tracks so a
-              custom shortcut cannot paint across visible metadata icons or
-              create an implicit grid row. */}
+              transient jump hint replaces all three cells and uses a
+              content-sized track so a custom shortcut cannot paint across
+              visible row content or create an implicit grid row. */}
           <div
-            className="grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
+            className={threadMetadataGridClassName}
             data-testid={`thread-metadata-grid-${thread.id}`}
           >
             {jumpLabel === null ? (
