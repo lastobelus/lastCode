@@ -2,20 +2,26 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  classifyStatusChecks,
+  assertWaitStart,
+  CI_REGISTRATION_TIMEOUT_MS,
   decideWaitForPr,
+  decideWaitTimeout,
   deriveReviewState,
   latestCodexReviewTrigger,
+  MERGE_RECOMPUTE_TIMEOUT_MS,
   pullRequestViewArgs,
+  REVIEW_TIMEOUT_MS,
   requiresReadyConfirmation,
   reviewThreadsArgs,
   samePullRequestRevision,
+  waitTimeoutClass,
   type ReviewState,
   type WaitObservation,
 } from "./lastcode-wait-for-pr.ts";
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const BASE = "abcdef1234567890abcdef1234567890abcdef12";
+const MERGE = "fedcba0987654321fedcba0987654321fedcba09";
 const reviewRequest = (head = HEAD): string =>
   `@codex review\n<!-- lastcode-review-head: ${head} -->`;
 
@@ -35,9 +41,18 @@ const handledReview: ReviewState = {
   latestTriggerId: 10,
 };
 
+const pendingCi: WaitObservation["ci"] = { state: "pending", reason: "run-in-progress" };
+const satisfiedCi: WaitObservation["ci"] = { state: "satisfied", reason: "exact-run" };
+const failedCi: WaitObservation["ci"] = {
+  state: "failure",
+  reason: "terminal-run",
+  detail: "CI failed.",
+};
+
 function observation(
   input: {
     readonly ci?: WaitObservation["ci"];
+    readonly number?: number;
     readonly review?: ReviewState;
     readonly head?: string;
     readonly base?: string;
@@ -47,11 +62,15 @@ function observation(
     readonly mergeStateStatus?: string;
     readonly baseRefName?: string;
     readonly unresolvedReviewThreads?: number;
+    readonly merge?: string | null;
+    readonly localHead?: string;
+    readonly localBranch?: string;
+    readonly clean?: boolean;
   } = {},
 ): WaitObservation {
   return {
     pullRequest: {
-      number: 87,
+      number: input.number ?? 87,
       url: "https://github.com/lastobelus/lastCode/pull/88",
       state: input.state ?? "OPEN",
       isDraft: input.isDraft ?? false,
@@ -60,11 +79,17 @@ function observation(
       baseRefName: input.baseRefName ?? "lastcode/main",
       mergeable: input.mergeable ?? "MERGEABLE",
       mergeStateStatus: input.mergeStateStatus ?? "CLEAN",
-      statusCheckRollup: [],
+      potentialMergeCommit:
+        input.merge === null ? null : { oid: input.merge === undefined ? MERGE : input.merge },
     },
-    ci: input.ci ?? "pending",
+    ci: input.ci ?? pendingCi,
     review: input.review ?? pendingReview,
     unresolvedReviewThreads: input.unresolvedReviewThreads ?? 0,
+    local: {
+      branch: input.localBranch ?? "lastcode/wait-for-pr",
+      head: input.localHead ?? HEAD,
+      clean: input.clean ?? true,
+    },
   };
 }
 
@@ -77,14 +102,14 @@ describe("lastcode-wait-for-pr", () => {
       "--repo",
       "lastobelus/lastCode",
       "--json",
-      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,potentialMergeCommit",
     ]);
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
       "requires a checked-out branch",
     );
   });
 
-  it("discards review observations when the head or base changes during collection", () => {
+  it("discards observations when the exact PR revision changes during collection", () => {
     const initial = observation().pullRequest;
     expect(samePullRequestRevision(initial, observation().pullRequest)).toBe(true);
     expect(
@@ -93,18 +118,22 @@ describe("lastcode-wait-for-pr", () => {
     expect(
       samePullRequestRevision(initial, observation({ base: "3".repeat(40) }).pullRequest),
     ).toBe(false);
+    expect(
+      samePullRequestRevision(initial, observation({ merge: "4".repeat(40) }).pullRequest),
+    ).toBe(true);
+    expect(samePullRequestRevision(initial, observation({ number: 88 }).pullRequest)).toBe(false);
   });
 
   it("requires a matching second review snapshot before returning ready", () => {
     expect(
       requiresReadyConfirmation(
-        observation({ ci: "success", review: handledReview, unresolvedReviewThreads: 0 }),
+        observation({ ci: satisfiedCi, review: handledReview, unresolvedReviewThreads: 0 }),
       ),
     ).toBe(true);
     expect(requiresReadyConfirmation(observation({ review: handledReview }))).toBe(false);
     expect(
       requiresReadyConfirmation(
-        observation({ ci: "success", review: handledReview, unresolvedReviewThreads: 1 }),
+        observation({ ci: satisfiedCi, review: handledReview, unresolvedReviewThreads: 1 }),
       ),
     ).toBe(false);
   });
@@ -121,13 +150,13 @@ describe("lastcode-wait-for-pr", () => {
 
   it("keeps waiting when CI succeeds while the current-head review is pending", () => {
     const baseline = observation();
-    expect(decideWaitForPr(baseline, observation({ ci: "success" }))).toEqual({
+    expect(decideWaitForPr(baseline, observation({ ci: satisfiedCi }))).toEqual({
       kind: "wait",
       reason: "review-pending",
     });
   });
 
-  it("wakes for a new clean or finding-bearing review even while CI is pending", () => {
+  it("keeps a new clean review asleep while CI is pending", () => {
     const baseline = observation();
     const currentReview = {
       ...handledReview,
@@ -136,15 +165,15 @@ describe("lastcode-wait-for-pr", () => {
         { key: "review:21", observedAt: "2026-08-24T10:06:00Z" },
       ],
     };
-    expect(decideWaitForPr(baseline, observation({ review: currentReview }))).toMatchObject({
-      kind: "wake",
-      reason: "review-completed",
+    expect(decideWaitForPr(baseline, observation({ review: currentReview }))).toEqual({
+      kind: "wait",
+      reason: "ci-pending",
     });
   });
 
   it("wakes for current-head CI failure even while review is pending", () => {
     const baseline = observation();
-    expect(decideWaitForPr(baseline, observation({ ci: "failure" }))).toMatchObject({
+    expect(decideWaitForPr(baseline, observation({ ci: failedCi }))).toMatchObject({
       kind: "wake",
       reason: "ci-failed",
     });
@@ -160,7 +189,7 @@ describe("lastcode-wait-for-pr", () => {
   it("returns ready after CI succeeds with a previously handled review", () => {
     const baseline = observation({ review: handledReview });
     expect(
-      decideWaitForPr(baseline, observation({ ci: "success", review: handledReview })),
+      decideWaitForPr(baseline, observation({ ci: satisfiedCi, review: handledReview })),
     ).toMatchObject({ kind: "wake", reason: "ready" });
   });
 
@@ -169,18 +198,18 @@ describe("lastcode-wait-for-pr", () => {
     expect(
       decideWaitForPr(
         baseline,
-        observation({ ci: "success", review: handledReview, mergeable: "UNKNOWN" }),
+        observation({ ci: satisfiedCi, review: handledReview, mergeable: "UNKNOWN" }),
       ),
     ).toEqual({ kind: "wait", reason: "mergeability-pending" });
     expect(
       decideWaitForPr(
         baseline,
-        observation({ ci: "success", review: handledReview, mergeStateStatus: "UNKNOWN" }),
+        observation({ ci: satisfiedCi, review: handledReview, mergeStateStatus: "UNKNOWN" }),
       ),
     ).toEqual({ kind: "wait", reason: "mergeability-pending" });
   });
 
-  it("wakes when the exact head or base drifts", () => {
+  it("wakes when the exact head or base drifts without treating regenerated merge SHAs as drift", () => {
     const baseline = observation();
     expect(decideWaitForPr(baseline, observation({ head: "2".repeat(40) }))).toMatchObject({
       kind: "wake",
@@ -190,6 +219,56 @@ describe("lastcode-wait-for-pr", () => {
       kind: "wake",
       reason: "base-changed",
     });
+    expect(decideWaitForPr(baseline, observation({ merge: "4".repeat(40) }))).toEqual({
+      kind: "wait",
+      reason: "review-pending",
+    });
+  });
+
+  it("wakes when the checked-out branch resolves to a different pull request", () => {
+    expect(decideWaitForPr(observation(), observation({ number: 88 }))).toMatchObject({
+      kind: "wake",
+      reason: "pr-changed",
+    });
+  });
+
+  it("rejects dirty or mismatched local state at launch and wakes for later drift", () => {
+    expect(() => assertWaitStart(observation())).not.toThrow();
+    expect(() => assertWaitStart(observation({ clean: false }))).toThrow("clean worktree");
+    expect(() => assertWaitStart(observation({ localHead: "5".repeat(40) }))).toThrow(
+      "does not match PR head",
+    );
+
+    const baseline = observation();
+    expect(decideWaitForPr(baseline, observation({ clean: false }))).toMatchObject({
+      kind: "wake",
+      reason: "worktree-changed",
+    });
+    expect(decideWaitForPr(baseline, observation({ localHead: "5".repeat(40) }))).toMatchObject({
+      kind: "wake",
+      reason: "local-head-changed",
+    });
+  });
+
+  it("bounds only registration, merge recomputation, and review pending waits", () => {
+    expect(waitTimeoutClass("mergeability-pending")).toBe("merge-recompute");
+    expect(waitTimeoutClass("ci-registration")).toBe("ci-registration");
+    expect(waitTimeoutClass("review-pending")).toBe("review");
+    expect(waitTimeoutClass("ci-pending")).toBeNull();
+    expect(decideWaitTimeout("ci-registration", CI_REGISTRATION_TIMEOUT_MS - 1)).toBeNull();
+    expect(decideWaitTimeout("ci-registration", CI_REGISTRATION_TIMEOUT_MS)).toMatchObject({
+      kind: "wake",
+      reason: "ci-registration-timeout",
+    });
+    expect(decideWaitTimeout("mergeability-pending", MERGE_RECOMPUTE_TIMEOUT_MS)).toMatchObject({
+      kind: "wake",
+      reason: "merge-recompute-timeout",
+    });
+    expect(decideWaitTimeout("review-pending", REVIEW_TIMEOUT_MS)).toMatchObject({
+      kind: "wake",
+      reason: "review-timeout",
+    });
+    expect(decideWaitTimeout("ci-pending", REVIEW_TIMEOUT_MS * 10)).toBeNull();
   });
 
   it("wakes for blocked mergeability without treating ordinary BLOCKED status as a conflict", () => {
@@ -210,7 +289,7 @@ describe("lastcode-wait-for-pr", () => {
       decideWaitForPr(
         observation({ review: handledReview, mergeStateStatus: "BLOCKED" }),
         observation({
-          ci: "success",
+          ci: satisfiedCi,
           review: handledReview,
           mergeStateStatus: "BLOCKED",
         }),
@@ -537,9 +616,9 @@ describe("lastcode-wait-for-pr", () => {
     ]);
 
     const baseline = observation();
-    expect(decideWaitForPr(baseline, observation({ ci: "success", review }))).toMatchObject({
+    expect(decideWaitForPr(baseline, observation({ ci: satisfiedCi, review }))).toMatchObject({
       kind: "wake",
-      reason: "review-completed",
+      reason: "review-unhandled",
     });
 
     expect(decideWaitForPr(observation({ review }), observation({ review }))).toMatchObject({
@@ -567,7 +646,7 @@ describe("lastcode-wait-for-pr", () => {
     expect(
       decideWaitForPr(
         observation({ review: handled }),
-        observation({ ci: "success", review: handled }),
+        observation({ ci: satisfiedCi, review: handled }),
       ),
     ).toMatchObject({ kind: "wake", reason: "ready" });
 
@@ -649,82 +728,34 @@ describe("lastcode-wait-for-pr", () => {
     expect(review.terminalArtifacts).toEqual([]);
   });
 
-  it("classifies check runs and status contexts without accepting cancellations", () => {
-    expect(classifyStatusChecks([])).toBe("pending");
+  it("distinguishes GitHub registration, execution, and configuration states", () => {
+    const baseline = observation({ review: handledReview });
     expect(
-      classifyStatusChecks([{ status: "COMPLETED", conclusion: "SUCCESS" }, { state: "SUCCESS" }]),
-    ).toBe("success");
+      decideWaitForPr(
+        baseline,
+        observation({
+          review: handledReview,
+          ci: { state: "pending", reason: "run-registration" },
+        }),
+      ),
+    ).toEqual({ kind: "wait", reason: "ci-registration" });
     expect(
-      classifyStatusChecks([
-        { status: "COMPLETED", conclusion: "SUCCESS" },
-        { status: "IN_PROGRESS", conclusion: null },
-      ]),
-    ).toBe("pending");
+      decideWaitForPr(
+        baseline,
+        observation({
+          review: handledReview,
+          ci: { state: "pending", reason: "run-in-progress" },
+        }),
+      ),
+    ).toEqual({ kind: "wait", reason: "ci-pending" });
     expect(
-      classifyStatusChecks([
-        { status: "COMPLETED", conclusion: "CANCELLED" },
-        { status: "IN_PROGRESS", conclusion: null },
-      ]),
-    ).toBe("failure");
-  });
-
-  it("classifies only the newest run when a failed check is rerun", () => {
-    expect(
-      classifyStatusChecks([
-        {
-          name: "build",
-          workflowName: "CI",
-          status: "COMPLETED",
-          conclusion: "FAILURE",
-          startedAt: "2026-08-24T10:00:00Z",
-          completedAt: "2026-08-24T10:01:00Z",
-        },
-        {
-          name: "build",
-          workflowName: "CI",
-          status: "IN_PROGRESS",
-          conclusion: null,
-          startedAt: "2026-08-24T10:02:00Z",
-          completedAt: "0001-01-01T00:00:00Z",
-        },
-      ]),
-    ).toBe("pending");
-  });
-
-  it("keeps same-named checks from distinct kinds and providers", () => {
-    expect(
-      classifyStatusChecks([
-        {
-          __typename: "StatusContext",
-          context: "build",
-          state: "FAILURE",
-        },
-        {
-          __typename: "CheckRun",
-          name: "build",
-          status: "COMPLETED",
-          conclusion: "SUCCESS",
-          startedAt: "2026-08-24T10:00:00Z",
-        },
-      ]),
-    ).toBe("failure");
-    expect(
-      classifyStatusChecks([
-        {
-          __typename: "CheckRun",
-          name: "verify",
-          detailsUrl: "https://checks.example-a.com/runs/1",
-          status: "COMPLETED",
-          conclusion: "FAILURE",
-        },
-        {
-          __typename: "CheckRun",
-          name: "verify",
-          detailsUrl: "https://checks.example-b.com/runs/2",
-          status: "COMPLETED",
-          conclusion: "SUCCESS",
-        },
-      ]),
-    ).toBe("failure");
+      decideWaitForPr(
+        baseline,
+        observation({
+          review: handledReview,
+          ci: { state: "failure", reason: "configuration", detail: "CI is disabled." },
+        }),
+      ),
+    ).toMatchObject({ kind: "wake", reason: "ci-configuration" });
   });
 });
