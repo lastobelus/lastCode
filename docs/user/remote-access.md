@@ -65,6 +65,9 @@ another link to share.
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale
 HTTPS** in **Settings → Connections**. Turn it off there to remove that route.
+If the HTTPS port already has a different Serve handler, T3 leaves it unchanged
+and asks you to choose another port; an unavailable backend does not make an
+occupied port safe to reuse.
 
 To start a command-line server with Tailscale HTTPS:
 
