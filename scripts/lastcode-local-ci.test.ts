@@ -11,6 +11,8 @@ import {
   assertRepositoryIntegrity,
   assertSupportedNodeVersion,
   captureRepositoryIntegrity,
+  formatLocalCiFailureSummary,
+  formatLocalCiSummary,
   parseLocalCiOptions,
   prepareLocalCiRepository,
   readFullCiStamp,
@@ -22,6 +24,16 @@ import {
 } from "./lastcode-local-ci.ts";
 
 describe("lastcode-local-ci", () => {
+  it("formats concise final summaries for resumable output", () => {
+    expect(formatLocalCiSummary("full", "abc123")).toBe(
+      "[lastcode:ci] Summary: Full local CI passed for abc123.",
+    );
+    expect(formatLocalCiSummary("quick")).toBe("[lastcode:ci] Summary: Quick local CI passed.");
+    expect(formatLocalCiFailureSummary(new Error("command failed\ndirty file"))).toBe(
+      "[lastcode:ci] Summary: failed: command failed dirty file",
+    );
+  });
+
   it("clears Git-local hook variables before starting the pre-push gate", () => {
     const hook = NodeFS.readFileSync(
       NodePath.resolve(import.meta.dirname, "../.vite-hooks/pre-push"),
