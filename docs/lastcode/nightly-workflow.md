@@ -419,9 +419,11 @@ Configure the fork so that:
 - checkpoint, revision, and build tags cannot be modified or deleted;
 - only the owner or automation identity can force-push `lastcode/main`;
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
-- GitHub Actions are enabled only for the manually dispatched
-  [LastCode Intel artifact workflow](release.md#intel-build-publication), while
-  ordinary CI remains disabled because local CI is authoritative.
+- GitHub Actions are enabled for the manually dispatched
+  [LastCode Intel artifact workflow](release.md#intel-build-publication) and the
+  pull-request CI workflow. During the hosted-CI proof stage, guarded merge still
+  requires the exact local Full CI stamp; the hosted run is observed and measured
+  before it replaces that local PR authority.
 
 Branch protection must permit the intentional force-with-lease promotion model.
 If GitHub cannot express that narrowly enough for a personal repository, rely on
