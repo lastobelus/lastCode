@@ -780,6 +780,31 @@ const summary = (observation: WaitObservation): string =>
     unresolvedReviewThreads: observation.unresolvedReviewThreads,
   });
 
+export function formatWaitForPrSummary(
+  decision: Extract<WaitDecision, { readonly kind: "wake" }>,
+  observation: WaitObservation,
+): string {
+  return `[wait-for-pr] Summary: ${JSON.stringify({
+    reason: decision.reason,
+    detail: decision.detail,
+    pr: observation.pullRequest.number,
+    url: observation.pullRequest.url,
+    head: observation.pullRequest.headRefOid,
+    base: observation.pullRequest.baseRefOid,
+    ci: observation.ci,
+    reviewPending: observation.review.pending,
+    reviewReady: observation.review.ready,
+    reviewArtifacts: observation.review.terminalArtifacts.map(({ key }) => key),
+  })}`;
+}
+
+export function formatWaitForPrFailureSummary(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/g, " ")
+    .trim();
+  return `[wait-for-pr] Summary: failed: ${message || "Unknown error."}`;
+}
+
 const sleep = (durationMs: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, durationMs));
 
@@ -804,21 +829,7 @@ async function main(): Promise<void> {
       decision = decideWaitTimeout(decision.reason, Date.now() - pendingSince) ?? decision;
     }
     if (decision.kind === "wake") {
-      console.log(
-        `[wait-for-pr] Result ${JSON.stringify({
-          reason: decision.reason,
-          detail: decision.detail,
-          pr: current.pullRequest.number,
-          url: current.pullRequest.url,
-          head: current.pullRequest.headRefOid,
-          base: current.pullRequest.baseRefOid,
-          merge: current.pullRequest.potentialMergeCommit?.oid ?? null,
-          ci: current.ci,
-          reviewPending: current.review.pending,
-          reviewReady: current.review.ready,
-          reviewArtifacts: current.review.terminalArtifacts.map(({ key }) => key),
-        })}`,
-      );
+      console.log(formatWaitForPrSummary(decision, current));
       return;
     }
 
@@ -834,7 +845,7 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((error: unknown) => {
-    console.error(`[wait-for-pr] ${error instanceof Error ? error.message : String(error)}`);
+    console.error(formatWaitForPrFailureSummary(error));
     process.exitCode = 1;
   });
 }
