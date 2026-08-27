@@ -990,6 +990,9 @@ function TimelineMinimap({
           }}
           onFocus={() => setActiveIndex((current) => current ?? 0)}
           onKeyDown={(event) => {
+            if (timelineMinimapEventTargetsPreview(event.target)) {
+              return;
+            }
             if (event.key === "ArrowDown") {
               event.preventDefault();
               moveActiveIndex(1);
