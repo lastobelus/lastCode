@@ -196,7 +196,7 @@ const collectStderr = collectStdout;
 
 const decodeTailscaleStatusJson = Schema.decodeEffect(Schema.fromJsonString(TailscaleStatusJson));
 const decodeTailscaleServeStatusJson = Schema.decodeEffect(
-  Schema.fromJsonString(TailscaleServeStatusJson),
+  Schema.fromJsonString(Schema.NullOr(TailscaleServeStatusJson)),
 );
 
 function normalizeMagicDnsName(status: TailscaleStatusJson): string | null {
@@ -446,13 +446,15 @@ const readTailscaleServePortState = (input: {
         Effect.mapError((cause) => new TailscaleStatusParseError({ cause })),
       ),
     ),
-    Effect.map((status) => servePortState(status, input)),
+    Effect.map((status) => (status === null ? "absent" : servePortState(status, input))),
   );
 
 export const ensureTailscaleServe = (input: {
   readonly localPort: number;
   readonly servePort?: number;
   readonly localHost?: string;
+  /** The caller has already verified that the current handler fronts this exact T3 environment. */
+  readonly replaceVerifiedHandler?: boolean;
 }): Effect.Effect<void, TailscaleServeError, ChildProcessSpawner.ChildProcessSpawner> => {
   const servePort = input.servePort ?? DEFAULT_TAILSCALE_SERVE_PORT;
   const localHost = input.localHost ?? "127.0.0.1";
@@ -462,7 +464,7 @@ export const ensureTailscaleServe = (input: {
     if (state === "exact") {
       return;
     }
-    if (state === "occupied") {
+    if (state === "occupied" && input.replaceVerifiedHandler !== true) {
       return yield* new TailscaleServePortOccupiedError({ servePort });
     }
     yield* runTailscaleCommand(
