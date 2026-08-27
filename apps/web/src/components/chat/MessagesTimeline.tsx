@@ -150,7 +150,8 @@ interface TimelineRowSharedState {
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
-  onToggleDisclosure: (anchorKey: string) => void;
+  expandedActionMessageIds: ReadonlySet<string>;
+  onToggleActionFollowUp: (rowId: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
@@ -303,6 +304,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const disclosureAnchorKeyRef = useRef<string | null>(null);
@@ -388,6 +392,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           next.delete(groupId);
         } else {
           next.add(groupId);
+        }
+        return next;
+      });
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setExpandedActionMessageIds((existing) => {
+        const next = new Set(existing);
+        if (next.has(rowId)) {
+          next.delete(rowId);
+        } else {
+          next.add(rowId);
         }
         return next;
       });
@@ -546,7 +565,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
-      onToggleDisclosure: suspendEndScrollMaintenanceForDisclosure,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       agentPanelModel,
@@ -563,7 +583,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
-      suspendEndScrollMaintenanceForDisclosure,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       agentPanelModel,
@@ -1334,8 +1355,8 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
 function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const [actionOutputExpanded, setActionOutputExpanded] = useState(false);
   const actionFollowUp = parseActionResumeFollowUp(row.message.text);
+  const actionOutputExpanded = ctx.expandedActionMessageIds.has(row.id);
 
   if (actionFollowUp) {
     const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
@@ -1345,10 +1366,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
           type="button"
           aria-expanded={actionOutputExpanded}
           className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
-          onClick={() => {
-            ctx.onToggleDisclosure(row.id);
-            setActionOutputExpanded((expanded) => !expanded);
-          }}
+          onClick={() => ctx.onToggleActionFollowUp(row.id)}
         >
           <BotIcon aria-hidden className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">

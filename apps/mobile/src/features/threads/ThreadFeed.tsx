@@ -977,6 +977,7 @@ function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
   props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
     readonly unsettledTurnId: TurnId | null;
@@ -1050,6 +1051,7 @@ function renderFeedEntry(
           lastOutputLine={actionFollowUp.lastOutputLine}
           output={actionFollowUp.output}
           iconColor={iconSubtleColor}
+          expanded={props.expandedActionRows[entry.id] ?? false}
           onToggle={() => props.onToggleActionFollowUp(entry.id)}
         />
       );
@@ -1215,22 +1217,19 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly lastOutputLine: string;
   readonly output: string;
   readonly iconColor: string | ColorValue;
+  readonly expanded: boolean;
   readonly onToggle: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const status = props.exitCode ?? props.validatedStatus;
 
   return (
     <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">
       <Pressable
         accessibilityRole="button"
-        accessibilityState={{ expanded }}
+        accessibilityState={{ expanded: props.expanded }}
         accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
         className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
-        onPress={() => {
-          props.onToggle();
-          setExpanded((value) => !value);
-        }}
+        onPress={props.onToggle}
       >
         <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
         <Text
@@ -1240,13 +1239,13 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
           Action completed: {props.actionName} Status: {status}
         </Text>
         <SymbolView
-          name={expanded ? "chevron.down" : "chevron.right"}
+          name={props.expanded ? "chevron.down" : "chevron.right"}
           size={14}
           tintColor={props.iconColor}
           type="monochrome"
         />
       </Pressable>
-      {expanded ? (
+      {props.expanded ? (
         <ScrollView
           nestedScrollEnabled
           className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-black/10 bg-neutral-950 px-3 py-2.5 dark:border-white/10"
@@ -1605,16 +1604,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly expandedTurnIds: ReadonlySet<TurnId>;
   }>({
     copiedRowId: null,
+    expandedActionRows: {},
     expandedWorkGroups: {},
     expandedWorkRows: {},
     expandedTurnIds: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedActionRows, expandedWorkGroups, expandedWorkRows, expandedTurnIds } =
+    interactionState;
   const [expandedImage, setExpandedImage] = useState<{
     uri: string;
     headers?: Record<string, string>;
@@ -2051,6 +2053,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const onToggleActionFollowUp = useCallback(
     (rowId: string) => {
       suspendEndScrollMaintenanceForDisclosure(rowId);
+      setInteractionState((current) => ({
+        ...current,
+        expandedActionRows: {
+          ...current.expandedActionRows,
+          [rowId]: !(current.expandedActionRows[rowId] ?? false),
+        },
+      }));
     },
     [suspendEndScrollMaintenanceForDisclosure],
   );
@@ -2096,6 +2105,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       renderFeedEntry(info, {
         environmentId: props.environmentId,
         copiedRowId,
+        expandedActionRows,
         expandedWorkRows,
         terminalAssistantMessageIds,
         unsettledTurnId,
@@ -2117,6 +2127,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       }),
     [
       copiedRowId,
+      expandedActionRows,
       expandedWorkRows,
       terminalAssistantMessageIds,
       unsettledTurnId,
