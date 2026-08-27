@@ -118,13 +118,15 @@ it.effect("parses keybinding rules", () =>
 
 it.effect("rejects invalid command values", () =>
   Effect.gen(function* () {
-    const result = yield* Effect.exit(
-      decode(KeybindingRule, {
-        key: "mod+j",
-        command: "script..run",
-      }),
-    );
-    assert.strictEqual(result._tag, "Failure");
+    for (const command of ["script..run", "script. setup .run"]) {
+      const result = yield* Effect.exit(
+        decode(KeybindingRule, {
+          key: "mod+j",
+          command,
+        }),
+      );
+      assert.strictEqual(result._tag, "Failure");
+    }
   }),
 );
 

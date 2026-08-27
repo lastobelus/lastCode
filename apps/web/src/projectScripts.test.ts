@@ -67,6 +67,7 @@ describe("projectScripts helpers", () => {
     expect(externalCommand).toBe(`script.${externalId}.run`);
     expect(projectScriptIdFromCommand(externalCommand)).toBe(externalId);
 
+    expect(projectScriptIdFromCommand("script. lint .run")).toBeNull();
     expect(projectScriptIdFromCommand("terminal.toggle")).toBeNull();
   });
 
