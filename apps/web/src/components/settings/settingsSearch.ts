@@ -289,7 +289,7 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "show-worktree-indicators",
-    title: "Show worktree indicators",
+    title: "Show worktree indicators (legacy sidebar)",
     to: "/settings/lastcode",
   },
   {
