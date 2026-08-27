@@ -46,6 +46,7 @@
     "lastcode:checkpoints": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoints.mjs",
     "lastcode:build": "mise exec node@24.13.1 -- node scripts/lastcode-build.mjs",
     "lastcode:install": "mise exec node@24.13.1 -- node scripts/lastcode-install.mjs",
+    "lastcode:intel-build": "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts",
     "lastcode:intel-stage": "mise exec node@24.13.1 -- node scripts/lastcode-intel-stage.mjs",
     "lastcode:daily-update": "mise exec node@24.13.1 -- node scripts/lastcode-daily-update.mjs",
     "lastcode:headless-service": "mise exec node@24.13.1 -- node scripts/lastcode-headless-service.mjs",
