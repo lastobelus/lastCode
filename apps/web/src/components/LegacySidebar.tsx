@@ -585,7 +585,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     jumpLabel ? "col-start-1 row-start-1 z-10" : ""
   } ${threadMetaVisibilityClassName}`;
   const threadMetadataGridClassName = jumpLabel
-    ? "grid shrink-0 grid-cols-[max-content] items-center"
+    ? "grid shrink-0 grid-cols-[max-content] items-center max-sm:grid-cols-[max-content_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
     : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
@@ -986,7 +986,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               which cannot widen the grid and push either icon sideways. A
               transient jump hint replaces all three cells and uses a
               content-sized track so a custom shortcut cannot paint across
-              visible row content or create an implicit grid row. */}
+              visible row content or create an implicit grid row; the mobile
+              grid retains its trailing action track. */}
           <div
             className={threadMetadataGridClassName}
             data-testid={`thread-metadata-grid-${thread.id}`}
