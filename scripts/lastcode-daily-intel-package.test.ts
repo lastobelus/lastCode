@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import type { BuildIntelDependencies } from "./lastcode-build-intel-package.ts";
 import {
   buildLatestIntelPackage,
   latestInstallableFromRemoteRefs,
@@ -20,6 +21,8 @@ describe("lastcode-daily-intel-package", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("actions: write");
     expect(workflow).toContain("contents: read");
+    expect(workflow).toContain("group: lastcode-daily-intel-package");
+    expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("node scripts/lastcode-daily-intel-package.ts");
     expect(workflow).not.toMatch(/airy|htulo/u);
   });
@@ -74,13 +77,15 @@ describe("lastcode-daily-intel-package", () => {
       releaseUrl: "https://example.invalid/releases/1206.2",
       assets: ["LastCode-x64.dmg"],
     };
-    const run = vi.fn(async () => result);
+    const run = vi.fn(async (_dependencies?: BuildIntelDependencies) => result);
 
     await expect(
       buildLatestIntelPackage({ resolveLatest: () => target, select, run }),
     ).resolves.toEqual(result);
     expect(select).toHaveBeenCalledOnce();
     expect(select.mock.calls[0]?.[0]).toBe(target.tag);
+    expect(select.mock.calls[0]?.[1]?.withRequestLock?.(() => "selected")).toBe("selected");
     expect(run).toHaveBeenCalledOnce();
+    expect(run.mock.calls[0]?.[0]?.withRequestLock(() => "running")).toBe("running");
   });
 });
