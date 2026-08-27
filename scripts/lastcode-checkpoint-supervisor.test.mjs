@@ -202,6 +202,34 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recovered.state.incident).toMatchObject({ resolutionDelivery: "sent" });
   });
 
+  it("reuses a queued incident when alternating blockers return", () => {
+    const failWith = (message) => () => {
+      throw new Error(message);
+    };
+    const first = fixture({ dependencies: { runPhase: failWith("blocker A") } });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("blocker A");
+
+    const second = fixture({
+      state: first.state,
+      dependencies: { runPhase: failWith("blocker B") },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("blocker B");
+
+    const third = fixture({
+      state: second.state,
+      dependencies: { runPhase: failWith("blocker A") },
+    });
+    expect(() => runCheckpointSupervisor({}, third.dependencies)).toThrow("blocker A");
+    expect(third.messages).toEqual([]);
+    expect(third.state.pendingResolutions).toHaveLength(1);
+
+    const recovered = fixture({ state: third.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(2);
+    expect(recovered.messages[0]?.message).not.toBe(recovered.messages[1]?.message);
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+  });
+
   it("sends one closure after a failed incident recovers", () => {
     const previous = fixture({
       dependencies: {

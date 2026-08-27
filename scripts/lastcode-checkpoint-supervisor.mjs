@@ -479,19 +479,29 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       phase: error instanceof CommandFailure ? error.phase : phase,
     };
     const fingerprint = checkpointIncidentFingerprint(failure);
-    const sameOpenIncident =
-      previous?.status === "failed" && previous.incident?.fingerprint === fingerprint;
-    const incident = sameOpenIncident
-      ? previous.incident
-      : {
-          alertDelivery: "pending",
-          deliveryAttempts: 0,
-          failure,
-          fingerprint,
-          openedAt: finishedAt,
-        };
     const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
     const pendingResolutions = [...durableIncidentList(previous, "pendingResolutions")];
+    const sameOpenIncident =
+      previous?.status === "failed" && previous.incident?.fingerprint === fingerprint;
+    const pendingIncidentIndex = pendingIncidents.findIndex(
+      (pendingIncident) => pendingIncident.fingerprint === fingerprint,
+    );
+    const pendingResolutionIndex = pendingResolutions.findIndex(
+      (pendingIncident) => pendingIncident.fingerprint === fingerprint,
+    );
+    const restoredIncident =
+      (pendingResolutionIndex >= 0
+        ? pendingResolutions.splice(pendingResolutionIndex, 1)[0]
+        : null) ??
+      (pendingIncidentIndex >= 0 ? pendingIncidents.splice(pendingIncidentIndex, 1)[0] : null);
+    const knownIncident = sameOpenIncident || Boolean(restoredIncident);
+    const incident = (sameOpenIncident ? previous.incident : restoredIncident) ?? {
+      alertDelivery: "pending",
+      deliveryAttempts: 0,
+      failure,
+      fingerprint,
+      openedAt: finishedAt,
+    };
     if (!sameOpenIncident && previous?.status === "failed" && previous.incident) {
       const destination =
         previous.incident.alertDelivery === "sent" ? pendingResolutions : pendingIncidents;
@@ -516,7 +526,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     };
     dependencies.writeState(state);
     state = attemptDelivery(state, config, dependencies);
-    if (!sameOpenIncident) {
+    if (!knownIncident) {
       const delivered = state.incident.alertDelivery === "sent";
       dependencies.notify(
         "LastCode checkpoint automation needs attention",
