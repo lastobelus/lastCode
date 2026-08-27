@@ -95,7 +95,8 @@ jobs:
           fi
 
           git fetch --force --no-tags origin \
-            "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}" \
+            "refs/tags/${INSTALLABLE_TAG}:refs/tags/${INSTALLABLE_TAG}"
+          git fetch --force --no-tags https://github.com/pingdotgg/t3code.git \
             "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
           resolved_commit="$(git rev-parse "${INSTALLABLE_TAG}^{commit}")"
           if [[ "$resolved_commit" != "$INSTALLABLE_COMMIT" ]]; then
