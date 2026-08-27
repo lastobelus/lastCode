@@ -104,9 +104,13 @@ function changedInitializedGitlink(worktree, fromCommit, toCommit) {
   return null;
 }
 
-export function managedCheckoutBackupRef(prefix, commit) {
+export function managedCheckoutBackupRef(prefix, commit, objectFormat = "sha1") {
   const normalizedPrefix = validateRefName(prefix, "Backup ref prefix");
-  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+  const objectIdLength = objectFormat === "sha1" ? 40 : objectFormat === "sha256" ? 64 : null;
+  if (objectIdLength === null) {
+    fail(`Managed checkout reported unsupported object format '${objectFormat}'.`);
+  }
+  if (!new RegExp(`^[0-9a-f]{${objectIdLength}}$`, "u").test(commit)) {
     fail(`Managed checkout reported invalid commit '${commit}'.`);
   }
   return `${normalizedPrefix}/${commit}`;
@@ -154,6 +158,8 @@ export function syncManagedCheckout(rawConfig, dependencies = {}) {
     (() =>
       git(config.worktree, [
         "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
         config.remote,
         `+refs/heads/${config.remoteBranch}:refs/remotes/${config.remote}/${config.remoteBranch}`,
       ]));
@@ -222,7 +228,8 @@ export function syncManagedCheckout(rawConfig, dependencies = {}) {
   if (collision) fail(`Managed checkout target would replace ignored content ('${collision}').`);
 
   assertSafe(currentCommit);
-  const backupRef = managedCheckoutBackupRef(config.backupRefPrefix, currentCommit);
+  const objectFormat = git(worktree, ["rev-parse", "--show-object-format"]);
+  const backupRef = managedCheckoutBackupRef(config.backupRefPrefix, currentCommit, objectFormat);
   git(worktree, ["update-ref", backupRef, currentCommit]);
   git(worktree, ["update-ref", branchRef, targetCommit, currentCommit]);
   try {

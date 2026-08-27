@@ -93,6 +93,18 @@ describe("managed checkout configuration", () => {
       /absolute JSON path/u,
     );
   });
+
+  it("builds backup refs for SHA-1 and SHA-256 object IDs", () => {
+    const prefix = "refs/example/managed-checkout-backups";
+    expect(managedCheckoutBackupRef(prefix, "a".repeat(40))).toBe(`${prefix}/${"a".repeat(40)}`);
+    expect(managedCheckoutBackupRef(prefix, "b".repeat(64), "sha256")).toBe(
+      `${prefix}/${"b".repeat(64)}`,
+    );
+    expect(() => managedCheckoutBackupRef(prefix, "c".repeat(41))).toThrow(/invalid commit/u);
+    expect(() => managedCheckoutBackupRef(prefix, "d".repeat(40), "unknown")).toThrow(
+      /unsupported object format/u,
+    );
+  });
 });
 
 describe("syncManagedCheckout", () => {
@@ -121,6 +133,31 @@ describe("syncManagedCheckout", () => {
     const test = fixture();
     const commit = git(test.managed, ["rev-parse", "HEAD"]);
     expect(syncManagedCheckout(test.config)).toEqual({ commit, status: "current" });
+  });
+
+  it("fetches only the configured branch without tags or submodules", () => {
+    const test = fixture();
+    publish(test, "tracked.txt", "two\n");
+    const calls = [];
+    const runGit = (cwd, args, options = {}) => {
+      calls.push(args);
+      const output = NodeChildProcess.execFileSync("git", ["-C", cwd, ...args], {
+        encoding: "utf8",
+        input: options.input,
+        maxBuffer: options.maxBuffer,
+      });
+      return options.raw ? output : output.trim();
+    };
+
+    syncManagedCheckout(test.config, { runGit });
+
+    expect(calls).toContainEqual([
+      "fetch",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "origin",
+      "+refs/heads/release:refs/remotes/origin/release",
+    ]);
   });
 
   it("refuses dirty, wrong-branch, and wrong-repository checkouts", () => {
