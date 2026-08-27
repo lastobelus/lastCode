@@ -15,6 +15,29 @@ Ordinary branch pushes run the quick gate through `.vite-hooks/pre-push`:
 pnpm lastcode:ci:quick
 ```
 
+Quick CI is a local waste-prevention gate, not merge authority. It checks the
+exact branch diff for whitespace errors, repository formatting and lint, and
+workspace types. The implementing agent runs focused tests for changed behavior;
+GitHub CI and the transitional full local gate retain comprehensive tests,
+Electron setup, builds, Rust, native analysis, and release smoke coverage.
+
+Agents run the independent **Run Quick CI** Project Action before a push. A
+successful action records the exact head and the selected workstream base ref and
+commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
+`origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
+receipt without rerunning validation.
+
+For each checkout that agents use, import **Run Quick CI** from `t3.json` in
+Project Settings once, then edit the imported Action and enable **Allow Codex
+and Claude to run and resume**. These are deliberate one-time Project Action
+settings; the repository does not automate or migrate them.
+
+The action never pushes: after it resumes, the agent still decides whether and
+what to push. A changed head, changed base tracking ref, or dirty worktree makes
+the receipt unusable. Without a matching receipt, ordinary command-line pushes
+run Quick CI synchronously and record one for transport retries of the same
+commit.
+
 The checkpoint runner is the narrow exception: after a checkpoint or revision
 candidate passes its dedicated smoke gate, its immutable tag and subsequent
 `lastcode/main` promotion push with `--no-verify`. This avoids rerunning the
