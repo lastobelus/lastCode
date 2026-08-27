@@ -275,13 +275,11 @@ export function assertPrePushTargetsHead(
   updates: ReadonlyArray<PrePushUpdate>,
   headCommit: string,
 ): boolean {
-  if (updates.length === 0) {
-    throw new Error("The pre-push hook did not receive any ref updates.");
-  }
+  if (!hasPrePushBranchCommit(updates)) return false;
   const commits = updates
+    .filter(({ remoteRef }) => remoteRef.startsWith("refs/heads/"))
     .map(({ localSha }) => localSha)
     .filter((localSha) => !/^0+$/.test(localSha));
-  if (commits.length === 0) return false;
   const mismatched = commits.find((commit) => commit !== headCommit);
   if (mismatched) {
     throw new Error(
@@ -289,6 +287,15 @@ export function assertPrePushTargetsHead(
     );
   }
   return true;
+}
+
+export function hasPrePushBranchCommit(updates: ReadonlyArray<PrePushUpdate>): boolean {
+  if (updates.length === 0) {
+    throw new Error("The pre-push hook did not receive any ref updates.");
+  }
+  return updates.some(
+    ({ localSha, remoteRef }) => remoteRef.startsWith("refs/heads/") && !/^0+$/.test(localSha),
+  );
 }
 
 export function resolveQuickCiReceiptPath(commonGitDir: string, commit: string): string {
@@ -619,6 +626,7 @@ function executeLocalCi(
   repoRoot: string,
   steps: ReadonlyArray<LocalCiStep>,
   repositoryIntegrity: RepositoryIntegritySnapshot,
+  prePushUpdates?: ReadonlyArray<PrePushUpdate>,
 ): void {
   assertCleanWorktree(repoRoot);
   const commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
@@ -663,11 +671,8 @@ function executeLocalCi(
     assertBaseIsAncestor(repoRoot, baseCommit, commitBefore);
 
     if (options.prePush) {
-      const updates = parsePrePushUpdates(NodeFS.readFileSync(0, "utf8"));
-      if (!assertPrePushTargetsHead(updates, commitBefore)) {
-        console.log("[lastcode:ci] No pushed commit requires Quick CI.");
-        return;
-      }
+      if (!prePushUpdates) throw new Error("Missing pre-push ref updates.");
+      assertPrePushTargetsHead(prePushUpdates, commitBefore);
       if (hasMatchingQuickCiReceipt(repositoryIntegrity.commonGitDir, commitBefore, baseCommit)) {
         console.log(
           `[lastcode:ci] Reusing Quick CI receipt for ${commitBefore} against ${baseCommit}.`,
@@ -778,6 +783,13 @@ function executeLocalCi(
 }
 
 function runLocalCi(options: LocalCiOptions): void {
+  const prePushUpdates = options.prePush
+    ? parsePrePushUpdates(NodeFS.readFileSync(0, "utf8"))
+    : undefined;
+  if (prePushUpdates && !hasPrePushBranchCommit(prePushUpdates)) {
+    console.log("[lastcode:ci] No pushed branch commit requires Quick CI.");
+    return;
+  }
   assertSupportedNodeVersion();
   const { integrity: repositoryIntegrity, repoRoot } = prepareLocalCiRepository();
   const steps = resolveLocalCiSteps(options.mode);
@@ -788,7 +800,7 @@ function runLocalCi(options: LocalCiOptions): void {
   }
 
   try {
-    executeLocalCi(options, repoRoot, steps, repositoryIntegrity);
+    executeLocalCi(options, repoRoot, steps, repositoryIntegrity, prePushUpdates);
   } finally {
     assertRepositoryIntegrity(repoRoot, repositoryIntegrity);
   }

@@ -14,6 +14,7 @@ import {
   captureRepositoryIntegrity,
   formatLocalCiFailureSummary,
   formatLocalCiSummary,
+  hasPrePushBranchCommit,
   hasMatchingQuickCiReceipt,
   parsePrePushUpdates,
   parseLocalCiOptions,
@@ -152,7 +153,46 @@ describe("lastcode-local-ci", () => {
         head,
       ),
     ).toBe(false);
+    const annotatedTag = parsePrePushUpdates(
+      `refs/tags/snapshot ${"d".repeat(40)} refs/tags/snapshot ${"0".repeat(40)}\n`,
+    );
+    expect(hasPrePushBranchCommit(annotatedTag)).toBe(false);
+    expect(assertPrePushTargetsHead(annotatedTag, head)).toBe(false);
+    expect(
+      assertPrePushTargetsHead(
+        parsePrePushUpdates(
+          [
+            `refs/heads/topic ${head} refs/heads/topic ${"b".repeat(40)}`,
+            `refs/tags/snapshot ${"d".repeat(40)} refs/tags/snapshot ${"0".repeat(40)}`,
+          ].join("\n"),
+        ),
+        head,
+      ),
+    ).toBe(true);
     expect(() => parsePrePushUpdates("incomplete update")).toThrow("Invalid pre-push update");
+  });
+
+  it("allows deletion-only pushes before inspecting the unrelated worktree", () => {
+    const repository = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-pre-push-delete-test-"),
+    );
+    NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    NodeFS.writeFileSync(NodePath.join(repository, "dirty.txt"), "untracked\n");
+
+    const result = NodeChildProcess.spawnSync(
+      process.execPath,
+      [NodePath.resolve(import.meta.dirname, "lastcode-local-ci.ts"), "--quick", "--pre-push"],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        input: `(delete) ${"0".repeat(40)} refs/heads/old ${"a".repeat(40)}\n`,
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("No pushed branch commit requires Quick CI");
+    expect(result.stderr).toBe("");
+    NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
   it("reuses Quick CI only for the exact head, base, and gate version", () => {
