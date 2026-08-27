@@ -1,6 +1,7 @@
-import type {
+import {
   DesktopLastCodeSettingsState,
   LastCodeSettingsImportPreview,
+  ThreadId,
 } from "@t3tools/contracts";
 import {
   DEFAULT_LEGACY_SIDEBAR_SCALE,
@@ -21,6 +22,7 @@ import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
 import { searchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
@@ -30,6 +32,19 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+
+const STATUS_INDICATOR_PREVIEW = {
+  colorClass: "text-sky-600 dark:text-sky-300/80",
+  dotClass: "bg-sky-500 dark:bg-sky-300/80",
+  label: "Working",
+  pulse: false,
+} as const;
+
+const WORKTREE_INDICATOR_PREVIEW_THREAD = {
+  id: ThreadId.make("settings-worktree-preview"),
+  branch: "feature/example",
+  worktreePath: "/example/worktrees/example",
+};
 
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
@@ -237,6 +252,15 @@ export function LastCodeSettingsPanel() {
         <SettingsRow
           {...searchableSetting("compact-status-indicators")}
           description="Show colored dot only for agent status, hiding labels like “Working” and “Completed.”"
+          status={
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-sidebar px-2 py-1 text-sm text-foreground">
+              <ThreadStatusLabel
+                compact={clientSettings.compactLegacySidebarStatuses}
+                status={STATUS_INDICATOR_PREVIEW}
+              />
+              <span>Title</span>
+            </span>
+          }
           control={
             <Switch
               checked={clientSettings.compactLegacySidebarStatuses}
@@ -249,14 +273,23 @@ export function LastCodeSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("show-worktree-indicators")}
-          description="Show the worktree icon beside threads that use a dedicated worktree."
+          description="Show the worktree icon beside threads that use a dedicated worktree in the legacy sidebar."
+          status={
+            <span className="inline-flex items-center gap-1 rounded-full bg-sidebar px-2 py-1 text-[10px] tabular-nums text-secondary-label">
+              {clientSettings.showThreadWorktreeIndicators ? (
+                <ThreadWorktreeIndicator thread={WORKTREE_INDICATOR_PREVIEW_THREAD} />
+              ) : null}
+              <EnvironmentIcon kind="server" context="legacy-row" className="size-3" />
+              <span>5m ago</span>
+            </span>
+          }
           control={
             <Switch
               checked={clientSettings.showThreadWorktreeIndicators}
               onCheckedChange={(checked) =>
                 updateClientSettings({ showThreadWorktreeIndicators: Boolean(checked) })
               }
-              aria-label="Show worktree indicators"
+              aria-label="Show worktree indicators (legacy sidebar)"
             />
           }
         />
