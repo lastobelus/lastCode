@@ -940,11 +940,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               >
                 <span
                   data-legacy-sidebar-unscaled-content
-                  className={
-                    props.compactStatusIndicators
-                      ? "size-[9px] rounded-full bg-yellow-500 dark:bg-yellow-300"
-                      : "size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300"
-                  }
+                  className="size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300"
                 />
               </TooltipTrigger>
               <TooltipPopup side="top">Waiting for {thread.actionResume.actionName}</TooltipPopup>
