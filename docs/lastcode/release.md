@@ -198,8 +198,11 @@ deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
 immutable artifact.
 
-This workflow remains explicitly selected and action-dispatched. Scheduling and
-installation are separate rollout gates.
+The agent-facing action remains explicitly selected. A separate daily GitHub
+workflow resolves the newest immutable installable tag, then uses the same exact
+tag, commit, request-token dispatch, and release validation path. If that Intel
+release already exists, the artifact workflow validates and reuses it without
+rebuilding. Installation remains a separate target-host decision.
 
 ### Intel target staging
 
