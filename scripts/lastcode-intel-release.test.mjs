@@ -107,6 +107,9 @@ describe("immutable Intel release validation", () => {
     );
     expect(workflow).toContain("request_token:");
     expect(workflow).toContain('if [[ ! "$REQUEST_TOKEN" =~ ^intel-[0-9a-f-]{36}$ ]]');
+    expect(workflow).toContain('upstream_tag="v${version%.*}"');
+    expect(workflow).toContain("https://github.com/pingdotgg/t3code.git");
+    expect(workflow).toContain('"refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"');
     const project = JSON.parse(
       NodeFS.readFileSync(NodePath.resolve(import.meta.dirname, "../t3.json"), "utf8"),
     );
