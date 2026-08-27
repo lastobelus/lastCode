@@ -211,7 +211,7 @@ stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
-pnpm lastcode:intel-stage stage --maximum-version-host airy
+pnpm lastcode:intel-stage stage --maximum-version-host version-source.example
 pnpm lastcode:intel-stage status
 ```
 
@@ -225,81 +225,61 @@ checks and supersession; a mismatch, competing invocation, or interrupted check
 leaves the prior pending selection intact. Staging never closes admission, stops
 the app, or starts installation.
 
-`--maximum-version-host airy` reads `/Applications/LastCode.app` on the named
+`--maximum-version-host version-source.example` reads
+`/Applications/LastCode.app` on the named
 SSH host and stages only releases at or below that installed nightly. If SSH is
 unavailable or the remote version is not a LastCode nightly, staging stops
-before changing the current pending selection. This is the simple version
-ceiling used to keep htulo from moving ahead of airy.
+before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
-### Daily htulo updates
+### Deployment primitives
 
-Htulo runs the packaged LastCode server as a login LaunchAgent on the fixed
-loopback port `3773`. It uses the normal LastCode home and does not launch an
-Electron window, renderer, or GPU process:
+This repository provides narrow components that private or organization-owned
+infrastructure can compose:
 
-```bash
-pnpm lastcode:headless-service install
-pnpm lastcode:headless-service status
-pnpm lastcode:headless-service stop
-pnpm lastcode:headless-service start
+- `lastcode:intel-stage` validates and prepares a published Intel build without
+  activating it;
+- `lastcode:headless-service` runs the packaged server in a dedicated macOS x64
+  environment;
+- `lastcode:install` performs the guarded application swap and rollback; and
+- `lastcode:managed-checkout` aligns an explicitly automation-owned checkout
+  with a configured remote branch.
+
+The repository deliberately does not define a real deployment topology,
+machine roles, update schedule, service ordering, or concrete environment
+paths. Infrastructure code owns those decisions, including when to pause work,
+how to select a version ceiling, when to activate a staged app, and which
+checkout is reserved for automation.
+
+The managed-checkout tool accepts an absolute JSON configuration:
+
+```json
+{
+  "backupRefPrefix": "refs/example/managed-checkout-backups",
+  "branch": "release",
+  "gitCommonDirectory": "/srv/example/repository.git",
+  "remote": "origin",
+  "remoteBranch": "release",
+  "worktree": "/srv/example/managed-checkout"
+}
 ```
 
-The first `install` writes and loads the LaunchAgent, then quits a running
-LastCode desktop once so the headless server can take ownership of the normal
-LastCode home. Launchd keeps the new service armed while the desktop exits.
-Later service starts and daily updates do not launch or quit the desktop.
-
-The service executes the server entry inside `/Applications/LastCode.app`, so
-the running server is always the version installed on htulo. Do not launch the
-desktop app against `~/.lastcode` while this service owns that home.
-
-Htulo's external updater is a second login LaunchAgent:
+Run it with:
 
 ```bash
-pnpm lastcode:daily-update install
-pnpm lastcode:daily-update status
-pnpm lastcode:daily-update run-now
+pnpm lastcode:managed-checkout sync --config /absolute/path/checkout.json
 ```
 
-At 04:00 each day it prepares and validates the newest eligible Intel app before
-interrupting work. If an update is ready, it uses htulo's local
-`lastcode-thread` command to ask every working thread to pause, waits for the
-explicit `PAUSED FOR LASTCODE UPDATE` replies, checks once for a newly started
-thread, stops the headless server, swaps the app, starts the same service on
-port `3773`, verifies the exact installed x64 build plus its packaged server
-through the public environment descriptor, and tells the paused threads to
-resume. If the new service does not become ready, the installer restores the
-previous app and restarts its server.
-A missing pause reply leaves the prepared update in place for the next run and
-does not stop the server. Threads that may already have paused are always
-queued for a resume; undelivered resumes are kept in
-`~/.lastcode/daily-update/pending-resumes.json` and retried before the next
-daily update check.
-
-The first update from a LastCode version older than the thread command is a
-manual bootstrap after the user has paused work:
-
-```bash
-pnpm lastcode:daily-update run --bootstrap
-```
-
-`--bootstrap` is never present in the scheduled LaunchAgent. Remove the schedule
-with `pnpm lastcode:daily-update uninstall`.
-
-For occasional desktop UI QA on htulo, stop any prior QA instance and run one
-isolated desktop process. Its state and port are deliberately separate from the
-production server:
-
-```bash
-T3CODE_HOME="$HOME/.lastcode-qa" \
-T3CODE_PORT=4773 \
-  /Applications/LastCode.app/Contents/MacOS/LastCode
-```
-
-Quit that desktop when QA is complete. Airy and browser clients continue to use
-the production htulo environment on port `3773` throughout.
+The tool verifies the configured repository identity, selected branch, clean
+tracked and untracked state, inactive Git operation, initialized-submodule
+changes, and collisions with ignored content. It fetches only the configured
+remote branch, saves the old tip under the configured backup-ref prefix, and
+moves the branch with compare-and-swap semantics before updating the tree. The
+caller must give it exclusive ownership of the checkout for the duration of the
+operation; Git cannot lock arbitrary concurrent filesystem writes. If the ref
+moves but tree verification fails, the tool retains the target ref and reports
+the backup ref for explicit recovery instead of pretending it rolled back.
 
 State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
 credential-free handoff contract for later drain and activation work. It names
