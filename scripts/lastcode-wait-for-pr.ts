@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalTimers:off -- Read-only host-side GitHub polling.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off globalTimers:off -- Read-only host-side GitHub polling.
 import * as NodeChildProcess from "node:child_process";
+
+import {
+  evaluateGithubCi,
+  githubBranchRulesArgs,
+  githubCiJobsArgs,
+  githubCiRunsArgs,
+  githubCiWorkflowArgs,
+  type GithubBranchRule,
+  type GithubCiEvidence,
+  type GithubWorkflow,
+  type GithubWorkflowJob,
+  type GithubWorkflowRun,
+} from "./lastcode-github-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -9,6 +22,9 @@ const CODEX_BOT_LOGIN = "chatgpt-codex-connector[bot]";
 const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const POLL_INTERVAL_MS = 60_000;
 const GH_TIMEOUT_MS = 30_000;
+export const CI_REGISTRATION_TIMEOUT_MS = 10 * 60_000;
+export const MERGE_RECOMPUTE_TIMEOUT_MS = 10 * 60_000;
+export const REVIEW_TIMEOUT_MS = 30 * 60_000;
 
 type PullRequestState = {
   readonly number: number;
@@ -20,20 +36,7 @@ type PullRequestState = {
   readonly baseRefName: string;
   readonly mergeable: string;
   readonly mergeStateStatus: string;
-  readonly statusCheckRollup: ReadonlyArray<StatusCheck> | null;
-};
-
-type StatusCheck = {
-  readonly __typename?: string;
-  readonly name?: string;
-  readonly context?: string;
-  readonly workflowName?: string | null;
-  readonly detailsUrl?: string | null;
-  readonly startedAt?: string | null;
-  readonly completedAt?: string | null;
-  readonly status?: string;
-  readonly conclusion?: string | null;
-  readonly state?: string;
+  readonly potentialMergeCommit?: { readonly oid?: string } | null;
 };
 
 type GitHubActor = {
@@ -71,8 +74,6 @@ type CommentReaction = {
   readonly created_at?: string;
 };
 
-export type CiState = "pending" | "success" | "failure";
-
 export interface ReviewArtifact {
   readonly key: string;
   readonly observedAt: string;
@@ -88,111 +89,52 @@ export interface ReviewState {
 
 export interface WaitObservation {
   readonly pullRequest: PullRequestState;
-  readonly ci: CiState;
+  readonly ci: GithubCiEvidence;
   readonly review: ReviewState;
   readonly unresolvedReviewThreads: number;
+  readonly local: LocalState;
+}
+
+export interface LocalState {
+  readonly branch: string;
+  readonly head: string;
+  readonly clean: boolean;
 }
 
 export type WaitDecision =
   | {
       readonly kind: "wait";
-      readonly reason: "ci-pending" | "mergeability-pending" | "review-pending";
+      readonly reason:
+        | "ci-pending"
+        | "ci-registration"
+        | "merge-recomputing"
+        | "mergeability-pending"
+        | "review-pending";
     }
   | {
       readonly kind: "wake";
       readonly reason:
         | "base-changed"
+        | "ci-configuration"
         | "ci-failed"
+        | "ci-registration-timeout"
         | "head-changed"
+        | "local-head-changed"
         | "merge-blocked"
+        | "merge-recompute-timeout"
+        | "merge-revision-changed"
+        | "pr-changed"
         | "pr-closed"
         | "pr-draft"
         | "ready"
-        | "review-completed"
         | "review-not-requested"
+        | "review-timeout"
         | "review-unhandled"
         | "review-unresolved"
-        | "unexpected-base";
+        | "unexpected-base"
+        | "worktree-changed";
       readonly detail: string;
     };
-
-const successfulCheckConclusions = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-
-const checkProvider = (detailsUrl: string | null | undefined): string | null => {
-  if (!detailsUrl) return null;
-  try {
-    const url = new URL(detailsUrl);
-    const pathIdentity = url.pathname.split("/").filter(Boolean).slice(0, 2).join("/");
-    return `${url.origin}/${pathIdentity}`;
-  } catch {
-    return null;
-  }
-};
-
-const checkIdentity = (check: StatusCheck, index: number): string => {
-  const kind = check.__typename ?? (check.context ? "StatusContext" : "CheckRun");
-  const name = check.name ?? check.context;
-  if (!name) return `nameless\u0000${index}`;
-  if (kind === "StatusContext") return `${kind}\u0000${name}`;
-  if (check.workflowName) return `${kind}\u0000${check.workflowName}\u0000${name}`;
-  const provider = checkProvider(check.detailsUrl);
-  return provider ? `${kind}\u0000${provider}\u0000${name}` : `${kind}\u0000${name}\u0000${index}`;
-};
-
-const checkTimestamp = (check: StatusCheck): number | null => {
-  for (const value of [check.completedAt, check.startedAt]) {
-    if (value) {
-      const parsed = Date.parse(value);
-      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-    }
-  }
-  return null;
-};
-
-const latestStatusChecks = (checks: ReadonlyArray<StatusCheck>): ReadonlyArray<StatusCheck> => {
-  const newestByIdentity = new Map<
-    string,
-    { readonly check: StatusCheck; readonly at: number | null }
-  >();
-  for (const [index, check] of checks.entries()) {
-    const identity = checkIdentity(check, index);
-    const candidate = { check, at: checkTimestamp(check) };
-    const kept = newestByIdentity.get(identity);
-    if (
-      kept === undefined ||
-      (candidate.at === null ? kept.at === null : kept.at === null || candidate.at >= kept.at)
-    ) {
-      newestByIdentity.set(identity, candidate);
-    }
-  }
-  return [...newestByIdentity.values()].map(({ check }) => check);
-};
-
-export function classifyStatusChecks(checks: PullRequestState["statusCheckRollup"]): CiState {
-  if (!checks || checks.length === 0) return "pending";
-
-  let pending = false;
-  for (const check of latestStatusChecks(checks)) {
-    if (check.status !== undefined) {
-      if (check.status !== "COMPLETED") {
-        pending = true;
-        continue;
-      }
-      if (!check.conclusion || !successfulCheckConclusions.has(check.conclusion)) {
-        return "failure";
-      }
-      continue;
-    }
-
-    if (check.state === "SUCCESS") continue;
-    if (check.state === "PENDING" || check.state === "EXPECTED" || check.state === undefined) {
-      pending = true;
-      continue;
-    }
-    return "failure";
-  }
-  return pending ? "pending" : "success";
-}
 
 export function pullRequestViewArgs(repository: string, branch: string): ReadonlyArray<string> {
   if (branch.length === 0) {
@@ -205,15 +147,20 @@ export function pullRequestViewArgs(repository: string, branch: string): Readonl
     "--repo",
     repository,
     "--json",
-    "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup",
+    "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,potentialMergeCommit",
   ];
 }
 
 export function samePullRequestRevision(
-  initial: Pick<PullRequestState, "headRefOid" | "baseRefOid">,
-  final: Pick<PullRequestState, "headRefOid" | "baseRefOid">,
+  initial: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid" | "potentialMergeCommit">,
+  final: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid" | "potentialMergeCommit">,
 ): boolean {
-  return initial.headRefOid === final.headRefOid && initial.baseRefOid === final.baseRefOid;
+  return (
+    initial.number === final.number &&
+    initial.headRefOid === final.headRefOid &&
+    initial.baseRefOid === final.baseRefOid &&
+    initial.potentialMergeCommit?.oid === final.potentialMergeCommit?.oid
+  );
 }
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){
@@ -424,6 +371,30 @@ export function deriveReviewState(input: {
 
 export function decideWaitForPr(baseline: WaitObservation, current: WaitObservation): WaitDecision {
   const pullRequest = current.pullRequest;
+  if (!current.local.clean) {
+    return {
+      kind: "wake",
+      reason: "worktree-changed",
+      detail: "The worktree became dirty while waiting for pull request gates.",
+    };
+  }
+  if (
+    current.local.branch !== baseline.local.branch ||
+    current.local.head !== baseline.local.head
+  ) {
+    return {
+      kind: "wake",
+      reason: "local-head-changed",
+      detail: `Local revision changed from ${baseline.local.branch}@${baseline.local.head} to ${current.local.branch}@${current.local.head}.`,
+    };
+  }
+  if (pullRequest.number !== baseline.pullRequest.number) {
+    return {
+      kind: "wake",
+      reason: "pr-changed",
+      detail: `Checked-out branch now resolves to pull request #${pullRequest.number}, not #${baseline.pullRequest.number}.`,
+    };
+  }
   if (pullRequest.state !== "OPEN") {
     return {
       kind: "wake",
@@ -459,6 +430,15 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `PR base changed from ${baseline.pullRequest.baseRefOid} to ${pullRequest.baseRefOid}.`,
     };
   }
+  const baselineMerge = baseline.pullRequest.potentialMergeCommit?.oid;
+  const currentMerge = pullRequest.potentialMergeCommit?.oid;
+  if (baselineMerge && currentMerge && baselineMerge !== currentMerge) {
+    return {
+      kind: "wake",
+      reason: "merge-revision-changed",
+      detail: `PR merge revision changed from ${baselineMerge} to ${currentMerge}.`,
+    };
+  }
   if (
     pullRequest.mergeable === "CONFLICTING" ||
     pullRequest.mergeStateStatus === "BEHIND" ||
@@ -471,22 +451,11 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
     };
   }
 
-  const baselineArtifacts = new Set(baseline.review.terminalArtifacts.map(({ key }) => key));
-  const newArtifacts = current.review.terminalArtifacts.filter(
-    ({ key }) => !baselineArtifacts.has(key),
-  );
-  if (newArtifacts.length > 0) {
+  if (current.ci.state === "failure") {
     return {
       kind: "wake",
-      reason: "review-completed",
-      detail: `Codex delivered ${newArtifacts.length} new current-head review artifact${newArtifacts.length === 1 ? "" : "s"}.`,
-    };
-  }
-  if (current.ci === "failure") {
-    return {
-      kind: "wake",
-      reason: "ci-failed",
-      detail: `Current-head CI for pull request #${pullRequest.number} needs attention.`,
+      reason: current.ci.reason === "configuration" ? "ci-configuration" : "ci-failed",
+      detail: current.ci.detail,
     };
   }
   if (!current.review.requestPresent) {
@@ -514,7 +483,7 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
     return { kind: "wait", reason: "mergeability-pending" };
   }
   if (
-    current.ci === "success" &&
+    current.ci.state === "satisfied" &&
     !current.review.pending &&
     current.review.ready &&
     pullRequest.mergeStateStatus === "BLOCKED"
@@ -525,16 +494,63 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `Pull request #${pullRequest.number} is blocked by a repository merge requirement.`,
     };
   }
-  if (current.ci === "success" && !current.review.pending && current.review.ready) {
+  if (current.ci.state === "satisfied" && !current.review.pending && current.review.ready) {
     return {
       kind: "wake",
       reason: "ready",
       detail: `GitHub CI and the handled Codex review are complete for pull request #${pullRequest.number}.`,
     };
   }
-  return current.review.pending
-    ? { kind: "wait", reason: "review-pending" }
-    : { kind: "wait", reason: "ci-pending" };
+  if (current.ci.state === "pending" && current.ci.reason === "merge-recomputing") {
+    return { kind: "wait", reason: "merge-recomputing" };
+  }
+  if (current.ci.state === "pending" && current.ci.reason === "run-registration") {
+    return { kind: "wait", reason: "ci-registration" };
+  }
+  if (current.review.pending) return { kind: "wait", reason: "review-pending" };
+  return { kind: "wait", reason: "ci-pending" };
+}
+
+export function decideWaitTimeout(
+  reason: Extract<WaitDecision, { readonly kind: "wait" }>["reason"],
+  elapsedMs: number,
+): WaitDecision | null {
+  if (reason === "ci-registration" && elapsedMs >= CI_REGISTRATION_TIMEOUT_MS) {
+    return {
+      kind: "wake",
+      reason: "ci-registration-timeout",
+      detail: `Expected GitHub CI did not register within ${CI_REGISTRATION_TIMEOUT_MS / 60_000} minutes.`,
+    };
+  }
+  if (
+    (reason === "merge-recomputing" || reason === "mergeability-pending") &&
+    elapsedMs >= MERGE_RECOMPUTE_TIMEOUT_MS
+  ) {
+    return {
+      kind: "wake",
+      reason: "merge-recompute-timeout",
+      detail: `GitHub did not establish the PR merge revision within ${MERGE_RECOMPUTE_TIMEOUT_MS / 60_000} minutes.`,
+    };
+  }
+  if (reason === "review-pending" && elapsedMs >= REVIEW_TIMEOUT_MS) {
+    return {
+      kind: "wake",
+      reason: "review-timeout",
+      detail: `Codex review remained pending for ${REVIEW_TIMEOUT_MS / 60_000} minutes.`,
+    };
+  }
+  return null;
+}
+
+export function waitTimeoutClass(
+  reason: Extract<WaitDecision, { readonly kind: "wait" }>["reason"],
+): "ci-registration" | "merge-recompute" | "review" | null {
+  if (reason === "ci-registration") return "ci-registration";
+  if (reason === "merge-recomputing" || reason === "mergeability-pending") {
+    return "merge-recompute";
+  }
+  if (reason === "review-pending") return "review";
+  return null;
 }
 
 function runGhJson<T>(args: ReadonlyArray<string>): T {
@@ -549,6 +565,42 @@ function runGhJson<T>(args: ReadonlyArray<string>): T {
     throw new Error(result.stderr.trim() || `gh ${args.join(" ")} failed.`);
   }
   return JSON.parse(result.stdout) as T;
+}
+
+type WorkflowRunsResponse = {
+  readonly workflow_runs?: ReadonlyArray<GithubWorkflowRun>;
+};
+
+type WorkflowJobsResponse = {
+  readonly jobs?: ReadonlyArray<GithubWorkflowJob>;
+};
+
+function readGithubCi(repository: string, pullRequest: PullRequestState): GithubCiEvidence {
+  const workflow = runGhJson<GithubWorkflow>(githubCiWorkflowArgs(repository));
+  const branchRules = runGhJson<ReadonlyArray<GithubBranchRule>>(
+    githubBranchRulesArgs(repository, pullRequest.baseRefName),
+  );
+  const mergeSha = pullRequest.potentialMergeCommit?.oid ?? null;
+  const workflowRuns = mergeSha
+    ? (runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, mergeSha)).workflow_runs ?? [])
+    : [];
+  const evaluation = {
+    workflow,
+    branchRules,
+    mergeSha,
+    workflowRuns,
+    jobs: null,
+  } as const;
+  const provisional = evaluateGithubCi(evaluation);
+  const completedSuccessRun = workflowRuns.find(
+    (run) =>
+      run.id === provisional.runId && run.status === "completed" && run.conclusion === "success",
+  );
+  if (!completedSuccessRun?.id) return provisional;
+  const jobs =
+    runGhJson<WorkflowJobsResponse>(githubCiJobsArgs(repository, completedSuccessRun.id)).jobs ??
+    [];
+  return evaluateGithubCi({ ...evaluation, jobs });
 }
 
 function paginatedGhApi<T>(endpoint: string): ReadonlyArray<T> {
@@ -593,19 +645,43 @@ function reviewThreadsSnapshot(
   };
 }
 
-function currentBranch(): string {
-  const result = NodeChildProcess.spawnSync("git", ["branch", "--show-current"], {
+function runGitText(args: ReadonlyArray<string>): string {
+  const result = NodeChildProcess.spawnSync("git", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: GH_TIMEOUT_MS,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || "Failed to resolve the current Git branch.");
+    throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed.`);
   }
-  const branch = result.stdout.trim();
+  return result.stdout.trim();
+}
+
+function currentBranch(): string {
+  const branch = runGitText(["branch", "--show-current"]);
   if (branch.length === 0) throw new Error("Wait for PR requires a checked-out branch.");
   return branch;
+}
+
+function readLocalState(): LocalState {
+  return {
+    branch: currentBranch(),
+    head: runGitText(["rev-parse", "HEAD"]),
+    clean: runGitText(["status", "--porcelain=v1", "--untracked-files=all"]).length === 0,
+  };
+}
+
+const sameLocalState = (left: LocalState, right: LocalState): boolean =>
+  left.branch === right.branch && left.head === right.head && left.clean === right.clean;
+
+export function assertWaitStart(observation: WaitObservation): void {
+  if (!observation.local.clean) throw new Error("Wait for PR requires a clean worktree.");
+  if (observation.local.head !== observation.pullRequest.headRefOid) {
+    throw new Error(
+      `Local HEAD ${observation.local.head} does not match PR head ${observation.pullRequest.headRefOid}.`,
+    );
+  }
 }
 
 type ReviewDataSnapshot = {
@@ -652,7 +728,7 @@ function readReviewData(repository: string, pullRequest: PullRequestState): Revi
 
 export function requiresReadyConfirmation(observation: WaitObservation): boolean {
   return (
-    observation.ci === "success" &&
+    observation.ci.state === "satisfied" &&
     !observation.review.pending &&
     observation.review.ready &&
     observation.unresolvedReviewThreads === 0
@@ -662,34 +738,48 @@ export function requiresReadyConfirmation(observation: WaitObservation): boolean
 const observationFrom = (
   pullRequest: PullRequestState,
   reviewData: ReviewDataSnapshot,
+  ci: GithubCiEvidence,
+  local: LocalState,
 ): WaitObservation => ({
   pullRequest,
-  ci: classifyStatusChecks(pullRequest.statusCheckRollup),
+  ci,
   review: reviewData.review,
   unresolvedReviewThreads: reviewData.unresolvedReviewThreads,
+  local,
 });
 
 function readObservation(repository: string, branch: string): WaitObservation {
   while (true) {
+    const initialLocal = readLocalState();
     const initialPullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
     const initialReviewData = readReviewData(repository, initialPullRequest);
+    const ci = readGithubCi(repository, initialPullRequest);
     const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
-    if (!samePullRequestRevision(initialPullRequest, pullRequest)) continue;
+    const local = readLocalState();
+    if (
+      !samePullRequestRevision(initialPullRequest, pullRequest) ||
+      !sameLocalState(initialLocal, local)
+    ) {
+      continue;
+    }
 
-    const observation = observationFrom(pullRequest, initialReviewData);
+    const observation = observationFrom(pullRequest, initialReviewData, ci, local);
     if (!requiresReadyConfirmation(observation)) return observation;
 
     const confirmedReviewData = readReviewData(repository, pullRequest);
+    const confirmedCi = readGithubCi(repository, pullRequest);
     const confirmedPullRequest = runGhJson<PullRequestState>(
       pullRequestViewArgs(repository, branch),
     );
+    const confirmedLocal = readLocalState();
     if (
       !samePullRequestRevision(pullRequest, confirmedPullRequest) ||
+      !sameLocalState(local, confirmedLocal) ||
       initialReviewData.fingerprint !== confirmedReviewData.fingerprint
     ) {
       continue;
     }
-    return observationFrom(confirmedPullRequest, confirmedReviewData);
+    return observationFrom(confirmedPullRequest, confirmedReviewData, confirmedCi, confirmedLocal);
   }
 }
 
@@ -698,7 +788,9 @@ const summary = (observation: WaitObservation): string =>
     pr: observation.pullRequest.number,
     head: observation.pullRequest.headRefOid,
     base: observation.pullRequest.baseRefOid,
-    ci: observation.ci,
+    merge: observation.pullRequest.potentialMergeCommit?.oid ?? null,
+    ci: observation.ci.state,
+    ciReason: observation.ci.reason,
     review: observation.review.pending
       ? "pending"
       : observation.review.ready
@@ -714,13 +806,34 @@ const sleep = (durationMs: number): Promise<void> =>
 
 async function main(): Promise<void> {
   const branch = currentBranch();
-  const baseline = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);
+  let baseline = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);
+  assertWaitStart(baseline);
   console.log(`[wait-for-pr] Baseline ${summary(baseline)}`);
 
   let previousSummary = "";
   let current = baseline;
+  let pendingClass: ReturnType<typeof waitTimeoutClass> = null;
+  let pendingSince = Date.now();
   while (true) {
-    const decision = decideWaitForPr(baseline, current);
+    if (
+      !baseline.pullRequest.potentialMergeCommit?.oid &&
+      current.pullRequest.potentialMergeCommit?.oid
+    ) {
+      baseline = Object.assign({}, baseline, {
+        pullRequest: Object.assign({}, baseline.pullRequest, {
+          potentialMergeCommit: current.pullRequest.potentialMergeCommit,
+        }),
+      });
+    }
+    let decision = decideWaitForPr(baseline, current);
+    if (decision.kind === "wait") {
+      const timeoutClass = waitTimeoutClass(decision.reason);
+      if (pendingClass !== timeoutClass) {
+        pendingClass = timeoutClass;
+        pendingSince = Date.now();
+      }
+      decision = decideWaitTimeout(decision.reason, Date.now() - pendingSince) ?? decision;
+    }
     if (decision.kind === "wake") {
       console.log(
         `[wait-for-pr] Result ${JSON.stringify({
@@ -730,6 +843,7 @@ async function main(): Promise<void> {
           url: current.pullRequest.url,
           head: current.pullRequest.headRefOid,
           base: current.pullRequest.baseRefOid,
+          merge: current.pullRequest.potentialMergeCommit?.oid ?? null,
           ci: current.ci,
           reviewPending: current.review.pending,
           reviewReady: current.review.ready,

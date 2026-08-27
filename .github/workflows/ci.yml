@@ -2,9 +2,14 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - lastcode/main
   push:
     branches:
-      - main
+      - lastcode/main
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
@@ -13,7 +18,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -61,10 +66,10 @@ jobs:
   # dependency ordering that `vp run` applies by default: these `test` tasks
   # declare no `dependsOn` and resolve workspace deps from source, so ordering
   # only bought us idle runners between dependency layers. The concurrency
-  # limit stays at the default 4 so peak load per runner is unchanged.
+  # limit stays at 4 until standard-runner measurements justify a change.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -94,7 +99,7 @@ jobs:
   # isolation that flag buys is preserved exactly.
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -157,11 +162,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-  # Split out of Check and Test: both paid ~7-9s to install a Rust toolchain
-  # for checks that take under 3s, on the critical path of every PR.
+  # Keep the Rust toolchain and checks off the JavaScript jobs' critical paths.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -183,13 +187,12 @@ jobs:
       - name: Test resource monitor
         run: cargo test --locked --manifest-path native/resource-monitor/Cargo.toml
 
-  # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
-  # minute, so gate it on the native sources it actually lints instead of paying
-  # for it on every push. Detection is API-only (no checkout) and fails open: if
-  # the diff cannot be resolved, the lint runs.
+  # The static analysis below needs a macOS runner, so gate it on the native
+  # sources it actually lints. Detection is API-only (no checkout) and fails
+  # open: if the diff cannot be resolved, the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -267,7 +270,7 @@ jobs:
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
     if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -295,7 +298,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -317,3 +320,42 @@ jobs:
 
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
+
+  ci_gate:
+    name: CI Gate
+    if: ${{ always() }}
+    needs:
+      - check
+      - test
+      - test_server
+      - rust
+      - mobile_native_changes
+      - mobile_native_static_analysis
+      - release_smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify required jobs
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TEST_SERVER_RESULT: ${{ needs.test_server.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          MOBILE_CHANGES_RESULT: ${{ needs.mobile_native_changes.result }}
+          MOBILE_CHANGED: ${{ needs.mobile_native_changes.outputs.changed }}
+          MOBILE_STATIC_RESULT: ${{ needs.mobile_native_static_analysis.result }}
+          RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
+        run: |
+          set -euo pipefail
+          test "$CHECK_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$TEST_SERVER_RESULT" = success
+          test "$RUST_RESULT" = success
+          test "$MOBILE_CHANGES_RESULT" = success
+          test "$RELEASE_SMOKE_RESULT" = success
+          if test "$MOBILE_CHANGED" = false; then
+            test "$MOBILE_STATIC_RESULT" = skipped
+          else
+            test "$MOBILE_STATIC_RESULT" = success
+          fi
