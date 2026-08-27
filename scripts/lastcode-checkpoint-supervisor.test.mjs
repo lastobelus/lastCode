@@ -368,6 +368,32 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
+  it("discards malformed records inside durable incident state", () => {
+    const test = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "success",
+        pendingIncidents: ["invalid", { fingerprint: "missing-failure" }],
+        pendingResolutions: [null, 42],
+        incident: "invalid",
+      },
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow("fetch failed");
+    expect(test.messages).toHaveLength(1);
+    expect(test.state.pendingIncidents).toBeUndefined();
+    expect(test.state.pendingResolutions).toBeUndefined();
+    expect(test.state).toMatchObject({
+      status: "failed",
+      incident: { alertDelivery: "sent" },
+    });
+  });
+
   it("does not inherit unrelated or credential-bearing session variables", () => {
     expect(
       checkpointEnvironment(

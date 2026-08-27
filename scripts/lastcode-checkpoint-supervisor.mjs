@@ -258,8 +258,25 @@ function notify(title, message, environment) {
   return result.status === 0;
 }
 
+function isDurableIncident(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof value.fingerprint === "string" &&
+    value.fingerprint.length > 0 &&
+    value.failure !== null &&
+    typeof value.failure === "object" &&
+    !Array.isArray(value.failure)
+  );
+}
+
+function durableIncident(value) {
+  return isDurableIncident(value) ? value : null;
+}
+
 function durableIncidentList(state, key) {
-  return Array.isArray(state?.[key]) ? state[key] : [];
+  return Array.isArray(state?.[key]) ? state[key].filter(isDurableIncident) : [];
 }
 
 function attemptDelivery(state, config, dependencies) {
@@ -481,18 +498,19 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     const fingerprint = checkpointIncidentFingerprint(failure);
     const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
     const pendingResolutions = [...durableIncidentList(previous, "pendingResolutions")];
+    const previousIncident = durableIncident(previous?.incident);
     if (
       previous?.status === "success" &&
-      previous.incident &&
-      previous.incident.resolutionDelivery !== "sent" &&
+      previousIncident &&
+      previousIncident.resolutionDelivery !== "sent" &&
       !pendingResolutions.some(
-        (pendingIncident) => pendingIncident.fingerprint === previous.incident.fingerprint,
+        (pendingIncident) => pendingIncident.fingerprint === previousIncident.fingerprint,
       )
     ) {
-      pendingResolutions.push(previous.incident);
+      pendingResolutions.push(previousIncident);
     }
     const sameOpenIncident =
-      previous?.status === "failed" && previous.incident?.fingerprint === fingerprint;
+      previous?.status === "failed" && previousIncident?.fingerprint === fingerprint;
     const pendingIncidentIndex = pendingIncidents.findIndex(
       (pendingIncident) => pendingIncident.fingerprint === fingerprint,
     );
@@ -505,22 +523,22 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         : null) ??
       (pendingIncidentIndex >= 0 ? pendingIncidents.splice(pendingIncidentIndex, 1)[0] : null);
     const knownIncident = sameOpenIncident || Boolean(restoredIncident);
-    const incident = (sameOpenIncident ? previous.incident : restoredIncident) ?? {
+    const incident = (sameOpenIncident ? previousIncident : restoredIncident) ?? {
       alertDelivery: "pending",
       deliveryAttempts: 0,
       failure,
       fingerprint,
       openedAt: finishedAt,
     };
-    if (!sameOpenIncident && previous?.status === "failed" && previous.incident) {
+    if (!sameOpenIncident && previous?.status === "failed" && previousIncident) {
       const destination =
-        previous.incident.alertDelivery === "sent" ? pendingResolutions : pendingIncidents;
+        previousIncident.alertDelivery === "sent" ? pendingResolutions : pendingIncidents;
       if (
         !destination.some(
-          (pendingIncident) => pendingIncident.fingerprint === previous.incident.fingerprint,
+          (pendingIncident) => pendingIncident.fingerprint === previousIncident.fingerprint,
         )
       ) {
-        destination.push(previous.incident);
+        destination.push(previousIncident);
       }
     }
     let state = {
@@ -549,7 +567,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   }
 
   const finishedAt = dependencies.now();
-  let incident = previous?.incident;
+  let incident = durableIncident(previous?.incident);
   const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
   const pendingResolutions = durableIncidentList(previous, "pendingResolutions").map(
     (pendingIncident) => ({
