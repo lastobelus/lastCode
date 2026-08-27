@@ -164,6 +164,7 @@ describe("lastcode-build-intel-package", () => {
 
   it("records the agent-selected remote identity and unique token", () => {
     let written: BuildRequest | null = null;
+    const calls: string[] = [];
     const selected = selectIntelBuild(tag, {
       resolveTag: (candidate) => ({ tag: candidate, commit }),
       writeRequest: (value) => {
@@ -171,9 +172,18 @@ describe("lastcode-build-intel-package", () => {
       },
       nowIso: () => "2026-08-27T00:00:00.000Z",
       uuid: () => "12345678-1234-1234-1234-123456789abc",
+      withRequestLock: (operation) => {
+        calls.push("lock:enter");
+        try {
+          return operation();
+        } finally {
+          calls.push("lock:exit");
+        }
+      },
     });
     expect(selected).toEqual(request());
     expect(written).toEqual(selected);
+    expect(calls).toEqual(["lock:enter", "lock:exit"]);
   });
 
   it("correlates only the exact request-token run", () => {
@@ -208,7 +218,11 @@ describe("lastcode-build-intel-package", () => {
     expect(test.getRequest().workflowRunId).toBe(123);
     expect(result).toMatchObject({ tag, commit, runId: 123 });
     expect(result.assets).toEqual(["LastCode-x64.dmg", "build-manifest.json"]);
-    expect(test.calls.at(-1)).toBe(`remove:${request().requestToken}`);
+    expect(test.calls.slice(-3)).toEqual([
+      "lock:enter",
+      `remove:${request().requestToken}`,
+      "lock:exit",
+    ]);
   });
 
   it("reattaches to an already attempted request without dispatching again", async () => {
@@ -288,7 +302,11 @@ describe("lastcode-build-intel-package", () => {
       await expect(runSelectedIntelBuild(terminal.dependencies)).rejects.toThrow(
         `ended with ${conclusion}`,
       );
-      expect(terminal.calls.at(-1)).toBe(`remove:${request().requestToken}`);
+      expect(terminal.calls.slice(-3)).toEqual([
+        "lock:enter",
+        `remove:${request().requestToken}`,
+        "lock:exit",
+      ]);
     }
   });
 });

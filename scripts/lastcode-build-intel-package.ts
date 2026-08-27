@@ -195,6 +195,20 @@ function requestPath(): string {
   );
 }
 
+function withRequestFileLock<T>(operation: () => T): T {
+  const path = requestPath();
+  const release = acquirePortableLock(
+    NodePath.dirname(path),
+    "build-intel-package.lock",
+    "Intel package dispatch",
+  );
+  try {
+    return operation();
+  } finally {
+    release();
+  }
+}
+
 function writeRequestFile(request: BuildRequest): void {
   const path = requestPath();
   NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
@@ -296,19 +310,7 @@ function defaultDependencies(): BuildIntelDependencies {
     readRequest: readRequestFile,
     writeRequest: writeRequestFile,
     removeRequest: removeRequestFile,
-    withRequestLock: (operation) => {
-      const path = requestPath();
-      const release = acquirePortableLock(
-        NodePath.dirname(path),
-        "build-intel-package.lock",
-        "Intel package dispatch",
-      );
-      try {
-        return operation();
-      } finally {
-        release();
-      }
-    },
+    withRequestLock: withRequestFileLock,
     log: (message) => console.log(message),
     registrationTimeoutMs: REGISTRATION_TIMEOUT_MS,
     registrationPollMs: REGISTRATION_POLL_MS,
@@ -322,6 +324,7 @@ export function selectIntelBuild(
   input: {
     readonly resolveTag?: typeof resolveRemoteInstallableTag;
     readonly writeRequest?: (request: BuildRequest) => void;
+    readonly withRequestLock?: <T>(operation: () => T) => T;
     readonly nowIso?: () => string;
     readonly uuid?: () => string;
   } = {},
@@ -336,7 +339,9 @@ export function selectIntelBuild(
     dispatchAttemptedAt: null,
     workflowRunId: null,
   };
-  (input.writeRequest ?? writeRequestFile)(request);
+  (input.withRequestLock ?? withRequestFileLock)(() =>
+    (input.writeRequest ?? writeRequestFile)(request),
+  );
   return request;
 }
 
@@ -427,7 +432,7 @@ export async function runSelectedIntelBuild(
 
   const completed = await waitForCompletion(run, dependencies);
   if (completed.conclusion !== "success") {
-    dependencies.removeRequest(request.requestToken);
+    dependencies.withRequestLock(() => dependencies.removeRequest(request.requestToken));
     fail(
       `Intel workflow ${completed.databaseId} ended with ${completed.conclusion ?? "no conclusion"}: ${completed.url}`,
     );
@@ -445,7 +450,7 @@ export async function runSelectedIntelBuild(
       `Intel workflow succeeded but ${request.installableTag} is not a complete immutable prerelease.`,
     );
   }
-  dependencies.removeRequest(request.requestToken);
+  dependencies.withRequestLock(() => dependencies.removeRequest(request.requestToken));
   return {
     tag: request.installableTag,
     commit: request.installableCommit,
