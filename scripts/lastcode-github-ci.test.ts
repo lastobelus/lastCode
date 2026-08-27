@@ -7,6 +7,7 @@ import {
   githubCiRunTitle,
   githubCiRunsArgs,
   githubCiWorkflowArgs,
+  readGithubCi,
   testedMergeShaFromGithubCiRunTitle,
   type GithubCiEvaluationInput,
 } from "./lastcode-github-ci.ts";
@@ -66,6 +67,36 @@ describe("LastCode GitHub CI evidence", () => {
       "api",
       "repos/lastobelus/lastCode/actions/runs/456/jobs?filter=latest&per_page=100",
     ]);
+  });
+
+  it("reads workflow, rule, exact run, and aggregate job evidence through one shared path", () => {
+    const calls: string[] = [];
+    const responses = new Map<string, unknown>([
+      [githubCiWorkflowArgs("lastobelus/lastCode").join(" "), { state: "active" }],
+      [githubBranchRulesArgs("lastobelus/lastCode", "lastcode/main").join(" "), []],
+      [
+        githubCiRunsArgs("lastobelus/lastCode", HEAD).join(" "),
+        { workflow_runs: input().workflowRuns },
+      ],
+      [githubCiJobsArgs("lastobelus/lastCode", 456).join(" "), { jobs: input().jobs }],
+    ]);
+    const evidence = readGithubCi(
+      "lastobelus/lastCode",
+      {
+        number: 104,
+        headRefOid: HEAD,
+        baseRefOid: BASE,
+        baseRefName: "lastcode/main",
+      },
+      <T>(args: ReadonlyArray<string>): T => {
+        const key = args.join(" ");
+        calls.push(key);
+        return responses.get(key) as T;
+      },
+    );
+
+    expect(evidence).toMatchObject({ state: "satisfied", reason: "exact-run", runId: 456 });
+    expect(calls).toEqual([...responses.keys()]);
   });
 
   it("satisfies disabled, non-required hosted CI without a run", () => {
