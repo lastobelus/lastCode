@@ -22,8 +22,10 @@ GitHub CI and the transitional full local gate retain comprehensive tests,
 Electron setup, builds, Rust, native analysis, and release smoke coverage.
 
 Agents run the independent **Run Quick CI** Project Action before a push. A
-successful action records the exact head and current local `origin/lastcode/main`
-commit. The pre-push hook consumes that receipt without rerunning validation.
+successful action records the exact head and the selected workstream base ref and
+commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
+`origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
+receipt without rerunning validation.
 The action never pushes: after it resumes, the agent still decides whether and
 what to push. A changed head, changed base tracking ref, or dirty worktree makes
 the receipt unusable. Without a matching receipt, ordinary command-line pushes

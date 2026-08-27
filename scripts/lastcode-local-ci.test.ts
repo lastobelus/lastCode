@@ -23,6 +23,7 @@ import {
   readQuickCiReceipt,
   resolveFullCiStampPath,
   resolveLocalCiSteps,
+  resolveQuickCiBase,
   resolveQuickCiReceiptPath,
   verifyPreloadBundle,
   writeFullCiStamp,
@@ -131,6 +132,26 @@ describe("lastcode-local-ci", () => {
     ]);
   });
 
+  it("selects the validation base from the documented workstream", () => {
+    expect(resolveQuickCiBase("fix/upstream-bug")).toEqual({
+      branch: "main",
+      remote: "upstream",
+      remoteRef: "refs/remotes/upstream/main",
+    });
+    expect(resolveQuickCiBase("feat/upstream-feature")).toEqual(
+      resolveQuickCiBase("fix/upstream-bug"),
+    );
+    expect(resolveQuickCiBase("main")).toEqual(resolveQuickCiBase("fix/upstream-bug"));
+    expect(resolveQuickCiBase("lastcode/local-workflow")).toEqual({
+      branch: "lastcode/main",
+      remote: "origin",
+      remoteRef: "refs/remotes/origin/lastcode/main",
+    });
+    expect(resolveQuickCiBase("port/upstream/upstream-bug")).toEqual(
+      resolveQuickCiBase("lastcode/local-workflow"),
+    );
+  });
+
   it("binds pre-push validation to the exact checked-out head", () => {
     const head = "a".repeat(40);
     const updates = parsePrePushUpdates(
@@ -202,6 +223,7 @@ describe("lastcode-local-ci", () => {
     const receipt = {
       commit: "head-sha",
       baseCommit: "base-sha",
+      baseRef: "refs/remotes/origin/lastcode/main",
       completedAt: "2026-08-27T00:00:00.000Z",
     } as const;
 
@@ -211,9 +233,23 @@ describe("lastcode-local-ci", () => {
       gateVersion: 1,
       ...receipt,
     });
-    expect(hasMatchingQuickCiReceipt(commonGitDir, receipt.commit, receipt.baseCommit)).toBe(true);
-    expect(hasMatchingQuickCiReceipt(commonGitDir, receipt.commit, "new-base-sha")).toBe(false);
-    expect(hasMatchingQuickCiReceipt(commonGitDir, "new-head-sha", receipt.baseCommit)).toBe(false);
+    expect(
+      hasMatchingQuickCiReceipt(commonGitDir, receipt.commit, receipt.baseCommit, receipt.baseRef),
+    ).toBe(true);
+    expect(
+      hasMatchingQuickCiReceipt(commonGitDir, receipt.commit, "new-base-sha", receipt.baseRef),
+    ).toBe(false);
+    expect(
+      hasMatchingQuickCiReceipt(commonGitDir, "new-head-sha", receipt.baseCommit, receipt.baseRef),
+    ).toBe(false);
+    expect(
+      hasMatchingQuickCiReceipt(
+        commonGitDir,
+        receipt.commit,
+        receipt.baseCommit,
+        "refs/remotes/upstream/main",
+      ),
+    ).toBe(false);
 
     NodeFS.writeFileSync(
       resolveQuickCiReceiptPath(commonGitDir, receipt.commit),
@@ -374,6 +410,7 @@ describe("lastcode-local-ci", () => {
       writeVerifiedQuickCiReceipt(repository, snapshot, {
         commit: stamp.commit,
         baseCommit: stamp.context.baseCommit,
+        baseRef: "refs/remotes/origin/lastcode/main",
         completedAt: stamp.completedAt,
       }),
     ).toThrow("Shared repository integrity");
