@@ -16,7 +16,7 @@ export function resolveWebDevServerHost(input: {
   readonly explicitHost: string | undefined;
   readonly sharedBindHost: string | undefined;
 }): string {
-  return input.explicitHost || input.sharedBindHost || "localhost";
+  return input.sharedBindHost || input.explicitHost || "localhost";
 }
 
 export function isDevProxiedPath(pathname: string): boolean {

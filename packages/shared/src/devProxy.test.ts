@@ -21,9 +21,19 @@ describe("resolveWebDevServerHost", () => {
     assert.equal(
       resolveWebDevServerHost({
         explicitHost: "192.0.2.10",
-        sharedBindHost: SHARED_DEV_LOOPBACK_HOST,
+        sharedBindHost: undefined,
       }),
       "192.0.2.10",
+    );
+  });
+
+  it("does not let an environment HOST override the shared proxy address", () => {
+    assert.equal(
+      resolveWebDevServerHost({
+        explicitHost: "localhost",
+        sharedBindHost: SHARED_DEV_LOOPBACK_HOST,
+      }),
+      "127.0.0.1",
     );
   });
 });
