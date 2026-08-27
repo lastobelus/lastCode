@@ -111,27 +111,24 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 1. Immediately before delivery, fetch `origin/lastcode/main` again. If the port
    parent moved, rebase the imported commits and rerun affected validation.
-2. Before the guarded push, require a clean worktree and record the local head,
-   destination base, and existing remote topic SHA (or its absence). Then push
-   in a clean environment so the pre-push `pnpm lastcode:ci:quick` gate sees
-   ordinary Git/SSH variables. Do not export `GIT_SSH_COMMAND` or inject an SSH
-   command through Git configuration around the push; those settings flow into
-   tests that intentionally control `GIT_SSH`.
-3. If Quick CI passes but the idle SSH transport subsequently dies, do not
-   treat its generic success line as an exact-head receipt. Require the local
-   head to equal the recorded head, the worktree to remain clean, the fetched
-   destination base to equal the recorded base, and the remote topic SHA (or
-   absence) to remain unchanged. Only then retry that recorded head with
-   `--no-verify` and an exact `--force-with-lease` tied to the recorded remote
-   topic state. Otherwise rerun the guarded push and its hook.
+2. Before publishing, run the independent **Run Quick CI** Project Action from
+   the clean exact port head. After it resumes, verify its receipt still matches
+   the head and destination base, then decide whether and what to push. The
+   pre-push hook consumes that receipt; ordinary command-line use falls back to
+   synchronous Quick CI.
+3. If transport fails after the hook accepts the receipt, verify the local head,
+   worktree, destination base, and remote topic state before retrying. Reuse the
+   same receipt only for the unchanged commit and base; otherwise rerun the
+   action.
 4. Open a PR targeting `lastcode/main` only when explicitly requested. Include
    the upstream PR and pinned head, observed state/date, import method,
    adaptations, rationale, validation, closure/review context, and published
    evidence.
 5. For review and merge, follow `lastcode-pr` and
    `.agents/skills/_references/external-review-mechanics.md`: require a terminal
-   clean Codex result for the exact head, zero unresolved threads, and a full
-   `pnpm lastcode:ci` stamp for the exact head/current base. Merge only through
+   clean Codex result for the exact head, zero unresolved threads, and a
+   successful exact-head/base GitHub CI run and aggregate `CI Gate`. Use **Wait
+   for PR** during passive review or CI waits, and merge only through
    `pnpm lastcode:merge`.
 6. Verify the merged commit on `origin/lastcode/main`. For a squash merge,
    compare stable patch IDs so provenance verification does not depend on the
@@ -152,5 +149,5 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 Report the source PR state and pinned head, destination base and port head,
 import method and adaptations, validation and real-client evidence, PR/merge
-state, exact-head review result, unresolved-thread count, full-CI stamp, and the
+state, exact-head review result, unresolved-thread count, GitHub CI run, and the
 merged commit or remaining blocker.
