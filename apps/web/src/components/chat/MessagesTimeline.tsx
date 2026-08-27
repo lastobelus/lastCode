@@ -29,6 +29,7 @@ const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { getProjectFaviconCacheKey } from "@t3tools/shared/projectFavicon";
+import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import {
   createContext,
   Fragment,
@@ -208,6 +209,8 @@ interface TimelineRowSharedState {
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  expandedActionMessageIds: ReadonlySet<string>;
+  onToggleActionFollowUp: (rowId: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   onToggleWorkEntry: (anchorKey: string) => void;
@@ -413,6 +416,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({ scrollPositions: new Map(), expandedEntries: new Set() }),
     [routeThreadKey],
   );
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const disclosureAnchorKeyRef = useRef<string | null>(null);
@@ -486,6 +492,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           next.delete(groupId);
         } else {
           next.add(groupId);
+        }
+        return next;
+      });
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setExpandedActionMessageIds((existing) => {
+        const next = new Set(existing);
+        if (next.has(rowId)) {
+          next.delete(rowId);
+        } else {
+          next.add(rowId);
         }
         return next;
       });
@@ -676,6 +697,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onFileOpen,
       onFileDownload,
       onOpenTurnDiff,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
@@ -700,6 +723,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onFileOpen,
       onFileDownload,
       onOpenTurnDiff,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       suspendEndScrollMaintenanceForDisclosure,
@@ -1718,6 +1743,42 @@ function AssistantMessageMeta({
 
 function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const actionFollowUp = parseActionResumeFollowUp(row.message.text);
+  const actionOutputExpanded = ctx.expandedActionMessageIds.has(row.id);
+
+  if (actionFollowUp) {
+    const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
+    return (
+      <div className="mx-1 overflow-hidden rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06]">
+        <button
+          type="button"
+          aria-expanded={actionOutputExpanded}
+          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
+          onClick={() => ctx.onToggleActionFollowUp(row.id)}
+        >
+          <BotIcon aria-hidden className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            Action completed: {actionFollowUp.actionName} Status: {status}
+          </span>
+          {actionOutputExpanded ? (
+            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+          ) : (
+            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+          )}
+        </button>
+        {actionOutputExpanded ? (
+          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
+            {actionFollowUp.output}
+          </pre>
+        ) : (
+          <p className="truncate px-3 pb-2.5 pt-1 text-sm text-foreground/90">
+            {actionFollowUp.lastOutputLine}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mx-1 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2.5">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-yellow-800 dark:text-yellow-200">
