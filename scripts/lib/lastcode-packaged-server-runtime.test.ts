@@ -59,22 +59,17 @@ function temporaryDirectory() {
 }
 
 function programArgumentsFromPlist(plist: string): ReadonlyArray<string> {
-  const result = NodeChildProcess.spawnSync(
-    "/usr/bin/plutil",
-    ["-convert", "json", "-o", "-", "-"],
-    { encoding: "utf8", input: plist },
+  const array = /<key>ProgramArguments<\/key>\s*<array>(?<body>[\s\S]*?)<\/array>/u.exec(plist)
+    ?.groups?.body;
+  if (!array) throw new Error("Rendered LaunchAgent has invalid ProgramArguments.");
+  return [...array.matchAll(/<string>(?<value>[\s\S]*?)<\/string>/gu)].map(({ groups }) =>
+    (groups?.value ?? "")
+      .replaceAll("&amp;", "&")
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&apos;", "'"),
   );
-  if (result.status !== 0) {
-    throw new Error(`Could not decode rendered LaunchAgent: ${result.stderr}`);
-  }
-  const parsed = JSON.parse(result.stdout) as { readonly ProgramArguments?: unknown };
-  if (
-    !Array.isArray(parsed.ProgramArguments) ||
-    !parsed.ProgramArguments.every((argument) => typeof argument === "string")
-  ) {
-    throw new Error("Rendered LaunchAgent has invalid ProgramArguments.");
-  }
-  return parsed.ProgramArguments;
 }
 
 function writeBuildManifest(root: string, overrides: Record<string, unknown> = {}) {
