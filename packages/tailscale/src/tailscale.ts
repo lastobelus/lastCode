@@ -388,7 +388,7 @@ const runTailscaleCommand = (
     );
   });
 
-type TailscaleServePortState = "absent" | "exact" | "occupied";
+type TailscaleServePortState = "absent" | "exact" | "funnel" | "occupied";
 
 function authorityPort(authority: string): number | null {
   try {
@@ -419,7 +419,10 @@ function servePortState(
     return "occupied";
   }
   const tcp = tcpEntries[0]?.[1];
-  if (tcp?.HTTPS !== true || funnelEnabled) {
+  if (funnelEnabled) {
+    return "funnel";
+  }
+  if (tcp?.HTTPS !== true) {
     return "occupied";
   }
 
@@ -467,7 +470,7 @@ export const ensureTailscaleServe = (input: {
     if (state === "exact") {
       return;
     }
-    if (state === "occupied" && input.replaceVerifiedHandler !== true) {
+    if (state === "funnel" || (state === "occupied" && input.replaceVerifiedHandler !== true)) {
       return yield* new TailscaleServePortOccupiedError({ servePort });
     }
     yield* runTailscaleCommand(
@@ -490,7 +493,7 @@ export const disableTailscaleServe = (input: {
     if (state === "absent") {
       return;
     }
-    if (state === "occupied") {
+    if (state === "occupied" || state === "funnel") {
       return yield* new TailscaleServePortOccupiedError({ servePort });
     }
     yield* runTailscaleCommand(["serve", `--https=${servePort}`, "off"], TAILSCALE_SERVE_TIMEOUT);
