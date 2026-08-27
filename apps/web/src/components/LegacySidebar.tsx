@@ -576,11 +576,17 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       standalone
     />
   );
-  const threadMetaClassName = isConfirmingArchive
-    ? "pointer-events-none opacity-0"
+  const threadMetaVisibilityClassName = isConfirmingArchive
+    ? "opacity-0"
     : !isThreadRunning
-      ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
-      : "pointer-events-none";
+      ? "transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
+      : "";
+  const threadMetaClassName = `pointer-events-none inline-flex w-full justify-end ${
+    jumpLabel ? "col-start-1 row-start-1 z-10" : ""
+  } ${threadMetaVisibilityClassName}`;
+  const threadMetadataGridClassName = jumpLabel
+    ? "grid shrink-0 grid-cols-[max-content] items-center max-sm:grid-cols-[max-content_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
+    : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
@@ -937,7 +943,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {cleanup === null && discoveredPorts.length > 0 && (
+          {cleanup === null && discoveredPorts.length > 0 ? (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -956,9 +962,8 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 {discoveredPorts.length > 1 ? ` (+${discoveredPorts.length - 1})` : ""}
               </TooltipPopup>
             </Tooltip>
-          )}
-          {props.showWorktreeIndicators ? <ThreadWorktreeIndicator thread={thread} /> : null}
-          {terminalStatus && (
+          ) : null}
+          {terminalStatus ? (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -975,37 +980,58 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               </TooltipTrigger>
               <TooltipPopup side="top">{terminalStatus.label}</TooltipPopup>
             </Tooltip>
-          )}
+          ) : null}
+          {/* These fixed tracks are the scanning columns for every thread row.
+              Empty local/worktree cells stay mounted for ordinary timestamps,
+              which cannot widen the grid and push either icon sideways. A
+              transient jump hint replaces all three cells and uses a
+              content-sized track so a custom shortcut cannot paint across
+              visible row content or create an implicit grid row; the mobile
+              grid retains its trailing action track. */}
           <div
-            className={`flex min-w-12 items-center justify-end gap-1 ${
-              isRemoteThread ? "max-sm:min-w-24" : "max-sm:min-w-20"
-            }`}
+            className={threadMetadataGridClassName}
+            data-testid={`thread-metadata-grid-${thread.id}`}
           >
-            <span className="inline-flex size-3 shrink-0 items-center justify-center">
-              {showsThreadEnvironmentIcon ? (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <span
-                        aria-label={threadEnvironmentLabel ?? "Remote"}
-                        className={`inline-flex shrink-0 items-center justify-center ${
-                          isConfirmingArchive ? "invisible" : ""
-                        }`}
-                        data-legacy-sidebar-unscaled-content
-                      />
-                    }
-                  >
-                    <EnvironmentIcon
-                      kind={threadEnvironmentIconKind}
-                      context="legacy-row"
-                      color={environmentIconColor}
-                      className="size-3"
-                    />
-                  </TooltipTrigger>
-                  <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
-                </Tooltip>
-              ) : null}
-            </span>
+            {jumpLabel === null ? (
+              <>
+                <span
+                  className="inline-flex h-3 w-full items-center justify-center"
+                  data-thread-metadata-column="worktree"
+                >
+                  {props.showWorktreeIndicators ? (
+                    <ThreadWorktreeIndicator thread={thread} />
+                  ) : null}
+                </span>
+                <span
+                  className="inline-flex h-3 w-full items-center justify-center"
+                  data-thread-metadata-column="environment"
+                >
+                  {showsThreadEnvironmentIcon ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-label={threadEnvironmentLabel ?? "Remote"}
+                            className={`inline-flex shrink-0 items-center justify-center ${
+                              isConfirmingArchive ? "invisible" : ""
+                            }`}
+                            data-legacy-sidebar-unscaled-content
+                          />
+                        }
+                      >
+                        <EnvironmentIcon
+                          kind={threadEnvironmentIconKind}
+                          context="legacy-row"
+                          color={environmentIconColor}
+                          className="size-3"
+                        />
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+                    </Tooltip>
+                  ) : null}
+                </span>
+              </>
+            ) : null}
             {isConfirmingArchive ? (
               <button
                 ref={handleConfirmArchiveRef}
@@ -1057,7 +1083,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 </Tooltip>
               )
             ) : null}
-            <span className={threadMetaClassName}>
+            <span
+              className={threadMetaClassName}
+              data-thread-metadata-column="timestamp"
+              data-thread-metadata-mode={jumpLabel ? "jump" : "timestamp"}
+            >
               <span className="inline-flex items-center gap-1">
                 {jumpLabel ? (
                   hasActiveAnnotation && thread.annotation ? (
