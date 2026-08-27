@@ -386,6 +386,7 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('data-testid="timeline-minimap"');
     expect(markup).toContain("data-thread-annotation-marker");
+    expect(markup).toContain('data-slot="popover-trigger"');
     expect(markup).toContain("[@media(pointer:coarse)]:block");
     expect(markup).toContain("[@media(pointer:coarse)]:opacity-100");
     expect(markup).not.toContain("data-thread-annotation-overflow");
@@ -408,6 +409,7 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("data-thread-annotation-overflow");
     expect(markup).toContain('aria-label="Annotation attached to an earlier message"');
+    expect(markup).toContain('data-slot="popover-trigger"');
     expect(markup).toContain('class="pointer-events-auto absolute left-3"');
     expect(markup).not.toContain("data-thread-annotation-marker");
   });

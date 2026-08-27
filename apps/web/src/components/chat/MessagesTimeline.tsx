@@ -146,6 +146,7 @@ import {
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
   deriveDisplayedUserMessageState,
   type ParsedTerminalContextEntry,
@@ -931,6 +932,94 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
+function TimelineAnnotationPopover({
+  annotation,
+  ariaLabel,
+  earlier,
+  markdownCwd,
+  open,
+  threadRef,
+  triggerClassName,
+  onActivate,
+  onAnnotationBodyChange,
+  onAnnotationEdit,
+  onAnnotationResolve,
+  onAnnotationReopen,
+  onOpenChange,
+}: {
+  annotation: ThreadAnnotation;
+  ariaLabel: string;
+  earlier: boolean;
+  markdownCwd: string | undefined;
+  open: boolean;
+  threadRef: ScopedThreadRef;
+  triggerClassName: string;
+  onActivate?: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationEdit: () => void;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger
+        closeDelay={120}
+        delay={0}
+        openOnHover
+        render={
+          <button
+            aria-label={ariaLabel}
+            className={triggerClassName}
+            data-thread-annotation-marker={earlier ? undefined : ""}
+            type="button"
+          />
+        }
+        onClick={(event) => {
+          event.stopPropagation();
+          onActivate?.();
+        }}
+        onFocus={onActivate}
+      />
+      <PopoverPopup
+        align="center"
+        className="w-80 max-w-80 text-left shadow-xl shadow-black/25 before:hidden"
+        data-minimap-preview
+        finalFocus={false}
+        initialFocus={false}
+        side="right"
+        tooltipStyle
+        viewportClassName="p-0"
+      >
+        <div className="w-80 max-w-80 bg-warning/10 p-3 text-warning-foreground">
+          {earlier ? (
+            <div className="mb-2 text-[11px] font-medium">Attached to an earlier message</div>
+          ) : null}
+          <ThreadAnnotationBody
+            annotation={annotation}
+            className="max-h-52 overflow-y-auto"
+            compact
+            cwd={markdownCwd}
+            onBodyChange={onAnnotationBodyChange}
+            threadRef={threadRef}
+          />
+          <div className="mt-2">
+            <ThreadAnnotationActions
+              annotation={annotation}
+              onEdit={onAnnotationEdit}
+              onReopen={onAnnotationReopen}
+              onResolve={onAnnotationResolve}
+              pending={annotationBodyPending}
+            />
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 function TimelineMinimap({
   annotation,
   hasPersistentGutter,
@@ -958,9 +1047,8 @@ function TimelineMinimap({
   onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
-  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [overflowAnnotationOpen, setOverflowAnnotationOpen] = useState(false);
+  const [annotationPopoverOpen, setAnnotationPopoverOpen] = useState(false);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -969,8 +1057,6 @@ function TimelineMinimap({
     ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
     : -1;
   const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
-  const activeItemHasAnnotation =
-    annotation !== null && activeItem?.messageId === annotation.anchorMessageId;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -1061,6 +1147,9 @@ function TimelineMinimap({
           }}
           onFocus={() => setActiveIndex((current) => current ?? 0)}
           onKeyDown={(event) => {
+            if (timelineMinimapEventTargetsPreview(event.target)) {
+              return;
+            }
             if (event.key === "ArrowDown") {
               event.preventDefault();
               moveActiveIndex(1);
@@ -1127,23 +1216,27 @@ function TimelineMinimap({
                 }}
                 style={{ top }}
               >
-                {annotation?.anchorMessageId === item.messageId ? (
-                  <button
-                    aria-label="Thread annotation"
-                    className="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
-                    data-thread-annotation-marker
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setActiveIndex(index);
-                    }}
-                    onFocus={() => setActiveIndex(index)}
+                {annotation?.anchorMessageId === item.messageId && threadRef ? (
+                  <TimelineAnnotationPopover
+                    annotation={annotation}
+                    ariaLabel="Thread annotation"
+                    earlier={false}
+                    markdownCwd={markdownCwd}
+                    open={annotationPopoverOpen}
+                    threadRef={threadRef}
+                    triggerClassName="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
+                    onActivate={() => setActiveIndex(index)}
+                    onAnnotationBodyChange={onAnnotationBodyChange}
+                    onAnnotationEdit={onAnnotationEdit}
+                    onAnnotationReopen={onAnnotationReopen}
+                    onAnnotationResolve={onAnnotationResolve}
+                    onOpenChange={setAnnotationPopoverOpen}
                   />
                 ) : null}
               </span>
             );
           })}
-          {activeItem ? (
+          {activeItem && !annotationPopoverOpen ? (
             <span
               className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
               data-minimap-preview
@@ -1153,45 +1246,23 @@ function TimelineMinimap({
                 transform: `translateY(${activeTooltipTranslate})`,
               }}
             >
-              {activeItemHasAnnotation && annotation && threadRef ? (
-                <span className="block rounded-xl border border-border/80 bg-warning/10 p-3 text-left text-warning-foreground shadow-xl shadow-black/25">
-                  <ThreadAnnotationBody
-                    annotation={annotation}
-                    className="max-h-52 overflow-y-auto"
-                    compact
-                    cwd={markdownCwd}
-                    onBodyChange={onAnnotationBodyChange}
-                    threadRef={threadRef}
-                  />
-                  <span className="mt-2 block">
-                    <ThreadAnnotationActions
-                      annotation={annotation}
-                      onEdit={onAnnotationEdit}
-                      onReopen={onAnnotationReopen}
-                      onResolve={onAnnotationResolve}
-                      pending={annotationBodyPending}
-                    />
-                  </span>
+              <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
+                <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
+                  {activeItem.userText ?? "User message"}
                 </span>
-              ) : (
-                <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
-                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
-                    {activeItem.userText ?? "User message"}
+                {activeItem.assistantText ? (
+                  <span
+                    className="mt-1 max-h-[3.75rem] overflow-hidden text-muted-foreground text-sm leading-5"
+                    style={{
+                      display: "-webkit-box",
+                      WebkitBoxOrient: "vertical",
+                      WebkitLineClamp: 3,
+                    }}
+                  >
+                    {activeItem.assistantText}
                   </span>
-                  {activeItem.assistantText ? (
-                    <span
-                      className="mt-1 max-h-[3.75rem] overflow-hidden text-muted-foreground text-sm leading-5"
-                      style={{
-                        display: "-webkit-box",
-                        WebkitBoxOrient: "vertical",
-                        WebkitLineClamp: 3,
-                      }}
-                    >
-                      {activeItem.assistantText}
-                    </span>
-                  ) : null}
-                </span>
-              )}
+                ) : null}
+              </span>
             </span>
           ) : null}
         </div>
@@ -1199,49 +1270,25 @@ function TimelineMinimap({
           <div
             className="pointer-events-auto absolute left-3"
             data-thread-annotation-overflow
-            onMouseEnter={() => setOverflowAnnotationOpen(true)}
-            onMouseLeave={() => setOverflowAnnotationOpen(false)}
-            onBlurCapture={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) {
-                setOverflowAnnotationOpen(false);
-              }
-            }}
             style={{
               top: "50%",
               transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
             }}
           >
-            <button
-              aria-label="Annotation attached to an earlier message"
-              className="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
-              type="button"
-              onClick={() => setOverflowAnnotationOpen((open) => !open)}
-              onFocus={() => setOverflowAnnotationOpen(true)}
+            <TimelineAnnotationPopover
+              annotation={annotation}
+              ariaLabel="Annotation attached to an earlier message"
+              earlier
+              markdownCwd={markdownCwd}
+              open={annotationPopoverOpen}
+              threadRef={threadRef}
+              triggerClassName="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationReopen={onAnnotationReopen}
+              onAnnotationResolve={onAnnotationResolve}
+              onOpenChange={setAnnotationPopoverOpen}
             />
-            {overflowAnnotationOpen ? (
-              <div className="absolute left-5 top-0 w-80 -translate-y-1/2 rounded-xl border border-border/80 bg-warning/10 p-3 text-left text-warning-foreground shadow-xl shadow-black/25">
-                <div className="mb-2 text-[11px] font-medium text-warning-foreground">
-                  Attached to an earlier message
-                </div>
-                <ThreadAnnotationBody
-                  annotation={annotation}
-                  className="max-h-52 overflow-y-auto"
-                  compact
-                  cwd={markdownCwd}
-                  onBodyChange={onAnnotationBodyChange}
-                  threadRef={threadRef}
-                />
-                <div className="mt-2">
-                  <ThreadAnnotationActions
-                    annotation={annotation}
-                    onEdit={onAnnotationEdit}
-                    onReopen={onAnnotationReopen}
-                    onResolve={onAnnotationResolve}
-                    pending={annotationBodyPending}
-                  />
-                </div>
-              </div>
-            ) : null}
           </div>
         ) : null}
       </div>
