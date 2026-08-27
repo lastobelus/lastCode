@@ -90,7 +90,7 @@ function runCommand(phase, cwd, command, args, environment, options = {}) {
   return options.capture ? result.stdout.trim() : "";
 }
 
-function latestFailedCheckpointRun(path) {
+export function latestFailedCheckpointRun(path) {
   try {
     const lines = NodeFS.readFileSync(path, "utf8").trim().split(/\r?\n/u);
     for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -105,6 +105,7 @@ function latestFailedCheckpointRun(path) {
         );
         continue;
       }
+      if (!record || typeof record !== "object" || Array.isArray(record)) continue;
       if (record.status === "failed") return record;
       if (record.status === "success") return null;
     }
@@ -132,6 +133,7 @@ export function checkpointIncidentFingerprint(failure) {
     .update(
       JSON.stringify({
         error: failure.error,
+        checkpointError: failure.checkpointRun?.error ?? null,
         failurePhase: failure.checkpointRun?.failurePhase ?? null,
         phase: failure.phase,
         recoveryBranch: failure.checkpointRun?.recoveryBranch ?? null,
@@ -285,8 +287,18 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
   } catch (error) {
     const finishedAt = dependencies.now();
+    let checkpointRun = null;
+    if (phase === "checkpoint") {
+      try {
+        checkpointRun = dependencies.latestFailedCheckpointRun();
+      } catch (historyError) {
+        console.error(
+          `[lastcode:checkpoint-supervisor] Could not enrich the incident from checkpoint history: ${historyError instanceof Error ? historyError.message : String(historyError)}`,
+        );
+      }
+    }
     const failure = {
-      checkpointRun: phase === "checkpoint" ? dependencies.latestFailedCheckpointRun() : null,
+      checkpointRun,
       error: error instanceof Error ? error.message : String(error),
       phase: error instanceof CommandFailure ? error.phase : phase,
     };

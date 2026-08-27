@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   checkpointEnvironment,
   checkpointFailureMessage,
+  checkpointIncidentFingerprint,
+  latestFailedCheckpointRun,
   refreshInstalledSupervisor,
   runCheckpointSupervisor,
 } from "./lastcode-checkpoint-supervisor.mjs";
@@ -189,6 +191,70 @@ describe("LastCode checkpoint supervisor", () => {
     expect(message).toContain("sync/nightly/nightly-1");
     expect(message).toContain("lastcode-checkpoints --verbose");
     expect(message).toContain("nightly-checkpoint.stderr.log");
+  });
+
+  it("distinguishes different recorded checkpoint blockers behind the same wrapper error", () => {
+    const baseFailure = {
+      phase: "checkpoint",
+      error: "node failed with exit code 1",
+      checkpointRun: {
+        upstreamTag: "nightly-1",
+        failurePhase: "smoke",
+        recoveryBranch: "sync/nightly/nightly-1",
+      },
+    };
+
+    expect(
+      checkpointIncidentFingerprint({
+        ...baseFailure,
+        checkpointRun: { ...baseFailure.checkpointRun, error: "migration smoke failed" },
+      }),
+    ).not.toBe(
+      checkpointIncidentFingerprint({
+        ...baseFailure,
+        checkpointRun: { ...baseFailure.checkpointRun, error: "server typecheck failed" },
+      }),
+    );
+  });
+
+  it("ignores invalid history shapes while finding the latest valid failure", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-history-"));
+    const historyPath = NodePath.join(directory, "checkpoint-runs.jsonl");
+    NodeFS.writeFileSync(
+      historyPath,
+      `${JSON.stringify({ status: "failed", error: "original failure" })}\nnull\n`,
+    );
+
+    expect(latestFailedCheckpointRun(historyPath)).toMatchObject({
+      status: "failed",
+      error: "original failure",
+    });
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("preserves and reports the original failure when history enrichment fails", () => {
+    const test = fixture({
+      dependencies: {
+        latestFailedCheckpointRun: () => {
+          throw new Error("history unreadable");
+        },
+        runPhase: (phase) => {
+          if (phase === "checkpoint") throw new Error("original checkpoint failure");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "original checkpoint failure",
+    );
+    expect(test.state).toMatchObject({
+      status: "failed",
+      incident: {
+        alertDelivery: "sent",
+        failure: { error: "original checkpoint failure", checkpointRun: null },
+      },
+    });
+    expect(test.messages).toHaveLength(1);
   });
 
   it("turns corrupt durable state into a reportable supervisor incident", () => {
