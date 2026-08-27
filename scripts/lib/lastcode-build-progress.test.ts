@@ -43,18 +43,11 @@ describe("LastCode local build progress model", () => {
       new URL("../lastcode-local-ci.ts", import.meta.url),
       "utf8",
     );
-    const quickSteps = ciSource.slice(
-      ciSource.indexOf("const QUICK_STEPS"),
-      ciSource.indexOf("const FULL_ONLY_STEPS"),
-    );
-    const fullOnlySteps = ciSource.slice(
-      ciSource.indexOf("const FULL_ONLY_STEPS"),
+    const fullSteps = ciSource.slice(
+      ciSource.indexOf("const FULL_STEPS"),
       ciSource.indexOf("const PRELOAD_PATH"),
     );
-    const ciLabels = [
-      ...quickSteps.matchAll(/label: "([^"]+)"/g),
-      ...fullOnlySteps.matchAll(/label: "([^"]+)"/g),
-    ].map((match) => match[1]);
+    const ciLabels = [...fullSteps.matchAll(/label: "([^"]+)"/g)].map((match) => match[1]);
     const ciMarkers = BUILD_PHASES.filter(({ marker }) => marker.startsWith("[lastcode:ci] "))
       .filter(({ marker }) => !marker.includes("Full local CI passed"))
       .map(({ marker }) => marker);
