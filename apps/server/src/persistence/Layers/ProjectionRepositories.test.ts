@@ -197,6 +197,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         archivedAt: null,
         settledOverride: null,
         settledAt: null,
+        ...({ unsettledAt: null } as Record<"unsettledAt", null>),
         snoozedUntil: null,
         snoozedAt: null,
         pinnedAt: null,
