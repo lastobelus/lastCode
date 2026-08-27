@@ -160,6 +160,39 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.state.incident).toMatchObject({ alertDelivery: "sent" });
   });
 
+  it("closes every delivered blocker after distinct failures recover", () => {
+    const first = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("first fetch blocker");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("first fetch blocker");
+
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        runPhase: () => {
+          throw new Error("second fetch blocker");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("second fetch blocker");
+    expect(second.state.pendingResolutions).toHaveLength(1);
+
+    const recovered = fixture({ state: second.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toHaveLength(2);
+    expect(recovered.messages.every(({ message }) => message.includes("resolved alert"))).toBe(
+      true,
+    );
+    expect(recovered.messages[0]?.message).not.toBe(recovered.messages[1]?.message);
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+    expect(recovered.state.incident).toMatchObject({ resolutionDelivery: "sent" });
+  });
+
   it("sends one closure after a failed incident recovers", () => {
     const previous = fixture({
       dependencies: {

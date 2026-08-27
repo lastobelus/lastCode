@@ -258,15 +258,15 @@ function notify(title, message, environment) {
   return result.status === 0;
 }
 
-function durablePendingIncidents(state) {
-  return Array.isArray(state?.pendingIncidents) ? state.pendingIncidents : [];
+function durableIncidentList(state, key) {
+  return Array.isArray(state?.[key]) ? state[key] : [];
 }
 
 function attemptDelivery(state, config, dependencies) {
   if (!config?.recoveryThreadId) return state;
   const recoveryThreadId = config.recoveryThreadId;
   let nextState = state;
-  let pendingIncidents = [...durablePendingIncidents(state)];
+  let pendingIncidents = [...durableIncidentList(state, "pendingIncidents")];
   while (pendingIncidents.length > 0) {
     const [incident, ...remaining] = pendingIncidents;
     if (!incident) break;
@@ -307,6 +307,44 @@ function attemptDelivery(state, config, dependencies) {
         `[lastcode:checkpoint-supervisor] Could not deliver a pending alert to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
       );
       return nextState;
+    }
+  }
+
+  if (nextState.status === "success") {
+    let pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
+    while (pendingResolutions.length > 0) {
+      const [incident, ...remaining] = pendingResolutions;
+      if (!incident) break;
+      const updatedIncident = {
+        ...incident,
+        resolutionDelivery: "pending",
+        deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
+        lastDeliveryAttemptAt: dependencies.now(),
+      };
+      nextState = Object.assign({}, nextState, {
+        pendingResolutions: [updatedIncident, ...remaining],
+      });
+      dependencies.writeState(nextState);
+      try {
+        dependencies.sendThread(
+          updatedIncident.deliveryThreadId ?? recoveryThreadId,
+          checkpointResolvedMessage(updatedIncident),
+        );
+        pendingResolutions = remaining;
+        nextState = Object.assign(
+          {},
+          nextState,
+          pendingResolutions.length > 0
+            ? { pendingResolutions }
+            : { pendingResolutions: undefined },
+        );
+        dependencies.writeState(nextState);
+      } catch (error) {
+        console.error(
+          `[lastcode:checkpoint-supervisor] Could not deliver a pending resolution to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return nextState;
+      }
     }
   }
 
@@ -441,16 +479,18 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
           fingerprint,
           openedAt: finishedAt,
         };
-    const pendingIncidents = [...durablePendingIncidents(previous)];
-    if (
-      !sameOpenIncident &&
-      previous?.status === "failed" &&
-      previous.incident?.alertDelivery !== "sent" &&
-      !pendingIncidents.some(
-        (pendingIncident) => pendingIncident.fingerprint === previous.incident.fingerprint,
-      )
-    ) {
-      pendingIncidents.push(previous.incident);
+    const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
+    const pendingResolutions = [...durableIncidentList(previous, "pendingResolutions")];
+    if (!sameOpenIncident && previous?.status === "failed" && previous.incident) {
+      const destination =
+        previous.incident.alertDelivery === "sent" ? pendingResolutions : pendingIncidents;
+      if (
+        !destination.some(
+          (pendingIncident) => pendingIncident.fingerprint === previous.incident.fingerprint,
+        )
+      ) {
+        destination.push(previous.incident);
+      }
     }
     let state = {
       schemaVersion: 1,
@@ -460,6 +500,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       finishedAt,
       ...(previous?.lastSuccessAt ? { lastSuccessAt: previous.lastSuccessAt } : {}),
       ...(pendingIncidents.length > 0 ? { pendingIncidents } : {}),
+      ...(pendingResolutions.length > 0 ? { pendingResolutions } : {}),
       incident,
     };
     dependencies.writeState(state);
@@ -478,7 +519,14 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
 
   const finishedAt = dependencies.now();
   let incident = previous?.incident;
-  const pendingIncidents = [...durablePendingIncidents(previous)];
+  const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
+  const pendingResolutions = durableIncidentList(previous, "pendingResolutions").map(
+    (pendingIncident) => ({
+      ...pendingIncident,
+      resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
+      resolutionDelivery: "pending",
+    }),
+  );
   if (previous?.status === "failed" && incident) {
     if (
       incident.alertDelivery !== "sent" &&
@@ -502,6 +550,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     finishedAt,
     lastSuccessAt: finishedAt,
     ...(pendingIncidents.length > 0 ? { pendingIncidents } : {}),
+    ...(pendingResolutions.length > 0 ? { pendingResolutions } : {}),
     ...(incident ? { incident } : {}),
   };
   dependencies.writeState(state);
