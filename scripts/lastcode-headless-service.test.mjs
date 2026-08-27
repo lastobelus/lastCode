@@ -36,15 +36,15 @@ function temporaryDirectory() {
 
 function descriptor(version) {
   return {
-    environmentId: "htulo",
-    label: "htulo",
+    environmentId: "managed-server",
+    label: "Managed server",
     platform: { arch: "x64", os: "darwin" },
     serverVersion: version,
   };
 }
 
 describe("LastCode headless service", () => {
-  it("renders the packaged server on htulo's fixed port without Electron UI", () => {
+  it("renders the packaged server on its fixed port without Electron UI", () => {
     const plist = renderHeadlessServicePlist({
       executablePath: "/Applications/LastCode.app/Contents/MacOS/LastCode",
       home: "/Users/me & you",
