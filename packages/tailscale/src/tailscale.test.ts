@@ -432,6 +432,41 @@ describe("tailscale", () => {
     });
   });
 
+  it.effect("refuses to reuse or disable a Funnel-enabled handler", () => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      const status = JSON.parse(serveStatusJson(8443, "http://127.0.0.1:13773")) as Record<
+        string,
+        unknown
+      >;
+      return {
+        stdout: JSON.stringify({
+          ...status,
+          AllowFunnel: { "desktop.tail.ts.net:8443": true },
+        }),
+      };
+    });
+
+    return Effect.gen(function* () {
+      const ensureError = yield* ensureTailscaleServe({
+        localPort: 13773,
+        servePort: 8443,
+      }).pipe(Effect.flip, Effect.provide(layer));
+      assert.instanceOf(ensureError, TailscaleServePortOccupiedError);
+
+      const disableError = yield* disableTailscaleServe({
+        localPort: 13773,
+        servePort: 8443,
+      }).pipe(Effect.flip, Effect.provide(layer));
+      assert.instanceOf(disableError, TailscaleServePortOccupiedError);
+      assert.deepEqual(commands, [
+        ["serve", "status", "--json"],
+        ["serve", "status", "--json"],
+      ]);
+    });
+  });
+
   it.effect("retains tailscale serve exit diagnostics", () => {
     const layer = mockSpawnerLayer((_command, args) =>
       args[1] === "status"
