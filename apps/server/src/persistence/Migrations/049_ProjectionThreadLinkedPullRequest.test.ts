@@ -5,51 +5,52 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
-import Migration0043 from "./043_ProjectionThreadAnnotation.ts";
-import Migration0044 from "./044_UpdateDrain.ts";
-import Migration0045 from "./045_UpdateDrainClaim.ts";
-import Migration0046 from "./046_ProjectionTurnRequestCorrelations.ts";
-import Migration0047 from "./047_ProjectionThreadWorktreeCleanup.ts";
-import Migration0048 from "./048_ProjectionThreadLinkedPullRequest.ts";
+import Migration0044 from "./044_ProjectionThreadAnnotation.ts";
+import Migration0045 from "./045_UpdateDrain.ts";
+import Migration0046 from "./046_UpdateDrainClaim.ts";
+import Migration0047 from "./047_ProjectionTurnRequestCorrelations.ts";
+import Migration0048 from "./048_ProjectionThreadWorktreeCleanup.ts";
+import Migration0049 from "./049_ProjectionThreadLinkedPullRequest.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("048_ProjectionThreadLinkedPullRequest", (it) => {
+layer("049_ProjectionThreadLinkedPullRequest", (it) => {
   it.effect("bridges databases that recorded the previous LastCode migration numbers", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
       yield* runMigrations({ toMigrationInclusive: 41 });
-      yield* Migration0043;
       yield* Migration0044;
       yield* Migration0045;
       yield* Migration0046;
       yield* Migration0047;
+      yield* Migration0048;
       yield* sql`
-          INSERT INTO effect_sql_migrations (migration_id, name)
-          VALUES
-            (42, 'ProjectionThreadAnnotation'),
-            (43, 'UpdateDrain'),
-            (44, 'UpdateDrainClaim'),
-            (45, 'ProjectionTurnRequestCorrelations'),
-            (46, 'ProjectionThreadWorktreeCleanup')
-        `;
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES
+          (42, 'ProjectionThreadAnnotation'),
+          (43, 'UpdateDrain'),
+          (44, 'UpdateDrainClaim'),
+          (45, 'ProjectionTurnRequestCorrelations'),
+          (46, 'ProjectionThreadWorktreeCleanup')
+      `;
 
       const before = yield* sql<{ readonly name: string }>`
-          PRAGMA table_info(projection_threads)
-        `;
+        PRAGMA table_info(projection_threads)
+      `;
       assert.isFalse(before.some((column) => column.name === "linked_pull_request_json"));
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 48 });
+      const executed = yield* runMigrations({ toMigrationInclusive: 49 });
       assert.deepStrictEqual(executed, [
-        [47, "ProjectionThreadWorktreeCleanup"],
-        [48, "ProjectionThreadLinkedPullRequest"],
+        [47, "ProjectionTurnRequestCorrelations"],
+        [48, "ProjectionThreadWorktreeCleanup"],
+        [49, "ProjectionThreadLinkedPullRequest"],
       ]);
 
-      yield* Migration0048;
+      yield* Migration0049;
       const after = yield* sql<{ readonly name: string }>`
-          PRAGMA table_info(projection_threads)
-        `;
+        PRAGMA table_info(projection_threads)
+      `;
       assert.equal(after.filter((column) => column.name === "linked_pull_request_json").length, 1);
     }),
   );
@@ -57,15 +58,15 @@ layer("048_ProjectionThreadLinkedPullRequest", (it) => {
 
 const partialUpgradeLayer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-partialUpgradeLayer("048_ProjectionThreadLinkedPullRequest partial upgrades", (it) => {
-  it.effect("preserves update drain data when upgrading from the previous migration 44", () =>
+partialUpgradeLayer("049_ProjectionThreadLinkedPullRequest partial upgrades", (it) => {
+  it.effect("preserves update drain data recorded with the previous migration numbers", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
       yield* runMigrations({ toMigrationInclusive: 41 });
-      yield* Migration0043;
       yield* Migration0044;
       yield* Migration0045;
+      yield* Migration0046;
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status
@@ -91,12 +92,13 @@ partialUpgradeLayer("048_ProjectionThreadLinkedPullRequest partial upgrades", (i
           (44, 'UpdateDrainClaim')
       `;
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 48 });
+      const executed = yield* runMigrations({ toMigrationInclusive: 49 });
       assert.deepStrictEqual(executed, [
-        [45, "UpdateDrainClaim"],
-        [46, "ProjectionTurnRequestCorrelations"],
-        [47, "ProjectionThreadWorktreeCleanup"],
-        [48, "ProjectionThreadLinkedPullRequest"],
+        [45, "UpdateDrain"],
+        [46, "UpdateDrainClaim"],
+        [47, "ProjectionTurnRequestCorrelations"],
+        [48, "ProjectionThreadWorktreeCleanup"],
+        [49, "ProjectionThreadLinkedPullRequest"],
       ]);
 
       const events = yield* sql<{

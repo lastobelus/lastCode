@@ -8,13 +8,13 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("044_UpdateDrain", (it) => {
+layer("045_UpdateDrain", (it) => {
   it.effect("creates a narrow event stream and durable command receipts", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 43 });
       yield* runMigrations({ toMigrationInclusive: 44 });
+      yield* runMigrations({ toMigrationInclusive: 45 });
 
       const eventColumns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(update_drain_events)
