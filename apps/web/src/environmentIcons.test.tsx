@@ -46,7 +46,7 @@ describe("environment icon preferences", () => {
         isPrimary: true,
         isDesktopLocal: false,
         showLocalEnvironmentIcon: false,
-        environmentLabel: "Airy",
+        environmentLabel: "Workstation",
       }),
     ).toEqual({ kind: "monitor", showRowIcon: false, hoverLabel: null });
     expect(
@@ -54,9 +54,9 @@ describe("environment icon preferences", () => {
         isPrimary: true,
         isDesktopLocal: false,
         showLocalEnvironmentIcon: true,
-        environmentLabel: "Airy",
+        environmentLabel: "Workstation",
       }),
-    ).toEqual({ kind: "monitor", showRowIcon: true, hoverLabel: "Airy (local)" });
+    ).toEqual({ kind: "monitor", showRowIcon: true, hoverLabel: "Workstation (local)" });
     expect(
       legacyThreadEnvironmentPresentation({
         isPrimary: false,
@@ -74,7 +74,7 @@ describe("environment icon preferences", () => {
   });
 
   it("formats the resolved local label with a safe fallback", () => {
-    expect(formatLocalEnvironmentLabel("Airy")).toBe("Airy (local)");
+    expect(formatLocalEnvironmentLabel("Workstation")).toBe("Workstation (local)");
     expect(formatLocalEnvironmentLabel(" ")).toBe("Local (local)");
   });
 });
@@ -87,13 +87,13 @@ describe("project environment icons", () => {
 
   it("hides a local-only icon by default and shows it after opt-in", () => {
     const base = {
-      members: [member(local, "Airy")],
+      members: [member(local, "Workstation")],
       primaryEnvironmentId: local,
       desktopLocalEnvironmentIds: new Set<EnvironmentId>(),
     };
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: false })).toEqual([]);
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: true })).toEqual([
-      { environmentId: local, kind: "monitor", label: "Airy (local)" },
+      { environmentId: local, kind: "monitor", label: "Workstation (local)" },
     ]);
   });
 
@@ -102,7 +102,7 @@ describe("project environment icons", () => {
       projectEnvironmentIconEntries({
         members: [
           member(buildbox, "Buildbox"),
-          member(local, "Airy"),
+          member(local, "Workstation"),
           member(buildbox, "Buildbox"),
           member(production, "Production"),
           member(wsl, "Ubuntu"),
@@ -112,7 +112,7 @@ describe("project environment icons", () => {
         showLocalEnvironmentIcon: false,
       }),
     ).toEqual([
-      { environmentId: local, kind: "monitor", label: "Airy (local)" },
+      { environmentId: local, kind: "monitor", label: "Workstation (local)" },
       { environmentId: buildbox, kind: "server", label: "Buildbox" },
       { environmentId: production, kind: "server", label: "Production" },
       { environmentId: wsl, kind: "container", label: "Ubuntu" },
