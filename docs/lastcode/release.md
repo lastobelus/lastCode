@@ -26,6 +26,12 @@ successful action records the exact head and the selected workstream base ref an
 commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
 receipt without rerunning validation.
+
+For each checkout that agents use, import **Run Quick CI** from `t3.json` in
+Project Settings once, then edit the imported Action and enable **Allow Codex
+and Claude to run and resume**. These are deliberate one-time Project Action
+settings; the repository does not automate or migrate them.
+
 The action never pushes: after it resumes, the agent still decides whether and
 what to push. A changed head, changed base tracking ref, or dirty worktree makes
 the receipt unusable. Without a matching receipt, ordinary command-line pushes
