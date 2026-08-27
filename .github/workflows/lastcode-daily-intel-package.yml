@@ -1,0 +1,38 @@
+name: LastCode daily Intel package
+
+on:
+  schedule:
+    # 01:00 Pacific during daylight time; midnight during standard time.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: lastcode-daily-intel-package
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Ensure newest installable has an Intel package
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - name: Checkout LastCode automation
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Build or reuse the newest Intel package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LASTCODE_GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/lastcode-daily-intel-package.ts
