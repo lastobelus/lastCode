@@ -291,6 +291,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts.length, 1);
     assert.equal(turnStarts[0]?.message.role, "system");
     assert.match(turnStarts[0]?.message.text ?? "", /Automated Project Action follow-up/);
+    assert.include(turnStarts[0]?.message.text ?? "", "Exit code: 0");
     assert.include(
       turnStarts[0]?.message.text ?? "",
       "QA failed: \u001b[31mexpected 2, received 3\u001b[0m",
