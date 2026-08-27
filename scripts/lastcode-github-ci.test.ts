@@ -4,22 +4,30 @@ import {
   evaluateGithubCi,
   githubBranchRulesArgs,
   githubCiJobsArgs,
+  githubCiRunTitle,
   githubCiRunsArgs,
   githubCiWorkflowArgs,
   type GithubCiEvaluationInput,
 } from "./lastcode-github-ci.ts";
 
 const MERGE = "1234567890abcdef1234567890abcdef12345678";
+const HEAD = "abcdef1234567890abcdef1234567890abcdef12";
+const BASE = "fedcba0987654321fedcba0987654321fedcba09";
+const TITLE = `CI pull_request PR #104 head ${HEAD} base ${BASE} merge ${MERGE}`;
 
 const input = (overrides: Partial<GithubCiEvaluationInput> = {}): GithubCiEvaluationInput => ({
   workflow: { id: 123, state: "active" },
   branchRules: [],
+  pullRequestNumber: 104,
+  headSha: HEAD,
+  baseSha: BASE,
   mergeSha: MERGE,
   workflowRuns: [
     {
       id: 456,
+      display_title: TITLE,
       event: "pull_request",
-      head_sha: MERGE,
+      head_sha: HEAD,
       status: "completed",
       conclusion: "success",
       created_at: "2026-08-27T10:00:00Z",
@@ -40,10 +48,13 @@ describe("LastCode GitHub CI evidence", () => {
       "api",
       "repos/lastobelus/lastCode/rules/branches/lastcode%2Fmain",
     ]);
-    expect(githubCiRunsArgs("lastobelus/lastCode", MERGE)).toEqual([
+    expect(githubCiRunsArgs("lastobelus/lastCode", HEAD)).toEqual([
       "api",
-      `repos/lastobelus/lastCode/actions/workflows/ci.yml/runs?event=pull_request&head_sha=${MERGE}&per_page=100`,
+      `repos/lastobelus/lastCode/actions/workflows/ci.yml/runs?event=pull_request&head_sha=${HEAD}&per_page=100`,
     ]);
+    expect(
+      githubCiRunTitle({ pullRequestNumber: 104, headSha: HEAD, baseSha: BASE, mergeSha: MERGE }),
+    ).toBe(TITLE);
     expect(githubCiJobsArgs("lastobelus/lastCode", 456)).toEqual([
       "api",
       "repos/lastobelus/lastCode/actions/runs/456/jobs?filter=latest&per_page=100",
@@ -94,6 +105,7 @@ describe("LastCode GitHub CI evidence", () => {
           workflowRuns: [
             {
               id: 1,
+              display_title: TITLE,
               event: "pull_request",
               head_sha: "a".repeat(40),
               status: "completed",
@@ -101,6 +113,27 @@ describe("LastCode GitHub CI evidence", () => {
             },
           ],
           jobs: [{ name: "CI Gate", status: "completed", conclusion: "success" }],
+        }),
+      ),
+    ).toEqual({ state: "pending", reason: "run-registration" });
+    expect(
+      evaluateGithubCi(
+        input({
+          workflowRuns: [
+            {
+              id: 1,
+              display_title: githubCiRunTitle({
+                pullRequestNumber: 104,
+                headSha: HEAD,
+                baseSha: BASE,
+                mergeSha: "b".repeat(40),
+              }),
+              event: "pull_request",
+              head_sha: HEAD,
+              status: "completed",
+              conclusion: "success",
+            },
+          ],
         }),
       ),
     ).toEqual({ state: "pending", reason: "run-registration" });
@@ -113,16 +146,18 @@ describe("LastCode GitHub CI evidence", () => {
           workflowRuns: [
             {
               id: 1,
+              display_title: TITLE,
               event: "pull_request",
-              head_sha: MERGE,
+              head_sha: HEAD,
               status: "completed",
               conclusion: "success",
               created_at: "2026-08-27T09:00:00Z",
             },
             {
               id: 2,
+              display_title: TITLE,
               event: "pull_request",
-              head_sha: MERGE,
+              head_sha: HEAD,
               status: "in_progress",
               conclusion: null,
               created_at: "2026-08-27T10:00:00Z",
@@ -141,8 +176,9 @@ describe("LastCode GitHub CI evidence", () => {
           workflowRuns: [
             {
               id: 2,
+              display_title: TITLE,
               event: "pull_request",
-              head_sha: MERGE,
+              head_sha: HEAD,
               status: "completed",
               conclusion: "cancelled",
               created_at: "2026-08-27T10:00:00Z",
@@ -178,7 +214,9 @@ describe("LastCode GitHub CI evidence", () => {
     });
     expect(
       evaluateGithubCi(
-        input({ workflowRuns: [{ id: 1, event: "pull_request", head_sha: MERGE }] }),
+        input({
+          workflowRuns: [{ id: 1, display_title: TITLE, event: "pull_request", head_sha: HEAD }],
+        }),
       ),
     ).toMatchObject({ state: "failure", reason: "configuration" });
   });

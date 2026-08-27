@@ -18,6 +18,7 @@ export type GithubBranchRule = {
 
 export type GithubWorkflowRun = {
   readonly id?: number;
+  readonly display_title?: string;
   readonly event?: string;
   readonly head_sha?: string;
   readonly status?: string;
@@ -57,6 +58,9 @@ export type GithubCiEvidence =
 export interface GithubCiEvaluationInput {
   readonly workflow: GithubWorkflow;
   readonly branchRules: ReadonlyArray<GithubBranchRule>;
+  readonly pullRequestNumber: number;
+  readonly headSha: string;
+  readonly baseSha: string;
   readonly mergeSha: string | null;
   readonly workflowRuns: ReadonlyArray<GithubWorkflowRun>;
   readonly jobs: ReadonlyArray<GithubWorkflowJob> | null;
@@ -78,11 +82,20 @@ export function githubBranchRulesArgs(
   return ["api", `repos/${repository}/rules/branches/${encodeURIComponent(baseBranch)}`];
 }
 
-export function githubCiRunsArgs(repository: string, mergeSha: string): ReadonlyArray<string> {
+export function githubCiRunsArgs(repository: string, headSha: string): ReadonlyArray<string> {
   return [
     "api",
-    `repos/${repository}/actions/workflows/${LASTCODE_CI_WORKFLOW}/runs?event=pull_request&head_sha=${mergeSha}&per_page=100`,
+    `repos/${repository}/actions/workflows/${LASTCODE_CI_WORKFLOW}/runs?event=pull_request&head_sha=${headSha}&per_page=100`,
   ];
+}
+
+export function githubCiRunTitle(input: {
+  readonly pullRequestNumber: number;
+  readonly headSha: string;
+  readonly baseSha: string;
+  readonly mergeSha: string;
+}): string {
+  return `CI pull_request PR #${input.pullRequestNumber} head ${input.headSha} base ${input.baseSha} merge ${input.mergeSha}`;
 }
 
 export function githubCiJobsArgs(repository: string, runId: number): ReadonlyArray<string> {
@@ -127,10 +140,20 @@ export function evaluateGithubCi(input: GithubCiEvaluationInput): GithubCiEviden
   if (!workflowActive) return { state: "satisfied", reason: "not-expected" };
   if (!input.mergeSha) return { state: "pending", reason: "merge-recomputing" };
 
+  const expectedTitle = githubCiRunTitle({
+    pullRequestNumber: input.pullRequestNumber,
+    headSha: input.headSha,
+    baseSha: input.baseSha,
+    mergeSha: input.mergeSha,
+  });
+
   const exactRuns = input.workflowRuns
     .filter(
       (run) =>
-        run.event === "pull_request" && run.head_sha === input.mergeSha && run.id !== undefined,
+        run.event === "pull_request" &&
+        run.head_sha === input.headSha &&
+        run.display_title === expectedTitle &&
+        run.id !== undefined,
     )
     .sort(
       (left, right) => runTimestamp(right) - runTimestamp(left) || (right.id ?? 0) - (left.id ?? 0),

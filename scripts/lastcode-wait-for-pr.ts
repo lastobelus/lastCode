@@ -582,11 +582,15 @@ function readGithubCi(repository: string, pullRequest: PullRequestState): Github
   );
   const mergeSha = pullRequest.potentialMergeCommit?.oid ?? null;
   const workflowRuns = mergeSha
-    ? (runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, mergeSha)).workflow_runs ?? [])
+    ? (runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, pullRequest.headRefOid))
+        .workflow_runs ?? [])
     : [];
   const evaluation = {
     workflow,
     branchRules,
+    pullRequestNumber: pullRequest.number,
+    headSha: pullRequest.headRefOid,
+    baseSha: pullRequest.baseRefOid,
     mergeSha,
     workflowRuns,
     jobs: null,

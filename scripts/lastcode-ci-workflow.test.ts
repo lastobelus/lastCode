@@ -40,6 +40,9 @@ const runGate = (overrides: Readonly<Record<string, string>> = {}): number | nul
 
 describe("LastCode GitHub CI workflow", () => {
   it("targets the downstream branch on standard GitHub runners", () => {
+    expect(workflow).toContain(
+      'run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"',
+    );
     expect(workflow).toContain("pull_request:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("permissions:\n  contents: read");
