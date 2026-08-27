@@ -275,6 +275,87 @@ describe("LastCode checkpoint supervisor", () => {
     expect(finallyRecovered.state.pendingResolutions).toBeUndefined();
   });
 
+  it("reopens recurring incidents when no recovery thread is configured", () => {
+    const runPhase = () => {
+      throw new Error("fetch failed");
+    };
+    const first = fixture({
+      dependencies: { loadConfig: () => null, runPhase },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
+    expect(first.dependencies.notify).toHaveBeenCalledOnce();
+
+    const recovered = fixture({
+      state: first.state,
+      dependencies: { loadConfig: () => null },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.state).toMatchObject({
+      status: "success",
+      incident: { alertDelivery: "not-needed", resolutionDelivery: "not-needed" },
+    });
+    expect(recovered.state.pendingIncidents).toBeUndefined();
+
+    const recurring = fixture({
+      state: recovered.state,
+      dependencies: { loadConfig: () => null, runPhase },
+    });
+    expect(() => runCheckpointSupervisor({}, recurring.dependencies)).toThrow("fetch failed");
+    expect(recurring.dependencies.notify).toHaveBeenCalledOnce();
+    expect(recurring.state.incident).toMatchObject({ alertDelivery: "pending" });
+  });
+
+  it("updates a queued closure with the delayed alert destination", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("blocker A");
+        },
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("blocker A");
+
+    const recoveredWithoutDelivery = fixture({
+      state: failed.state,
+      dependencies: {
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    runCheckpointSupervisor({}, recoveredWithoutDelivery.dependencies);
+
+    const failedAgain = fixture({
+      state: recoveredWithoutDelivery.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-delivery" }),
+        runPhase: () => {
+          throw new Error("blocker B");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failedAgain.dependencies)).toThrow("blocker B");
+    expect(failedAgain.state.pendingResolutions).toHaveLength(1);
+    expect(failedAgain.state.pendingResolutions[0]).toMatchObject({
+      deliveryThreadId: "thread-delivery",
+    });
+
+    const finallyRecovered = fixture({
+      state: failedAgain.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+    runCheckpointSupervisor({}, finallyRecovered.dependencies);
+    expect(finallyRecovered.messages).toHaveLength(2);
+    expect(finallyRecovered.messages.every(({ threadId }) => threadId === "thread-delivery")).toBe(
+      true,
+    );
+  });
+
   it("sends one closure after a failed incident recovers", () => {
     const previous = fixture({
       dependencies: {

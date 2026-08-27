@@ -310,13 +310,18 @@ function attemptDelivery(state, config, dependencies) {
         deliveryThreadId: recoveryThreadId,
       };
       const pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
-      if (
-        currentIncident?.fingerprint !== updatedIncident.fingerprint &&
-        !pendingResolutions.some(
+      if (currentIncident?.fingerprint !== updatedIncident.fingerprint) {
+        const pendingResolutionIndex = pendingResolutions.findIndex(
           (pendingIncident) => pendingIncident.fingerprint === updatedIncident.fingerprint,
-        )
-      ) {
-        pendingResolutions.push(deliveredIncident);
+        );
+        if (pendingResolutionIndex >= 0) {
+          pendingResolutions[pendingResolutionIndex] = {
+            ...pendingResolutions[pendingResolutionIndex],
+            ...deliveredIncident,
+          };
+        } else {
+          pendingResolutions.push(deliveredIncident);
+        }
       }
       nextState = Object.assign(
         {},
@@ -502,7 +507,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     if (
       previous?.status === "success" &&
       previousIncident &&
-      previousIncident.resolutionDelivery !== "sent" &&
+      previousIncident.resolutionDelivery === "pending" &&
       !pendingResolutions.some(
         (pendingIncident) => pendingIncident.fingerprint === previousIncident.fingerprint,
       )
@@ -567,17 +572,21 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   }
 
   const finishedAt = dependencies.now();
+  const deliveryConfigured = Boolean(config?.recoveryThreadId);
   let incident = durableIncident(previous?.incident);
-  const pendingIncidents = [...durableIncidentList(previous, "pendingIncidents")];
-  const pendingResolutions = durableIncidentList(previous, "pendingResolutions").map(
-    (pendingIncident) => ({
-      ...pendingIncident,
-      resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
-      resolutionDelivery: "pending",
-    }),
-  );
+  const pendingIncidents = deliveryConfigured
+    ? [...durableIncidentList(previous, "pendingIncidents")]
+    : [];
+  const pendingResolutions = deliveryConfigured
+    ? durableIncidentList(previous, "pendingResolutions").map((pendingIncident) => ({
+        ...pendingIncident,
+        resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
+        resolutionDelivery: "pending",
+      }))
+    : [];
   if (previous?.status === "failed" && incident) {
     if (
+      deliveryConfigured &&
       incident.alertDelivery !== "sent" &&
       !pendingIncidents.some(
         (pendingIncident) => pendingIncident.fingerprint === incident.fingerprint,
@@ -588,8 +597,13 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     incident = {
       ...incident,
       resolvedAt: finishedAt,
-      resolutionDelivery: "pending",
+      resolutionDelivery: deliveryConfigured ? "pending" : "not-needed",
+      ...(!deliveryConfigured && incident.alertDelivery !== "sent"
+        ? { alertDelivery: "not-needed" }
+        : {}),
     };
+  } else if (!deliveryConfigured && incident) {
+    incident = { ...incident, resolutionDelivery: "not-needed" };
   }
   let state = {
     schemaVersion: 1,
