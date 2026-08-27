@@ -102,6 +102,19 @@ describe("immutable Intel release validation", () => {
       NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
       "utf8",
     );
+    expect(workflow).toContain(
+      "run-name: Build Intel package · ${{ inputs.installable_tag }} · ${{ inputs.request_token }}",
+    );
+    expect(workflow).toContain("request_token:");
+    expect(workflow).toContain('if [[ ! "$REQUEST_TOKEN" =~ ^intel-[0-9a-f-]{36}$ ]]');
+    const project = JSON.parse(
+      NodeFS.readFileSync(NodePath.resolve(import.meta.dirname, "../t3.json"), "utf8"),
+    );
+    expect(project.scripts).toContainEqual({
+      name: "Build Intel package",
+      command: "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
+      icon: "build",
+    });
     const automationCheckout = workflow.slice(
       workflow.indexOf("- name: Checkout workflow automation"),
       workflow.indexOf("- name: Checkout exact installable"),

@@ -14,6 +14,11 @@
       "icon": "test"
     },
     {
+      "name": "Build Intel package",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
+      "icon": "build"
+    },
+    {
       "name": "Run Full CI",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --full",
       "icon": "test"
