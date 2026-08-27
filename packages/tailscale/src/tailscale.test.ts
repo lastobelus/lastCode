@@ -452,6 +452,7 @@ describe("tailscale", () => {
       const ensureError = yield* ensureTailscaleServe({
         localPort: 13773,
         servePort: 8443,
+        replaceVerifiedHandler: true,
       }).pipe(Effect.flip, Effect.provide(layer));
       assert.instanceOf(ensureError, TailscaleServePortOccupiedError);
 
