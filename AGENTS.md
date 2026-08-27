@@ -120,6 +120,19 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - One concern per PR. If the description says "also", split it.
 - When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
 
+## Public repository boundary
+
+Keep deployment-specific infrastructure out of this public repository. Do not
+commit real machine names, private endpoints, host roles, network topology,
+private ports, operator schedules, or paths that identify a maintainer's
+environment. Public automation must expose environment-neutral tools and
+document their contracts with generic examples. Put the concrete wiring and
+deployment policy in the private infrastructure repository that owns it.
+
+Before publishing a LastCode change, inspect the diff, PR body, issue text, and
+review replies for infrastructure details. Test fixtures must use unmistakably
+generic names such as `workstation.example`, `managed-server`, or `build-host`.
+
 ## Plans and work artifacts
 
 - Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree. `.plans/` is gitignored only as a safety net for legacy tooling.

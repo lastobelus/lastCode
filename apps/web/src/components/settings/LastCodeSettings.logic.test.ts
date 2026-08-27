@@ -34,7 +34,7 @@ describe("deriveLastCodeEnvironmentSettingEntries", () => {
         entry(
           new PrimaryConnectionTarget({
             environmentId: primary,
-            label: "Airy",
+            label: "Workstation",
             httpBaseUrl: "http://localhost",
             wsBaseUrl: "ws://localhost/ws",
           }),
@@ -65,7 +65,7 @@ describe("deriveLastCodeEnvironmentSettingEntries", () => {
     expect(
       deriveLastCodeEnvironmentSettingEntries({ entries, primaryEnvironmentId: primary }),
     ).toEqual([
-      { environmentId: primary, kind: "local", label: "Airy (local)" },
+      { environmentId: primary, kind: "local", label: "Workstation (local)" },
       { environmentId: production, kind: "remote", label: "Production" },
       { environmentId: buildbox, kind: "remote", label: "Buildbox" },
       { environmentId: ssh, kind: "remote", label: "SSH Lab" },
