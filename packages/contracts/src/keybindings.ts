@@ -81,10 +81,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
 
 export const SCRIPT_RUN_COMMAND_PATTERN = Schema.TemplateLiteral([
   Schema.Literal("script."),
-  Schema.NonEmptyString.check(
-    Schema.isMaxLength(MAX_SCRIPT_ID_LENGTH),
-    Schema.isPattern(/^[a-z0-9][a-z0-9-]*$/),
-  ),
+  Schema.String.check(Schema.isTrimmed(), Schema.isNonEmpty()),
   Schema.Literal(".run"),
 ]);
 
