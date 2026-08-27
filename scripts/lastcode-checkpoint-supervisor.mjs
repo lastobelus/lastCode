@@ -9,6 +9,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import * as NodeUtil from "node:util";
 
 const CHECKPOINT_ARGS = [
   "scripts/lastcode-checkpoint.ts",
@@ -16,6 +17,7 @@ const CHECKPOINT_ARGS = [
   "--promote-if-no-open-prs",
   "--mirror-upstream-main",
 ];
+const DIAGNOSTIC_MAX_CHARACTERS = 1_200;
 
 function parseJson(raw, label) {
   try {
@@ -71,23 +73,79 @@ export function checkpointEnvironment(
 }
 
 class CommandFailure extends Error {
-  constructor(phase, command, status) {
+  constructor(phase, command, status, diagnostic) {
     super(`${command} failed with exit code ${status ?? "unknown"}.`);
+    this.diagnostic = diagnostic;
     this.phase = phase;
     this.status = status;
   }
 }
 
+export function boundedCommandDiagnostic(raw) {
+  const redacted = NodeUtil.stripVTControlCharacters(raw)
+    .replaceAll(/(https?:\/\/)[^/@\s]+@/giu, "$1<redacted>@")
+    .replaceAll(/\b(?:github_pat_|gh[pousr]_|ctx7sk-|sk-)[A-Za-z0-9_-]{8,}\b/gu, "<redacted>")
+    .replaceAll(/\b((?:api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/giu, "$1<redacted>")
+    .split("")
+    .map((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return (code < 32 && character !== "\n" && character !== "\r" && character !== "\t") ||
+        code === 127
+        ? " "
+        : character;
+    })
+    .join("")
+    .trim();
+  return redacted.length > DIAGNOSTIC_MAX_CHARACTERS
+    ? `...${redacted.slice(-DIAGNOSTIC_MAX_CHARACTERS)}`
+    : redacted;
+}
+
 function runCommand(phase, cwd, command, args, environment, options = {}) {
-  const result = NodeChildProcess.spawnSync(command, args, {
-    cwd,
-    encoding: options.capture ? "utf8" : undefined,
-    env: environment,
-    stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new CommandFailure(phase, command, result.status);
-  return options.capture ? result.stdout.trim() : "";
+  if (options.capture) {
+    const result = NodeChildProcess.spawnSync(command, args, {
+      cwd,
+      encoding: "utf8",
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new CommandFailure(
+        phase,
+        command,
+        result.status,
+        boundedCommandDiagnostic(result.stderr),
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  const temporaryDirectory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-checkpoint-command-"),
+  );
+  const stderrPath = NodePath.join(temporaryDirectory, "stderr.log");
+  let stderrDescriptor;
+  try {
+    stderrDescriptor = NodeFS.openSync(stderrPath, "w", 0o600);
+    const result = NodeChildProcess.spawnSync(command, args, {
+      cwd,
+      env: environment,
+      stdio: ["ignore", "inherit", stderrDescriptor],
+    });
+    NodeFS.closeSync(stderrDescriptor);
+    stderrDescriptor = undefined;
+    const stderr = NodeFS.readFileSync(stderrPath, "utf8");
+    if (stderr) process.stderr.write(stderr);
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new CommandFailure(phase, command, result.status, boundedCommandDiagnostic(stderr));
+    }
+    return "";
+  } finally {
+    if (stderrDescriptor !== undefined) NodeFS.closeSync(stderrDescriptor);
+    NodeFS.rmSync(temporaryDirectory, { force: true, recursive: true });
+  }
 }
 
 export function latestFailedCheckpointRun(path) {
@@ -134,6 +192,7 @@ export function checkpointIncidentFingerprint(failure) {
       JSON.stringify({
         error: failure.error,
         checkpointError: failure.checkpointRun?.error ?? null,
+        diagnostic: failure.diagnostic ?? null,
         failurePhase: failure.checkpointRun?.failurePhase ?? null,
         phase: failure.phase,
         recoveryBranch: failure.checkpointRun?.recoveryBranch ?? null,
@@ -150,13 +209,17 @@ export function checkpointFailureMessage(failure, fingerprint) {
   const recovery = failure.checkpointRun?.recoveryBranch
     ? ` Recovery branch: ${failure.checkpointRun.recoveryBranch}.`
     : "";
+  const diagnostic = failure.diagnostic ? `Diagnostic: ${failure.diagnostic}` : null;
   return [
     `Automated LastCode checkpoint maintenance alert ${fingerprint.slice(0, 12)}.`,
     `The hourly service failed during ${failure.phase}${nightly}.${recovery}`,
+    diagnostic,
     "Run lastcode-checkpoints --verbose, inspect the live daemon and retained recovery state, and address the concrete problem.",
     "The bounded service logs are ~/.lastcode/automation/nightly-checkpoint.stdout.log and nightly-checkpoint.stderr.log.",
     "Use this thread for the recovery; do not create a new maintenance thread and do not only report the alert.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function checkpointResolvedMessage(incident) {
@@ -299,6 +362,9 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     }
     const failure = {
       checkpointRun,
+      ...(error instanceof CommandFailure && error.diagnostic
+        ? { diagnostic: error.diagnostic }
+        : {}),
       error: error instanceof Error ? error.message : String(error),
       phase: error instanceof CommandFailure ? error.phase : phase,
     };

@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  boundedCommandDiagnostic,
   checkpointEnvironment,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
@@ -215,6 +216,32 @@ describe("LastCode checkpoint supervisor", () => {
         checkpointRun: { ...baseFailure.checkpointRun, error: "server typecheck failed" },
       }),
     );
+  });
+
+  it("distinguishes pre-checkpoint blockers with the same command exit", () => {
+    const baseFailure = {
+      phase: "fetch",
+      error: "git failed with exit code 128",
+      checkpointRun: null,
+    };
+
+    expect(
+      checkpointIncidentFingerprint({ ...baseFailure, diagnostic: "host key verification failed" }),
+    ).not.toBe(
+      checkpointIncidentFingerprint({ ...baseFailure, diagnostic: "repository not found" }),
+    );
+  });
+
+  it("bounds and redacts command diagnostics before persistence or delivery", () => {
+    const diagnostic = boundedCommandDiagnostic(
+      `https://user:password@example.com/repo token=secret-value github_pat_abcdefghijklmnopqrstuvwxyz ${"x".repeat(2_000)}`,
+    );
+
+    expect(diagnostic.length).toBeLessThanOrEqual(1_203);
+    expect(diagnostic).not.toContain("user:password");
+    expect(diagnostic).not.toContain("secret-value");
+    expect(diagnostic).not.toContain("github_pat_");
+    expect(diagnostic.endsWith("x".repeat(1_000))).toBe(true);
   });
 
   it("ignores invalid history shapes while finding the latest valid failure", () => {
