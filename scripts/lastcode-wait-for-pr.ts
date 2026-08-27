@@ -3,18 +3,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off globalTimers:off -- Read-only host-side GitHub polling.
 import * as NodeChildProcess from "node:child_process";
 
-import {
-  evaluateGithubCi,
-  githubBranchRulesArgs,
-  githubCiJobsArgs,
-  githubCiRunsArgs,
-  githubCiWorkflowArgs,
-  type GithubBranchRule,
-  type GithubCiEvidence,
-  type GithubWorkflow,
-  type GithubWorkflowJob,
-  type GithubWorkflowRun,
-} from "./lastcode-github-ci.ts";
+import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -545,43 +534,6 @@ function runGhJson<T>(args: ReadonlyArray<string>): T {
   return JSON.parse(result.stdout) as T;
 }
 
-type WorkflowRunsResponse = {
-  readonly workflow_runs?: ReadonlyArray<GithubWorkflowRun>;
-};
-
-type WorkflowJobsResponse = {
-  readonly jobs?: ReadonlyArray<GithubWorkflowJob>;
-};
-
-function readGithubCi(repository: string, pullRequest: PullRequestState): GithubCiEvidence {
-  const workflow = runGhJson<GithubWorkflow>(githubCiWorkflowArgs(repository));
-  const branchRules = runGhJson<ReadonlyArray<GithubBranchRule>>(
-    githubBranchRulesArgs(repository, pullRequest.baseRefName),
-  );
-  const workflowRuns =
-    runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, pullRequest.headRefOid))
-      .workflow_runs ?? [];
-  const evaluation = {
-    workflow,
-    branchRules,
-    pullRequestNumber: pullRequest.number,
-    headSha: pullRequest.headRefOid,
-    baseSha: pullRequest.baseRefOid,
-    workflowRuns,
-    jobs: null,
-  } as const;
-  const provisional = evaluateGithubCi(evaluation);
-  const completedSuccessRun = workflowRuns.find(
-    (run) =>
-      run.id === provisional.runId && run.status === "completed" && run.conclusion === "success",
-  );
-  if (!completedSuccessRun?.id) return provisional;
-  const jobs =
-    runGhJson<WorkflowJobsResponse>(githubCiJobsArgs(repository, completedSuccessRun.id)).jobs ??
-    [];
-  return evaluateGithubCi({ ...evaluation, jobs });
-}
-
 function paginatedGhApi<T>(endpoint: string): ReadonlyArray<T> {
   const pages = runGhJson<ReadonlyArray<ReadonlyArray<T>>>([
     "api",
@@ -732,7 +684,7 @@ function readObservation(repository: string, branch: string): WaitObservation {
     const initialLocal = readLocalState();
     const initialPullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
     const initialReviewData = readReviewData(repository, initialPullRequest);
-    const ci = readGithubCi(repository, initialPullRequest);
+    const ci = readGithubCi(repository, initialPullRequest, runGhJson);
     const pullRequest = runGhJson<PullRequestState>(pullRequestViewArgs(repository, branch));
     const local = readLocalState();
     if (
@@ -746,7 +698,7 @@ function readObservation(repository: string, branch: string): WaitObservation {
     if (!requiresReadyConfirmation(observation)) return observation;
 
     const confirmedReviewData = readReviewData(repository, pullRequest);
-    const confirmedCi = readGithubCi(repository, pullRequest);
+    const confirmedCi = readGithubCi(repository, pullRequest, runGhJson);
     const confirmedPullRequest = runGhJson<PullRequestState>(
       pullRequestViewArgs(repository, branch),
     );
