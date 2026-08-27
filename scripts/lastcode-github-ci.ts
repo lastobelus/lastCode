@@ -68,6 +68,23 @@ export interface GithubCiEvaluationInput {
   readonly jobs: ReadonlyArray<GithubWorkflowJob> | null;
 }
 
+export interface GithubCiPullRequest {
+  readonly number: number;
+  readonly headRefOid: string;
+  readonly baseRefOid: string;
+  readonly baseRefName: string;
+}
+
+export type RunGithubJson = <T>(args: ReadonlyArray<string>) => T;
+
+type WorkflowRunsResponse = {
+  readonly workflow_runs?: ReadonlyArray<GithubWorkflowRun>;
+};
+
+type WorkflowJobsResponse = {
+  readonly jobs?: ReadonlyArray<GithubWorkflowJob>;
+};
+
 const runTimestamp = (run: GithubWorkflowRun): number => {
   const parsed = Date.parse(run.created_at ?? "");
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -124,6 +141,39 @@ export function requiredGithubCiGate(branchRules: ReadonlyArray<GithubBranchRule
       rule.type === "required_status_checks" &&
       rule.parameters?.required_status_checks?.some(({ context }) => context === LASTCODE_CI_GATE),
   );
+}
+
+export function readGithubCi(
+  repository: string,
+  pullRequest: GithubCiPullRequest,
+  runGithubJson: RunGithubJson,
+): GithubCiEvidence {
+  const workflow = runGithubJson<GithubWorkflow>(githubCiWorkflowArgs(repository));
+  const branchRules = runGithubJson<ReadonlyArray<GithubBranchRule>>(
+    githubBranchRulesArgs(repository, pullRequest.baseRefName),
+  );
+  const workflowRuns =
+    runGithubJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, pullRequest.headRefOid))
+      .workflow_runs ?? [];
+  const evaluation = {
+    workflow,
+    branchRules,
+    pullRequestNumber: pullRequest.number,
+    headSha: pullRequest.headRefOid,
+    baseSha: pullRequest.baseRefOid,
+    workflowRuns,
+    jobs: null,
+  } as const;
+  const provisional = evaluateGithubCi(evaluation);
+  const completedSuccessRun = workflowRuns.find(
+    (run) =>
+      run.id === provisional.runId && run.status === "completed" && run.conclusion === "success",
+  );
+  if (!completedSuccessRun?.id) return provisional;
+  const jobs =
+    runGithubJson<WorkflowJobsResponse>(githubCiJobsArgs(repository, completedSuccessRun.id))
+      .jobs ?? [];
+  return evaluateGithubCi({ ...evaluation, jobs });
 }
 
 const configurationFailure = (detail: string): GithubCiEvidence => ({
