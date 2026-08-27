@@ -418,6 +418,30 @@ describe("tailscale", () => {
     });
   });
 
+  it.effect("does not replace a complex handler after an environment probe", () => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      const status = JSON.parse(serveStatusJson(8443, "http://127.0.0.1:13773")) as {
+        Web: Record<string, { Handlers: Record<string, unknown> }>;
+      };
+      const web = status.Web["desktop.tail.ts.net:8443"];
+      assert.isDefined(web);
+      web.Handlers["/api"] = { Proxy: "http://127.0.0.1:39831" };
+      return { stdout: JSON.stringify(status) };
+    });
+
+    return Effect.gen(function* () {
+      const error = yield* ensureTailscaleServe({
+        localPort: 5733,
+        servePort: 8443,
+        replaceVerifiedHandler: true,
+      }).pipe(Effect.flip, Effect.provide(layer));
+      assert.instanceOf(error, TailscaleServePortOccupiedError);
+      assert.deepEqual(commands, [["serve", "status", "--json"]]);
+    });
+  });
+
   it.effect("treats a non-web listener on the selected port as occupied", () => {
     const layer = mockSpawnerLayer(() => ({
       stdout: JSON.stringify({ TCP: { 8443: { TCPForward: "127.0.0.1:39831" } }, Web: {} }),
