@@ -104,12 +104,7 @@ export interface LocalState {
 export type WaitDecision =
   | {
       readonly kind: "wait";
-      readonly reason:
-        | "ci-pending"
-        | "ci-registration"
-        | "merge-recomputing"
-        | "mergeability-pending"
-        | "review-pending";
+      readonly reason: "ci-pending" | "ci-registration" | "mergeability-pending" | "review-pending";
     }
   | {
       readonly kind: "wake";
@@ -122,7 +117,6 @@ export type WaitDecision =
         | "local-head-changed"
         | "merge-blocked"
         | "merge-recompute-timeout"
-        | "merge-revision-changed"
         | "pr-changed"
         | "pr-closed"
         | "pr-draft"
@@ -152,14 +146,13 @@ export function pullRequestViewArgs(repository: string, branch: string): Readonl
 }
 
 export function samePullRequestRevision(
-  initial: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid" | "potentialMergeCommit">,
-  final: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid" | "potentialMergeCommit">,
+  initial: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid">,
+  final: Pick<PullRequestState, "number" | "headRefOid" | "baseRefOid">,
 ): boolean {
   return (
     initial.number === final.number &&
     initial.headRefOid === final.headRefOid &&
-    initial.baseRefOid === final.baseRefOid &&
-    initial.potentialMergeCommit?.oid === final.potentialMergeCommit?.oid
+    initial.baseRefOid === final.baseRefOid
   );
 }
 
@@ -430,15 +423,6 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `PR base changed from ${baseline.pullRequest.baseRefOid} to ${pullRequest.baseRefOid}.`,
     };
   }
-  const baselineMerge = baseline.pullRequest.potentialMergeCommit?.oid;
-  const currentMerge = pullRequest.potentialMergeCommit?.oid;
-  if (baselineMerge && currentMerge && baselineMerge !== currentMerge) {
-    return {
-      kind: "wake",
-      reason: "merge-revision-changed",
-      detail: `PR merge revision changed from ${baselineMerge} to ${currentMerge}.`,
-    };
-  }
   if (
     pullRequest.mergeable === "CONFLICTING" ||
     pullRequest.mergeStateStatus === "BEHIND" ||
@@ -501,9 +485,6 @@ export function decideWaitForPr(baseline: WaitObservation, current: WaitObservat
       detail: `GitHub CI and the handled Codex review are complete for pull request #${pullRequest.number}.`,
     };
   }
-  if (current.ci.state === "pending" && current.ci.reason === "merge-recomputing") {
-    return { kind: "wait", reason: "merge-recomputing" };
-  }
   if (current.ci.state === "pending" && current.ci.reason === "run-registration") {
     return { kind: "wait", reason: "ci-registration" };
   }
@@ -522,10 +503,7 @@ export function decideWaitTimeout(
       detail: `Expected GitHub CI did not register within ${CI_REGISTRATION_TIMEOUT_MS / 60_000} minutes.`,
     };
   }
-  if (
-    (reason === "merge-recomputing" || reason === "mergeability-pending") &&
-    elapsedMs >= MERGE_RECOMPUTE_TIMEOUT_MS
-  ) {
+  if (reason === "mergeability-pending" && elapsedMs >= MERGE_RECOMPUTE_TIMEOUT_MS) {
     return {
       kind: "wake",
       reason: "merge-recompute-timeout",
@@ -546,7 +524,7 @@ export function waitTimeoutClass(
   reason: Extract<WaitDecision, { readonly kind: "wait" }>["reason"],
 ): "ci-registration" | "merge-recompute" | "review" | null {
   if (reason === "ci-registration") return "ci-registration";
-  if (reason === "merge-recomputing" || reason === "mergeability-pending") {
+  if (reason === "mergeability-pending") {
     return "merge-recompute";
   }
   if (reason === "review-pending") return "review";
@@ -580,18 +558,15 @@ function readGithubCi(repository: string, pullRequest: PullRequestState): Github
   const branchRules = runGhJson<ReadonlyArray<GithubBranchRule>>(
     githubBranchRulesArgs(repository, pullRequest.baseRefName),
   );
-  const mergeSha = pullRequest.potentialMergeCommit?.oid ?? null;
-  const workflowRuns = mergeSha
-    ? (runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, pullRequest.headRefOid))
-        .workflow_runs ?? [])
-    : [];
+  const workflowRuns =
+    runGhJson<WorkflowRunsResponse>(githubCiRunsArgs(repository, pullRequest.headRefOid))
+      .workflow_runs ?? [];
   const evaluation = {
     workflow,
     branchRules,
     pullRequestNumber: pullRequest.number,
     headSha: pullRequest.headRefOid,
     baseSha: pullRequest.baseRefOid,
-    mergeSha,
     workflowRuns,
     jobs: null,
   } as const;
@@ -819,16 +794,6 @@ async function main(): Promise<void> {
   let pendingClass: ReturnType<typeof waitTimeoutClass> = null;
   let pendingSince = Date.now();
   while (true) {
-    if (
-      !baseline.pullRequest.potentialMergeCommit?.oid &&
-      current.pullRequest.potentialMergeCommit?.oid
-    ) {
-      baseline = Object.assign({}, baseline, {
-        pullRequest: Object.assign({}, baseline.pullRequest, {
-          potentialMergeCommit: current.pullRequest.potentialMergeCommit,
-        }),
-      });
-    }
     let decision = decideWaitForPr(baseline, current);
     if (decision.kind === "wait") {
       const timeoutClass = waitTimeoutClass(decision.reason);

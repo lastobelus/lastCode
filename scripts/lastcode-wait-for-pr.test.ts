@@ -120,7 +120,7 @@ describe("lastcode-wait-for-pr", () => {
     ).toBe(false);
     expect(
       samePullRequestRevision(initial, observation({ merge: "4".repeat(40) }).pullRequest),
-    ).toBe(false);
+    ).toBe(true);
     expect(samePullRequestRevision(initial, observation({ number: 88 }).pullRequest)).toBe(false);
   });
 
@@ -209,7 +209,7 @@ describe("lastcode-wait-for-pr", () => {
     ).toEqual({ kind: "wait", reason: "mergeability-pending" });
   });
 
-  it("wakes when the exact head, base, or merge revision drifts", () => {
+  it("wakes when the exact head or base drifts without treating regenerated merge SHAs as drift", () => {
     const baseline = observation();
     expect(decideWaitForPr(baseline, observation({ head: "2".repeat(40) }))).toMatchObject({
       kind: "wake",
@@ -219,9 +219,9 @@ describe("lastcode-wait-for-pr", () => {
       kind: "wake",
       reason: "base-changed",
     });
-    expect(decideWaitForPr(baseline, observation({ merge: "4".repeat(40) }))).toMatchObject({
-      kind: "wake",
-      reason: "merge-revision-changed",
+    expect(decideWaitForPr(baseline, observation({ merge: "4".repeat(40) }))).toEqual({
+      kind: "wait",
+      reason: "review-pending",
     });
   });
 
@@ -251,7 +251,6 @@ describe("lastcode-wait-for-pr", () => {
   });
 
   it("bounds only registration, merge recomputation, and review pending waits", () => {
-    expect(waitTimeoutClass("merge-recomputing")).toBe("merge-recompute");
     expect(waitTimeoutClass("mergeability-pending")).toBe("merge-recompute");
     expect(waitTimeoutClass("ci-registration")).toBe("ci-registration");
     expect(waitTimeoutClass("review-pending")).toBe("review");
@@ -260,10 +259,6 @@ describe("lastcode-wait-for-pr", () => {
     expect(decideWaitTimeout("ci-registration", CI_REGISTRATION_TIMEOUT_MS)).toMatchObject({
       kind: "wake",
       reason: "ci-registration-timeout",
-    });
-    expect(decideWaitTimeout("merge-recomputing", MERGE_RECOMPUTE_TIMEOUT_MS)).toMatchObject({
-      kind: "wake",
-      reason: "merge-recompute-timeout",
     });
     expect(decideWaitTimeout("mergeability-pending", MERGE_RECOMPUTE_TIMEOUT_MS)).toMatchObject({
       kind: "wake",
@@ -753,15 +748,6 @@ describe("lastcode-wait-for-pr", () => {
         }),
       ),
     ).toEqual({ kind: "wait", reason: "ci-pending" });
-    expect(
-      decideWaitForPr(
-        baseline,
-        observation({
-          review: handledReview,
-          ci: { state: "pending", reason: "merge-recomputing" },
-        }),
-      ),
-    ).toEqual({ kind: "wait", reason: "merge-recomputing" });
     expect(
       decideWaitForPr(
         baseline,

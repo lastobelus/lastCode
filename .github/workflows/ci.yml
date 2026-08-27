@@ -25,14 +25,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # The pull-request merge checkout plus both parents are enough to
+          # compare the exact event head and base without fetching full history.
+          fetch-depth: 2
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Reject repository-owned PR assets
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          files="$(git ls-files .github/pr-assets)"
+          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- .github/pr-assets)"
           if test -n "$files"; then
             printf 'PR evidence must be uploaded to GitHub, not committed:\n%s\n' "$files" >&2
             exit 1

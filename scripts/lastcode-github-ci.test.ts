@@ -7,6 +7,7 @@ import {
   githubCiRunTitle,
   githubCiRunsArgs,
   githubCiWorkflowArgs,
+  testedMergeShaFromGithubCiRunTitle,
   type GithubCiEvaluationInput,
 } from "./lastcode-github-ci.ts";
 
@@ -21,7 +22,6 @@ const input = (overrides: Partial<GithubCiEvaluationInput> = {}): GithubCiEvalua
   pullRequestNumber: 104,
   headSha: HEAD,
   baseSha: BASE,
-  mergeSha: MERGE,
   workflowRuns: [
     {
       id: 456,
@@ -55,6 +55,13 @@ describe("LastCode GitHub CI evidence", () => {
     expect(
       githubCiRunTitle({ pullRequestNumber: 104, headSha: HEAD, baseSha: BASE, mergeSha: MERGE }),
     ).toBe(TITLE);
+    expect(
+      testedMergeShaFromGithubCiRunTitle(TITLE, {
+        pullRequestNumber: 104,
+        headSha: HEAD,
+        baseSha: BASE,
+      }),
+    ).toBe(MERGE);
     expect(githubCiJobsArgs("lastobelus/lastCode", 456)).toEqual([
       "api",
       "repos/lastobelus/lastCode/actions/runs/456/jobs?filter=latest&per_page=100",
@@ -87,18 +94,14 @@ describe("LastCode GitHub CI evidence", () => {
     ).toMatchObject({ state: "failure", reason: "configuration" });
   });
 
-  it("waits for a merge revision and exact workflow registration", () => {
-    expect(evaluateGithubCi(input({ mergeSha: null, workflowRuns: [], jobs: null }))).toEqual({
-      state: "pending",
-      reason: "merge-recomputing",
-    });
+  it("waits for exact workflow registration", () => {
     expect(evaluateGithubCi(input({ workflowRuns: [], jobs: null }))).toEqual({
       state: "pending",
       reason: "run-registration",
     });
   });
 
-  it("ignores runs for a PR head or stale merge revision", () => {
+  it("ignores runs for a different head or base", () => {
     expect(
       evaluateGithubCi(
         input({
@@ -125,8 +128,8 @@ describe("LastCode GitHub CI evidence", () => {
               display_title: githubCiRunTitle({
                 pullRequestNumber: 104,
                 headSha: HEAD,
-                baseSha: BASE,
-                mergeSha: "b".repeat(40),
+                baseSha: "b".repeat(40),
+                mergeSha: MERGE,
               }),
               event: "pull_request",
               head_sha: HEAD,
@@ -137,6 +140,13 @@ describe("LastCode GitHub CI evidence", () => {
         }),
       ),
     ).toEqual({ state: "pending", reason: "run-registration" });
+  });
+
+  it("retains the immutable tested merge SHA without comparing it to a later PR snapshot", () => {
+    expect(evaluateGithubCi(input())).toMatchObject({
+      state: "satisfied",
+      testedMergeSha: MERGE,
+    });
   });
 
   it("uses the newest exact run and waits while it is active", () => {

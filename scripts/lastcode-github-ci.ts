@@ -40,12 +40,14 @@ export type GithubCiEvidence =
       readonly reason: "exact-run" | "not-expected";
       readonly runId?: number;
       readonly runUrl?: string;
+      readonly testedMergeSha?: string;
     }
   | {
       readonly state: "pending";
-      readonly reason: "merge-recomputing" | "run-in-progress" | "run-registration";
+      readonly reason: "run-in-progress" | "run-registration";
       readonly runId?: number;
       readonly runUrl?: string;
+      readonly testedMergeSha?: string;
     }
   | {
       readonly state: "failure";
@@ -53,6 +55,7 @@ export type GithubCiEvidence =
       readonly detail: string;
       readonly runId?: number;
       readonly runUrl?: string;
+      readonly testedMergeSha?: string;
     };
 
 export interface GithubCiEvaluationInput {
@@ -61,7 +64,6 @@ export interface GithubCiEvaluationInput {
   readonly pullRequestNumber: number;
   readonly headSha: string;
   readonly baseSha: string;
-  readonly mergeSha: string | null;
   readonly workflowRuns: ReadonlyArray<GithubWorkflowRun>;
   readonly jobs: ReadonlyArray<GithubWorkflowJob> | null;
 }
@@ -96,6 +98,20 @@ export function githubCiRunTitle(input: {
   readonly mergeSha: string;
 }): string {
   return `CI pull_request PR #${input.pullRequestNumber} head ${input.headSha} base ${input.baseSha} merge ${input.mergeSha}`;
+}
+
+export function testedMergeShaFromGithubCiRunTitle(
+  title: string | undefined,
+  input: {
+    readonly pullRequestNumber: number;
+    readonly headSha: string;
+    readonly baseSha: string;
+  },
+): string | null {
+  const prefix = `CI pull_request PR #${input.pullRequestNumber} head ${input.headSha} base ${input.baseSha} merge `;
+  if (!title?.startsWith(prefix)) return null;
+  const testedMergeSha = title.slice(prefix.length);
+  return /^[0-9a-f]{40}$/u.test(testedMergeSha) ? testedMergeSha : null;
 }
 
 export function githubCiJobsArgs(repository: string, runId: number): ReadonlyArray<string> {
@@ -138,21 +154,13 @@ export function evaluateGithubCi(input: GithubCiEvaluationInput): GithubCiEviden
     );
   }
   if (!workflowActive) return { state: "satisfied", reason: "not-expected" };
-  if (!input.mergeSha) return { state: "pending", reason: "merge-recomputing" };
-
-  const expectedTitle = githubCiRunTitle({
-    pullRequestNumber: input.pullRequestNumber,
-    headSha: input.headSha,
-    baseSha: input.baseSha,
-    mergeSha: input.mergeSha,
-  });
 
   const exactRuns = input.workflowRuns
     .filter(
       (run) =>
         run.event === "pull_request" &&
         run.head_sha === input.headSha &&
-        run.display_title === expectedTitle &&
+        testedMergeShaFromGithubCiRunTitle(run.display_title, input) !== null &&
         run.id !== undefined,
     )
     .sort(
@@ -163,7 +171,11 @@ export function evaluateGithubCi(input: GithubCiEvaluationInput): GithubCiEviden
 
   const runId = run.id;
   if (runId === undefined) return configurationFailure("Exact workflow run has no ID.");
-  const runIdentity = run.html_url ? { runId, runUrl: run.html_url } : { runId };
+  const testedMergeSha = testedMergeShaFromGithubCiRunTitle(run.display_title, input);
+  if (!testedMergeSha) return configurationFailure("Exact workflow run has no tested merge SHA.");
+  const runIdentity = run.html_url
+    ? { runId, runUrl: run.html_url, testedMergeSha }
+    : { runId, testedMergeSha };
   if (run.status !== "completed") {
     if (["queued", "in_progress", "pending", "requested", "waiting"].includes(run.status ?? "")) {
       return { state: "pending", reason: "run-in-progress", ...runIdentity };
