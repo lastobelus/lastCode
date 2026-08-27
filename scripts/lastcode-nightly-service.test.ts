@@ -39,12 +39,24 @@ it("configures one durable recovery thread only during installation", () => {
     recoveryThreadId: "e01b7101-0713-4df7-9b6b-5c46f9d507db",
   });
   expect(parseNightlyServiceArgs(["install"])).toEqual({ command: "install" });
+  expect(parseNightlyServiceArgs(["install", "--no-recovery-thread"])).toEqual({
+    command: "install",
+    clearRecoveryThread: true,
+  });
   expect(() => parseNightlyServiceArgs(["run-now", "--recovery-thread", "thread-1"])).toThrow(
     "accepted only",
   );
   expect(() => parseNightlyServiceArgs(["install", "--recovery-thread", "short"])).toThrow(
     "valid thread ID",
   );
+  expect(() =>
+    parseNightlyServiceArgs([
+      "install",
+      "--no-recovery-thread",
+      "--recovery-thread",
+      "thread-maintenance",
+    ]),
+  ).toThrow("accepts only");
 });
 
 it("requests an idle service run without terminating an active checkpoint", () => {

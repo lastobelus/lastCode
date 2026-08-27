@@ -64,6 +64,7 @@ export function renderLaunchAgentPlist(input: {
 
 export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   readonly command: "install" | "run-now" | "status" | "uninstall";
+  readonly clearRecoveryThread?: boolean;
   readonly recoveryThreadId?: string;
 } {
   const command = argv[0];
@@ -74,7 +75,7 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     command !== "uninstall"
   ) {
     throw new Error(
-      "Usage: pnpm lastcode:checkpoint:service <install|run-now|status|uninstall> [--recovery-thread <thread-id>]",
+      "Usage: pnpm lastcode:checkpoint:service <install|run-now|status|uninstall> [--recovery-thread <thread-id> | --no-recovery-thread]",
     );
   }
   if (command !== "install") {
@@ -84,6 +85,9 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     return { command } as const;
   }
   if (argv.length === 1) return { command } as const;
+  if (argv.length === 2 && argv[1] === "--no-recovery-thread") {
+    return { command, clearRecoveryThread: true } as const;
+  }
   const recoveryThreadId = argv[2];
   if (
     argv.length !== 3 ||
@@ -118,7 +122,7 @@ function run(
 function main(argv: ReadonlyArray<string>): void {
   if (Effect.runSync(HostProcessPlatform) !== "darwin")
     throw new Error("LastCode nightly scheduling requires macOS launchd.");
-  const { command, recoveryThreadId } = parseNightlyServiceArgs(argv);
+  const { clearRecoveryThread, command, recoveryThreadId } = parseNightlyServiceArgs(argv);
 
   const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: process.cwd(),
@@ -164,6 +168,7 @@ function main(argv: ReadonlyArray<string>): void {
       NodeFS.renameSync(plistPath, backupPath);
       console.log(`[lastcode:service] Disabled plist retained at ${backupPath}.`);
     }
+    if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
     return;
   }
 
@@ -195,7 +200,9 @@ function main(argv: ReadonlyArray<string>): void {
   NodeFS.mkdirSync(supervisorDirectory, { recursive: true, mode: 0o700 });
   NodeFS.copyFileSync(NodePath.join(repoRoot, "scripts", SUPERVISOR_FILE), supervisorPath);
   NodeFS.chmodSync(supervisorPath, 0o700);
-  if (recoveryThreadId) {
+  if (clearRecoveryThread) {
+    if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
+  } else if (recoveryThreadId) {
     const temporaryConfigPath = `${supervisorConfigPath}.tmp`;
     NodeFS.writeFileSync(
       temporaryConfigPath,
@@ -222,6 +229,8 @@ function main(argv: ReadonlyArray<string>): void {
     console.log(
       "[lastcode:service] Automatic recovery alerts use the configured maintenance thread.",
     );
+  } else if (clearRecoveryThread) {
+    console.log("[lastcode:service] Automatic recovery thread delivery is disabled.");
   }
 }
 

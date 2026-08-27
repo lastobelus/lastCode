@@ -131,6 +131,35 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.state.incident.deliveryAttempts).toBe(2);
   });
 
+  it("delivers every distinct blocker after thread delivery recovers", () => {
+    const first = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("first fetch blocker");
+        },
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("first fetch blocker");
+
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        runPhase: () => {
+          throw new Error("second fetch blocker");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("second fetch blocker");
+
+    expect(second.messages).toHaveLength(2);
+    expect(second.messages[0]?.message).not.toBe(second.messages[1]?.message);
+    expect(second.state.pendingIncidents).toBeUndefined();
+    expect(second.state.incident).toMatchObject({ alertDelivery: "sent" });
+  });
+
   it("sends one closure after a failed incident recovers", () => {
     const previous = fixture({
       dependencies: {

@@ -201,6 +201,13 @@ a login shell; the supervisor passes only a narrow allowlist to child processes,
 including the launchd SSH agent socket needed for Git fetches. The macOS
 notification remains a secondary signal.
 
+Disable maintenance-thread delivery explicitly (uninstalling the service also
+clears the saved destination):
+
+```bash
+pnpm lastcode:checkpoint:service install --no-recovery-thread
+```
+
 The job runs at login and hourly while the Mac is awake. Missed intervals do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.
 When the latest checkpoint is already promoted, the job exits without running
