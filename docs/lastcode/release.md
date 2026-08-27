@@ -121,10 +121,37 @@ until LastCode intentionally publishes compatible releases.
 
 ## Intel Build Publication
 
-The manually dispatched **LastCode Intel artifact** workflow accepts one exact
+The resumable **Build Intel package (macOS)** Project Action dispatches the manual
+**LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
 commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
 full CI gate on `macos-15-intel`, and builds a certificate-free x64 artifact.
+
+The agent chooses the target explicitly. First record and verify that exact remote
+tag in the current worktree:
+
+```bash
+pnpm lastcode:intel-build select \
+  --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
+```
+
+Then run the imported **Build Intel package (macOS)** Project Action. The LastCode
+environment controlling this Action must run on macOS; the actual x64 build still
+runs on GitHub's hosted Intel runner. For agent-triggered
+one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
+Action in Project Settings. The Action attaches a unique request token to the
+dispatch, waits for only the matching workflow run, and returns to the thread on
+success, workflow failure or cancellation, missing workflow configuration, or a
+run-registration timeout. It reports both the workflow-run URL and immutable
+release URL.
+
+The request is marked before dispatch so an interrupted or ambiguous transport
+result is never dispatched a second time. The Action waits for the unique token
+to appear and then records the matching run ID for later reattachment. If GitHub
+never registers it, select the tag again to create a deliberate new request.
+
+The Action only builds and publishes. It never stages, installs, promotes,
+restarts, or updates an Intel target. Those remain separate agent decisions.
 
 Successful output is attached to the installable tag as a GitHub prerelease,
 explicitly excluded from GitHub's latest-release selection. The release contains
@@ -151,8 +178,8 @@ deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
 immutable artifact.
 
-This workflow remains manual-only. Scheduling and installation are separate
-rollout gates.
+This workflow remains explicitly selected and action-dispatched. Scheduling and
+installation are separate rollout gates.
 
 ### Intel target staging
 
