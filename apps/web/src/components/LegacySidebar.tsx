@@ -577,10 +577,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     />
   );
   const threadMetaClassName = isConfirmingArchive
-    ? "pointer-events-none inline-flex w-12 justify-end opacity-0"
+    ? "pointer-events-none inline-flex w-full justify-end opacity-0"
     : !isThreadRunning
-      ? "pointer-events-none inline-flex w-12 justify-end transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
-      : "pointer-events-none inline-flex w-12 justify-end";
+      ? "pointer-events-none inline-flex w-full justify-end transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
+      : "pointer-events-none inline-flex w-full justify-end";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
@@ -979,17 +979,17 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               Empty local/worktree cells stay mounted, and the timestamp cannot
               widen the grid and push either icon sideways. */}
           <div
-            className="grid shrink-0 grid-cols-[repeat(2,0.75rem)_3rem] items-center gap-x-1 max-sm:grid-cols-[repeat(2,0.75rem)_3rem_1.5rem]"
+            className="grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-[calc(0.25rem*var(--legacy-sidebar-content-zoom))] max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
             data-testid={`thread-metadata-grid-${thread.id}`}
           >
             <span
-              className="inline-flex size-3 items-center justify-center"
+              className="inline-flex h-3 w-full items-center justify-center"
               data-thread-metadata-column="worktree"
             >
               {props.showWorktreeIndicators ? <ThreadWorktreeIndicator thread={thread} /> : null}
             </span>
             <span
-              className="inline-flex size-3 items-center justify-center"
+              className="inline-flex h-3 w-full items-center justify-center"
               data-thread-metadata-column="environment"
             >
               {showsThreadEnvironmentIcon ? (
