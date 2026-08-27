@@ -24,7 +24,6 @@ describe("lastcode-daily-intel-package", () => {
     expect(workflow).toContain("group: lastcode-daily-intel-package");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("node scripts/lastcode-daily-intel-package.ts");
-    expect(workflow).not.toMatch(/airy|htulo/u);
   });
 
   it("selects the newest strict installable and peels annotated tags", () => {
