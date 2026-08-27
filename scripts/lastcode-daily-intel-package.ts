@@ -3,7 +3,11 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off -- GitHub release automation.
 import * as NodeChildProcess from "node:child_process";
 
-import { runSelectedIntelBuild, selectIntelBuild } from "./lastcode-build-intel-package.ts";
+import {
+  createBuildIntelDependencies,
+  runSelectedIntelBuild,
+  selectIntelBuild,
+} from "./lastcode-build-intel-package.ts";
 
 const fullCommitPattern = /^[0-9a-f]{40}$/u;
 const installableTagPattern =
@@ -105,11 +109,16 @@ export async function buildLatestIntelPackage(
   } = {},
 ) {
   const target = (input.resolveLatest ?? resolveLatestRemoteInstallable)();
+  const withoutLocalLock = <T>(operation: () => T): T => operation();
   const request = (input.select ?? selectIntelBuild)(target.tag, {
     resolveTag: () => target,
+    withRequestLock: withoutLocalLock,
   });
   console.log(`[daily-intel] Selected ${request.installableTag} at ${request.installableCommit}.`);
-  return (input.run ?? runSelectedIntelBuild)();
+  return (input.run ?? runSelectedIntelBuild)({
+    ...createBuildIntelDependencies(),
+    withRequestLock: withoutLocalLock,
+  });
 }
 
 if (import.meta.main) {
