@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// LastCode-only packaged server service for the trusted htulo host.
+// LastCode-only packaged server service for a dedicated macOS x64 environment.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -173,7 +173,7 @@ export async function waitForHeadlessService(options = {}) {
         );
       }
       if (descriptor?.platform?.os !== "darwin" || descriptor?.platform?.arch !== "x64") {
-        throw new Error("readiness did not report the htulo macOS x64 server");
+        throw new Error("readiness did not report the expected macOS x64 server");
       }
       const verifyListenerOwnership = options.verifyListenerOwnership ?? verifyHeadlessListener;
       if (!verifyListenerOwnership(options)) {
