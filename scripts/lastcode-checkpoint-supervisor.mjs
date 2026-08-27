@@ -287,17 +287,28 @@ function attemptDelivery(state, config, dependencies) {
       );
       pendingIncidents = remaining;
       const currentIncident = nextState.incident;
+      const deliveredIncident = {
+        ...updatedIncident,
+        alertDelivery: "sent",
+        deliveryThreadId: recoveryThreadId,
+      };
+      const pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
+      if (
+        currentIncident?.fingerprint !== updatedIncident.fingerprint &&
+        !pendingResolutions.some(
+          (pendingIncident) => pendingIncident.fingerprint === updatedIncident.fingerprint,
+        )
+      ) {
+        pendingResolutions.push(deliveredIncident);
+      }
       nextState = Object.assign(
         {},
         nextState,
         pendingIncidents.length > 0 ? { pendingIncidents } : { pendingIncidents: undefined },
+        pendingResolutions.length > 0 ? { pendingResolutions } : {},
         currentIncident?.fingerprint === updatedIncident.fingerprint
           ? {
-              incident: {
-                ...currentIncident,
-                alertDelivery: "sent",
-                deliveryThreadId: recoveryThreadId,
-              },
+              incident: { ...currentIncident, ...deliveredIncident },
             }
           : {},
       );

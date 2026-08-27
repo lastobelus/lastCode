@@ -157,7 +157,16 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.messages).toHaveLength(2);
     expect(second.messages[0]?.message).not.toBe(second.messages[1]?.message);
     expect(second.state.pendingIncidents).toBeUndefined();
+    expect(second.state.pendingResolutions).toHaveLength(1);
     expect(second.state.incident).toMatchObject({ alertDelivery: "sent" });
+
+    const recovered = fixture({ state: second.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(2);
+    expect(recovered.messages.every(({ message }) => message.includes("resolved alert"))).toBe(
+      true,
+    );
+    expect(recovered.state.pendingResolutions).toBeUndefined();
   });
 
   it("closes every delivered blocker after distinct failures recover", () => {
