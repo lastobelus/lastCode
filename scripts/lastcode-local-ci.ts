@@ -29,7 +29,29 @@ interface VerifyPreloadStep {
   readonly label: string;
 }
 
-export type LocalCiStep = CommandStep | VerifyPreloadStep;
+interface DiffWhitespaceStep {
+  readonly kind: "diff-whitespace";
+  readonly label: string;
+}
+
+export type LocalCiStep = CommandStep | VerifyPreloadStep | DiffWhitespaceStep;
+
+export const QUICK_CI_GATE_VERSION = 1;
+
+export interface QuickCiReceipt {
+  readonly schemaVersion: 1;
+  readonly gateVersion: typeof QUICK_CI_GATE_VERSION;
+  readonly commit: string;
+  readonly baseCommit: string;
+  readonly completedAt: string;
+}
+
+export interface PrePushUpdate {
+  readonly localRef: string;
+  readonly localSha: string;
+  readonly remoteRef: string;
+  readonly remoteSha: string;
+}
 
 export interface FullCiStamp {
   readonly schemaVersion: 2;
@@ -52,6 +74,7 @@ export interface FullCiStamp {
 export interface LocalCiOptions {
   readonly mode: LocalCiMode;
   readonly dryRun: boolean;
+  readonly prePush: boolean;
   readonly checkpointTag?: string;
 }
 
@@ -67,10 +90,14 @@ export interface PreparedLocalCiRepository {
   readonly repoRoot: string;
 }
 
-export function formatLocalCiSummary(mode: LocalCiMode, commit?: string): string {
+export function formatLocalCiSummary(
+  mode: LocalCiMode,
+  commit?: string,
+  baseCommit?: string,
+): string {
   return mode === "full"
     ? `[lastcode:ci] Summary: Full local CI passed${commit ? ` for ${commit}` : ""}.`
-    : "[lastcode:ci] Summary: Quick local CI passed.";
+    : `[lastcode:ci] Summary: Quick local CI passed${commit ? ` for ${commit}` : ""}${baseCommit ? ` against ${baseCommit}` : ""}.`;
 }
 
 export function formatLocalCiFailureSummary(error: unknown): string {
@@ -91,6 +118,12 @@ export function assertSupportedNodeVersion(version = process.versions.node): voi
 }
 
 const QUICK_STEPS: ReadonlyArray<LocalCiStep> = [
+  { kind: "diff-whitespace", label: "Diff whitespace" },
+  { kind: "command", label: "Format and lint", command: "vp", args: ["check"] },
+  { kind: "command", label: "Workspace typecheck", command: "vpr", args: ["typecheck"] },
+];
+
+const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
   {
     kind: "command",
     label: "Ensure Electron runtime",
@@ -116,9 +149,6 @@ const QUICK_STEPS: ReadonlyArray<LocalCiStep> = [
     isolatedGitConfig: true,
     transferBudgetOutput: true,
   },
-];
-
-const FULL_ONLY_STEPS: ReadonlyArray<LocalCiStep> = [
   {
     kind: "command",
     label: "Resource monitor formatting",
@@ -172,6 +202,7 @@ const PRELOAD_EXPECTED_EXPORTS = [
 export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions {
   let mode: LocalCiMode = "full";
   let dryRun = false;
+  let prePush = false;
   let checkpointTag: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -184,6 +215,8 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
       mode = "quick";
     } else if (arg === "--dry-run") {
       dryRun = true;
+    } else if (arg === "--pre-push") {
+      prePush = true;
     } else if (arg === "--checkpoint") {
       checkpointTag = argv[index + 1];
       if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
@@ -193,11 +226,15 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
     }
   }
 
-  return { mode, dryRun, ...(checkpointTag ? { checkpointTag } : {}) };
+  if (prePush && mode !== "quick") {
+    throw new Error("--pre-push is only supported with --quick.");
+  }
+
+  return { mode, dryRun, prePush, ...(checkpointTag ? { checkpointTag } : {}) };
 }
 
 export function resolveLocalCiSteps(mode: LocalCiMode): ReadonlyArray<LocalCiStep> {
-  return mode === "quick" ? QUICK_STEPS : [...QUICK_STEPS, ...FULL_ONLY_STEPS];
+  return mode === "quick" ? QUICK_STEPS : FULL_STEPS;
 }
 
 export function verifyPreloadBundle(repoRoot: string): void {
@@ -212,6 +249,100 @@ export function verifyPreloadBundle(repoRoot: string): void {
       throw new Error(`Desktop preload bundle is missing '${expectedExport}'.`);
     }
   }
+}
+
+export function parsePrePushUpdates(input: string): ReadonlyArray<PrePushUpdate> {
+  return input
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const fields = line.split(/\s+/);
+      if (fields.length !== 4) {
+        throw new Error(`Invalid pre-push update: ${line}`);
+      }
+      const [localRef, localSha, remoteRef, remoteSha] = fields;
+      return {
+        localRef: localRef!,
+        localSha: localSha!,
+        remoteRef: remoteRef!,
+        remoteSha: remoteSha!,
+      };
+    });
+}
+
+export function assertPrePushTargetsHead(
+  updates: ReadonlyArray<PrePushUpdate>,
+  headCommit: string,
+): boolean {
+  if (updates.length === 0) {
+    throw new Error("The pre-push hook did not receive any ref updates.");
+  }
+  const commits = updates
+    .map(({ localSha }) => localSha)
+    .filter((localSha) => !/^0+$/.test(localSha));
+  if (commits.length === 0) return false;
+  const mismatched = commits.find((commit) => commit !== headCommit);
+  if (mismatched) {
+    throw new Error(
+      `Pre-push Quick CI only supports refs at the checked-out HEAD ${headCommit}; received ${mismatched}. Push refs separately.`,
+    );
+  }
+  return true;
+}
+
+export function resolveQuickCiReceiptPath(commonGitDir: string, commit: string): string {
+  return NodePath.resolve(commonGitDir, "lastcode-ci", "quick", `${commit}.json`);
+}
+
+export function writeQuickCiReceipt(
+  commonGitDir: string,
+  receipt: Omit<QuickCiReceipt, "schemaVersion" | "gateVersion">,
+): string {
+  const receiptPath = resolveQuickCiReceiptPath(commonGitDir, receipt.commit);
+  NodeFS.mkdirSync(NodePath.dirname(receiptPath), { recursive: true });
+  NodeFS.writeFileSync(
+    receiptPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        gateVersion: QUICK_CI_GATE_VERSION,
+        ...receipt,
+      } satisfies QuickCiReceipt,
+      null,
+      2,
+    )}\n`,
+  );
+  return receiptPath;
+}
+
+export function readQuickCiReceipt(
+  commonGitDir: string,
+  commit: string,
+): QuickCiReceipt | undefined {
+  const receiptPath = resolveQuickCiReceiptPath(commonGitDir, commit);
+  if (!NodeFS.existsSync(receiptPath)) return undefined;
+
+  const value = JSON.parse(NodeFS.readFileSync(receiptPath, "utf8")) as Partial<QuickCiReceipt>;
+  if (
+    value.schemaVersion !== 1 ||
+    value.gateVersion !== QUICK_CI_GATE_VERSION ||
+    value.commit !== commit ||
+    typeof value.baseCommit !== "string" ||
+    typeof value.completedAt !== "string"
+  ) {
+    throw new Error(`Invalid Quick CI receipt at ${receiptPath}.`);
+  }
+  return value as QuickCiReceipt;
+}
+
+export function hasMatchingQuickCiReceipt(
+  commonGitDir: string,
+  commit: string,
+  baseCommit: string,
+): boolean {
+  const receipt = readQuickCiReceipt(commonGitDir, commit);
+  return receipt?.baseCommit === baseCommit;
 }
 
 export function resolveFullCiStampPath(commonGitDir: string, commit: string): string {
@@ -440,10 +571,19 @@ export function writeVerifiedFullCiStamp(
   return writeFullCiStamp(integrity.commonGitDir, stamp);
 }
 
+export function writeVerifiedQuickCiReceipt(
+  repoRoot: string,
+  integrity: RepositoryIntegritySnapshot,
+  receipt: Omit<QuickCiReceipt, "schemaVersion" | "gateVersion">,
+): string {
+  assertRepositoryIntegrity(repoRoot, integrity);
+  return writeQuickCiReceipt(integrity.commonGitDir, receipt);
+}
+
 export function assertCleanWorktree(repoRoot: string): void {
   const status = runGit(repoRoot, ["status", "--porcelain", "--untracked-files=all"]);
   if (status) {
-    throw new Error(`Working tree must be clean for full local CI.\n${status}`);
+    throw new Error(`Working tree must be clean for local CI.\n${status}`);
   }
 }
 
@@ -456,7 +596,7 @@ export function assertBaseIsAncestor(repoRoot: string, baseCommit: string, commi
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
-      `Current branch is not based on the latest ${LASTCODE_BASE_BRANCH}. Rebase it before running full local CI.`,
+      `Current branch is not based on ${LASTCODE_BASE_BRANCH} at ${baseCommit}. Rebase it before running local CI.`,
     );
   }
 }
@@ -464,7 +604,12 @@ export function assertBaseIsAncestor(repoRoot: string, baseCommit: string, commi
 function printPlan(mode: LocalCiMode): void {
   console.log(`[lastcode:ci] ${mode} local CI plan:`);
   for (const step of resolveLocalCiSteps(mode)) {
-    const command = step.kind === "command" ? `: ${step.command} ${step.args.join(" ")}` : "";
+    const command =
+      step.kind === "command"
+        ? `: ${step.command} ${step.args.join(" ")}`
+        : step.kind === "diff-whitespace"
+          ? `: git diff --check <base>...<head>`
+          : "";
     console.log(`- ${step.label}${command}`);
   }
 }
@@ -475,12 +620,11 @@ function executeLocalCi(
   steps: ReadonlyArray<LocalCiStep>,
   repositoryIntegrity: RepositoryIntegritySnapshot,
 ): void {
-  let commitBefore: string | undefined;
+  assertCleanWorktree(repoRoot);
+  const commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
   let baseCommit: string | undefined;
   let checkpointContext: Extract<FullCiStamp["context"], { kind: "checkpoint" }> | undefined;
   if (options.mode === "full") {
-    assertCleanWorktree(repoRoot);
-    commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
     if (options.checkpointTag) {
       const installable = parseLastCodeInstallableTag(options.checkpointTag);
       if (!installable)
@@ -507,6 +651,30 @@ function executeLocalCi(
         `refs/remotes/${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH}`,
       ]);
       assertBaseIsAncestor(repoRoot, baseCommit, commitBefore);
+    }
+  } else {
+    if (!options.prePush) {
+      runProcess(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
+    }
+    baseCommit = runGit(repoRoot, [
+      "rev-parse",
+      `refs/remotes/${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH}`,
+    ]);
+    assertBaseIsAncestor(repoRoot, baseCommit, commitBefore);
+
+    if (options.prePush) {
+      const updates = parsePrePushUpdates(NodeFS.readFileSync(0, "utf8"));
+      if (!assertPrePushTargetsHead(updates, commitBefore)) {
+        console.log("[lastcode:ci] No pushed commit requires Quick CI.");
+        return;
+      }
+      if (hasMatchingQuickCiReceipt(repositoryIntegrity.commonGitDir, commitBefore, baseCommit)) {
+        console.log(
+          `[lastcode:ci] Reusing Quick CI receipt for ${commitBefore} against ${baseCommit}.`,
+        );
+        console.log(formatLocalCiSummary("quick", commitBefore, baseCommit));
+        return;
+      }
     }
   }
 
@@ -538,6 +706,10 @@ function executeLocalCi(
       console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
       if (step.kind === "verify-preload") {
         verifyPreloadBundle(repoRoot);
+        continue;
+      }
+      if (step.kind === "diff-whitespace") {
+        runProcess(repoRoot, "git", ["diff", "--check", `${baseCommit!}...${commitBefore}`]);
         continue;
       }
 
@@ -574,12 +746,13 @@ function executeLocalCi(
     NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
   }
 
-  if (options.mode === "full" && commitBefore && (baseCommit || checkpointContext)) {
-    const commitAfter = runGit(repoRoot, ["rev-parse", "HEAD"]);
-    if (commitAfter !== commitBefore) {
-      throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
-    }
-    assertCleanWorktree(repoRoot);
+  const commitAfter = runGit(repoRoot, ["rev-parse", "HEAD"]);
+  if (commitAfter !== commitBefore) {
+    throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
+  }
+  assertCleanWorktree(repoRoot);
+
+  if (options.mode === "full" && (baseCommit || checkpointContext)) {
     const stampPath = writeVerifiedFullCiStamp(repoRoot, repositoryIntegrity, {
       commit: commitBefore,
       completedAt: new Date().toISOString(),
@@ -592,8 +765,15 @@ function executeLocalCi(
     console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);
     console.log(formatLocalCiSummary("full", commitBefore));
-  } else {
-    console.log(`\n${formatLocalCiSummary("quick")}`);
+  } else if (options.mode === "quick" && baseCommit) {
+    const receiptPath = writeVerifiedQuickCiReceipt(repoRoot, repositoryIntegrity, {
+      commit: commitBefore,
+      baseCommit,
+      completedAt: new Date().toISOString(),
+    });
+    console.log(`\n[lastcode:ci] Quick local CI passed for ${commitBefore}.`);
+    console.log(`[lastcode:ci] Receipt: ${receiptPath}`);
+    console.log(formatLocalCiSummary("quick", commitBefore, baseCommit));
   }
 }
 
