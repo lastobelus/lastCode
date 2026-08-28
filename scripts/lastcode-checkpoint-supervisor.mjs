@@ -236,7 +236,7 @@ export function checkpointFailureMessage(failure, fingerprint) {
   const diagnostic = failure.diagnostic ? `Diagnostic: ${failure.diagnostic}` : null;
   return [
     `Automated LastCode checkpoint maintenance alert ${fingerprint.slice(0, 12)}.`,
-    `The hourly service failed during ${failure.phase}${nightly}.${recovery}`,
+    `The checkpoint service failed during ${failure.phase}${nightly}.${recovery}`,
     diagnostic,
     "Run lastcode-checkpoints --verbose, inspect the live daemon and retained recovery state, and address the concrete problem.",
     "The bounded service logs are ~/.lastcode/automation/nightly-checkpoint.stdout.log and nightly-checkpoint.stderr.log.",
@@ -250,7 +250,7 @@ export function checkpointResolvedMessage(incident) {
   const nightly = incident.failure.checkpointRun?.upstreamTag
     ? ` through ${incident.failure.checkpointRun.upstreamTag}`
     : "";
-  return `Automated LastCode checkpoint maintenance resolved alert ${incident.fingerprint.slice(0, 12)}${nightly}. The hourly service completed successfully again.`;
+  return `Automated LastCode checkpoint maintenance resolved alert ${incident.fingerprint.slice(0, 12)}${nightly}. The checkpoint service completed successfully again.`;
 }
 
 function sendThread(threadToolPath, threadId, message, environment) {
