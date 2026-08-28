@@ -18,6 +18,7 @@ const CHECKPOINT_ARGS = [
   "--mirror-upstream-main",
 ];
 const DIAGNOSTIC_MAX_CHARACTERS = 1_200;
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 
 function parseJson(raw, label) {
   try {
@@ -54,6 +55,151 @@ export function supervisorPaths(home = NodeOS.homedir()) {
     statePath: NodePath.join(rootDirectory, "checkpoint-service-state.json"),
     threadToolPath: NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread"),
   };
+}
+
+export function selectPrimaryWorktree(worktreeList) {
+  const primaryWorktree = worktreeList
+    .split(/\r?\n/u)
+    .find((line) => line.startsWith("worktree "))
+    ?.slice("worktree ".length);
+  if (!primaryWorktree) {
+    throw new Error("Could not resolve the repository's primary worktree.");
+  }
+  return primaryWorktree;
+}
+
+export function changedGitlink(rawDiff) {
+  const fields = rawDiff.split("\0");
+  for (let index = 0; index < fields.length; ) {
+    const metadata = fields[index++];
+    if (!metadata) continue;
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*$/u.exec(metadata);
+    if (!match) throw new Error(`Primary checkout reported invalid raw diff '${metadata}'.`);
+    const sourcePath = fields[index++];
+    if (!sourcePath) throw new Error("Primary checkout reported a raw diff without a path.");
+    const destinationPath = match[3] === "R" || match[3] === "C" ? fields[index++] : sourcePath;
+    if (!destinationPath)
+      throw new Error("Primary checkout reported a renamed diff without a path.");
+    if (match[1] === "160000" || match[2] === "160000") return sourcePath;
+  }
+  return null;
+}
+
+function assertPrimaryCheckoutReady(primaryWorktree, environment, execute) {
+  const branch = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["branch", "--show-current"],
+    environment,
+    { capture: true },
+  );
+  if (branch !== "lastcode/main") {
+    throw new Error(
+      `Primary LastCode checkout must be on lastcode/main; found '${branch || "detached HEAD"}'.`,
+    );
+  }
+  const status = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    environment,
+    { capture: true },
+  );
+  if (status) throw new Error("Primary LastCode checkout has uncommitted or untracked changes.");
+}
+
+export function refreshPrimaryCheckout(repoRoot, environment, execute = runCommand) {
+  const worktreeList = execute(
+    "checkout-refresh",
+    repoRoot,
+    "git",
+    ["worktree", "list", "--porcelain"],
+    environment,
+    { capture: true },
+  );
+  const primaryWorktree = selectPrimaryWorktree(worktreeList);
+  assertPrimaryCheckoutReady(primaryWorktree, environment, execute);
+  const previousCommit = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["rev-parse", "HEAD"],
+    environment,
+    { capture: true },
+  );
+  execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["fetch", "--no-tags", "origin", "+refs/heads/lastcode/main:refs/remotes/origin/lastcode/main"],
+    environment,
+  );
+  assertPrimaryCheckoutReady(primaryWorktree, environment, execute);
+  const verifiedCommit = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["rev-parse", "HEAD"],
+    environment,
+    { capture: true },
+  );
+  if (verifiedCommit !== previousCommit) {
+    throw new Error("Primary LastCode checkout changed while its remote was being refreshed.");
+  }
+  const promotedCommit = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["rev-parse", "refs/remotes/origin/lastcode/main"],
+    environment,
+    { capture: true },
+  );
+  if (previousCommit === promotedCommit) return;
+  const rawDiff = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["diff-tree", "-r", "--no-commit-id", "--raw", "-z", previousCommit, promotedCommit],
+    environment,
+    { capture: true, maxBuffer: GIT_MAX_BUFFER },
+  );
+  const gitlink = changedGitlink(rawDiff);
+  if (gitlink) {
+    throw new Error(`Primary LastCode checkout target changes submodule gitlink '${gitlink}'.`);
+  }
+  execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["update-ref", `refs/lastcode/primary-checkout-backups/${previousCommit}`, previousCommit],
+    environment,
+  );
+  execute(
+    "checkout-refresh",
+    repoRoot,
+    process.execPath,
+    [
+      NodePath.join(repoRoot, "scripts", "lastcode-primary-checkout-transaction.mjs"),
+      primaryWorktree,
+      previousCommit,
+      promotedCommit,
+    ],
+    environment,
+  );
+  assertPrimaryCheckoutReady(primaryWorktree, environment, execute);
+  const refreshedCommit = execute(
+    "checkout-refresh",
+    primaryWorktree,
+    "git",
+    ["rev-parse", "HEAD"],
+    environment,
+    { capture: true },
+  );
+  if (refreshedCommit !== promotedCommit) {
+    throw new Error("Primary LastCode checkout did not reach the promoted commit.");
+  }
 }
 
 export function checkpointEnvironment(
@@ -107,6 +253,7 @@ function runCommand(phase, cwd, command, args, environment, options = {}) {
       cwd,
       encoding: "utf8",
       env: environment,
+      maxBuffer: options.maxBuffer ?? 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (result.error) throw result.error;
@@ -455,6 +602,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
     notify: (title, message) => notify(title, message, environment),
+    refreshPrimaryCheckout: () => refreshPrimaryCheckout(repoRoot, environment),
     retainedRecoveryMatches: (checkpointRun) =>
       retainedRecoveryMatches(repoRoot, checkpointRun, environment),
     refreshSupervisor: () => refreshInstalledSupervisor(repoRoot, installedSupervisorPath),
@@ -516,6 +664,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       );
     }
     dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
+    phase = "checkout-refresh";
+    dependencies.refreshPrimaryCheckout();
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
