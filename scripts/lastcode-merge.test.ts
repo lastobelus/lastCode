@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { validateGithubCiForMerge, validatePullRequestForMerge } from "./lastcode-merge.ts";
+import {
+  postMergeCheckpointArguments,
+  validateGithubCiForMerge,
+  validatePullRequestForMerge,
+} from "./lastcode-merge.ts";
 
 const mergeablePullRequest = {
   number: 12,
@@ -15,6 +19,14 @@ const mergeablePullRequest = {
 } as const;
 
 describe("lastcode-merge", () => {
+  it("silently skips the optional checkpoint request on hosts without the service", () => {
+    expect(postMergeCheckpointArguments()).toEqual([
+      "scripts/lastcode-nightly-service.ts",
+      "run-now",
+      "--if-installed",
+    ]);
+  });
+
   it("accepts an open, clean LastCode PR at the exact head and base", () => {
     expect(() =>
       validatePullRequestForMerge(mergeablePullRequest, "head-sha", "base-sha"),
