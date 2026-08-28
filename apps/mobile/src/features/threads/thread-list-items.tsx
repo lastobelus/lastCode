@@ -619,7 +619,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         accessibilityLabel={`Waiting for ${runningAction.actionName}`}
         className="size-3 items-center justify-center"
       >
-        <View className="size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300" />
+        <View className="size-1.5 rounded-full bg-adaptive-yellow-500-300" />
       </View>
     ) : null;
 
