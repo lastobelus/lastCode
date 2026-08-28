@@ -65,6 +65,7 @@ export function renderLaunchAgentPlist(input: {
 export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   readonly command: "install" | "run-now" | "status" | "uninstall";
   readonly clearRecoveryThread?: boolean;
+  readonly ifInstalled?: boolean;
   readonly intervalSeconds?: number;
   readonly recoveryThreadId?: string;
 } {
@@ -76,10 +77,13 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     command !== "uninstall"
   ) {
     throw new Error(
-      "Usage: pnpm lastcode:checkpoint:service install --interval-seconds <seconds> [--recovery-thread <thread-id> | --no-recovery-thread] | <run-now|status|uninstall>",
+      "Usage: pnpm lastcode:checkpoint:service install --interval-seconds <seconds> [--recovery-thread <thread-id> | --no-recovery-thread] | run-now [--if-installed] | <status|uninstall>",
     );
   }
   if (command !== "install") {
+    if (command === "run-now" && argv.length === 2 && argv[1] === "--if-installed") {
+      return { command, ifInstalled: true } as const;
+    }
     if (argv.length !== 1) {
       throw new Error("Install options are accepted only by the install command.");
     }
@@ -138,6 +142,10 @@ export function runNowArguments(service: string): ReadonlyArray<string> {
   return ["kickstart", service];
 }
 
+export function shouldRequestRunNow(ifInstalled: boolean, plistExists: boolean): boolean {
+  return !ifInstalled || plistExists;
+}
+
 function run(
   command: string,
   args: ReadonlyArray<string>,
@@ -156,7 +164,7 @@ function run(
 function main(argv: ReadonlyArray<string>): void {
   if (Effect.runSync(HostProcessPlatform) !== "darwin")
     throw new Error("LastCode nightly scheduling requires macOS launchd.");
-  const { clearRecoveryThread, command, intervalSeconds, recoveryThreadId } =
+  const { clearRecoveryThread, command, ifInstalled, intervalSeconds, recoveryThreadId } =
     parseNightlyServiceArgs(argv);
 
   const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -193,7 +201,9 @@ function main(argv: ReadonlyArray<string>): void {
     return;
   }
   if (command === "run-now") {
+    if (!shouldRequestRunNow(ifInstalled === true, NodeFS.existsSync(plistPath))) return;
     run("launchctl", runNowArguments(service));
+    console.log("[lastcode:service] Requested an immediate installable-revision check.");
     return;
   }
   if (command === "uninstall") {

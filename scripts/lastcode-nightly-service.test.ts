@@ -4,6 +4,7 @@ import {
   parseNightlyServiceArgs,
   renderLaunchAgentPlist,
   runNowArguments,
+  shouldRequestRunNow,
 } from "./lastcode-nightly-service.ts";
 
 it("renders the deployment-defined interval in a source-only launch agent", () => {
@@ -78,8 +79,16 @@ it("configures one durable recovery thread only during installation", () => {
 });
 
 it("requests an idle service run without terminating an active checkpoint", () => {
+  expect(parseNightlyServiceArgs(["run-now"])).toEqual({ command: "run-now" });
+  expect(parseNightlyServiceArgs(["run-now", "--if-installed"])).toEqual({
+    command: "run-now",
+    ifInstalled: true,
+  });
   expect(runNowArguments("gui/501/codes.lastobelus.lastcode-nightly-checkpoint")).toEqual([
     "kickstart",
     "gui/501/codes.lastobelus.lastcode-nightly-checkpoint",
   ]);
+  expect(shouldRequestRunNow(false, false)).toBe(true);
+  expect(shouldRequestRunNow(true, true)).toBe(true);
+  expect(shouldRequestRunNow(true, false)).toBe(false);
 });
