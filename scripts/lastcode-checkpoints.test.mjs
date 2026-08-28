@@ -13,6 +13,7 @@ import {
   parseRemotePublicationState,
   parseTrailers,
   recoveryActionLines,
+  serviceFailureDetailLines,
   renderLauncher,
   selectAutomationWorktree,
   selectCheckpointTags,
@@ -274,6 +275,30 @@ describe("LastCode checkpoint dashboard", () => {
     expect(failureDetailLines(rows, true)).toEqual([
       "Failure v0.0.1-nightly.20260812.2: rebase failed · Recovery: sync/nightly/v0.0.1-nightly.20260812.2",
     ]);
+  });
+
+  it("shows supervisor failures even when checkpoint publication succeeded", () => {
+    const state = {
+      schemaVersion: 1,
+      status: "failed",
+      phase: "checkout-refresh",
+      incident: {
+        failure: {
+          phase: "checkout-refresh",
+          error: "Primary LastCode checkout has uncommitted or untracked changes.",
+          diagnostic: "git read-tree refused to overwrite file",
+        },
+      },
+    };
+
+    expect(serviceFailureDetailLines(state, false)).toEqual([
+      "Service failure (checkout-refresh): Primary LastCode checkout has uncommitted or untracked changes.",
+    ]);
+    expect(serviceFailureDetailLines(state, true)).toEqual([
+      "Service failure (checkout-refresh): Primary LastCode checkout has uncommitted or untracked changes.",
+      "Diagnostic: git read-tree refused to overwrite file",
+    ]);
+    expect(serviceFailureDetailLines({ schemaVersion: 1, status: "success" }, true)).toEqual([]);
   });
 
   it("keeps a tag with retained recovery state in the failed state", () => {
