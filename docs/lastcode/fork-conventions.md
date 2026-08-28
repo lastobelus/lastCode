@@ -309,7 +309,7 @@ upstream nightly.
 An open PR targeting `lastcode/main` pauses nightly promotion, but the automation
 continues creating immutable checkpoint tags. Promotion catches up after the PR
 queue is empty. The daemon also publishes immutable LastCode revisions for
-merged downstream work and uses the hourly run to repair a missed merge trigger.
+merged downstream work and uses a later managed run to repair a missed merge trigger.
 
 ### Inspect a specific pull request
 
