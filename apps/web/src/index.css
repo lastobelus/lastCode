@@ -783,15 +783,19 @@ html[data-rounded-project-icons] [data-slot="project-favicon"] {
   }
 
   .chat-composer-shoulder-tab {
+    --chat-composer-shoulder-tint: transparent;
+
     border-color: var(
       --chat-composer-outline,
       color-mix(in srgb, var(--contrast-foreground) 8%, transparent)
     );
-    background: color-mix(
-      in srgb,
-      var(--chat-composer-glass-surface, var(--card)) var(--glass-opacity),
-      transparent
-    );
+    background:
+      linear-gradient(var(--chat-composer-shoulder-tint), var(--chat-composer-shoulder-tint)),
+      color-mix(
+        in srgb,
+        var(--chat-composer-glass-surface, var(--card)) var(--glass-opacity),
+        transparent
+      );
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
     box-shadow: 0 -8px 24px -18px rgb(0 0 0 / 45%);
@@ -801,7 +805,15 @@ html[data-rounded-project-icons] [data-slot="project-favicon"] {
     }
 
     @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-      background: var(--chat-composer-glass-surface, var(--card));
+      background:
+        linear-gradient(var(--chat-composer-shoulder-tint), var(--chat-composer-shoulder-tint)),
+        var(--chat-composer-glass-surface, var(--card));
+    }
+
+    &[data-variant="warning"] {
+      --chat-composer-shoulder-tint: color-mix(in srgb, var(--warning) 8%, transparent);
+
+      border-color: color-mix(in srgb, var(--warning) 28%, transparent);
     }
   }
 
