@@ -9,19 +9,28 @@ const CANONICAL_UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
 const SERVICE_PLIST_NAME = "codes.lastobelus.lastcode-nightly-checkpoint.plist";
 
 export function parseOptions(argv) {
+  let checkpointIntervalSeconds;
   let dryRun = false;
   let enableNightlyWrites = false;
   let help = false;
 
-  for (const arg of argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--dry-run") dryRun = true;
     else if (arg === "--enable-nightly-writes") enableNightlyWrites = true;
-    else if (arg === "-h" || arg === "--help") help = true;
+    else if (arg === "--checkpoint-interval-seconds") {
+      const value = Number(argv[index + 1]);
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error("--checkpoint-interval-seconds requires a positive integer.");
+      }
+      checkpointIntervalSeconds = value;
+      index += 1;
+    } else if (arg === "-h" || arg === "--help") help = true;
     else throw new Error(`Unknown argument '${arg}'.`);
   }
 
-  return { dryRun, enableNightlyWrites, help };
+  return { checkpointIntervalSeconds, dryRun, enableNightlyWrites, help };
 }
 
 export function isCanonicalUpstreamUrl(value) {
@@ -30,7 +39,7 @@ export function isCanonicalUpstreamUrl(value) {
   );
 }
 
-export function setupCommands(repoRoot, nodeExecutable = process.execPath) {
+export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSeconds) {
   return [
     {
       kind: "dependencies",
@@ -41,7 +50,12 @@ export function setupCommands(repoRoot, nodeExecutable = process.execPath) {
     {
       kind: "service",
       command: nodeExecutable,
-      args: [NodePath.join(repoRoot, "scripts", "lastcode-nightly-service.ts"), "install"],
+      args: [
+        NodePath.join(repoRoot, "scripts", "lastcode-nightly-service.ts"),
+        "install",
+        "--interval-seconds",
+        String(checkpointIntervalSeconds),
+      ],
       cwd: repoRoot,
     },
     {
@@ -146,21 +160,28 @@ function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log(
-      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes [--dry-run]",
+      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes --checkpoint-interval-seconds <seconds> [--dry-run]",
     );
     console.log();
-    console.log("Installs LastCode's hourly checkpoint service and managed local-build commands.");
+    console.log(
+      "Provisions an Apple Silicon checkpoint/release coordinator with managed checkpointing and local build commands.",
+    );
     return;
   }
   const platform = run("/usr/bin/uname", ["-s"], { capture: true });
   const architecture = run("/usr/bin/uname", ["-m"], { capture: true });
   if (platform !== "Darwin" || architecture !== "arm64") {
-    throw new Error("LastCode local setup currently requires Apple Silicon macOS.");
+    throw new Error(
+      "The LastCode checkpoint/release coordinator setup currently requires Apple Silicon macOS.",
+    );
   }
   if (!options.enableNightlyWrites) {
     throw new Error(
-      "Setup installs an hourly daemon that pushes checkpoint tags and rebased branches to origin. Rerun with --enable-nightly-writes after confirming origin is your writable fork.",
+      "Setup installs checkpoint automation that pushes tags and rebased branches to origin. Rerun with --enable-nightly-writes after confirming origin is your writable fork.",
     );
+  }
+  if (options.checkpointIntervalSeconds === undefined) {
+    throw new Error("Setup requires --checkpoint-interval-seconds from deployment configuration.");
   }
 
   const repoRoot = run("git", ["rev-parse", "--show-toplevel"], {
@@ -185,7 +206,7 @@ function main(argv) {
     });
   }
 
-  const commands = setupCommands(repoRoot);
+  const commands = setupCommands(repoRoot, process.execPath, options.checkpointIntervalSeconds);
   if (options.dryRun) {
     for (const step of commands) console.log(shellDisplay(step.command, step.args));
     return;
