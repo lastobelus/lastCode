@@ -224,7 +224,7 @@ function main(argv: ReadonlyArray<string>): void {
   run("launchctl", ["bootout", service], { allowFailure: true });
   run("launchctl", ["bootstrap", domain, plistPath]);
   run("launchctl", ["kickstart", service]);
-  console.log(`[lastcode:service] Installed ${LABEL}; it runs at login and hourly.`);
+  console.log(`[lastcode:service] Installed managed checkpoint service ${LABEL}.`);
   if (recoveryThreadId) {
     console.log(
       "[lastcode:service] Automatic recovery alerts use the configured maintenance thread.",

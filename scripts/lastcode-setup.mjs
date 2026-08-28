@@ -150,7 +150,7 @@ function main(argv) {
     );
     console.log();
     console.log(
-      "Provisions an Apple Silicon checkpoint/release coordinator with hourly checkpointing and local build commands.",
+      "Provisions an Apple Silicon checkpoint/release coordinator with managed checkpointing and local build commands.",
     );
     return;
   }
@@ -163,7 +163,7 @@ function main(argv) {
   }
   if (!options.enableNightlyWrites) {
     throw new Error(
-      "Setup installs an hourly daemon that pushes checkpoint tags and rebased branches to origin. Rerun with --enable-nightly-writes after confirming origin is your writable fork.",
+      "Setup installs checkpoint automation that pushes tags and rebased branches to origin. Rerun with --enable-nightly-writes after confirming origin is your writable fork.",
     );
   }
 

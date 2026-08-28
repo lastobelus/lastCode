@@ -137,7 +137,7 @@ lastcode/revision/v0.0.34-nightly.20260816.1105.1
 ```
 
 The guarded PR merge command requests an immediate daemon run. If that request
-is missed because the service is unavailable, the normal hourly run repairs it.
+is missed because the service is unavailable, a later managed run repairs it.
 The daemon replays only the newly merged LastCode commits onto the newest
 checkpoint, smoke-tests the result, publishes the revision, and promotes it when
 the PR queue permits. The running app then discovers version

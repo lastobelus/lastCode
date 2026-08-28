@@ -31,8 +31,8 @@ application state.
 These prerequisites apply to the node that runs `lastcode:setup`; they are not
 requirements for every LastCode GUI or server node.
 
-The writable fork is essential. The checkpoint daemon does more than fetch: at
-login and hourly it rebases LastCode onto new T3 Code nightlies, pushes immutable
+The writable fork is essential. The managed checkpoint service does more than
+fetch: it rebases LastCode onto new T3 Code nightlies, pushes immutable
 `lastcode/checkpoint/*` and `lastcode/revision/*` tags, promotes
 `lastcode/main` when no LastCode pull request is open, and mirrors upstream
 `main`. Do not point `origin` at a repository you do not intend the
@@ -60,7 +60,7 @@ The explicit flag acknowledges the remote writes described above. The command:
 
 1. installs the pinned workspace dependencies;
 2. creates a detached `lastcode-automation` worktree beside the checkout;
-3. installs a macOS LaunchAgent that runs at login and hourly;
+3. installs the managed macOS checkpoint service;
 4. starts the first checkpoint run; and
 5. installs `lastcode-checkpoints`, `lastcode-build`, and `lastcode-install`
    under `~/.local/bin` with their managed files under `~/.lastcode/bin`.

@@ -123,7 +123,7 @@ checkpoint. It publishes the result as the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
 requests an immediate daemon run without interrupting one already in progress;
-the hourly schedule repairs a missed request.
+the managed checkpoint service repairs a missed request.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
@@ -208,7 +208,7 @@ clears the saved destination):
 pnpm lastcode:checkpoint:service install --no-recovery-thread
 ```
 
-The job runs at login and hourly while the Mac is awake. Missed intervals do not
+The job runs through the managed checkpoint service. Missed invocations do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.
 When the latest checkpoint is already promoted, the job exits without running
 the local push gate or pushing an unchanged branch.

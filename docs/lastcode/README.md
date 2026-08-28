@@ -49,7 +49,7 @@ pnpm run lastcode:checkpoint -- --dry-run
 # Checkpoint every missing nightly and push immutable tags.
 pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
 
-# Enable the same operation at login and hourly.
+# Enable managed background checkpointing.
 pnpm lastcode:checkpoint:service install
 
 # Install and inspect the checkpoint dashboard (eight rows by default).

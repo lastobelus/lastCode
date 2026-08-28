@@ -100,8 +100,8 @@ squash-merges with an exact-head guard and requests an immediate
 checkpoint-daemon run. The daemon publishes a new installable LastCode revision
 when no new upstream
 nightly is waiting. Failure to start the service is reported without lying about
-the already-completed GitHub merge; the hourly service run remains the repair
-path. The request never terminates a daemon run already in progress.
+the already-completed GitHub merge; the managed checkpoint service remains the
+repair path. The request never terminates a daemon run already in progress.
 
 ## Checkpoint CI
 
