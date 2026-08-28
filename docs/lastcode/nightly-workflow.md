@@ -280,7 +280,10 @@ the newest installable checkpoint or revision and whether it is on
 `lastcode/main`. A retained recovery worktree produces an `Action required`
 message with the path and a command to inspect it. Full failure errors and
 recovery branch names are shown only with `--verbose`; superseded failures are
-not actionable after the same nightly succeeds.
+not actionable after the same nightly succeeds. Failures in the surrounding
+service pipeline, including a blocked primary-checkout refresh after successful
+checkpoint publication, are read from the durable supervisor state and shown
+with their phase and reason; `--verbose` also shows any redacted command diagnostic.
 
 Successful checkpoint metadata is stored in the annotated checkpoint tag, so
 it travels with the Git repository. Failed and successful local attempts are
@@ -309,19 +312,43 @@ and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`
 and `TERM=dumb` produce plain text.
 
 Logs are written to `~/.lastcode/automation/`. Uninstalling unloads the job and
-moves its plist to a timestamped disabled backup instead of deleting it.
+moves its plist to a timestamped disabled backup instead of deleting it. It clears
+the active service state so the dashboard does not retain a stale failure after
+the daemon is removed; checkpoint run history remains available.
 The installer creates a dedicated `lastcode-automation` Git worktree. Before
 loading the launch agent, it installs that worktree's dependencies. Before each
 scheduled run, the worktree fetches and force-checks out
 `origin/lastcode/main`, reconciles its dependencies from the checked-out lockfile,
-and then runs the checkpoint command. It never uses or modifies a human
-development worktree. Uninstall leaves the automation worktree available for
-inspection.
+and then runs the checkpoint command. After a successful checkpoint run, the
+supervisor also refreshes the repository's primary `lastcode/main` checkout from
+`origin/lastcode/main`. Checkpoint promotion rebases the retained nightly stack,
+so the supervisor verifies the checkout is clean and on `lastcode/main`, fetches
+the promoted branch, and verifies both guards and the original commit again. It
+records the previous commit under `refs/lastcode/primary-checkout-backups/`, rejects
+any promoted submodule-gitlink change, and runs one native Git checkout with a
+command-scoped reference-transaction guard. While Git holds its own ref locks, that
+guard requires the `lastcode/main` update to start at the previously verified commit
+and confirms that `HEAD` still names `lastcode/main`. The checkout disables ignored-
+file overwrites and submodule recursion, so Git itself refuses concurrent local
+changes, untracked collisions, and ignored-path collisions while applying the new
+tree. A concurrent commit or branch switch makes the guard reject the update instead
+of displacing it. Because Git can stage tree changes before a reference hook rejects,
+the helper does not attempt a destructive rollback after rejection. The selected
+branch and every commit remain reachable, and any newer tracked or ignored edit is
+left untouched; Git may leave the checkout dirty for explicit recovery. The
+supervisor rechecks the branch, exact commit, and cleanliness immediately after a
+successful checkout, so an edit Git safely preserved is still reported as a refresh
+failure in the same run. The checkpoint dashboard includes that failure and its
+bounded diagnostic. Other human development worktrees are never modified.
+Uninstall leaves the automation worktree available for inspection.
 
 When a new nightly needs an isolated sync worktree, dependency bootstrap uses
 the automation worktree's installed Vite+ runner. Once installation completes,
-all smoke checks use the sync worktree's own runner. This keeps scheduled runs
-independent of shell PATH configuration and global `vp` installations.
+all smoke checks use the sync worktree's own runner. The smoke gate parses and
+formats every GitHub workflow before publication so an invalid workflow merge
+is retained for recovery instead of reaching `lastcode/main`. This keeps
+scheduled runs independent of shell PATH configuration and global `vp`
+installations.
 
 The launch agent is opt-in. Repository installation and tests never register it.
 
