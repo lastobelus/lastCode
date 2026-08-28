@@ -123,7 +123,7 @@ checkpoint. It publishes the result as the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
 requests an immediate daemon run without interrupting one already in progress;
-the hourly schedule repairs a missed request.
+the managed checkpoint service repairs a missed request.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
@@ -180,14 +180,17 @@ understood before the sequence continues.
 Install the per-user launch agent:
 
 ```bash
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
 
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
 maintenance and configure its thread ID once:
 
 ```bash
-pnpm lastcode:checkpoint:service install --recovery-thread <thread-id>
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
+  --recovery-thread <thread-id>
 ```
 
 The service reuses that thread instead of creating a new thread per failure. A
@@ -205,10 +208,12 @@ Disable maintenance-thread delivery explicitly (uninstalling the service also
 clears the saved destination):
 
 ```bash
-pnpm lastcode:checkpoint:service install --no-recovery-thread
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
+  --no-recovery-thread
 ```
 
-The job runs at login and hourly while the Mac is awake. Missed intervals do not
+The job runs through the managed checkpoint service. Missed invocations do not
 matter: every run discovers all uncheckpointed tags and catches up oldest-first.
 When the latest checkpoint is already promoted, the job exits without running
 the local push gate or pushing an unchanged branch.
@@ -242,7 +247,8 @@ Install the launch agent first so its dedicated automation worktree exists, then
 install the checkpoint dashboard as a user command:
 
 ```bash
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 pnpm run lastcode:checkpoints -- --install
 ```
 
