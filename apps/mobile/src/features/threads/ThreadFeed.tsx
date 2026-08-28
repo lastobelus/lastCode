@@ -1780,7 +1780,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
       >
         <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
         <Text
-          className="min-w-0 flex-1 font-t3-medium text-xs text-amber-800 dark:text-amber-200"
+          className="min-w-0 flex-1 font-t3-medium text-xs text-adaptive-amber-800-200"
           numberOfLines={1}
         >
           Action completed: {props.actionName} Status: {status}
@@ -1795,7 +1795,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
       {props.expanded ? (
         <ScrollView
           nestedScrollEnabled
-          className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-black/10 bg-neutral-950 px-3 py-2.5 dark:border-white/10"
+          className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-adaptive-black-a10-white-a10 bg-neutral-950 px-3 py-2.5"
         >
           <Text selectable className="font-mono text-xs leading-5 text-neutral-100">
             {props.output}
