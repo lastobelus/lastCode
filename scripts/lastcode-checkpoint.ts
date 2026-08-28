@@ -120,6 +120,10 @@ export function checkpointSmokeTypecheckCommands(): ReadonlyArray<ReadonlyArray<
   ];
 }
 
+export function checkpointSmokeWorkflowFormatCommand(): ReadonlyArray<string> {
+  return ["fmt", "--check", ".github/workflows"];
+}
+
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -668,6 +672,7 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
   run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   assertForkInvariants(worktree);
+  run(worktree, vp.isolated, checkpointSmokeWorkflowFormatCommand(), { environment });
   run(
     worktree,
     vp.isolated,
