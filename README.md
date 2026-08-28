@@ -29,8 +29,13 @@ git clone git@github.com:YOUR_GITHUB_USER/LastCode.git ~/projects/lastCode
 cd ~/projects/lastCode
 git switch lastcode/main
 git remote add upstream https://github.com/pingdotgg/t3code.git
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes
+mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
+
+Deployment configuration must set `LASTCODE_CHECKPOINT_INTERVAL_SECONDS` to a
+positive integer before running the setup command.
 
 When `lastcode-checkpoints --verbose` shows a ready installable, build and install the first app:
 
