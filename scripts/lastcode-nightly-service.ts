@@ -10,7 +10,6 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
 const LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
-const INTERVAL_SECONDS = 60 * 60;
 const SUPERVISOR_FILE = "lastcode-checkpoint-supervisor.mjs";
 
 function xml(value: string): string {
@@ -23,6 +22,7 @@ function xml(value: string): string {
 }
 
 export function renderLaunchAgentPlist(input: {
+  readonly intervalSeconds: number;
   readonly logDirectory: string;
   readonly nodePath: string;
   readonly repoRoot: string;
@@ -50,7 +50,7 @@ export function renderLaunchAgentPlist(input: {
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>${INTERVAL_SECONDS}</integer>
+  <integer>${input.intervalSeconds}</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
@@ -65,6 +65,7 @@ export function renderLaunchAgentPlist(input: {
 export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   readonly command: "install" | "run-now" | "status" | "uninstall";
   readonly clearRecoveryThread?: boolean;
+  readonly intervalSeconds?: number;
   readonly recoveryThreadId?: string;
 } {
   const command = argv[0];
@@ -75,29 +76,62 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     command !== "uninstall"
   ) {
     throw new Error(
-      "Usage: pnpm lastcode:checkpoint:service <install|run-now|status|uninstall> [--recovery-thread <thread-id> | --no-recovery-thread]",
+      "Usage: pnpm lastcode:checkpoint:service install --interval-seconds <seconds> [--recovery-thread <thread-id> | --no-recovery-thread] | <run-now|status|uninstall>",
     );
   }
   if (command !== "install") {
     if (argv.length !== 1) {
-      throw new Error("--recovery-thread is accepted only by the install command.");
+      throw new Error("Install options are accepted only by the install command.");
     }
     return { command } as const;
   }
-  if (argv.length === 1) return { command } as const;
-  if (argv.length === 2 && argv[1] === "--no-recovery-thread") {
-    return { command, clearRecoveryThread: true } as const;
+  let clearRecoveryThread = false;
+  let intervalSeconds: number | undefined;
+  let recoveryThreadId: string | undefined;
+  for (let index = 1; index < argv.length; index += 1) {
+    const option = argv[index];
+    if (option === "--interval-seconds") {
+      const value = Number(argv[index + 1]);
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error("--interval-seconds requires a positive integer.");
+      }
+      if (intervalSeconds !== undefined) {
+        throw new Error("--interval-seconds may be provided only once.");
+      }
+      intervalSeconds = value;
+      index += 1;
+      continue;
+    }
+    if (option === "--recovery-thread") {
+      const value = argv[index + 1];
+      if (!value || !/^[A-Za-z0-9-]{8,}$/u.test(value)) {
+        throw new Error("--recovery-thread requires a valid thread ID.");
+      }
+      if (clearRecoveryThread || recoveryThreadId !== undefined) {
+        throw new Error("Configure either one recovery thread or no recovery thread.");
+      }
+      recoveryThreadId = value;
+      index += 1;
+      continue;
+    }
+    if (option === "--no-recovery-thread") {
+      if (clearRecoveryThread || recoveryThreadId !== undefined) {
+        throw new Error("Configure either one recovery thread or no recovery thread.");
+      }
+      clearRecoveryThread = true;
+      continue;
+    }
+    throw new Error(`Unknown install option '${option}'.`);
   }
-  const recoveryThreadId = argv[2];
-  if (
-    argv.length !== 3 ||
-    argv[1] !== "--recovery-thread" ||
-    !recoveryThreadId ||
-    !/^[A-Za-z0-9-]{8,}$/u.test(recoveryThreadId)
-  ) {
-    throw new Error("install accepts only --recovery-thread followed by a valid thread ID.");
+  if (intervalSeconds === undefined) {
+    throw new Error("install requires --interval-seconds from deployment configuration.");
   }
-  return { command, recoveryThreadId } as const;
+  return {
+    command,
+    intervalSeconds,
+    ...(clearRecoveryThread ? { clearRecoveryThread: true } : {}),
+    ...(recoveryThreadId ? { recoveryThreadId } : {}),
+  } as const;
 }
 
 export function runNowArguments(service: string): ReadonlyArray<string> {
@@ -122,7 +156,8 @@ function run(
 function main(argv: ReadonlyArray<string>): void {
   if (Effect.runSync(HostProcessPlatform) !== "darwin")
     throw new Error("LastCode nightly scheduling requires macOS launchd.");
-  const { clearRecoveryThread, command, recoveryThreadId } = parseNightlyServiceArgs(argv);
+  const { clearRecoveryThread, command, intervalSeconds, recoveryThreadId } =
+    parseNightlyServiceArgs(argv);
 
   const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: process.cwd(),
@@ -171,6 +206,9 @@ function main(argv: ReadonlyArray<string>): void {
     if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
     return;
   }
+  if (intervalSeconds === undefined) {
+    throw new Error("Install interval was not resolved from deployment configuration.");
+  }
 
   run("git", [
     "-C",
@@ -214,6 +252,7 @@ function main(argv: ReadonlyArray<string>): void {
   NodeFS.writeFileSync(
     plistPath,
     renderLaunchAgentPlist({
+      intervalSeconds,
       logDirectory,
       nodePath: process.execPath,
       repoRoot: automationWorktree,
@@ -224,7 +263,7 @@ function main(argv: ReadonlyArray<string>): void {
   run("launchctl", ["bootout", service], { allowFailure: true });
   run("launchctl", ["bootstrap", domain, plistPath]);
   run("launchctl", ["kickstart", service]);
-  console.log(`[lastcode:service] Installed ${LABEL}; it runs at login and hourly.`);
+  console.log(`[lastcode:service] Installed managed checkpoint service ${LABEL}.`);
   if (recoveryThreadId) {
     console.log(
       "[lastcode:service] Automatic recovery alerts use the configured maintenance thread.",
