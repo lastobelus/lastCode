@@ -1,12 +1,16 @@
 # Remote Update Activation Helper
 
-LastCode contains a dormant, scripts-only transaction helper for replacing one
-Intel host's application and packaged-server LaunchAgent without making a
-half-installed selection durable. Nothing invokes or installs this helper yet.
+LastCode contains a dormant, scripts-only transaction helper for replacing an
+Intel artifact-consumer node's application and packaged-server LaunchAgent
+without making a half-installed selection durable. Nothing invokes or installs
+this helper yet.
 
-The helper intentionally supports one deployment shape: the active server is
-owned by `codes.lastobelus.lastcode.server`, the LastCode desktop app is not
-running, and that LaunchAgent holds the canonical server-owner lease. It rejects
+The helper requires the artifact consumer to also perform the packaged-server
+role during activation: the active server is owned by
+`codes.lastobelus.lastcode.server`, the LastCode desktop app is not running, and
+that LaunchAgent holds the canonical server-owner lease. This is a capability
+requirement, not a prescribed wider topology; the same node need not be a GUI
+controller, builder, version source, or release coordinator. The helper rejects
 a desktop-owned environment, simultaneous desktop and LaunchAgent presence, an
 unknown lease holder, or no active owner before stopping anything.
 
