@@ -6,6 +6,7 @@ import {
   checkpointPromotionPushArgs,
   checkpointSmokeEnvironment,
   checkpointSmokeTypecheckCommands,
+  checkpointSmokeWorkflowFormatCommand,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
@@ -91,6 +92,14 @@ it("typechecks checkpoint automation, shared clients, and the server before publ
     ["run", "--filter", "@t3tools/scripts", "typecheck"],
     ["run", "--filter", "@t3tools/client-runtime", "typecheck"],
     ["run", "--filter", "t3", "typecheck"],
+  ]);
+});
+
+it("parses and formats every GitHub workflow before publishing", () => {
+  assert.deepStrictEqual(checkpointSmokeWorkflowFormatCommand(), [
+    "fmt",
+    "--check",
+    ".github/workflows",
   ]);
 });
 
