@@ -1795,11 +1795,11 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
   if (actionFollowUp) {
     const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
     return (
-      <div className="mx-1 overflow-hidden rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06]">
+      <div className="mx-1 overflow-hidden rounded-lg border border-warning/28 bg-warning/8">
         <button
           type="button"
           aria-expanded={actionOutputExpanded}
-          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
+          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground"
           onClick={() => ctx.onToggleActionFollowUp(row.id)}
         >
           <BotIcon aria-hidden className="size-3.5 shrink-0" />
