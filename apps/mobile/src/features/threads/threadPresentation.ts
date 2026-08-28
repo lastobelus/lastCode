@@ -53,8 +53,8 @@ export function resolveThreadStatus(
     return {
       kind: "cleanup-failed",
       label: "Cleanup failed",
-      pillClassName: "bg-rose-500/12 dark:bg-rose-500/16",
-      textClassName: "text-rose-700 dark:text-rose-300",
+      pillClassName: "bg-adaptive-rose-500-a12-a16",
+      textClassName: "text-adaptive-rose-700-300",
       iconColor: "#ff453a",
       iconBackground: "rgba(255,69,58,0.22)",
       pulse: false,
@@ -65,8 +65,8 @@ export function resolveThreadStatus(
     return {
       kind: "cleanup-queued",
       label: "Deleting (Queued)",
-      pillClassName: "bg-orange-500/12 dark:bg-orange-500/16",
-      textClassName: "text-orange-700 dark:text-orange-300",
+      pillClassName: "bg-adaptive-orange-500-a12-a16",
+      textClassName: "text-adaptive-orange-700-300",
       iconColor: "#ff9f0a",
       iconBackground: "rgba(255,159,10,0.22)",
       pulse: false,
@@ -77,8 +77,8 @@ export function resolveThreadStatus(
     return {
       kind: "cleanup-deleting",
       label: "Deleting",
-      pillClassName: "bg-orange-500/12 dark:bg-orange-500/16",
-      textClassName: "text-orange-700 dark:text-orange-300",
+      pillClassName: "bg-adaptive-orange-500-a12-a16",
+      textClassName: "text-adaptive-orange-700-300",
       iconColor: "#ff9f0a",
       iconBackground: "rgba(255,159,10,0.22)",
       pulse: false,
@@ -149,8 +149,8 @@ export function resolveThreadStatus(
     return {
       kind: "waiting",
       label: "Waiting",
-      pillClassName: "bg-yellow-500/12 dark:bg-yellow-500/16",
-      textClassName: "text-yellow-700 dark:text-yellow-300",
+      pillClassName: "bg-adaptive-yellow-500-a12-a16",
+      textClassName: "text-adaptive-yellow-700-300",
       iconColor: "#eab308",
       iconBackground: "rgba(234,179,8,0.22)",
       pulse: false,
