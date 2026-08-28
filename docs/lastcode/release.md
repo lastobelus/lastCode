@@ -78,7 +78,7 @@ anything.
 Workspace test tasks run one package, one Vitest worker, and one concurrent test
 case at a time. This takes longer than the task-runner defaults but avoids
 cross-suite state leaks plus memory and CPU contention between the web, mobile,
-desktop, and server suites on the single local build machine.
+desktop, and server suites on whichever CI node runs the gate.
 
 The independent **Wait for PR** Project Action waits for both Codex review and
 the exact GitHub pull-request workflow run. GitHub CI records the PR number,
@@ -100,8 +100,8 @@ squash-merges with an exact-head guard and requests an immediate
 checkpoint-daemon run. The daemon publishes a new installable LastCode revision
 when no new upstream
 nightly is waiting. Failure to start the service is reported without lying about
-the already-completed GitHub merge; the hourly service run remains the repair
-path. The request never terminates a daemon run already in progress.
+the already-completed GitHub merge; the managed checkpoint service remains the
+repair path. The request never terminates a daemon run already in progress.
 
 ## Checkpoint CI
 
@@ -116,9 +116,9 @@ The resulting stamp binds the exact LastCode commit, installable tag, upstream
 tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
 checkpoint stamp cannot authorize a PR merge.
 
-## Apple Silicon Build
+## Apple Silicon DMG builder
 
-Build the selected checkpoint or revision:
+An Apple Silicon DMG builder builds the selected checkpoint or revision:
 
 ```bash
 pnpm lastcode:build:mac:arm64 \
@@ -139,7 +139,7 @@ Developer certificate. It is not notarized for public distribution.
 Local builds omit the hosted update feed. The built-in updater remains disabled
 until LastCode intentionally publishes compatible releases.
 
-## Intel Build Publication
+## Intel DMG build publication
 
 The resumable **Build Intel package (macOS)** Project Action dispatches the manual
 **LastCode Intel artifact** workflow for one exact
@@ -155,9 +155,11 @@ pnpm lastcode:intel-build select \
   --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 
-Then run the imported **Build Intel package (macOS)** Project Action. The LastCode
-environment controlling this Action must run on macOS; the actual x64 build still
-runs on GitHub's hosted Intel runner. For agent-triggered
+Then run the imported **Build Intel package (macOS)** Project Action. The
+LastCode environment hosting the project and Action terminal must run on macOS;
+the connected client may run anywhere, and that environment need not be an Intel
+builder. The actual x64 build runs on GitHub's hosted Intel runner. For
+agent-triggered
 one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
 Action in Project Settings. The Action attaches a unique request token to the
 dispatch, waits for only the matching workflow run, and returns to the thread on
@@ -171,7 +173,8 @@ to appear and then records the matching run ID for later reattachment. If GitHub
 never registers it, select the tag again to create a deliberate new request.
 
 The Action only builds and publishes. It never stages, installs, promotes,
-restarts, or updates an Intel target. Those remain separate agent decisions.
+restarts, or updates an Intel artifact-consumer node. Those remain separate
+agent decisions.
 
 Successful output is attached to the installable tag as a GitHub prerelease,
 explicitly excluded from GitHub's latest-release selection. The release contains
@@ -202,12 +205,12 @@ The agent-facing action remains explicitly selected. A separate daily GitHub
 workflow resolves the newest immutable installable tag, then uses the same exact
 tag, commit, request-token dispatch, and release validation path. If that Intel
 release already exists, the artifact workflow validates and reuses it without
-rebuilding. Installation remains a separate target-host decision.
+rebuilding. Installation remains a separate artifact-consumer decision.
 
-### Intel target staging
+### Intel artifact-consumer staging
 
-An Intel target can fetch the newest published immutable prerelease without
-stopping LastCode:
+An Intel artifact-consumer node can fetch the newest published immutable
+prerelease without stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
@@ -226,10 +229,11 @@ leaves the prior pending selection intact. Staging never closes admission, stops
 the app, or starts installation.
 
 `--maximum-version-host version-source.example` reads
-`/Applications/LastCode.app` on the named
-SSH host and stages only releases at or below that installed nightly. If SSH is
-unavailable or the remote version is not a LastCode nightly, staging stops
-before changing the current pending selection.
+`/Applications/LastCode.app` on a separately selected version-source node and
+stages only releases at or below that installed nightly. A version source may
+also be a GUI/controller or server node, but staging does not require that
+topology. If SSH is unavailable or the remote version is not a LastCode
+nightly, staging stops before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
@@ -246,11 +250,28 @@ infrastructure can compose:
 - `lastcode:managed-checkout` aligns an explicitly automation-owned checkout
   with a configured remote branch.
 
-The repository deliberately does not define a real deployment topology,
-machine roles, update schedule, service ordering, or concrete environment
-paths. Infrastructure code owns those decisions, including when to pause work,
-how to select a version ceiling, when to activate a staged app, and which
-checkout is reserved for automation.
+The public contracts use these independent roles:
+
+- **GUI/controller node**: runs a LastCode client and may dispatch Project
+  Actions;
+- **server node**: runs the LastCode server, either from the desktop app or the
+  packaged headless service;
+- **Apple Silicon DMG builder** and **Intel DMG builder**: produce artifacts for
+  one architecture;
+- **artifact-consumer node**: stages or installs an architecture-compatible
+  artifact;
+- **version-source node**: advertises the maximum installed nightly another
+  consumer may select;
+- **checkpoint/release coordinator**: tracks upstream nightlies, publishes
+  immutable tags, and promotes downstream revisions; and
+- **automation-owned checkout node**: exposes a checkout that infrastructure is
+  explicitly allowed to synchronize.
+
+One node may perform several roles, or every role may run on a separate node.
+The repository deliberately does not choose that topology, an update schedule,
+service ordering, or concrete environment paths. Infrastructure code owns those
+decisions, including when to pause work, how to select a version ceiling, when
+to activate a staged app, and which checkout is reserved for automation.
 
 The managed-checkout tool accepts an absolute JSON configuration:
 
@@ -281,7 +302,8 @@ operation; Git cannot lock arbitrary concurrent filesystem writes. If the ref
 moves but tree verification fails, the tool retains the target ref and reports
 the backup ref for explicit recovery instead of pretending it rolled back.
 
-State defaults to `~/.lastcode/intel-updates`. `pending.json` is the narrow,
+On an Intel artifact-consumer node, state defaults to
+`~/.lastcode/intel-updates`. `pending.json` is the narrow,
 credential-free handoff contract for later drain and activation work. It names
 the immutable tag and commit, expected version and DMG hash, and one candidate
 directory. GitHub credentials remain owned by `gh` and are not written into
