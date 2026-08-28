@@ -72,14 +72,14 @@ export function ActionResumeNotice(props: {
 
   if (action?.outcome === "running") {
     return (
-      <View className="rounded-2xl border border-yellow-400/35 bg-yellow-500/10 px-3.5 py-3 dark:border-yellow-300/20">
+      <View className="rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3">
         <View className="flex-row items-center gap-2.5">
           <SymbolView name="clock" size={18} tintColor="#eab308" type="monochrome" />
           <View className="min-w-0 flex-1">
-            <Text className="text-sm font-t3-bold text-yellow-800 dark:text-yellow-200">
+            <Text className="text-sm font-t3-bold text-adaptive-yellow-800-200">
               Waiting for {action.actionName}
             </Text>
-            <Text className="mt-0.5 text-xs text-yellow-800/75 dark:text-yellow-200/70">
+            <Text className="mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70">
               The agent will resume once this Action finishes and the thread is idle.
             </Text>
           </View>
@@ -98,7 +98,7 @@ export function ActionResumeNotice(props: {
   if (action?.delivery !== "available") return null;
 
   return (
-    <View className="rounded-2xl border border-yellow-400/35 bg-yellow-500/10 px-3.5 py-3 dark:border-yellow-300/20">
+    <View className="rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3">
       <View className="flex-row items-start gap-2.5">
         <SymbolView
           name="exclamationmark.triangle"
@@ -107,10 +107,10 @@ export function ActionResumeNotice(props: {
           type="monochrome"
         />
         <View className="min-w-0 flex-1">
-          <Text className="text-sm font-t3-bold text-yellow-800 dark:text-yellow-200">
+          <Text className="text-sm font-t3-bold text-adaptive-yellow-800-200">
             {action.actionName} was interrupted
           </Text>
-          <Text className="mt-0.5 text-xs text-yellow-800/75 dark:text-yellow-200/70">
+          <Text className="mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70">
             LastCode did not restart the command or wake the agent. Resume only the agent follow-up
             when you are ready.
           </Text>
