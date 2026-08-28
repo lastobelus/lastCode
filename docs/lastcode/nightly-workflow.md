@@ -122,8 +122,9 @@ promotion was paused, the daemon replays only the newly merged commits onto that
 checkpoint. It publishes the result as the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
-requests an immediate daemon run without interrupting one already in progress;
-the managed checkpoint service repairs a missed request.
+requests an immediate daemon run without interrupting one already in progress.
+Hosts without the optional service skip that request silently; the managed
+checkpoint service repairs a missed request where it is installed.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
