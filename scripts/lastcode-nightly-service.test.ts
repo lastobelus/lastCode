@@ -6,15 +6,16 @@ import {
   runNowArguments,
 } from "./lastcode-nightly-service.ts";
 
-it("renders an hourly source-only launch agent with escaped durable paths", () => {
+it("renders the deployment-defined interval in a source-only launch agent", () => {
   const plist = renderLaunchAgentPlist({
+    intervalSeconds: 1234,
     repoRoot: "/Users/example/LastCode & experiments",
     logDirectory: "/Users/example/.lastcode/automation",
     nodePath: "/Users/example/.local/share/mise/installs/node/24.13.1/bin/node",
     supervisorPath: "/Users/example/.lastcode/automation/bin/checkpoint supervisor.mjs",
   });
 
-  expect(plist).toContain("<integer>3600</integer>");
+  expect(plist).toContain("<integer>1234</integer>");
   expect(plist).toContain("node/24.13.1/bin/node");
   expect(plist).toContain("checkpoint supervisor.mjs");
   expect(plist).not.toContain("/bin/zsh");
@@ -31,32 +32,49 @@ it("configures one durable recovery thread only during installation", () => {
   expect(
     parseNightlyServiceArgs([
       "install",
+      "--interval-seconds",
+      "1234",
       "--recovery-thread",
       "e01b7101-0713-4df7-9b6b-5c46f9d507db",
     ]),
   ).toEqual({
     command: "install",
+    intervalSeconds: 1234,
     recoveryThreadId: "e01b7101-0713-4df7-9b6b-5c46f9d507db",
   });
-  expect(parseNightlyServiceArgs(["install"])).toEqual({ command: "install" });
-  expect(parseNightlyServiceArgs(["install", "--no-recovery-thread"])).toEqual({
+  expect(
+    parseNightlyServiceArgs(["install", "--interval-seconds", "1234", "--no-recovery-thread"]),
+  ).toEqual({
     command: "install",
     clearRecoveryThread: true,
+    intervalSeconds: 1234,
   });
   expect(() => parseNightlyServiceArgs(["run-now", "--recovery-thread", "thread-1"])).toThrow(
     "accepted only",
   );
-  expect(() => parseNightlyServiceArgs(["install", "--recovery-thread", "short"])).toThrow(
-    "valid thread ID",
+  expect(() =>
+    parseNightlyServiceArgs([
+      "install",
+      "--interval-seconds",
+      "1234",
+      "--recovery-thread",
+      "short",
+    ]),
+  ).toThrow("valid thread ID");
+  expect(() => parseNightlyServiceArgs(["install"])).toThrow("requires --interval-seconds");
+  expect(() => parseNightlyServiceArgs(["install", "--interval-seconds", "not-a-number"])).toThrow(
+    "positive integer",
   );
   expect(() =>
     parseNightlyServiceArgs([
       "install",
+      "--interval-seconds",
+      "1234",
       "--no-recovery-thread",
       "--recovery-thread",
       "thread-maintenance",
     ]),
-  ).toThrow("accepts only");
+  ).toThrow("either one recovery thread");
 });
 
 it("requests an idle service run without terminating an active checkpoint", () => {
