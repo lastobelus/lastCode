@@ -2,7 +2,8 @@
 
 LastCode can turn immutable local checkpoint and LastCode revision tags into an
 in-app update without publishing a release or using GitHub Actions. This is a
-personal-machine workflow, not a public distribution channel.
+local Apple Silicon artifact builder and consumer workflow, not a public
+distribution channel.
 
 ## Opt in
 
@@ -18,7 +19,8 @@ Code's state.
 Before enabling it, install the checkpoint service and dashboard:
 
 ```bash
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 pnpm run lastcode:checkpoints -- --install
 pnpm run lastcode:build -- --install
 pnpm run lastcode:install -- --install
@@ -136,7 +138,7 @@ lastcode/revision/v0.0.34-nightly.20260816.1105.1
 ```
 
 The guarded PR merge command requests an immediate daemon run. If that request
-is missed because the service is unavailable, the normal hourly run repairs it.
+is missed because the service is unavailable, a later managed run repairs it.
 The daemon replays only the newly merged LastCode commits onto the newest
 checkpoint, smoke-tests the result, publishes the revision, and promotes it when
 the PR queue permits. The running app then discovers version
