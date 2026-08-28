@@ -146,6 +146,16 @@ export function shouldRequestRunNow(ifInstalled: boolean, plistExists: boolean):
   return !ifInstalled || plistExists;
 }
 
+export function shouldRunNightlyServiceCommand(
+  command: "install" | "run-now" | "status" | "uninstall",
+  ifInstalled: boolean,
+  platform: string,
+): boolean {
+  if (platform === "darwin") return true;
+  if (command === "run-now" && ifInstalled) return false;
+  throw new Error("LastCode nightly scheduling requires macOS launchd.");
+}
+
 function run(
   command: string,
   args: ReadonlyArray<string>,
@@ -162,10 +172,16 @@ function run(
 }
 
 function main(argv: ReadonlyArray<string>): void {
-  if (Effect.runSync(HostProcessPlatform) !== "darwin")
-    throw new Error("LastCode nightly scheduling requires macOS launchd.");
   const { clearRecoveryThread, command, ifInstalled, intervalSeconds, recoveryThreadId } =
     parseNightlyServiceArgs(argv);
+  if (
+    !shouldRunNightlyServiceCommand(
+      command,
+      ifInstalled === true,
+      Effect.runSync(HostProcessPlatform),
+    )
+  )
+    return;
 
   const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: process.cwd(),
