@@ -258,6 +258,8 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("[lastcode:ci] Summary: all checks passed");
     expect(markup).not.toContain("full output hidden while collapsed");
     expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("border-warning/28 bg-warning/8");
+    expect(markup).toContain("text-warning-foreground");
   });
 
   it("shows the validated outcome when an Action has no exit code", () => {
