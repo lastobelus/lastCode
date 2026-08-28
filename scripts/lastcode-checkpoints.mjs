@@ -451,7 +451,7 @@ function installCommand(repoRoot, home) {
   const automationWorktree = findAutomationWorktree(repoRoot);
   if (!automationWorktree) {
     throw new Error(
-      "LastCode automation worktree is not installed. Run pnpm lastcode:checkpoint:service install first.",
+      "LastCode automation worktree is not installed. Install the checkpoint service with a deployment-defined interval first.",
     );
   }
   NodeFS.mkdirSync(binDirectory, { recursive: true });
