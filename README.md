@@ -15,7 +15,12 @@ Use LastCode with that additional risk in mind. For the smaller upstream surface
 
 LastCode is currently a personal source-build workflow for Apple Silicon macOS, not a public binary distribution. It installs as `/Applications/LastCode.app` and keeps its bundle identity, application state (`~/.lastcode`), Electron profile, single-instance lock, and URL schemes separate from T3 Code. Both apps can therefore remain installed and run on the same Mac.
 
-The setup mirrors the maintainer's arrangement: a personal writable GitHub fork, a dedicated automation worktree, and a macOS daemon that rebases LastCode onto T3 Code nightlies at login and hourly. The daemon pushes checkpoint and revision tags, promotes `lastcode/main` when no LastCode pull request is open, and mirrors upstream `main`, so do not install it against an `origin` you do not intend to update.
+The setup provisions a checkpoint/release coordinator for a writable GitHub
+fork, including a dedicated automation worktree and a managed macOS service.
+Deployment configuration supplies the service cadence. The coordinator pushes
+checkpoint and revision tags, promotes `lastcode/main` when no LastCode pull
+request is open, and mirrors upstream `main`, so do not install it against an
+`origin` you do not intend to update.
 
 After installing Git, [GitHub CLI](https://cli.github.com/), [mise](https://mise.jdx.dev/), [Vite+](https://viteplus.dev/guide/), and [fzf](https://github.com/junegunn/fzf), fork this repository and run:
 
@@ -24,8 +29,13 @@ git clone git@github.com:YOUR_GITHUB_USER/LastCode.git ~/projects/lastCode
 cd ~/projects/lastCode
 git switch lastcode/main
 git remote add upstream https://github.com/pingdotgg/t3code.git
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes
+mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
+
+Deployment configuration must set `LASTCODE_CHECKPOINT_INTERVAL_SECONDS` to a
+positive integer before running the setup command.
 
 When `lastcode-checkpoints --verbose` shows a ready installable, build and install the first app:
 
