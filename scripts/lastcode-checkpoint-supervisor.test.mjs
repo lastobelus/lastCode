@@ -484,16 +484,16 @@ describe("LastCode checkpoint supervisor", () => {
           SSH_AUTH_SOCK: "/tmp/agent.sock",
           ELECTRON_RUN_AS_NODE: "1",
           SECRET_TOKEN: "do-not-copy",
-          USER: "lasto",
+          USER: "example-user",
         },
-        "/Users/lasto",
+        "/Users/example",
         "/opt/pinned-node/bin/node",
       ),
     ).toEqual({
-      HOME: "/Users/lasto",
+      HOME: "/Users/example",
       PATH: "/opt/pinned-node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
       SSH_AUTH_SOCK: "/tmp/agent.sock",
-      USER: "lasto",
+      USER: "example-user",
     });
   });
 
