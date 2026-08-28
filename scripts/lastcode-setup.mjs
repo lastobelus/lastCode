@@ -149,13 +149,17 @@ function main(argv) {
       "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes [--dry-run]",
     );
     console.log();
-    console.log("Installs LastCode's hourly checkpoint service and managed local-build commands.");
+    console.log(
+      "Provisions an Apple Silicon checkpoint/release coordinator with hourly checkpointing and local build commands.",
+    );
     return;
   }
   const platform = run("/usr/bin/uname", ["-s"], { capture: true });
   const architecture = run("/usr/bin/uname", ["-m"], { capture: true });
   if (platform !== "Darwin" || architecture !== "arm64") {
-    throw new Error("LastCode local setup currently requires Apple Silicon macOS.");
+    throw new Error(
+      "The LastCode checkpoint/release coordinator setup currently requires Apple Silicon macOS.",
+    );
   }
   if (!options.enableNightlyWrites) {
     throw new Error(

@@ -100,19 +100,21 @@ describe("LastCode checkpoint dashboard", () => {
   it("requires the dedicated automation worktree for a durable installation", () => {
     expect(
       selectAutomationWorktree(
-        "worktree /Users/lasto/projects/lastCode\n\nworktree /Users/lasto/projects/lastCode-worktrees/lastcode-automation\n",
+        "worktree /Users/example/projects/lastCode\n\nworktree /Users/example/projects/lastCode-worktrees/lastcode-automation\n",
       ),
-    ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-automation");
-    expect(selectAutomationWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+    ).toBe("/Users/example/projects/lastCode-worktrees/lastcode-automation");
+    expect(selectAutomationWorktree("worktree /Users/example/projects/lastCode\n")).toBeUndefined();
   });
 
   it("finds the retained nightly recovery worktree", () => {
     expect(
       selectNightlySyncWorktree(
-        "worktree /Users/lasto/projects/lastCode\n\nworktree /Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync\n",
+        "worktree /Users/example/projects/lastCode\n\nworktree /Users/example/projects/lastCode-worktrees/lastcode-nightly-sync\n",
       ),
-    ).toBe("/Users/lasto/projects/lastCode-worktrees/lastcode-nightly-sync");
-    expect(selectNightlySyncWorktree("worktree /Users/lasto/projects/lastCode\n")).toBeUndefined();
+    ).toBe("/Users/example/projects/lastCode-worktrees/lastcode-nightly-sync");
+    expect(
+      selectNightlySyncWorktree("worktree /Users/example/projects/lastCode\n"),
+    ).toBeUndefined();
   });
 
   it("shows the complete recovery lifecycle for a retained rebase", () => {

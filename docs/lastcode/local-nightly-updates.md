@@ -2,7 +2,8 @@
 
 LastCode can turn immutable local checkpoint and LastCode revision tags into an
 in-app update without publishing a release or using GitHub Actions. This is a
-personal-machine workflow, not a public distribution channel.
+local Apple Silicon artifact builder and consumer workflow, not a public
+distribution channel.
 
 ## Opt in
 
