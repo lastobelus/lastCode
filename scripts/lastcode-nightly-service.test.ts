@@ -1,12 +1,29 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This filesystem test verifies removal of durable launchd service state.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { expect, it } from "vite-plus/test";
 
 import {
+  clearNightlyServiceState,
   parseNightlyServiceArgs,
   renderLaunchAgentPlist,
   runNowArguments,
   shouldRequestRunNow,
   shouldRunNightlyServiceCommand,
 } from "./lastcode-nightly-service.ts";
+
+it("clears stale supervisor state when the service is removed", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-service-state-"));
+  const statePath = NodePath.join(directory, "checkpoint-service-state.json");
+  NodeFS.writeFileSync(statePath, '{"schemaVersion":1,"status":"failed"}\n');
+
+  clearNightlyServiceState(directory);
+
+  expect(NodeFS.existsSync(statePath)).toBe(false);
+  NodeFS.rmSync(directory, { recursive: true });
+});
 
 it("renders the deployment-defined interval in a source-only launch agent", () => {
   const plist = renderLaunchAgentPlist({
