@@ -33,6 +33,7 @@ describe("ComposerActionResumeBadge", () => {
     );
 
     expect(markup).toContain('data-composer-action-resume-badge="true"');
+    expect(markup).toContain('data-variant="warning"');
     expect(markup).toContain("chat-composer-shoulder-tab");
     expect(markup).toContain("lucide-rotate-ccw-clock");
     expect(markup).toContain("Deploy preview");

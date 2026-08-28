@@ -1408,7 +1408,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
   if (actionFollowUp) {
     const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
     return (
-      <div className="mx-1 overflow-hidden rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06]">
+      <div className="mx-1 overflow-hidden rounded-lg border border-warning/28 bg-warning/8">
         <button
           type="button"
           aria-expanded={actionOutputExpanded}
