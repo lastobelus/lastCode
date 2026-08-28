@@ -1412,7 +1412,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
         <button
           type="button"
           aria-expanded={actionOutputExpanded}
-          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-yellow-800 dark:text-yellow-200"
+          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground"
           onClick={() => ctx.onToggleActionFollowUp(row.id)}
         >
           <BotIcon aria-hidden className="size-3.5 shrink-0" />
