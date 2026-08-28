@@ -1,12 +1,14 @@
 # Packaged Server Runtime Foundation
 
-LastCode's macOS headless service must run the server shipped inside an exact LastCode desktop
-artifact. It must never resolve `t3` from npm or reuse the upstream service's
-`node_modules/t3/dist/bin.mjs` convention.
+LastCode's macOS headless-server role must run the server shipped inside an
+exact LastCode desktop artifact. It must never resolve `t3` from npm or reuse
+the upstream service's `node_modules/t3/dist/bin.mjs` convention.
 
-This document describes the preparation boundary implemented for the Intel service. It does not
-activate a LaunchAgent. Pending-DMG activation and the live-service handoff remain a separate
-update step.
+This document describes the preparation boundary implemented for an Intel
+packaged-server node. That node may also be the Intel artifact consumer, but it
+need not be a GUI/controller, builder, version source, or release coordinator.
+Preparation does not activate a LaunchAgent. Pending-DMG activation and the
+live-service handoff remain a separate update step.
 
 ## Runtime identity
 
@@ -104,8 +106,9 @@ the LaunchAgent itself.
 
 ## Remaining acceptance work
 
-Activation must still integrate with the pending-DMG updater and service-owner lease. End-to-end
-QA remains required on Intel macOS for launchd login/logout behavior, disabled Login Items,
-provider discovery through mise, one real read-only thread, private remote reachability, sleep,
-TCC attribution, unexpected-exit restart, rollback, and proof that the desktop and headless
-service cannot own the same LastCode home concurrently.
+Activation must still integrate with the pending-DMG updater and service-owner
+lease. End-to-end QA remains required on an Intel packaged-server node for
+launchd login/logout behavior, disabled Login Items, provider discovery through
+mise, one real read-only thread, private remote reachability, sleep, TCC
+attribution, unexpected-exit restart, rollback, and proof that the desktop and
+headless service cannot own the same LastCode home concurrently.
