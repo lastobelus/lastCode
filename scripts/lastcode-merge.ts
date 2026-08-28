@@ -80,6 +80,10 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
   );
 }
 
+export function postMergeCheckpointArguments(): ReadonlyArray<string> {
+  return ["scripts/lastcode-nightly-service.ts", "run-now", "--if-installed"];
+}
+
 function runCommand(
   repoRoot: string,
   command: string,
@@ -189,8 +193,7 @@ function main(argv: ReadonlyArray<string>): void {
     commit,
   ]);
   try {
-    runCommand(repoRoot, process.execPath, ["scripts/lastcode-nightly-service.ts", "run-now"]);
-    console.log("[lastcode:merge] Requested an immediate installable-revision check.");
+    runCommand(repoRoot, process.execPath, postMergeCheckpointArguments());
   } catch (error) {
     console.warn(
       `[lastcode:merge] Merge succeeded, but the checkpoint service could not be started: ${error instanceof Error ? error.message : String(error)}`,
