@@ -9,11 +9,20 @@ import {
 
 describe("lastcode-setup", () => {
   it("parses the explicit acknowledgement of nightly writes", () => {
-    expect(parseOptions(["--enable-nightly-writes", "--dry-run"])).toEqual({
+    expect(
+      parseOptions([
+        "--enable-nightly-writes",
+        "--checkpoint-interval-seconds",
+        "1234",
+        "--dry-run",
+      ]),
+    ).toEqual({
+      checkpointIntervalSeconds: 1234,
       dryRun: true,
       enableNightlyWrites: true,
       help: false,
     });
+    expect(() => parseOptions(["--checkpoint-interval-seconds", "0"])).toThrow("positive integer");
     expect(() => parseOptions(["--surprise"])).toThrow("Unknown argument");
   });
 
@@ -25,10 +34,16 @@ describe("lastcode-setup", () => {
   });
 
   it("installs dependencies, the service, and all managed commands", () => {
-    const commands = setupCommands("/repo", "/node");
+    const commands = setupCommands("/repo", "/node", 1234);
     expect(commands.map(({ command, args }) => [command, ...args])).toEqual([
       ["vp", "install", "--frozen-lockfile"],
-      ["/node", "/repo/scripts/lastcode-nightly-service.ts", "install"],
+      [
+        "/node",
+        "/repo/scripts/lastcode-nightly-service.ts",
+        "install",
+        "--interval-seconds",
+        "1234",
+      ],
       ["/node", "/repo/scripts/lastcode-checkpoints.mjs", "--install"],
       ["/node", "/repo/scripts/lastcode-build.mjs", "--install"],
       ["/node", "/repo/scripts/lastcode-install.mjs", "--install"],
@@ -36,7 +51,7 @@ describe("lastcode-setup", () => {
   });
 
   it("disables a newly installed service when a later helper fails", () => {
-    const commands = setupCommands("/repo", "/node");
+    const commands = setupCommands("/repo", "/node", 1234);
     const executed = [];
 
     expect(() =>
@@ -57,7 +72,7 @@ describe("lastcode-setup", () => {
   });
 
   it("preserves a service that existed before a failed rerun", () => {
-    const commands = setupCommands("/repo", "/node");
+    const commands = setupCommands("/repo", "/node", 1234);
     const executed = [];
 
     expect(() =>
