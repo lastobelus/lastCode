@@ -142,6 +142,11 @@ export function runNowArguments(service: string): ReadonlyArray<string> {
   return ["kickstart", service];
 }
 
+export function clearNightlyServiceState(logDirectory: string): void {
+  const statePath = NodePath.join(logDirectory, "checkpoint-service-state.json");
+  if (NodeFS.existsSync(statePath)) NodeFS.rmSync(statePath);
+}
+
 export function shouldRequestRunNow(ifInstalled: boolean, plistExists: boolean): boolean {
   return !ifInstalled || plistExists;
 }
@@ -230,6 +235,7 @@ function main(argv: ReadonlyArray<string>): void {
       console.log(`[lastcode:service] Disabled plist retained at ${backupPath}.`);
     }
     if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
+    clearNightlyServiceState(logDirectory);
     return;
   }
   if (intervalSeconds === undefined) {
