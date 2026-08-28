@@ -6,6 +6,12 @@ building an application are deliberately separate operations: every nightly can
 be checkpointed, merged LastCode work can become an ordered revision, and only
 selected installable tags need full local CI and a build.
 
+The workflow is described in terms of independent capabilities: GUI/controller
+nodes, server nodes, architecture-specific DMG builders, artifact consumers,
+version sources, checkpoint/release coordinators, and automation-owned
+checkouts. Deployments may co-locate any of these roles or keep them separate;
+this public repository does not prescribe concrete hosts or topology.
+
 This directory is the deliberate namespace for LastCode-only contributor and
 operations documentation. Product documentation and material intended for an
 upstream contribution continue to use T3 Code's audience-based documentation
@@ -35,7 +41,9 @@ directories.
 
 ```bash
 # Provision a personal checkout, daemon, and managed helper commands.
-pnpm run lastcode:setup -- --enable-nightly-writes
+pnpm run lastcode:setup -- \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
@@ -43,8 +51,9 @@ pnpm run lastcode:checkpoint -- --dry-run
 # Checkpoint every missing nightly and push immutable tags.
 pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
 
-# Enable the same operation at login and hourly.
-pnpm lastcode:checkpoint:service install
+# Enable managed background checkpointing.
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 
 # Install and inspect the checkpoint dashboard (eight rows by default).
 pnpm run lastcode:checkpoints -- --install
