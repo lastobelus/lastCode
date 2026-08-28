@@ -33,7 +33,9 @@ describe("ComposerActionResumeBadge", () => {
     );
 
     expect(markup).toContain('data-composer-action-resume-badge="true"');
+    expect(markup).toContain('data-variant="warning"');
     expect(markup).toContain("chat-composer-shoulder-tab");
+    expect(markup).toContain("text-warning-foreground");
     expect(markup).toContain("lucide-rotate-ccw-clock");
     expect(markup).toContain("Deploy preview");
     expect(markup).toContain("Running");
@@ -85,6 +87,7 @@ describe("ComposerActionResumeDrawer", () => {
 
     expect(markup).toContain('data-chat-composer-action-resume-drawer="true"');
     expect(markup).toContain('data-variant="warning"');
+    expect(markup).toContain("bg-warning");
     expect(markup).toContain("vp run deploy:preview");
     expect(markup).toContain(
       "When it finishes, LastCode resumes the agent once this thread is idle",
