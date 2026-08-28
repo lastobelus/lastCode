@@ -52,7 +52,7 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
         aria-expanded={expanded}
         aria-label={label}
         disabled={disabled}
-        className="shrink-0 gap-1 px-1.5 text-yellow-700 dark:text-yellow-300"
+        className="shrink-0 gap-1 px-1.5 text-warning-foreground"
         onClick={onToggle}
         onPointerDown={(event) => event.preventDefault()}
       >
@@ -65,14 +65,15 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
 
   return (
     <div
-      className="chat-composer-shoulder-tab absolute -top-7 left-4 right-4 z-0 flex h-8 items-center rounded-t-xl border border-b-0 px-2 pb-1 text-xs leading-none text-yellow-700 dark:text-yellow-300"
+      className="chat-composer-shoulder-tab absolute -top-7 left-4 right-4 z-0 flex h-8 items-center rounded-t-xl border border-b-0 px-2 pb-1 text-xs leading-none text-warning-foreground"
       data-composer-action-resume-badge="true"
+      data-variant="warning"
     >
       <button
         type="button"
         aria-expanded={expanded}
         aria-label={label}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 self-stretch text-left hover:text-yellow-800 dark:hover:text-yellow-200"
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 self-stretch text-left"
         onClick={onToggle}
         onPointerDown={(event) => event.preventDefault()}
       >
@@ -114,15 +115,12 @@ export const ComposerActionResumeDrawer = memo(function ComposerActionResumeDraw
           onClick={onCollapse}
           onPointerDown={(event) => event.preventDefault()}
         >
-          <RotateCcwClockIcon
-            aria-hidden
-            className="size-3.5 shrink-0 text-yellow-700 dark:text-yellow-300"
-          />
+          <RotateCcwClockIcon aria-hidden className="size-3.5 shrink-0 text-warning-foreground" />
           <span className="min-w-0 flex-1 truncate font-medium text-foreground">
             {action.action.actionName}
           </span>
-          <span className="inline-flex shrink-0 items-center gap-1.5 text-yellow-700 dark:text-yellow-300">
-            <span aria-hidden className="size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300" />
+          <span className="inline-flex shrink-0 items-center gap-1.5 text-warning-foreground">
+            <span aria-hidden className="size-1.5 rounded-full bg-warning" />
             Running for <ActionElapsed startedAt={action.action.startedAt} />
           </span>
         </button>
