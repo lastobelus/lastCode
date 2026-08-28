@@ -150,6 +150,28 @@ function readRuns(home) {
     });
 }
 
+export function readCheckpointServiceState(home) {
+  const statePath = NodePath.join(home, ".lastcode", "automation", "checkpoint-service-state.json");
+  if (!NodeFS.existsSync(statePath)) return null;
+  try {
+    const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8"));
+    return state?.schemaVersion === 1 && ["failed", "success"].includes(state.status)
+      ? state
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function serviceFailureDetailLines(state, verbose) {
+  if (state?.status !== "failed" || !state.incident?.failure) return [];
+  const failure = state.incident.failure;
+  const phase = failure.phase ?? state.phase ?? "unknown phase";
+  const lines = [`Service failure (${phase}): ${failure.error ?? "unknown error"}`];
+  if (verbose && failure.diagnostic) lines.push(`Diagnostic: ${failure.diagnostic}`);
+  return lines;
+}
+
 export function latestRunsByUpstreamTag(records) {
   const latest = new Map();
   for (const record of records) latest.set(record.upstreamTag, record);
@@ -760,6 +782,9 @@ function printDashboard(repoRoot, home, count, verbose) {
     : undefined;
   console.log("");
   console.log(style(ansi.lavender, daemon.summary));
+  for (const detail of serviceFailureDetailLines(readCheckpointServiceState(home), verbose)) {
+    console.log(style(ansi.error, detail));
+  }
   console.log(
     style(
       freshness === "Up to date"

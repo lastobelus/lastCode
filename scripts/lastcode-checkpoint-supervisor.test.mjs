@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -9,10 +10,14 @@ import {
   checkpointEnvironment,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
+  changedGitlink,
   latestFailedCheckpointRun,
+  refreshPrimaryCheckout,
   refreshInstalledSupervisor,
   runCheckpointSupervisor,
+  selectPrimaryWorktree,
 } from "./lastcode-checkpoint-supervisor.mjs";
+import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
 
 function fixture(overrides = {}) {
   const states = [];
@@ -31,6 +36,7 @@ function fixture(overrides = {}) {
     loadState: () => state,
     now: () => `2026-08-26T00:00:0${now++}.000Z`,
     notify: vi.fn(),
+    refreshPrimaryCheckout: vi.fn(),
     refreshSupervisor: vi.fn(),
     runPhase: vi.fn(),
     sendThread: (threadId, message) => messages.push({ message, threadId }),
@@ -65,8 +71,371 @@ describe("LastCode checkpoint supervisor", () => {
       "checkpoint",
     ]);
     expect(test.dependencies.refreshSupervisor).toHaveBeenCalledOnce();
+    expect(test.dependencies.refreshPrimaryCheckout).toHaveBeenCalledOnce();
     expect(test.messages).toEqual([]);
     expect(test.states.at(-1)).toMatchObject({ status: "success", phase: "complete" });
+  });
+
+  it("selects the repository's primary checkout", () => {
+    expect(
+      selectPrimaryWorktree(
+        "worktree /srv/example/lastCode\n\nworktree /srv/example/lastCode-worktrees/lastcode-automation\n",
+      ),
+    ).toBe("/srv/example/lastCode");
+  });
+
+  it("detects every changed submodule gitlink", () => {
+    const rawDiff = ":160000 160000 1111111 2222222 M\0.repos/example\0";
+    expect(changedGitlink(rawDiff)).toBe(".repos/example");
+    expect(changedGitlink(":100644 100644 1111111 2222222 M\0README.md\0")).toBeNull();
+  });
+
+  it("uses a guarded native checkout to preserve ignored local content", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-checkout-"));
+    const git = (args, options = {}) => {
+      const result = NodeChildProcess.spawnSync("git", args, {
+        cwd: directory,
+        encoding: "utf8",
+        input: options.input,
+      });
+      if (result.status !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    };
+    git(["init", "--quiet", "--initial-branch=lastcode/main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, ".gitignore"), "local.env\n");
+    git(["add", ".gitignore"]);
+    git(["commit", "--quiet", "--message", "previous"]);
+    const previousCommit = git(["rev-parse", "HEAD"]);
+    const localPath = NodePath.join(directory, "local.env");
+    NodeFS.writeFileSync(localPath, "promoted\n");
+    git(["add", "--force", "local.env"]);
+    git(["commit", "--quiet", "--message", "promoted"]);
+    const promotedCommit = git(["rev-parse", "HEAD"]);
+    git(["reset", "--hard", previousCommit]);
+    NodeFS.writeFileSync(localPath, "local\n");
+
+    await expect(
+      refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit),
+    ).rejects.toThrow("would be overwritten");
+    expect(NodeFS.readFileSync(localPath, "utf8")).toBe("local\n");
+    expect(git(["rev-parse", "HEAD"])).toBe(previousCommit);
+    expect(git(["branch", "--show-current"])).toBe("lastcode/main");
+
+    NodeFS.rmSync(localPath);
+    await refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit);
+    expect(git(["rev-parse", "HEAD"])).toBe(promotedCommit);
+    expect(git(["branch", "--show-current"])).toBe("lastcode/main");
+    expect(NodeFS.readFileSync(localPath, "utf8")).toBe("promoted\n");
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("preserves a tracked edit that appears immediately before checkout", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-checkout-"));
+    const git = (args) => {
+      const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    };
+    git(["init", "--quiet", "--initial-branch=lastcode/main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    const trackedPath = NodePath.join(directory, "tracked.txt");
+    NodeFS.writeFileSync(trackedPath, "previous\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "previous"]);
+    const previousCommit = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(trackedPath, "promoted\n");
+    git(["commit", "--quiet", "--all", "--message", "promoted"]);
+    const promotedCommit = git(["rev-parse", "HEAD"]);
+    git(["reset", "--hard", previousCommit]);
+
+    await expect(
+      refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit, {
+        beforeCheckout: () => NodeFS.writeFileSync(trackedPath, "user edit\n"),
+      }),
+    ).rejects.toThrow("would be overwritten");
+
+    expect(NodeFS.readFileSync(trackedPath, "utf8")).toBe("user edit\n");
+    expect(git(["rev-parse", "HEAD"])).toBe(previousCommit);
+    expect(git(["status", "--porcelain=v1"])).toBe("M tracked.txt");
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("preserves a branch commit made before the transaction prepares", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-checkout-"));
+    const git = (args, options = {}) => {
+      const result = NodeChildProcess.spawnSync("git", args, {
+        cwd: directory,
+        encoding: "utf8",
+        input: options.input,
+      });
+      if (result.status !== 0 && !options.allowFailure) throw new Error(result.stderr);
+      return { status: result.status, stdout: result.stdout.trim() };
+    };
+    git(["init", "--quiet", "--initial-branch=lastcode/main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "previous\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "previous"]);
+    const previousCommit = git(["rev-parse", "HEAD"]).stdout;
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "promoted\n");
+    git(["commit", "--quiet", "--all", "--message", "promoted"]);
+    const promotedCommit = git(["rev-parse", "HEAD"]).stdout;
+    git(["reset", "--hard", previousCommit]);
+    const concurrentCommit = git([
+      "commit-tree",
+      `${previousCommit}^{tree}`,
+      "-p",
+      previousCommit,
+      "-m",
+      "concurrent",
+    ]).stdout;
+    git(["update-ref", "refs/heads/lastcode/main", concurrentCommit, previousCommit]);
+
+    await expect(
+      refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit),
+    ).rejects.toThrow();
+    expect(git(["rev-parse", "refs/heads/lastcode/main"]).stdout).toBe(concurrentCommit);
+    expect(git(["rev-parse", "HEAD"]).stdout).toBe(concurrentCommit);
+    expect(git(["branch", "--show-current"]).stdout).toBe("lastcode/main");
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("preserves a same-commit branch switch without forcing a rollback", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-checkout-"));
+    const git = (args) => {
+      const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    };
+    git(["init", "--quiet", "--initial-branch=lastcode/main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "previous\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "previous"]);
+    const previousCommit = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "promoted\n");
+    git(["commit", "--quiet", "--all", "--message", "promoted"]);
+    const promotedCommit = git(["rev-parse", "HEAD"]);
+    git(["reset", "--hard", previousCommit]);
+    git(["branch", "feature/in-progress", previousCommit]);
+    git(["switch", "--quiet", "feature/in-progress"]);
+
+    await expect(
+      refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit),
+    ).rejects.toThrow("changed branches before refresh");
+    expect(git(["branch", "--show-current"])).toBe("feature/in-progress");
+    expect(git(["rev-parse", "refs/heads/lastcode/main"])).toBe(previousCommit);
+    expect(git(["status", "--porcelain=v1"])).toBe("M  tracked.txt");
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("rejects a commit injected immediately before checkout", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-checkout-"));
+    const git = (args, allowFailure = false) => {
+      const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+      if (result.status !== 0 && !allowFailure) throw new Error(result.stderr);
+      return result;
+    };
+    git(["init", "--quiet", "--initial-branch=lastcode/main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "previous\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "previous"]);
+    const previousCommit = git(["rev-parse", "HEAD"]).stdout.trim();
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "promoted\n");
+    git(["commit", "--quiet", "--all", "--message", "promoted"]);
+    const promotedCommit = git(["rev-parse", "HEAD"]).stdout.trim();
+    git(["reset", "--hard", previousCommit]);
+    await expect(
+      refreshPrimaryCheckoutTransaction(directory, previousCommit, promotedCommit, {
+        beforeCheckout: () => {
+          expect(git(["commit", "--allow-empty", "--message", "concurrent"]).status).toBe(0);
+        },
+      }),
+    ).rejects.toThrow("Primary LastCode branch changed before checkout refresh");
+    expect(git(["branch", "--show-current"]).stdout.trim()).toBe("lastcode/main");
+    expect(git(["rev-parse", "HEAD"]).stdout.trim()).not.toBe(promotedCommit);
+    NodeFS.rmSync(directory, { recursive: true });
+  });
+
+  it("safely repoints a clean primary LastCode checkout after rewritten promotion", () => {
+    const calls = [];
+    let headChecks = 0;
+    const execute = vi.fn((phase, cwd, command, args, environment, options) => {
+      calls.push({ args, command, cwd, environment, options, phase });
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") return "";
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        headChecks += 1;
+        return headChecks < 3 ? "1111111" : "2222222";
+      }
+      if (args[0] === "rev-parse") return "2222222";
+      return "";
+    });
+
+    refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute);
+
+    expect(calls.map(({ args }) => args)).toEqual([
+      ["worktree", "list", "--porcelain"],
+      ["branch", "--show-current"],
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      ["rev-parse", "HEAD"],
+      [
+        "fetch",
+        "--no-tags",
+        "origin",
+        "+refs/heads/lastcode/main:refs/remotes/origin/lastcode/main",
+      ],
+      ["branch", "--show-current"],
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      ["rev-parse", "HEAD"],
+      ["rev-parse", "refs/remotes/origin/lastcode/main"],
+      ["diff-tree", "-r", "--no-commit-id", "--raw", "-z", "1111111", "2222222"],
+      ["update-ref", "refs/lastcode/primary-checkout-backups/1111111", "1111111"],
+      [
+        "/srv/example/lastCode-worktrees/lastcode-automation/scripts/lastcode-primary-checkout-transaction.mjs",
+        "/srv/example/lastCode",
+        "1111111",
+        "2222222",
+      ],
+      ["branch", "--show-current"],
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      ["rev-parse", "HEAD"],
+    ]);
+    const transactionCall = calls.find(({ command }) => command === process.execPath);
+    expect(transactionCall?.cwd).toBe("/srv/example/lastCode-worktrees/lastcode-automation");
+    expect(
+      calls
+        .slice(1)
+        .filter(({ command }) => command !== process.execPath)
+        .every(({ cwd }) => cwd === "/srv/example/lastCode"),
+    ).toBe(true);
+  });
+
+  it("reports an edit preserved during checkout in the same run", () => {
+    let headChecks = 0;
+    let statusChecks = 0;
+    const execute = vi.fn((_phase, _cwd, command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") {
+        statusChecks += 1;
+        return statusChecks < 3 ? "" : " M unchanged.txt";
+      }
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        headChecks += 1;
+        return headChecks < 3 ? "1111111" : "2222222";
+      }
+      if (args[0] === "rev-parse") return "2222222";
+      if (command === process.execPath) return "";
+      return "";
+    });
+
+    expect(() =>
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toThrow("uncommitted or untracked changes");
+    expect(execute.mock.calls.filter(([, , command]) => command === process.execPath)).toHaveLength(
+      1,
+    );
+  });
+
+  it("refuses to reset when the primary checkout changes during fetch", () => {
+    let branchChecks = 0;
+    const execute = vi.fn((_phase, _cwd, command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") {
+        branchChecks += 1;
+        return branchChecks === 1 ? "lastcode/main" : "feature/in-progress";
+      }
+      if (args[0] === "status") return "";
+      if (args[0] === "rev-parse") return "1111111";
+      return "";
+    });
+
+    expect(() =>
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toThrow("found 'feature/in-progress'");
+    expect(execute.mock.calls.some(([, , , args]) => args[0] === "checkout")).toBe(false);
+  });
+
+  it("refuses to reset when the primary commit changes during fetch", () => {
+    let commitChecks = 0;
+    const execute = vi.fn((_phase, _cwd, command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") return "";
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        commitChecks += 1;
+        return commitChecks === 1 ? "1111111" : "3333333";
+      }
+      return "2222222";
+    });
+
+    expect(() =>
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toThrow("changed while its remote was being refreshed");
+    expect(execute.mock.calls.some(([, , , args]) => args[0] === "update-ref")).toBe(false);
+  });
+
+  it("propagates a transactional checkout failure without retrying destructively", () => {
+    const execute = vi.fn((_phase, _cwd, command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") return "";
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return "1111111";
+      if (args[0] === "rev-parse") return "2222222";
+      if (command === process.execPath)
+        throw new Error("local.env would be overwritten by checkout");
+      return "";
+    });
+
+    expect(() =>
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toThrow("would be overwritten");
+    expect(execute.mock.calls.filter(([, , command]) => command === process.execPath)).toHaveLength(
+      1,
+    );
+    expect(execute.mock.calls.some(([, , , args]) => args[0] === "reset")).toBe(false);
+  });
+
+  it("refuses to refresh a dirty primary checkout", () => {
+    const execute = vi.fn((_phase, _cwd, _command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") return "?? local-notes.txt";
+      return "";
+    });
+
+    expect(() =>
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toThrow("uncommitted or untracked changes");
+    expect(execute.mock.calls.some(([, , , args]) => args[0] === "fetch")).toBe(false);
+  });
+
+  it("records a blocked primary checkout refresh as a checkpoint service failure", () => {
+    const test = fixture({
+      dependencies: {
+        refreshPrimaryCheckout: () => {
+          throw new Error("primary checkout has uncommitted changes");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "primary checkout has uncommitted changes",
+    );
+    expect(test.state).toMatchObject({
+      status: "failed",
+      phase: "checkout-refresh",
+      incident: { failure: { phase: "checkout-refresh" } },
+    });
   });
 
   it("persists a new checkpoint blocker before alerting one maintenance thread", () => {
