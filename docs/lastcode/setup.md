@@ -53,10 +53,14 @@ git remote add upstream https://github.com/pingdotgg/t3code.git
 Run the guarded bootstrap from the checkout:
 
 ```bash
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes
+mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
 
-The explicit flag acknowledges the remote writes described above. The command:
+Deployment configuration must set `LASTCODE_CHECKPOINT_INTERVAL_SECONDS` to a
+positive integer. The explicit flag acknowledges the remote writes described
+above. The command:
 
 1. installs the pinned workspace dependencies;
 2. creates a detached `lastcode-automation` worktree beside the checkout;

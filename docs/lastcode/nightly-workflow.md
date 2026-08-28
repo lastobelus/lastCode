@@ -180,14 +180,17 @@ understood before the sequence continues.
 Install the per-user launch agent:
 
 ```bash
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
 
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
 maintenance and configure its thread ID once:
 
 ```bash
-pnpm lastcode:checkpoint:service install --recovery-thread <thread-id>
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
+  --recovery-thread <thread-id>
 ```
 
 The service reuses that thread instead of creating a new thread per failure. A
@@ -205,7 +208,9 @@ Disable maintenance-thread delivery explicitly (uninstalling the service also
 clears the saved destination):
 
 ```bash
-pnpm lastcode:checkpoint:service install --no-recovery-thread
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
+  --no-recovery-thread
 ```
 
 The job runs through the managed checkpoint service. Missed invocations do not
@@ -242,7 +247,8 @@ Install the launch agent first so its dedicated automation worktree exists, then
 install the checkpoint dashboard as a user command:
 
 ```bash
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 pnpm run lastcode:checkpoints -- --install
 ```
 

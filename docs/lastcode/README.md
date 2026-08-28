@@ -41,7 +41,9 @@ directories.
 
 ```bash
 # Provision a personal checkout, daemon, and managed helper commands.
-pnpm run lastcode:setup -- --enable-nightly-writes
+pnpm run lastcode:setup -- \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
@@ -50,7 +52,8 @@ pnpm run lastcode:checkpoint -- --dry-run
 pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
 
 # Enable managed background checkpointing.
-pnpm lastcode:checkpoint:service install
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 
 # Install and inspect the checkpoint dashboard (eight rows by default).
 pnpm run lastcode:checkpoints -- --install

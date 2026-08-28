@@ -156,9 +156,10 @@ pnpm lastcode:intel-build select \
 ```
 
 Then run the imported **Build Intel package (macOS)** Project Action. The
-GUI/controller node dispatching this Action must run on macOS; it need not be an
-Intel builder or run a LastCode server. The actual x64 build runs on GitHub's
-hosted Intel runner. For agent-triggered
+LastCode environment hosting the project and Action terminal must run on macOS;
+the connected client may run anywhere, and that environment need not be an Intel
+builder. The actual x64 build runs on GitHub's hosted Intel runner. For
+agent-triggered
 one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
 Action in Project Settings. The Action attaches a unique request token to the
 dispatch, waits for only the matching workflow run, and returns to the thread on
