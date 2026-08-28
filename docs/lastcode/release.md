@@ -97,8 +97,9 @@ The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 stale bases, draft or non-clean PRs, and PRs that do not target
 `lastcode/main`. It fetches and checks the base again after reading CI, then
 squash-merges with an exact-head guard and requests an immediate
-checkpoint-daemon run. The daemon publishes a new installable LastCode revision
-when no new upstream
+checkpoint-daemon run when that service is installed on the current host. Hosts
+without the optional service skip the request silently. The daemon publishes a
+new installable LastCode revision when no new upstream
 nightly is waiting. Failure to start the service is reported without lying about
 the already-completed GitHub merge; the managed checkpoint service remains the
 repair path. The request never terminates a daemon run already in progress.
