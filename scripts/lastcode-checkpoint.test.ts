@@ -6,7 +6,7 @@ import {
   checkpointPromotionPushArgs,
   checkpointSmokeEnvironment,
   checkpointSmokeTypecheckCommands,
-  checkpointSmokeWorkflowFormatCommand,
+  checkpointSmokeFormatAndLintCommand,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
@@ -95,12 +95,8 @@ it("typechecks checkpoint automation, shared clients, and the server before publ
   ]);
 });
 
-it("parses and formats every GitHub workflow before publishing", () => {
-  assert.deepStrictEqual(checkpointSmokeWorkflowFormatCommand(), [
-    "fmt",
-    "--check",
-    ".github/workflows",
-  ]);
+it("runs the repository format and lint gate before publishing", () => {
+  assert.deepStrictEqual(checkpointSmokeFormatAndLintCommand(), ["check"]);
 });
 
 it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {
