@@ -19,6 +19,11 @@ import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import {
+  ACTION_EVENT_TOKEN_ENV,
+  ACTION_RUN_ID_ENV,
+  actionProtocolFrame,
+} from "@t3tools/shared/actionResumeProtocol";
 
 import { ProjectionThreadActivityRepository } from "../persistence/Services/ProjectionThreadActivities.ts";
 import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
@@ -253,10 +258,26 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     );
     assert.match(written.at(-1)?.data ?? "", /vp test run/);
     assert.match(written.at(-1)?.data ?? "", /exit \$__t3_action_status/);
+    assert.equal(opened.at(-1)?.env?.[ACTION_RUN_ID_ENV], running.runId);
+    const eventToken = opened.at(-1)?.env?.[ACTION_EVENT_TOKEN_ENV];
+    assert.isString(eventToken);
 
     assert.isDefined(terminalListener);
     const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
     const endMarker = ActionResume.actionOutputMarker(running.runId, "end");
+    const resultFrame = actionProtocolFrame({
+      runId: running.runId,
+      token: eventToken!,
+      event: {
+        kind: "result",
+        report: {
+          version: 1,
+          outcome: "attention",
+          reason: "test-failure",
+          summary: "One test needs attention",
+        },
+      },
+    });
     yield* terminalListener!({
       type: "output",
       threadId,
@@ -267,7 +288,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${endMarker}prompt`,
+      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${resultFrame}${endMarker}prompt`,
     });
     yield* terminalListener!({
       type: "exited",
@@ -304,6 +325,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.deepInclude(registry.getLatest(threadId), {
       outcome: "succeeded",
       delivery: "delivered",
+      report: {
+        version: 1,
+        outcome: "attention",
+        reason: "test-failure",
+        summary: "One test needs attention",
+      },
     });
 
     const deleting = yield* service.runProjectActionAndResume(

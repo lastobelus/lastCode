@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -812,6 +813,12 @@ function executeLocalCi(
     console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);
     console.log(formatLocalCiSummary("full", commitBefore));
+    lastCodeAction.result({
+      outcome: "success",
+      summary: `Full local CI passed for ${commitBefore}`,
+      subject: { type: "commit", id: commitBefore, revision: commitBefore },
+      facts: { mode: "full" },
+    });
   } else if (options.mode === "quick" && baseCommit && quickBase) {
     const receiptPath = writeVerifiedQuickCiReceipt(repoRoot, repositoryIntegrity, {
       commit: commitBefore,
@@ -822,6 +829,12 @@ function executeLocalCi(
     console.log(`\n[lastcode:ci] Quick local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Receipt: ${receiptPath}`);
     console.log(formatLocalCiSummary("quick", commitBefore, baseCommit));
+    lastCodeAction.result({
+      outcome: "success",
+      summary: `Quick local CI passed for ${commitBefore}`,
+      subject: { type: "commit", id: commitBefore, revision: commitBefore },
+      facts: { mode: "quick", baseCommit },
+    });
   }
 }
 
