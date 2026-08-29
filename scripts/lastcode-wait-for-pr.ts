@@ -4,6 +4,7 @@
 import * as NodeChildProcess from "node:child_process";
 
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -782,6 +783,27 @@ async function main(): Promise<void> {
     }
     if (decision.kind === "wake") {
       console.log(formatWaitForPrSummary(decision, current));
+      lastCodeAction.result({
+        outcome: decision.reason === "ready" ? "success" : "attention",
+        reason: decision.reason,
+        summary: decision.detail,
+        subject: {
+          type: "pull-request",
+          id: String(current.pullRequest.number),
+          revision: current.pullRequest.headRefOid,
+          url: current.pullRequest.url,
+        },
+        facts: {
+          base: current.pullRequest.baseRefOid,
+          ci: current.ci.state,
+          review: current.review.pending
+            ? "pending"
+            : current.review.ready
+              ? "completed"
+              : "attention",
+        },
+        artifacts: [{ label: "Pull request", url: current.pullRequest.url }],
+      });
       return;
     }
 
