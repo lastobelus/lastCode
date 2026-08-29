@@ -118,7 +118,18 @@ export function formatDuration(durationMs) {
 
 export function checkpointFreshness(latestUpstream, latestCheckpoint) {
   if (!latestUpstream) return "Upstream unavailable";
-  return latestUpstream === latestCheckpoint ? "Up to date" : "Checkpoint pending";
+  if (!latestCheckpoint) return "Checkpoint pending";
+  return compareNightlies(latestCheckpoint, latestUpstream) >= 0
+    ? "Up to date"
+    : "Checkpoint pending";
+}
+
+export function latestNightlyTag(tags) {
+  return tags.toSorted((left, right) => compareNightlies(right, left)).at(0);
+}
+
+export function latestKnownUpstreamTag(remoteLatest, localLatest, latestCheckpoint) {
+  return latestNightlyTag([remoteLatest, localLatest, latestCheckpoint].filter(Boolean));
 }
 
 function formatFinished(value) {
@@ -264,6 +275,30 @@ export function parseRemotePublicationState(output) {
     }
   }
   return { publishedTags, remoteMain };
+}
+
+export function parseRemoteUpstreamTags(output) {
+  return splitLines(output).flatMap((line) => {
+    const [, ref] = line.split(/\s+/);
+    if (!ref?.startsWith("refs/tags/") || ref.endsWith("^{}")) return [];
+    const tag = ref.slice("refs/tags/".length);
+    return parseNightly(tag) ? [tag] : [];
+  });
+}
+
+function remoteLatestUpstreamTag(repoRoot) {
+  const result = NodeChildProcess.spawnSync(
+    "git",
+    ["ls-remote", "upstream", "refs/tags/v*-nightly.*"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: REMOTE_PROBE_TIMEOUT_MS,
+    },
+  );
+  if (result.error || result.status !== 0) return undefined;
+  return latestNightlyTag(parseRemoteUpstreamTags(result.stdout));
 }
 
 function remotePublicationState(repoRoot) {
@@ -742,9 +777,7 @@ function printDashboard(repoRoot, home, count, verbose) {
     }
   }
 
-  const upstreamTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"])).sort(
-    (left, right) => compareNightlies(right, left),
-  );
+  const upstreamTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
   const latestCheckpoint = checkpointTagsWithoutUnpublishedFailures(
     splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
@@ -754,7 +787,11 @@ function printDashboard(repoRoot, home, count, verbose) {
     .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))
     .sort((left, right) => compareNightlies(right, left))
     .at(0);
-  const latestUpstream = upstreamTags.at(0);
+  const latestUpstream = latestKnownUpstreamTag(
+    remoteLatestUpstreamTag(repoRoot),
+    latestNightlyTag(upstreamTags),
+    latestCheckpoint,
+  );
   const freshness = checkpointFreshness(latestUpstream, latestCheckpoint);
   const latestInstallableTag = splitLines(
     git(repoRoot, [
