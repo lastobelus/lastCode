@@ -1471,32 +1471,48 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
 
   if (actionFollowUp) {
     const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
+    const heading = (
+      <>
+        <BotIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          Action completed: {actionFollowUp.actionName} Status: {status}
+        </span>
+      </>
+    );
     return (
       <div className="mx-1 overflow-hidden rounded-lg border border-warning/28 bg-warning/8">
-        <button
-          type="button"
-          aria-expanded={actionOutputExpanded}
-          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground"
-          onClick={() => ctx.onToggleActionFollowUp(row.id)}
-        >
-          <BotIcon aria-hidden className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            Action completed: {actionFollowUp.actionName} Status: {status}
-          </span>
-          {actionOutputExpanded ? (
-            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
-          ) : (
-            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
-          )}
-        </button>
-        {actionOutputExpanded ? (
+        {actionFollowUp.detailedOutputAvailable ? (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground">
+            {heading}
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={actionOutputExpanded}
+            className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground"
+            onClick={() => ctx.onToggleActionFollowUp(row.id)}
+          >
+            {heading}
+            {actionOutputExpanded ? (
+              <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+            ) : (
+              <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+            )}
+          </button>
+        )}
+        {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
           <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
             {actionFollowUp.output}
           </pre>
         ) : (
-          <p className="truncate px-3 pb-2.5 pt-1 text-sm text-foreground/90">
-            {actionFollowUp.lastOutputLine}
-          </p>
+          <div className="px-3 pb-2.5 pt-1">
+            <p className="truncate text-sm text-foreground/90">{actionFollowUp.lastOutputLine}</p>
+            {actionFollowUp.detailedOutputAvailable ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Detailed output retained in the Action terminal.
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
     );

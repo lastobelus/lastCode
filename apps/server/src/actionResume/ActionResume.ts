@@ -10,6 +10,7 @@
 import {
   ActionResumeState,
   ActionResumeError,
+  ActionRunInspection,
   CommandId,
   EventId,
   MessageId,
@@ -88,6 +89,10 @@ export class ActionResume extends Context.Service<
       invocation: ActionResumeInvocation,
       actionId: string,
     ) => Effect.Effect<ActionResumeState, ActionResumeError>;
+    readonly inspectActionRun: (
+      invocation: ActionResumeInvocation,
+      runId: string,
+    ) => Effect.Effect<ActionRunInspection, ActionResumeError>;
     readonly cancelByUser: (threadId: ThreadId) => Effect.Effect<void>;
     readonly cancelByArchive: (threadId: ThreadId) => Effect.Effect<void>;
     readonly resumeInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
@@ -219,8 +224,10 @@ const followUpText = (state: ActionResumeState, outputTail: string | undefined):
   return formatActionResumeFollowUp({
     actionName: state.actionName,
     actionId: state.actionId,
+    runId: state.runId,
     validatedStatus: status,
     exitCode: state.exitCode,
+    report: state.report,
     output: outputTail,
   });
 };
@@ -650,6 +657,40 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const inspectActionRunImpl = Effect.fn("ActionResume.inspectActionRun")(function* (
+    invocation: ActionResumeInvocation,
+    runId: string,
+  ) {
+    const rows = yield* activities.listByThreadId({ threadId: invocation.threadId });
+    const decoded = yield* Effect.forEach(
+      rows.filter((row) => row.kind === ACTION_RESUME_ACTIVITY_KIND),
+      (row) => Effect.option(decodeState(row.payload)),
+    );
+    const state = decoded
+      .filter(Option.isSome)
+      .map((entry) => entry.value)
+      .findLast((entry) => entry.runId === runId && entry.threadId === invocation.threadId);
+    if (state === undefined) {
+      return yield* new ActionResumeError({
+        reason: "action_run_not_found",
+        message: "No retained Project Action run with that id belongs to this thread.",
+      });
+    }
+
+    const history = yield* terminals.history({
+      threadId: invocation.threadId,
+      terminalId: state.terminalId,
+    });
+    return ActionRunInspection.make({
+      runId: state.runId,
+      actionName: state.actionName,
+      lifecycleOutcome: state.outcome,
+      exitCode: state.exitCode,
+      exitSignal: state.exitSignal,
+      outputTail: actionOutputFromTranscript(history, state.runId, true) ?? "",
+    });
+  });
+
   const resumeInterruptedImpl = Effect.fn("ActionResume.resumeInterrupted")(function* (
     threadId: ThreadId,
   ) {
@@ -859,6 +900,8 @@ const make = Effect.gen(function* () {
       runProjectActionAndResumeImpl(invocation, actionId).pipe(
         mapActionResumeError("run the Project Action"),
       ),
+    inspectActionRun: (invocation, runId) =>
+      inspectActionRunImpl(invocation, runId).pipe(mapActionResumeError("inspect the Action run")),
     cancelByUser: (threadId) => cancel(threadId, "cancelled_by_user"),
     cancelByArchive: (threadId) => cancel(threadId, "cancelled_by_archive"),
     resumeInterrupted: (threadId) =>
