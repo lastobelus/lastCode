@@ -752,6 +752,14 @@ function executeLocalCi(
   try {
     for (const [index, step] of steps.entries()) {
       console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
+      lastCodeAction.progress({
+        state: "working",
+        phase: step.kind,
+        summary: step.label,
+        current: index + 1,
+        total: steps.length,
+        unit: "step",
+      });
       if (step.kind === "verify-preload") {
         verifyPreloadBundle(repoRoot);
         continue;

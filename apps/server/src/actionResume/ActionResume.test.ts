@@ -294,6 +294,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.isDefined(terminalListener);
     const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
     const endMarker = ActionResume.actionOutputMarker(running.runId, "end");
+    const progressFrame = (state: "working" | "waiting", summary: string) =>
+      actionProtocolFrame({
+        runId: running.runId,
+        token: eventToken!,
+        event: { kind: "progress", progress: { version: 1, state, summary } },
+      });
     const resultFrame = actionProtocolFrame({
       runId: running.runId,
       token: eventToken!,
@@ -317,8 +323,30 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${resultFrame}${endMarker}prompt`,
+      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${progressFrame("working", "Running checks")}${progressFrame("working", "Running checks")}${progressFrame("working", "Running tests")}${progressFrame("waiting", "Waiting for review")}${resultFrame}${endMarker}prompt`,
     });
+    const registry = yield* ThreadActionResume.ThreadActionResumeService;
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "running",
+      revision: 2,
+    });
+    assert.equal(registry.getLatest(threadId)?.progress?.state, "waiting");
+    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Waiting for review");
+    assert.deepEqual(
+      dispatched.flatMap((command) => {
+        if (
+          command.type !== "thread.activity.append" ||
+          command.activity.kind !== ActionResume.ACTION_RESUME_ACTIVITY_KIND
+        ) {
+          return [];
+        }
+        const payload = command.activity.payload as ActionResumeState;
+        return payload.runId === running.runId && payload.outcome === "running"
+          ? [payload.revision]
+          : [];
+      }),
+      [0, 1, 2],
+    );
     yield* terminalListener!({
       type: "exited",
       threadId,
@@ -349,7 +377,6 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
     assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
 
-    const registry = yield* ThreadActionResume.ThreadActionResumeService;
     assert.deepInclude(registry.getLatest(threadId), {
       outcome: "succeeded",
       delivery: "delivered",

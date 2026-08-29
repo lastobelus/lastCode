@@ -39,7 +39,14 @@ describe("Action resume contracts", () => {
       decodeActionProgress({
         version: 1,
         state: "working",
-        summary: "x".repeat(281),
+        summary: "x".repeat(161),
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeActionProgress({
+        version: 1,
+        state: "working",
+        summary: "Running\nchecks",
       }),
     ).toThrow();
     expect(() =>
@@ -109,6 +116,35 @@ describe("Action resume contracts", () => {
 
     expect(state.report).toBeUndefined();
     expect(state.progress).toBeUndefined();
+  });
+
+  it("decodes host-stamped running progress revisions", () => {
+    const state = decodeActionResumeState({
+      runId: "run-1",
+      threadId: "thread-1",
+      projectId: "project-1",
+      actionId: "qa",
+      actionName: "QA",
+      terminalId: "action-run-1",
+      outcome: "running",
+      delivery: "armed",
+      startedAt: "2026-08-29T12:00:00.000Z",
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+      revision: 2,
+      progress: {
+        version: 1,
+        state: "working",
+        summary: "Running checks",
+        updatedAt: "2026-08-29T12:00:05.000Z",
+      },
+    });
+
+    expect(state).toMatchObject({
+      revision: 2,
+      progress: { state: "working", summary: "Running checks" },
+    });
   });
 
   it("bounds retained output returned by Action run inspection", () => {

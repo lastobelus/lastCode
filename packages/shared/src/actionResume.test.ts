@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatActionResumeFollowUp, parseActionResumeFollowUp } from "./actionResume.ts";
+import {
+  actionResultPresentation,
+  actionRunningPresentation,
+  formatActionResumeFollowUp,
+  parseActionResumeFollowUp,
+} from "./actionResume.ts";
 
 describe("Action resume follow-up presentation", () => {
   it("round-trips the action identity, exit code, and output summary", () => {
@@ -9,6 +14,7 @@ describe("Action resume follow-up presentation", () => {
       actionId: "run-full-ci",
       runId: "run-1",
       validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
       exitCode: 0,
       report: {
         version: 1,
@@ -24,6 +30,7 @@ describe("Action resume follow-up presentation", () => {
       actionId: "run-full-ci",
       runId: "run-1",
       validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
       exitCode: 0,
       report: {
         version: 1,
@@ -49,6 +56,7 @@ describe("Action resume follow-up presentation", () => {
       actionId: "qa) (test",
       runId: "run-delimiter",
       validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
       exitCode: 0,
       report: undefined,
       output: "QA passed.",
@@ -83,6 +91,7 @@ describe("Action resume follow-up presentation", () => {
       actionId: "wait-for-pr",
       runId: "run-cancelled",
       validatedStatus: "was cancelled by the user",
+      lifecycleOutcome: "cancelled_by_user",
       exitCode: null,
       report: undefined,
       output: undefined,
@@ -94,5 +103,42 @@ describe("Action resume follow-up presentation", () => {
       lastOutputLine: "No Action stdout/stderr was captured.",
       detailedOutputAvailable: true,
     });
+  });
+
+  it("maps running progress and final results to canonical presentation", () => {
+    expect(
+      actionRunningPresentation({
+        actionName: "Wait for PR",
+        progress: {
+          version: 1,
+          state: "working",
+          summary: "Checking CI",
+          updatedAt: "2026-08-29T12:00:00.000Z",
+        },
+      }),
+    ).toEqual({ state: "working", label: "Working", summary: "Checking CI" });
+    expect(actionRunningPresentation({ actionName: "Legacy Action" })).toEqual({
+      state: "waiting",
+      label: "Waiting",
+      summary: "Legacy Action",
+    });
+    expect(
+      actionResultPresentation({
+        lifecycleOutcome: "succeeded",
+        validatedStatus: "succeeded",
+        exitCode: 0,
+        report: { version: 1, outcome: "blocked", summary: "Approval is required" },
+        lastOutputLine: "legacy",
+      }),
+    ).toEqual({ outcome: "blocked", label: "Blocked", summary: "Approval is required" });
+    expect(
+      actionResultPresentation({
+        lifecycleOutcome: "failed",
+        validatedStatus: "failed with exit code 1",
+        exitCode: 1,
+        report: null,
+        lastOutputLine: "Tests failed",
+      }),
+    ).toEqual({ outcome: "error", label: "Failed", summary: "Tests failed" });
   });
 });

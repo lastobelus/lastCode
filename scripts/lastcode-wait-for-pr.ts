@@ -761,6 +761,13 @@ export function formatWaitForPrFailureSummary(error: unknown): string {
 const sleep = (durationMs: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, durationMs));
 
+const waitProgressSummary = {
+  "ci-pending": "Waiting for CI",
+  "ci-registration": "Waiting for CI registration",
+  "mergeability-pending": "Waiting for GitHub mergeability",
+  "review-pending": "Waiting for review",
+} as const;
+
 async function main(): Promise<void> {
   const branch = currentBranch();
   let baseline = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);
@@ -810,6 +817,12 @@ async function main(): Promise<void> {
     const currentSummary = summary(current);
     if (currentSummary !== previousSummary) {
       console.log(`[wait-for-pr] Waiting (${decision.reason}) ${currentSummary}`);
+      lastCodeAction.progress({
+        state: "waiting",
+        phase: decision.reason,
+        summary: waitProgressSummary[decision.reason],
+        detail: currentSummary,
+      });
       previousSummary = currentSummary;
     }
     await sleep(POLL_INTERVAL_MS);

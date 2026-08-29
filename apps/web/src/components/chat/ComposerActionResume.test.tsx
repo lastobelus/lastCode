@@ -23,6 +23,12 @@ const action: ComposerResumableAction = {
     finishedAt: null,
     exitCode: null,
     exitSignal: null,
+    progress: {
+      version: 1,
+      state: "working",
+      summary: "Building preview bundle",
+      updatedAt: "2026-08-25T12:00:05.000Z",
+    },
   } as ActionResumeState,
 };
 
@@ -33,12 +39,13 @@ describe("ComposerActionResumeBadge", () => {
     );
 
     expect(markup).toContain('data-composer-action-resume-badge="true"');
-    expect(markup).toContain('data-variant="warning"');
+    expect(markup).toContain('data-variant="info"');
     expect(markup).toContain("chat-composer-shoulder-tab");
-    expect(markup).toContain("text-warning-foreground");
+    expect(markup).toContain("text-info-foreground");
     expect(markup).toContain("lucide-rotate-ccw-clock");
     expect(markup).toContain("Deploy preview");
-    expect(markup).toContain("Running");
+    expect(markup).toContain("Building preview bundle");
+    expect(markup).toContain("Working");
     expect(markup).toContain('aria-expanded="false"');
   });
 
@@ -86,9 +93,10 @@ describe("ComposerActionResumeDrawer", () => {
     );
 
     expect(markup).toContain('data-chat-composer-action-resume-drawer="true"');
-    expect(markup).toContain('data-variant="warning"');
-    expect(markup).toContain("bg-warning");
+    expect(markup).toContain('data-variant="info"');
+    expect(markup).toContain("bg-info");
     expect(markup).toContain("vp run deploy:preview");
+    expect(markup).toContain("Building preview bundle");
     expect(markup).toContain(
       "When it finishes, LastCode resumes the agent once this thread is idle",
     );

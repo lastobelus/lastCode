@@ -4,7 +4,11 @@ import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
-import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  actionResultPresentation,
+  type ActionResultPresentationOutcome,
+  parseActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
 import { SymbolView } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
@@ -1031,12 +1035,13 @@ function renderFeedEntry(
     const actionFollowUp =
       message.role === "system" ? parseActionResumeFollowUp(message.text) : null;
     if (actionFollowUp) {
+      const presentation = actionResultPresentation(actionFollowUp);
       return (
         <ActionFollowUpCard
           actionName={actionFollowUp.actionName}
-          exitCode={actionFollowUp.exitCode}
-          validatedStatus={actionFollowUp.validatedStatus}
-          lastOutputLine={actionFollowUp.lastOutputLine}
+          outcome={presentation.outcome}
+          outcomeLabel={presentation.label}
+          summary={presentation.summary}
           output={actionFollowUp.output}
           detailedOutputAvailable={actionFollowUp.detailedOutputAvailable}
           iconColor={iconSubtleColor}
@@ -1203,33 +1208,64 @@ function renderFeedEntry(
 
 const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly actionName: string;
-  readonly exitCode: number | null;
-  readonly validatedStatus: string;
-  readonly lastOutputLine: string;
+  readonly outcome: ActionResultPresentationOutcome;
+  readonly outcomeLabel: string;
+  readonly summary: string;
   readonly output: string;
   readonly detailedOutputAvailable: boolean;
   readonly iconColor: string | ColorValue;
   readonly expanded: boolean;
   readonly onToggle: () => void;
 }) {
-  const status = props.exitCode ?? props.validatedStatus;
+  const tone =
+    props.outcome === "success"
+      ? {
+          container: "border-emerald-500/25 bg-emerald-500/[0.06]",
+          text: "text-adaptive-emerald-700-300",
+          color: "#30d158",
+          icon: "checkmark.circle" as const,
+        }
+      : props.outcome === "error"
+        ? {
+            container: "border-rose-500/25 bg-rose-500/[0.06]",
+            text: "text-adaptive-rose-700-300",
+            color: "#ff453a",
+            icon: "xmark.circle.fill" as const,
+          }
+        : props.outcome === "cancelled"
+          ? {
+              container: "border-adaptive-black-a10-white-a10 bg-neutral-500/[0.06]",
+              text: "text-foreground-muted",
+              color: props.iconColor,
+              icon: "xmark.circle.fill" as const,
+            }
+          : props.outcome === "blocked"
+            ? {
+                container: "border-violet-500/25 bg-violet-500/[0.06]",
+                text: "text-adaptive-violet-700-300",
+                color: "#bf5af2",
+                icon: "exclamationmark.triangle" as const,
+              }
+            : {
+                container: "border-amber-500/25 bg-amber-500/[0.06]",
+                text: "text-adaptive-amber-700-300",
+                color: "#eab308",
+                icon: "exclamationmark.triangle" as const,
+              };
   const heading = (
     <>
-      <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
-      <Text
-        className="min-w-0 flex-1 font-t3-medium text-xs text-adaptive-amber-800-200"
-        numberOfLines={1}
-      >
-        Action completed: {props.actionName} Status: {status}
+      <SymbolView name={tone.icon} size={14} tintColor={tone.color} type="monochrome" />
+      <Text className={cn("min-w-0 flex-1 font-t3-medium text-xs", tone.text)} numberOfLines={1}>
+        {props.outcomeLabel}: {props.actionName}
       </Text>
     </>
   );
 
   return (
-    <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">
+    <View className={cn("mb-5 overflow-hidden rounded-xl border", tone.container)}>
       {props.detailedOutputAvailable ? (
         <View
-          accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
           className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
         >
           {heading}
@@ -1238,7 +1274,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ expanded: props.expanded }}
-          accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
           className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
           onPress={props.onToggle}
         >
@@ -1263,7 +1299,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
       ) : (
         <View className="px-3 pb-2.5 pt-1">
           <Text className="text-sm text-foreground" numberOfLines={1}>
-            {props.lastOutputLine}
+            {props.summary}
           </Text>
           {props.detailedOutputAvailable ? (
             <Text className="mt-0.5 text-xs text-foreground-muted">
