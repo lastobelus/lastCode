@@ -34,6 +34,9 @@ For a useful compact result, make every resumable Action print one concise summa
 output line. Include the result that the agent needs next, such as which checks passed, why a wait
 ended, or what requires attention.
 
+To delegate the workflow design and one-time setup, see
+[use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
+
 ## Keep the default branch current
 
 Enable **Automatically pull** to keep the default-branch checkout up to date with its configured
