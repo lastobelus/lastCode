@@ -264,17 +264,60 @@ export function checkpointTagsWithoutUnpublishedFailures(tags, publishedTags, re
   });
 }
 
+export function latestPublishedCheckpointTag(localTags, publishedTags, records) {
+  return checkpointTagsWithoutUnpublishedFailures(
+    [
+      ...new Set([
+        ...localTags,
+        ...publishedTags.filter((tag) => tag.startsWith(CHECKPOINT_PREFIX)),
+      ]),
+    ],
+    publishedTags,
+    records,
+  )
+    .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))
+    .sort((left, right) => compareNightlies(right, left))
+    .at(0);
+}
+
+export function latestPublishedInstallableTag(localTags, publishedTags) {
+  return [
+    ...new Set([
+      ...localTags,
+      ...publishedTags.filter(
+        (tag) => tag.startsWith(CHECKPOINT_PREFIX) || tag.startsWith(REVISION_PREFIX),
+      ),
+    ]),
+  ]
+    .map((tag) => ({
+      tag,
+      version: tag.slice(
+        tag.startsWith(REVISION_PREFIX) ? REVISION_PREFIX.length : CHECKPOINT_PREFIX.length,
+      ),
+    }))
+    .sort((left, right) => compareNightlies(right.version, left.version))
+    .at(0);
+}
+
 export function parseRemotePublicationState(output) {
   let remoteMain;
   const publishedTags = [];
+  const publishedTagCommits = {};
+  const publishedTagObjects = {};
   for (const line of splitLines(output)) {
     const [commit, ref] = line.split(/\s+/);
     if (ref === "refs/heads/lastcode/main") remoteMain = commit;
-    else if (ref?.startsWith("refs/tags/") && !ref.endsWith("^{}")) {
-      publishedTags.push(ref.slice("refs/tags/".length));
+    else if (ref?.startsWith("refs/tags/")) {
+      const tag = ref.slice("refs/tags/".length).replace(/\^\{\}$/, "");
+      if (ref.endsWith("^{}")) publishedTagCommits[tag] = commit;
+      else {
+        publishedTags.push(tag);
+        publishedTagObjects[tag] = commit;
+      }
     }
   }
-  return { publishedTags, remoteMain };
+  for (const tag of publishedTags) publishedTagCommits[tag] ??= publishedTagObjects[tag];
+  return { publishedTags, publishedTagCommits, remoteMain };
 }
 
 export function parseRemoteUpstreamTags(output) {
@@ -322,7 +365,7 @@ function remotePublicationState(repoRoot) {
     },
   );
   if (result.error || result.status !== 0) {
-    return { publishedTags: [], remoteMain: cachedRemoteMain };
+    return { publishedTags: [], publishedTagCommits: {}, remoteMain: cachedRemoteMain };
   }
   const remote = parseRemotePublicationState(result.stdout);
   return { ...remote, remoteMain: remote.remoteMain ?? cachedRemoteMain };
@@ -779,38 +822,35 @@ function printDashboard(repoRoot, home, count, verbose) {
 
   const upstreamTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
   const latestVisibleCheckpoint = rows.find((row) => row.status === "success");
-  const latestCheckpoint = checkpointTagsWithoutUnpublishedFailures(
-    splitLines(git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`])),
+  const localCheckpointTags = splitLines(
+    git(repoRoot, ["tag", "--list", `${CHECKPOINT_PREFIX}v*-nightly.*`]),
+  );
+  const latestCheckpoint = latestPublishedCheckpointTag(
+    localCheckpointTags,
     remoteState.publishedTags,
     readRuns(home),
-  )
-    .map((tag) => tag.slice(CHECKPOINT_PREFIX.length))
-    .sort((left, right) => compareNightlies(right, left))
-    .at(0);
+  );
   const latestUpstream = latestKnownUpstreamTag(
     remoteLatestUpstreamTag(repoRoot),
     latestNightlyTag(upstreamTags),
     latestCheckpoint,
   );
   const freshness = checkpointFreshness(latestUpstream, latestCheckpoint);
-  const latestInstallableTag = splitLines(
-    git(repoRoot, [
-      "tag",
-      "--list",
-      `${CHECKPOINT_PREFIX}v*-nightly.*`,
-      `${REVISION_PREFIX}v*-nightly.*`,
-    ]),
-  )
-    .map((tag) => ({
-      tag,
-      version: tag.slice(
-        tag.startsWith(REVISION_PREFIX) ? REVISION_PREFIX.length : CHECKPOINT_PREFIX.length,
-      ),
-    }))
-    .sort((left, right) => compareNightlies(right.version, left.version))
-    .at(0);
+  const latestInstallableTag = latestPublishedInstallableTag(
+    splitLines(
+      git(repoRoot, [
+        "tag",
+        "--list",
+        `${CHECKPOINT_PREFIX}v*-nightly.*`,
+        `${REVISION_PREFIX}v*-nightly.*`,
+      ]),
+    ),
+    remoteState.publishedTags,
+  );
   const latestInstallableCommit = latestInstallableTag
-    ? git(repoRoot, ["rev-list", "-n", "1", latestInstallableTag.tag])
+    ? git(repoRoot, ["rev-list", "-n", "1", latestInstallableTag.tag], {
+        allowFailure: true,
+      }) || remoteState.publishedTagCommits[latestInstallableTag.tag]
     : undefined;
   const latestInstallableBuild = latestInstallableTag
     ? latestBuildNumbers(splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`]))).get(
