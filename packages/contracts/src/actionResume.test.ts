@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { ActionProgress, ActionReport, ActionResumeState } from "./orchestration.ts";
+import {
+  ActionProgress,
+  ActionReport,
+  ActionResumeState,
+  ActionRunInspection,
+} from "./orchestration.ts";
 
 const decodeActionProgress = Schema.decodeUnknownSync(ActionProgress);
 const decodeActionReport = Schema.decodeUnknownSync(ActionReport);
 const decodeActionResumeState = Schema.decodeUnknownSync(ActionResumeState);
+const decodeActionRunInspection = Schema.decodeUnknownSync(ActionRunInspection);
 
 describe("Action resume contracts", () => {
   it("decodes compact domain results independently from host lifecycle outcomes", () => {
@@ -103,5 +109,18 @@ describe("Action resume contracts", () => {
 
     expect(state.report).toBeUndefined();
     expect(state.progress).toBeUndefined();
+  });
+
+  it("bounds retained output returned by Action run inspection", () => {
+    expect(() =>
+      decodeActionRunInspection({
+        runId: "run-1",
+        actionName: "QA",
+        lifecycleOutcome: "succeeded",
+        exitCode: 0,
+        exitSignal: null,
+        outputTail: "x".repeat(12_001),
+      }),
+    ).toThrow();
   });
 });

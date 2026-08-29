@@ -32,7 +32,8 @@ The agent should first make the repository self-describing:
 1. Read the project's agent instructions and current workflow implementation.
 2. Identify the passive portion that should run without an open agent turn.
 3. Implement or tighten the command so it has stable target identity, explicit wake reasons,
-   failure handling, and one concise final summary line.
+   failure handling, and one concise structured result. If the Action cannot use the reporting kit,
+   print the same summary as its final output line.
 4. Add an importable entry to the repository-root `t3.json`.
 5. Update the repository's agent instructions or workflow skill with the exact
    list-launch-end-turn-resume sequence.

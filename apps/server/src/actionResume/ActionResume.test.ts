@@ -142,6 +142,29 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     }),
     Layer.mock(ProjectionThreadActivityRepository)({
       listByKind: () => Effect.succeed([]),
+      listByThreadId: ({ threadId: requestedThreadId }) =>
+        Effect.succeed(
+          dispatched.flatMap((command) => {
+            if (
+              command.type !== "thread.activity.append" ||
+              command.threadId !== requestedThreadId
+            ) {
+              return [];
+            }
+            return [
+              {
+                activityId: command.activity.id,
+                threadId: command.threadId,
+                turnId: command.activity.turnId,
+                tone: command.activity.tone,
+                kind: command.activity.kind,
+                summary: command.activity.summary,
+                payload: command.activity.payload,
+                createdAt: command.activity.createdAt,
+              },
+            ];
+          }),
+        ),
     }),
     Layer.mock(TerminalManager.TerminalManager)({
       open: (input) =>
@@ -166,6 +189,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
           terminalId: input.terminalId ?? "default",
           deleteHistory: input.deleteHistory ?? false,
         }) ?? Effect.void,
+      history: ({ terminalId }) => {
+        const runId = terminalId.slice("action-".length);
+        return Effect.succeed(
+          `prompt\n${ActionResume.actionOutputMarker(runId, "start")}full retained output\n${ActionResume.actionOutputMarker(runId, "end")}prompt`,
+        );
+      },
       subscribe: (listener) =>
         Effect.sync(() => {
           terminalListener = listener;
@@ -313,10 +342,9 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts[0]?.message.role, "system");
     assert.match(turnStarts[0]?.message.text ?? "", /Automated Project Action follow-up/);
     assert.include(turnStarts[0]?.message.text ?? "", "Exit code: 0");
-    assert.include(
-      turnStarts[0]?.message.text ?? "",
-      "QA failed: \u001b[31mexpected 2, received 3\u001b[0m",
-    );
+    assert.include(turnStarts[0]?.message.text ?? "", "One test needs attention");
+    assert.include(turnStarts[0]?.message.text ?? "", `"runId":"${running.runId}"`);
+    assert.notInclude(turnStarts[0]?.message.text ?? "", "expected 2, received 3");
     assert.notInclude(turnStarts[0]?.message.text ?? "", "prompt and echoed command");
     assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
     assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
@@ -332,6 +360,21 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
         summary: "One test needs attention",
       },
     });
+    const inspection = yield* service.inspectActionRun(
+      { threadId, providerInstanceId },
+      running.runId,
+    );
+    assert.deepInclude(inspection, {
+      runId: running.runId,
+      actionName: "QA",
+      lifecycleOutcome: "succeeded",
+      exitCode: 0,
+      outputTail: "full retained output\n",
+    });
+    const missingInspection = yield* service
+      .inspectActionRun({ threadId, providerInstanceId }, "another-thread-run")
+      .pipe(Effect.flip);
+    assert.equal(missingInspection.reason, "action_run_not_found");
 
     const deleting = yield* service.runProjectActionAndResume(
       { threadId, providerInstanceId },

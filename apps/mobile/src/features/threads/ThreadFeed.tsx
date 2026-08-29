@@ -1038,6 +1038,7 @@ function renderFeedEntry(
           validatedStatus={actionFollowUp.validatedStatus}
           lastOutputLine={actionFollowUp.lastOutputLine}
           output={actionFollowUp.output}
+          detailedOutputAvailable={actionFollowUp.detailedOutputAvailable}
           iconColor={iconSubtleColor}
           expanded={props.expandedActionRows[entry.id] ?? false}
           onToggle={() => props.onToggleActionFollowUp(entry.id)}
@@ -1206,36 +1207,51 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly validatedStatus: string;
   readonly lastOutputLine: string;
   readonly output: string;
+  readonly detailedOutputAvailable: boolean;
   readonly iconColor: string | ColorValue;
   readonly expanded: boolean;
   readonly onToggle: () => void;
 }) {
   const status = props.exitCode ?? props.validatedStatus;
+  const heading = (
+    <>
+      <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
+      <Text
+        className="min-w-0 flex-1 font-t3-medium text-xs text-adaptive-amber-800-200"
+        numberOfLines={1}
+      >
+        Action completed: {props.actionName} Status: {status}
+      </Text>
+    </>
+  );
 
   return (
     <View className="mb-5 overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.06]">
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded: props.expanded }}
-        accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
-        className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
-        onPress={props.onToggle}
-      >
-        <SymbolView name="cpu" size={14} tintColor={props.iconColor} type="monochrome" />
-        <Text
-          className="min-w-0 flex-1 font-t3-medium text-xs text-adaptive-amber-800-200"
-          numberOfLines={1}
+      {props.detailedOutputAvailable ? (
+        <View
+          accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
         >
-          Action completed: {props.actionName} Status: {status}
-        </Text>
-        <SymbolView
-          name={props.expanded ? "chevron.down" : "chevron.right"}
-          size={14}
-          tintColor={props.iconColor}
-          type="monochrome"
-        />
-      </Pressable>
-      {props.expanded ? (
+          {heading}
+        </View>
+      ) : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: props.expanded }}
+          accessibilityLabel={`Action completed: ${props.actionName}. Status: ${status}`}
+          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+          onPress={props.onToggle}
+        >
+          {heading}
+          <SymbolView
+            name={props.expanded ? "chevron.down" : "chevron.right"}
+            size={14}
+            tintColor={props.iconColor}
+            type="monochrome"
+          />
+        </Pressable>
+      )}
+      {!props.detailedOutputAvailable && props.expanded ? (
         <ScrollView
           nestedScrollEnabled
           className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-adaptive-black-a10-white-a10 bg-neutral-950 px-3 py-2.5"
@@ -1245,9 +1261,16 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
           </Text>
         </ScrollView>
       ) : (
-        <Text className="px-3 pb-2.5 pt-1 text-sm text-foreground" numberOfLines={1}>
-          {props.lastOutputLine}
-        </Text>
+        <View className="px-3 pb-2.5 pt-1">
+          <Text className="text-sm text-foreground" numberOfLines={1}>
+            {props.lastOutputLine}
+          </Text>
+          {props.detailedOutputAvailable ? (
+            <Text className="mt-0.5 text-xs text-foreground-muted">
+              Detailed output retained in the Action terminal.
+            </Text>
+          ) : null}
+        </View>
       )}
     </View>
   );

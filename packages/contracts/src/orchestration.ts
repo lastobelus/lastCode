@@ -429,6 +429,16 @@ export const ActionResumeState = Schema.Struct({
 });
 export type ActionResumeState = typeof ActionResumeState.Type;
 
+export const ActionRunInspection = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  actionName: TrimmedNonEmptyString,
+  lifecycleOutcome: ActionResumeOutcome,
+  exitCode: Schema.NullOr(Schema.Int),
+  exitSignal: Schema.NullOr(Schema.Int),
+  outputTail: Schema.String.check(Schema.isMaxLength(12_000)),
+});
+export type ActionRunInspection = typeof ActionRunInspection.Type;
+
 export class ActionResumeError extends Schema.TaggedErrorClass<ActionResumeError>()(
   "ActionResumeError",
   {
@@ -437,6 +447,7 @@ export class ActionResumeError extends Schema.TaggedErrorClass<ActionResumeError
       "thread_not_found",
       "project_not_found",
       "action_not_found",
+      "action_run_not_found",
       "action_not_enabled",
       "action_already_running",
       "action_not_recoverable",
