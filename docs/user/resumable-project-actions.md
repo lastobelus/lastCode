@@ -6,9 +6,8 @@ another message to the agent. LastCode waits until both the Action has finished 
 idle before delivering the automatic follow-up.
 
 To design and operate these workflows with less prompting, see the
-[agent guide](./resumable-project-actions-for-agents.md), the
-[Wait for PR tutorial](./resumable-project-actions-wait-for-pr.md), and the
-[agent-assisted setup guide](./resumable-project-actions-setup.md).
+[agent-assisted workflow](./resumable-project-actions-for-agents.md). Agents and maintainers can
+continue with the [implementation guide](../internals/resumable-project-actions-for-agents.md).
 
 ## Recognize a waiting thread
 

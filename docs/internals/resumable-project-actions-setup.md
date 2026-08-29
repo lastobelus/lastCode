@@ -1,4 +1,4 @@
-# Set Up Resumable Project Actions With an Agent
+# Implementation Runbook: Set Up Resumable Project Actions With an Agent
 
 An agent can do nearly all of the setup for a resumable workflow: identify the passive wait, write
 and test its command, add the importable `t3.json` entry, update repository instructions, and use

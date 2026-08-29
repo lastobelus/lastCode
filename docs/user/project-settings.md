@@ -43,8 +43,5 @@ For a useful compact result, make every resumable Action print one concise summa
 output line. Include the result that the agent needs next, such as which checks passed, why a wait
 ended, or what requires attention.
 
-An agent can implement the command, add its `t3.json` entry, update the repository workflow, and
-complete this one-time UI configuration with authorized computer use. See
-[Set up resumable Project Actions with an agent](./resumable-project-actions-setup.md). For command
-design and agent workflow guidance, see the
-[agent guide](./resumable-project-actions-for-agents.md).
+To delegate the workflow design and one-time setup, see
+[use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).

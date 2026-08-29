@@ -1,4 +1,4 @@
-# Tutorial: Build a Resumable Wait Like Wait for PR
+# Implementation Tutorial: Build a Resumable Wait Like Wait for PR
 
 LastCode's **Wait for PR** Action illustrates a useful resumable workflow: the agent prepares a
 pull request, hands passive GitHub waiting to a dedicated process, and returns only when there is a
