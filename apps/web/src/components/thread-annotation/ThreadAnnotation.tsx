@@ -233,25 +233,31 @@ export function ThreadAnnotationPostIt(props: {
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   return (
-    <div className="mx-auto mb-1.5 w-full max-w-3xl rounded-xl border border-border/80 bg-warning/10 px-3.5 py-2.5 text-warning-foreground shadow-sm">
-      <ThreadAnnotationBody
-        annotation={props.annotation}
-        className="max-h-48 overflow-y-auto"
-        cwd={props.cwd}
-        onBodyChange={props.onBodyChange}
-        threadRef={props.threadRef}
-      />
-      <div className="mt-2 flex items-center justify-between">
-        <ThreadAnnotationActions
+    <div className="dropdown-glass mx-auto mb-1.5 min-w-0 w-full max-w-3xl overflow-hidden rounded-xl text-warning-foreground">
+      <div className="bg-warning/10 px-3.5 py-2.5">
+        <ThreadAnnotationBody
           annotation={props.annotation}
-          onEdit={props.onEdit}
-          onReopen={() => undefined}
-          onResolve={props.onResolve}
-          pending={props.pending || bodyChangePending}
+          className="max-h-48 overflow-y-auto"
+          cwd={props.cwd}
+          onBodyChange={props.onBodyChange}
+          threadRef={props.threadRef}
         />
-        <button className="text-xs text-warning-foreground" type="button" onClick={props.onDismiss}>
-          Dismiss
-        </button>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <ThreadAnnotationActions
+            annotation={props.annotation}
+            onEdit={props.onEdit}
+            onReopen={() => undefined}
+            onResolve={props.onResolve}
+            pending={props.pending || bodyChangePending}
+          />
+          <button
+            className="shrink-0 text-xs text-warning-foreground"
+            type="button"
+            onClick={props.onDismiss}
+          >
+            Dismiss
+          </button>
+        </div>
       </div>
     </div>
   );
