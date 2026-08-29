@@ -7,6 +7,10 @@
 - [Keyboard shortcuts](./user/keybindings.md)
 - [Organizing threads](./user/thread-sidebar.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
+- [Agent guide to resumable Project Actions](./user/resumable-project-actions-for-agents.md)
+- [Tutorial: build a resumable wait like Wait for
+  PR](./user/resumable-project-actions-wait-for-pr.md)
+- [Set up resumable Project Actions with an agent](./user/resumable-project-actions-setup.md)
 - [Review usage](./user/usage.md)
 - [Customize a project icon](./user/project-settings.md)
 - [Mobile appearance](./user/mobile-appearance.md)

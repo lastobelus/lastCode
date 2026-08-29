@@ -5,6 +5,11 @@ same agent thread when the command finishes. The Action keeps running independen
 another message to the agent. LastCode waits until both the Action has finished and the thread is
 idle before delivering the automatic follow-up.
 
+To design and operate these workflows with less prompting, see the
+[agent guide](./resumable-project-actions-for-agents.md), the
+[Wait for PR tutorial](./resumable-project-actions-wait-for-pr.md), and the
+[agent-assisted setup guide](./resumable-project-actions-setup.md).
+
 ## Recognize a waiting thread
 
 While an Action is running, the legacy thread sidebar shows a yellow dot and the v2 sidebar shows
