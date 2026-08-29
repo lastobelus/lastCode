@@ -8,9 +8,12 @@ import {
   failedRunsWithoutPublishedTags,
   formatRecoveryProblemLines,
   formatDuration,
+  latestKnownUpstreamTag,
+  latestNightlyTag,
   parseRebaseRange,
   parseOptions,
   parseRemotePublicationState,
+  parseRemoteUpstreamTags,
   parseTrailers,
   recoveryActionLines,
   serviceFailureDetailLines,
@@ -90,6 +93,39 @@ describe("LastCode checkpoint dashboard", () => {
     expect(checkpointFreshness("v0.0.1-nightly.20260812.1", "v0.0.1-nightly.20260812.1")).toBe(
       "Up to date",
     );
+    expect(
+      checkpointFreshness("v0.0.35-nightly.20260826.1195", "v0.0.36-nightly.20260828.1213"),
+    ).toBe("Up to date");
+    expect(
+      checkpointFreshness("v0.0.37-nightly.20260829.1219", "v0.0.36-nightly.20260828.1213"),
+    ).toBe("Checkpoint pending");
+  });
+
+  it("uses bounded remote nightly knowledge without regressing to stale local tags", () => {
+    const remoteTags = parseRemoteUpstreamTags(
+      [
+        "tag-1219\trefs/tags/v0.0.37-nightly.20260829.1219",
+        "peeled\trefs/tags/v0.0.37-nightly.20260829.1219^{}",
+        "tag-1218\trefs/tags/v0.0.37-nightly.20260829.1218",
+        "other\trefs/tags/v1.0.0",
+      ].join("\n"),
+    );
+    expect(remoteTags).toEqual(["v0.0.37-nightly.20260829.1219", "v0.0.37-nightly.20260829.1218"]);
+    expect(latestNightlyTag(remoteTags)).toBe("v0.0.37-nightly.20260829.1219");
+    expect(
+      latestKnownUpstreamTag(
+        "v0.0.37-nightly.20260829.1219",
+        "v0.0.35-nightly.20260826.1195",
+        "v0.0.36-nightly.20260828.1213",
+      ),
+    ).toBe("v0.0.37-nightly.20260829.1219");
+    expect(
+      latestKnownUpstreamTag(
+        undefined,
+        "v0.0.35-nightly.20260826.1195",
+        "v0.0.36-nightly.20260828.1213",
+      ),
+    ).toBe("v0.0.36-nightly.20260828.1213");
   });
 
   it("launches the installed dashboard with the repository's pinned Node runtime", () => {
