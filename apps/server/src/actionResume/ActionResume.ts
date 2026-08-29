@@ -20,6 +20,12 @@ import {
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  ACTION_EVENT_TOKEN_ENV,
+  ACTION_RUN_ID_ENV,
+  createActionProtocolDecoder,
+  type ActionProtocolDecoder,
+} from "@t3tools/shared/actionResumeProtocol";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -65,6 +71,11 @@ interface FinishActionInput {
   readonly exitCode?: number | null;
   readonly exitSignal?: number | null;
   readonly deliver?: boolean;
+}
+
+interface ActionProtocolCapture {
+  readonly decoder: ActionProtocolDecoder;
+  report?: ActionResumeState["report"];
 }
 
 export class ActionResume extends Context.Service<
@@ -272,6 +283,7 @@ const make = Effect.gen(function* () {
   const mutex = yield* Semaphore.make(1);
   const decodeState = Schema.decodeUnknownEffect(ActionResumeState);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
+  const protocolCaptureByRunId = new Map<string, ActionProtocolCapture>();
 
   const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
     function* (providerInstanceId: ProviderInstanceId) {
@@ -377,6 +389,7 @@ const make = Effect.gen(function* () {
     });
     yield* persistState({ ...state, delivery: "delivered" });
     outputCaptureByRunId.delete(state.runId);
+    protocolCaptureByRunId.delete(state.runId);
   });
 
   const attemptDeliverPending = (threadId: ThreadId) =>
@@ -411,6 +424,8 @@ const make = Effect.gen(function* () {
       (input.outcome === "succeeded" ||
         input.outcome === "failed" ||
         input.outcome === "cancelled_by_user");
+    const report =
+      input.outcome === "succeeded" ? protocolCaptureByRunId.get(current.runId)?.report : undefined;
     const next: ActionResumeState = {
       ...current,
       outcome: input.outcome,
@@ -422,9 +437,13 @@ const make = Effect.gen(function* () {
       finishedAt,
       exitCode: input.exitCode ?? null,
       exitSignal: input.exitSignal ?? null,
+      ...(report === undefined ? {} : { report }),
     };
     yield* persistState(next);
-    if (next.delivery === "disposed") outputCaptureByRunId.delete(next.runId);
+    if (next.delivery === "disposed") {
+      outputCaptureByRunId.delete(next.runId);
+      protocolCaptureByRunId.delete(next.runId);
+    }
   });
 
   const finish = (input: FinishActionInput) =>
@@ -465,6 +484,7 @@ const make = Effect.gen(function* () {
             ) {
               yield* persistState({ ...latest, delivery: "disposed" });
               outputCaptureByRunId.delete(latest.runId);
+              protocolCaptureByRunId.delete(latest.runId);
             }
           }),
         );
@@ -536,6 +556,7 @@ const make = Effect.gen(function* () {
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
     const runId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
     const terminalId = `action-${runId}`;
+    const eventToken = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
     const startedAt = yield* nowIso;
     const state: ActionResumeState = {
       runId,
@@ -556,6 +577,10 @@ const make = Effect.gen(function* () {
     const env = projectScriptRuntimeEnv({
       project: { cwd: project.workspaceRoot },
       worktreePath: thread.worktreePath,
+      extraEnv: {
+        [ACTION_RUN_ID_ENV]: runId,
+        [ACTION_EVENT_TOKEN_ENV]: eventToken,
+      },
     });
     const launch = Effect.gen(function* () {
       const terminal = yield* terminals.open({
@@ -572,6 +597,9 @@ const make = Effect.gen(function* () {
       }
       yield* persistState(state);
       outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
+      protocolCaptureByRunId.set(runId, {
+        decoder: createActionProtocolDecoder({ runId, token: eventToken }),
+      });
       yield* terminals.write({
         threadId: invocation.threadId,
         terminalId,
@@ -670,6 +698,7 @@ const make = Effect.gen(function* () {
         }
         yield* persistState({ ...current, delivery: "disposed" });
         outputCaptureByRunId.delete(current.runId);
+        protocolCaptureByRunId.delete(current.runId);
       }),
     );
   });
@@ -680,16 +709,43 @@ const make = Effect.gen(function* () {
       return Effect.void;
     }
     if (event.type === "output") {
-      return Effect.sync(() => {
+      return Effect.gen(function* () {
         const capture =
           outputCaptureByRunId.get(state.runId) ?? createActionOutputCapture(state.runId);
         outputCaptureByRunId.set(state.runId, capture);
-        consumeActionTerminalOutput(capture, event.data);
+        const protocol = protocolCaptureByRunId.get(state.runId);
+        if (!protocol) {
+          consumeActionTerminalOutput(capture, event.data);
+          return;
+        }
+        const decoded = protocol.decoder.push(event.data);
+        consumeActionTerminalOutput(capture, decoded.output);
+        for (const actionEvent of decoded.events) {
+          if (actionEvent.kind !== "result") continue;
+          if (protocol.report === undefined) protocol.report = actionEvent.report;
+          else {
+            yield* Effect.logWarning("Action emitted more than one terminal result", {
+              threadId: state.threadId,
+              runId: state.runId,
+            });
+          }
+        }
+        if (decoded.invalidFrames > 0) {
+          yield* Effect.logWarning("Action emitted malformed protocol frames", {
+            threadId: state.threadId,
+            runId: state.runId,
+            count: decoded.invalidFrames,
+          });
+        }
       });
     }
     if (event.type === "exited") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
       const capture = outputCaptureByRunId.get(state.runId);
-      if (capture) finishActionOutputCapture(capture);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({
         threadId: state.threadId,
         outcome: event.exitCode === 0 ? "succeeded" : "failed",
@@ -698,8 +754,12 @@ const make = Effect.gen(function* () {
       });
     }
     if (event.type === "closed") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
       const capture = outputCaptureByRunId.get(state.runId);
-      if (capture) finishActionOutputCapture(capture);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({
         threadId: state.threadId,
         outcome: "cancelled_by_user",
@@ -707,6 +767,12 @@ const make = Effect.gen(function* () {
       });
     }
     if (event.type === "error") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
+      const capture = outputCaptureByRunId.get(state.runId);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({ threadId: state.threadId, outcome: "failed" });
     }
     return Effect.void;
@@ -751,7 +817,12 @@ const make = Effect.gen(function* () {
         const threadId = event.aggregateId as ThreadId;
         if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
         if (event.type === "thread.deleted") {
+          const state = registry.getLatest(threadId);
           registry.clear(threadId);
+          if (state !== null) {
+            outputCaptureByRunId.delete(state.runId);
+            protocolCaptureByRunId.delete(state.runId);
+          }
           return Effect.void;
         }
         return deliverPending(threadId);

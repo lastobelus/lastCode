@@ -880,7 +880,7 @@ function shouldStripDcsSequence(content: string): boolean {
 }
 
 function shouldStripOscSequence(content: string): boolean {
-  return /^(10|11|12);(?:\?|rgb:)/.test(content);
+  return /^(10|11|12);(?:\?|rgb:)/.test(content) || content.startsWith("777;T3ActionEvent;");
 }
 
 function stripStringTerminator(value: string): string {
