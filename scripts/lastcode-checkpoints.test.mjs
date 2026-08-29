@@ -10,6 +10,8 @@ import {
   formatDuration,
   latestKnownUpstreamTag,
   latestNightlyTag,
+  latestPublishedCheckpointTag,
+  latestPublishedInstallableTag,
   parseRebaseRange,
   parseOptions,
   parseRemotePublicationState,
@@ -358,7 +360,20 @@ describe("LastCode checkpoint dashboard", () => {
       ),
     ).toEqual({
       publishedTags: ["lastcode/checkpoint/v1"],
+      publishedTagCommits: { "lastcode/checkpoint/v1": "peeled" },
       remoteMain: "main-sha",
+    });
+  });
+
+  it("uses remote-only checkpoint tags when local refs are stale", () => {
+    const localTag = "lastcode/checkpoint/v0.0.36-nightly.20260828.1213";
+    const remoteTag = "lastcode/checkpoint/v0.0.37-nightly.20260829.1219";
+    expect(latestPublishedCheckpointTag([localTag], [localTag, remoteTag], [])).toBe(
+      "v0.0.37-nightly.20260829.1219",
+    );
+    expect(latestPublishedInstallableTag([localTag], [localTag, remoteTag])).toEqual({
+      tag: remoteTag,
+      version: "v0.0.37-nightly.20260829.1219",
     });
   });
 });
