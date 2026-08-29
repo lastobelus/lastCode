@@ -26,11 +26,11 @@ const makeTemporaryDirectory = () => {
   return directory;
 };
 
-const makeServerConfig = (baseDir: string): ServerConfig.ServerConfig["Service"] => {
+const makeServerConfig = (baseDir: string) => {
   const stateDir = NodePath.join(baseDir, "userdata");
   const logsDir = NodePath.join(stateDir, "logs");
   const providerLogsDir = NodePath.join(logsDir, "provider");
-  return {
+  const config = {
     logLevel: "Error",
     traceMinLevel: "Info",
     traceTimingEnabled: true,
@@ -50,6 +50,7 @@ const makeServerConfig = (baseDir: string): ServerConfig.ServerConfig["Service"]
     dbPath: NodePath.join(stateDir, "state.sqlite"),
     keybindingsConfigPath: NodePath.join(stateDir, "keybindings.json"),
     settingsPath: NodePath.join(stateDir, "settings.json"),
+    environmentThemesDir: NodePath.join(stateDir, "themes"),
     providerStatusCacheDir: NodePath.join(baseDir, "caches"),
     worktreesDir: NodePath.join(baseDir, "worktrees"),
     attachmentsDir: NodePath.join(stateDir, "attachments"),
@@ -76,7 +77,8 @@ const makeServerConfig = (baseDir: string): ServerConfig.ServerConfig["Service"]
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
-  };
+  } as const;
+  return config;
 };
 
 const spawnLeaseOwner = (source: string, argument: string) =>
