@@ -7,6 +7,7 @@
 - [Keyboard shortcuts](./user/keybindings.md)
 - [Organizing threads](./user/thread-sidebar.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
+- [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
 - [Review usage](./user/usage.md)
 - [Customize a project icon](./user/project-settings.md)
 - [Mobile appearance](./user/mobile-appearance.md)
@@ -41,6 +42,12 @@ policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../A
 - [T3 Connect](./internals/t3-connect.md)
 - [CI gates](./internals/ci.md)
 - [Engineering work artifacts](./internals/work-artifacts.md)
+- [Agent implementation guide to resumable Project
+  Actions](./internals/resumable-project-actions-for-agents.md)
+- [Implementation tutorial: build a resumable wait like Wait for
+  PR](./internals/resumable-project-actions-wait-for-pr.md)
+- [Implementation runbook: set up resumable Project Actions with an
+  agent](./internals/resumable-project-actions-setup.md)
 
 ### Runbooks
 
