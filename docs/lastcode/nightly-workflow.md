@@ -306,6 +306,10 @@ dashboard verifies checkpoint publication against `origin`; while offline, an
 unconfirmed local tag with a failed run remains failed rather than being shown
 as current. The bounded remote probe also reads `lastcode/main` for the `MAIN`
 column and falls back to the cached branch ref if the remote does not respond.
+A separate bounded, read-only upstream probe supplies the newest nightly for the
+freshness footer. If that probe is unavailable, the dashboard uses the newest
+local upstream tag or published checkpoint as a safe lower bound, so stale local
+tags cannot make a newer checkpoint look pending.
 
 Interactive output uses the amber, ice, pacific, lavender, success, warning,
 and error palette from the shell `mocolors` theme. Redirected output, `NO_COLOR`,
