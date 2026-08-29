@@ -275,9 +275,11 @@ commits replayed, finish time, duration, checkpoint commit, promotion to
 appear as distinct indented rows beneath their upstream checkpoint, including
 the revision commit, build number, and whether that revision is on
 `lastcode/main`. It also summarizes the launch agent and whether the local
-checkpoint set has caught up to the latest known upstream tag. Its footer shows
-the newest installable checkpoint or revision and whether it is on
-`lastcode/main`. A retained recovery worktree produces an `Action required`
+published checkpoint set has caught up to the latest known upstream tag. Its
+footer shows the newest installable checkpoint or revision and whether it is on
+`lastcode/main`, including published tags that have not been fetched into the
+current checkout. The detailed table still uses locally available tag metadata.
+A retained recovery worktree produces an `Action required`
 message with the path and a command to inspect it. Full failure errors and
 recovery branch names are shown only with `--verbose`; superseded failures are
 not actionable after the same nightly succeeds. Failures in the surrounding
