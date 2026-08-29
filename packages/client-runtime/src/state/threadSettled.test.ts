@@ -524,11 +524,13 @@ describe("canSettle", () => {
     expect(canSettle(makeShell({ activityAt: FRESH, runningAction: true }), { now: NOW })).toBe(
       false,
     );
+    const manualSettling = {
+      now: NOW,
+      autoSettleAfterDays: 3,
+      autoSettleMode: "never" as const,
+    };
     expect(
-      effectiveSettled(makeShell({ activityAt: STALE, runningAction: true }), {
-        now: NOW,
-        autoSettleAfterDays: 3,
-      }),
+      effectiveSettled(makeShell({ activityAt: STALE, runningAction: true }), manualSettling),
     ).toBe(false);
   });
 
