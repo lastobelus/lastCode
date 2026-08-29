@@ -238,12 +238,14 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
-  it("initially collapses completed Action output to its header and final line", () => {
+  it("shows compact completed Action results without embedding detailed output", () => {
     const actionText = formatActionResumeFollowUp({
       actionName: "Run Full CI",
       actionId: "run-full-ci",
+      runId: "run-full-ci-1",
       validatedStatus: "succeeded",
       exitCode: 0,
+      report: undefined,
       output: "full output hidden while collapsed\n[lastcode:ci] Summary: all checks passed",
     });
     const entry = buildAssistantTimelineEntry(actionText);
@@ -257,7 +259,8 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Action completed: Run Full CI Status: 0");
     expect(markup).toContain("[lastcode:ci] Summary: all checks passed");
     expect(markup).not.toContain("full output hidden while collapsed");
-    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).not.toContain('aria-expanded="false"');
+    expect(markup).toContain("Detailed output retained in the Action terminal.");
     expect(markup).toContain("border-warning/28 bg-warning/8");
     expect(markup).toContain("text-warning-foreground");
   });
@@ -266,8 +269,10 @@ describe("MessagesTimeline", () => {
     const actionText = formatActionResumeFollowUp({
       actionName: "Wait for PR",
       actionId: "wait-for-pr",
+      runId: "wait-for-pr-1",
       validatedStatus: "was cancelled by the user",
       exitCode: null,
+      report: undefined,
       output: "Cancellation requested.",
     });
     const entry = buildAssistantTimelineEntry(actionText);

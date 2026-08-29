@@ -1111,6 +1111,28 @@ it.layer(
     }),
   );
 
+  it.effect("flushes pending terminal output before reading persisted history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("fresh output\n");
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "output" && event.data === "fresh output\n"),
+        ),
+      );
+
+      assert.equal(
+        yield* manager.history({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }),
+        "fresh output\n",
+      );
+    }),
+  );
+
   it.effect("strips replay-unsafe terminal query and reply sequences from persisted history", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
