@@ -1122,6 +1122,7 @@ it.layer(
       process.emitData("prompt ");
       process.emitData("\u001b[32mok\u001b[0m ");
       process.emitData("\u001b]11;rgb:ffff/ffff/ffff\u0007");
+      process.emitData("\u001b]777;T3ActionEvent;run-1;token;payload\u0007");
       process.emitData("\u001b[1;1R");
       process.emitData("done\n");
 

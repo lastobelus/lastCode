@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 const DEFAULT_REPOSITORY = "lastobelus/lastCode";
 const DEFAULT_REMOTE = "origin";
@@ -490,6 +491,19 @@ async function main(): Promise<void> {
   }
   const result = await runSelectedIntelBuild();
   console.log(`[build-intel] Result ${JSON.stringify(result)}`);
+  lastCodeAction.result({
+    outcome: "success",
+    summary: `Intel package ${result.tag} is ready`,
+    subject: { type: "release", id: result.tag, revision: result.commit, url: result.releaseUrl },
+    facts: {
+      workflowCommit: result.workflowCommit,
+      assets: result.assets.join(", "),
+    },
+    artifacts: [
+      { label: "Release", url: result.releaseUrl },
+      { label: "Workflow run", url: result.runUrl },
+    ],
+  });
 }
 
 if (import.meta.main) {

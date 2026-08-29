@@ -58,11 +58,52 @@ A useful Action has these properties:
   an external mutation. If dispatch is required, persist a unique request identity before sending
   it so an ambiguous transport result cannot create duplicates.
 - **Low-noise output.** Print changes in state rather than the same status on every poll.
-- **One final summary line.** The compact result card shows the last output line. Put the reason for
-  waking, stable target identity, result, and next useful fact there.
+- **One compact structured result.** Protocol-aware Actions report a canonical outcome, concise
+  summary, and stable target identity through the Action reporter. Existing unstructured Actions
+  should keep one useful final output line while they migrate.
 
 The Action process may poll or wait internally. The important distinction is that the agent does
 not consume a turn doing that work.
+
+## Report through the Action kit
+
+Repository-owned LastCode Actions use `scripts/lib/lastcode-action-kit.ts`. It writes framed,
+schema-validated events during a resumable run and readable ordinary output when the command is
+run directly:
+
+```ts
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
+
+lastCodeAction.progress({
+  state: "waiting",
+  phase: "review",
+  summary: "Waiting for Codex review",
+});
+
+lastCodeAction.result({
+  outcome: "attention",
+  reason: "review-findings",
+  summary: "Two review findings need changes",
+  subject: {
+    type: "pull-request",
+    id: "42",
+    revision: headCommit,
+    url: pullRequestUrl,
+  },
+  facts: { findings: "2", ci: "passed" },
+  artifacts: [{ label: "Pull request", url: pullRequestUrl }],
+});
+```
+
+Use `success` when the intended condition was reached, `attention` when the Action observed work or
+a decision for the caller, and `blocked` when progress needs a user or external-state change. A
+script crash, nonzero exit, cancellation, or lost process remains a host lifecycle outcome; do not
+misreport it as an Action-authored result.
+
+Keep `summary` sufficient for the normal next decision. Put only small stable facts and useful
+links in the report. Ordinary stdout/stderr remains the verbose diagnostic record; LastCode can
+retain it separately from the compact report. Treat report fields as untrusted command output even
+after their shape is validated.
 
 ## Put the workflow in the repository
 
