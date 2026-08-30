@@ -1027,6 +1027,14 @@ function resolveAutomationWorktree(repoRoot: string): string {
   );
 }
 
+export function runPromotionThenShadow(promote: () => void, shadow: () => void): void {
+  try {
+    promote();
+  } finally {
+    shadow();
+  }
+}
+
 function publishRevisionIfNeeded(
   repoRoot: string,
   sourceRef: string,
@@ -1034,7 +1042,7 @@ function publishRevisionIfNeeded(
   installables: ReadonlyArray<InstallableRef>,
   options: CheckpointOptions,
   platform: NodeJS.Platform,
-): { readonly handled: boolean; readonly producedTag?: string } {
+): { readonly handled: boolean } {
   const plan = resolveRevisionPlan({
     installableRefs: installables,
     sourceCommit,
@@ -1111,16 +1119,20 @@ function publishRevisionIfNeeded(
     }
   }
 
-  promoteCheckpoint(
-    repoRoot,
-    candidateCommit,
-    options,
-    platform,
-    options.smoke || options.pushTags,
+  runPromotionThenShadow(
+    () =>
+      promoteCheckpoint(
+        repoRoot,
+        candidateCommit,
+        options,
+        platform,
+        options.smoke || options.pushTags,
+      ),
+    () => runCarrySetShadowAfterPublication(repoRoot, plan.installableTag),
   );
   notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
   console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
-  return { handled: true, producedTag: plan.installableTag };
+  return { handled: true };
 }
 
 export function openPullRequestListArgs(
@@ -1460,12 +1472,13 @@ function main(argv: ReadonlyArray<string>): void {
         )
       : { handled: false };
     if (revisionPublication.handled) {
-      runCarrySetShadowAfterPublication(repoRoot, revisionPublication.producedTag);
       console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
       return;
     }
-    promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags);
-    runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag);
+    runPromotionThenShadow(
+      () => promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags),
+      () => runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag),
+    );
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
   }
@@ -1624,14 +1637,17 @@ function main(argv: ReadonlyArray<string>): void {
     }
   }
 
-  promoteCheckpoint(
-    repoRoot,
-    candidateCommit,
-    options,
-    hostPlatform,
-    options.smoke || options.pushTags,
+  runPromotionThenShadow(
+    () =>
+      promoteCheckpoint(
+        repoRoot,
+        candidateCommit,
+        options,
+        hostPlatform,
+        options.smoke || options.pushTags,
+      ),
+    () => runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag),
   );
-  runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag);
   notify(hostPlatform, "LastCode nightly checkpoint complete", `${candidateRef} is ready.`);
 }
 

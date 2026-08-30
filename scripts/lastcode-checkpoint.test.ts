@@ -22,6 +22,7 @@ import {
   rerereRebaseMadeProgress,
   rebaseStateFiles,
   runCarrySetShadowAfterPublication,
+  runPromotionThenShadow,
   resolveCheckpointPlan,
   resolveRevisionPlan,
   resolveUpstreamMainMirror,
@@ -166,6 +167,21 @@ it("does not run a carry-set shadow check when no immutable was produced", () =>
 
   assert.equal(result, undefined);
   assert.equal(checked, false);
+});
+
+it("runs the carry-set shadow check even when promotion fails", () => {
+  const calls: Array<string> = [];
+
+  expect(() =>
+    runPromotionThenShadow(
+      () => {
+        calls.push("promotion");
+        throw new Error("promotion failed");
+      },
+      () => calls.push("shadow"),
+    ),
+  ).toThrow("promotion failed");
+  expect(calls).toEqual(["promotion", "shadow"]);
 });
 
 it("fingerprints retained recovery content so human edits prevent automatic cleanup", () => {
