@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { ThreadEnvMode } from "./environment.ts";
+import { MAX_SCRIPT_ID_LENGTH } from "./keybindings.ts";
 import { ProjectScriptIcon } from "./orchestration.ts";
 
 /** File name of the checked-in T3 project file, resolved at the workspace root. */
@@ -25,6 +26,15 @@ const trimmedNonEmpty = (annotations: { readonly description: string }, maxLengt
 };
 
 export const T3ProjectFileScript = Schema.Struct({
+  id: Schema.optionalKey(
+    trimmedNonEmpty(
+      {
+        description:
+          "Stable identifier for tools that reconcile this checked-in script with a saved Project Action.",
+      },
+      MAX_SCRIPT_ID_LENGTH,
+    ).check(Schema.isPattern(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u)),
+  ),
   name: trimmedNonEmpty({
     description: "Display name for the script, shown in the T3 Code scripts menu.",
   }),
