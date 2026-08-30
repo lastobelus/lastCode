@@ -14,6 +14,8 @@ describe("lastcode-setup", () => {
         "--enable-nightly-writes",
         "--checkpoint-interval-seconds",
         "1234",
+        "--trusted-project-action",
+        "lc-wait-for-pr",
         "--dry-run",
       ]),
     ).toEqual({
@@ -21,6 +23,7 @@ describe("lastcode-setup", () => {
       dryRun: true,
       enableNightlyWrites: true,
       help: false,
+      trustedProjectActionIds: ["lc-wait-for-pr"],
     });
     expect(() => parseOptions(["--checkpoint-interval-seconds", "0"])).toThrow("positive integer");
     expect(() => parseOptions(["--surprise"])).toThrow("Unknown argument");
@@ -34,15 +37,31 @@ describe("lastcode-setup", () => {
   });
 
   it("installs dependencies, the service, and all managed commands", () => {
-    const commands = setupCommands("/repo", "/node", 1234);
+    const commands = setupCommands("/repo", "/node", 1234, {
+      home: "/home/example",
+      trustedProjectActionIds: ["lc-wait-for-pr"],
+    });
     expect(commands.map(({ command, args }) => [command, ...args])).toEqual([
       ["vp", "install", "--frozen-lockfile"],
+      [
+        "/node",
+        "/repo/scripts/lastcode-project-actions.mjs",
+        "reconcile",
+        "--repo-root",
+        "/repo",
+        "--base-dir",
+        "/home/example/.lastcode",
+        "--trusted-source-id",
+        "lc-wait-for-pr",
+      ],
       [
         "/node",
         "/repo/scripts/lastcode-nightly-service.ts",
         "install",
         "--interval-seconds",
         "1234",
+        "--trusted-project-action",
+        "lc-wait-for-pr",
       ],
       ["/node", "/repo/scripts/lastcode-checkpoints.mjs", "--install"],
       ["/node", "/repo/scripts/lastcode-build.mjs", "--install"],
@@ -51,7 +70,7 @@ describe("lastcode-setup", () => {
   });
 
   it("disables a newly installed service when a later helper fails", () => {
-    const commands = setupCommands("/repo", "/node", 1234);
+    const commands = setupCommands("/repo", "/node", 1234, { home: "/home/example" });
     const executed = [];
 
     expect(() =>
@@ -72,7 +91,7 @@ describe("lastcode-setup", () => {
   });
 
   it("preserves a service that existed before a failed rerun", () => {
-    const commands = setupCommands("/repo", "/node", 1234);
+    const commands = setupCommands("/repo", "/node", 1234, { home: "/home/example" });
     const executed = [];
 
     expect(() =>
