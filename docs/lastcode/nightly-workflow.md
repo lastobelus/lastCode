@@ -58,7 +58,8 @@ Run it and publish checkpoint tags:
 pnpm run lastcode:checkpoint -- \
   --push-tags \
   --promote-if-no-open-prs \
-  --mirror-upstream-main
+  --mirror-upstream-main \
+  --supersede-failed-recovery
 ```
 
 The command:
@@ -181,8 +182,20 @@ can retry. `lastcode-checkpoints` prints the exact commands for the current
 state: it distinguishes an in-progress rebase, a rebase already completed by
 the operator, and a smoke-gate failure that must first be fixed on
 `lastcode/main`. The final printed command runs the daemon immediately. The next
-automated run refuses to replace an existing recovery worktree until those
-cleanup steps are complete.
+automated run normally refuses to replace an existing recovery worktree until
+those cleanup steps are complete. The supervised service records a fingerprint
+for an automation-owned nightly rebase or smoke failure. If a newer upstream
+nightly appears before anyone changes that retained attempt, the service may
+abort and remove only that unchanged generated worktree and branch, skip the
+superseded nightly, and retry the newer sequence. Any detected human file,
+index, configuration, or rebase-metadata edit present at the final verification,
+plus any unexpected ignored path, branch mismatch, worktree lock, initialized
+submodule, current-nightly failure, or publication failure, keeps the recovery
+in place for operator review. Empty untracked directories contain no recoverable
+work and are not protected. Dry-run mode previews the same skip without aborting
+or deleting anything. The brief final verification-and-removal transaction assumes an
+operator is not simultaneously editing that recovery worktree; the service does
+not add cross-process locking for that exceptional race.
 After an operator resolves and completes a retained rebase, Git records those
 choices through `rerere`. A later checkpoint run automatically continues when
 Git reapplies and stages every remembered resolution; genuinely unmerged paths
@@ -200,8 +213,10 @@ gate runs the bridge regression and typechecks the server so broken migration
 imports, incompatible projection fixtures, and invalid upgrade paths stop before
 a checkpoint tag is published.
 
-No later nightly is checkpointed after a failure, because each failure should be
-understood before the sequence continues.
+No later nightly is checkpointed after a current or changed failure. The only
+automatic exception is an untouched, automation-owned rebase or smoke attempt
+that a newer upstream nightly has superseded; the service never invents a
+semantic conflict resolution.
 
 ## Local Scheduling
 
@@ -251,7 +266,8 @@ The supervisor executes the equivalent of:
 pnpm run lastcode:checkpoint -- \
   --push-tags \
   --promote-if-no-open-prs \
-  --mirror-upstream-main
+  --mirror-upstream-main \
+  --supersede-failed-recovery
 ```
 
 The scheduled job also keeps the fork's clean `main` branch synchronized with
