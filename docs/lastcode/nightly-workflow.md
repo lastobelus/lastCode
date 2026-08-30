@@ -398,6 +398,10 @@ supervisor rechecks the branch, exact commit, and cleanliness immediately after 
 successful checkout, so an edit Git safely preserved is still reported as a refresh
 failure in the same run. The checkpoint dashboard includes that failure and its
 bounded diagnostic. Other human development worktrees are never modified.
+After that guarded refresh succeeds, the supervisor reconciles non-setup Project
+Actions from the primary checkout's `t3.json` into the local LastCode environment.
+The trust allowlist saved during setup is applied again; any reconciliation failure
+is recorded as a separate `project-actions` service phase.
 Uninstall leaves the automation worktree available for inspection.
 
 When a new nightly needs an isolated sync worktree, dependency bootstrap uses
