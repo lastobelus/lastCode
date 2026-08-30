@@ -104,6 +104,7 @@ function harness(input: {
       }
     },
     log: (message) => calls.push(`log:${message}`),
+    progress: ({ state, phase, summary }) => calls.push(`progress:${state}:${phase}:${summary}`),
     registrationTimeoutMs: 20,
     registrationPollMs: 5,
     runTimeoutMs: 30,
@@ -217,6 +218,10 @@ describe("lastcode-build-intel-package", () => {
     expect(test.getRequest().dispatchAttemptedAt).toBe("2026-08-27T00:02:00.000Z");
     expect(test.getRequest().workflowRunId).toBe(123);
     expect(result).toMatchObject({ tag, commit, runId: 123 });
+    expect(test.calls).toContain(
+      "progress:waiting:registration:Waiting for GitHub to register the workflow",
+    );
+    expect(test.calls).toContain("progress:waiting:workflow:Workflow is in_progress");
     expect(result.assets).toEqual(["LastCode-x64.dmg", "build-manifest.json"]);
     expect(test.calls.slice(-3)).toEqual([
       "lock:enter",
