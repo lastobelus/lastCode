@@ -2,6 +2,7 @@ import * as React from "react";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   activeThreadAnchorTimestampMs,
   getThreadSortTimestamp,
@@ -564,7 +565,7 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
     return "monitoring";
   }
   if (thread.actionResume?.outcome === "running") {
-    return "waiting";
+    return actionRunningPresentation(thread.actionResume).state;
   }
   return "ready";
 }
@@ -827,10 +828,17 @@ export function resolveThreadStatusPill(input: {
   }
 
   if (thread.actionResume?.outcome === "running") {
+    const action = actionRunningPresentation(thread.actionResume);
     return {
-      label: "Waiting",
-      colorClass: "text-yellow-700 dark:text-yellow-300/90",
-      dotClass: "bg-yellow-500 dark:bg-yellow-300/90",
+      label: action.label,
+      colorClass:
+        action.state === "working"
+          ? "text-sky-600 dark:text-sky-300/80"
+          : "text-yellow-700 dark:text-yellow-300/90",
+      dotClass:
+        action.state === "working"
+          ? "bg-sky-500 dark:bg-sky-300/80"
+          : "bg-yellow-500 dark:bg-yellow-300/90",
       pulse: false,
     };
   }
