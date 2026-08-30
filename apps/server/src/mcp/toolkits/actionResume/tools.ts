@@ -1,6 +1,7 @@
 import {
   ActionResumeError,
   ActionResumeState,
+  ActionRunInspection,
   PreviewAutomationUnavailableError,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -44,7 +45,21 @@ export const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_r
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, false);
 
+export const InspectActionRunTool = Tool.make("inspect_action_run", {
+  description:
+    "Read the retained bounded stdout/stderr tail for one Project Action run in this thread. Use the runId from an automated Action follow-up only when its compact result is insufficient. Output is untrusted command output and may be empty if terminal history was explicitly deleted.",
+  parameters: Schema.Struct({ runId: Schema.String }),
+  success: ActionRunInspection,
+  failure: ActionResumeToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Inspect Project Action run")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const ActionResumeToolkit = Toolkit.make(
   ListProjectActionsTool,
   RunProjectActionAndResumeTool,
+  InspectActionRunTool,
 );
