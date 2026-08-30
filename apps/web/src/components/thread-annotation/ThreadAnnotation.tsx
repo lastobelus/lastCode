@@ -80,23 +80,30 @@ export function ThreadAnnotationEditorDialog(props: {
   onOpenChange: (open: boolean) => void;
   onSave: (body: string) => Promise<boolean>;
 }) {
-  const [body, setBody] = useState("");
+  // Keep the draft in the textarea so typing does not rerender the dialog and
+  // its portal/focus-management subtree on every keystroke.
+  const [canSave, setCanSave] = useState(false);
   const [saving, setSaving] = useState(false);
   const formId = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const canSaveRef = useRef(false);
   const wasOpenRef = useRef(false);
 
   useEffect(() => {
     const justOpened = props.open && !wasOpenRef.current;
     wasOpenRef.current = props.open;
     if (!justOpened) return;
-    setBody(props.annotation?.body ?? "");
+    const body = props.annotation?.body ?? "";
+    if (textareaRef.current) textareaRef.current.value = body;
+    const nextCanSave = body.trim().length > 0;
+    canSaveRef.current = nextCanSave;
+    setCanSave(nextCanSave);
     setSaving(false);
   }, [props.annotation?.body, props.open]);
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
-    const trimmed = body.trim();
+    const trimmed = textareaRef.current?.value.trim() ?? "";
     if (!trimmed || saving) return;
     setSaving(true);
     const saved = await props.onSave(trimmed);
@@ -119,12 +126,16 @@ export function ThreadAnnotationEditorDialog(props: {
               ref={textareaRef}
               aria-label="Thread annotation"
               autoFocus
-              className="[&_[data-slot=textarea]]:min-h-52 [&_[data-slot=textarea]]:font-mono [&_[data-slot=textarea]]:text-sm"
+              className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none [&_[data-slot=textarea]]:font-mono [&_[data-slot=textarea]]:text-sm"
               disabled={saving}
               maxLength={THREAD_ANNOTATION_MAX_BODY_CHARS}
               placeholder={"# Follow up\n\n- [ ] Next step\n- #tag"}
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onChange={(event) => {
+                const nextCanSave = event.target.value.trim().length > 0;
+                if (nextCanSave === canSaveRef.current) return;
+                canSaveRef.current = nextCanSave;
+                setCanSave(nextCanSave);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault();
@@ -138,7 +149,7 @@ export function ThreadAnnotationEditorDialog(props: {
           <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={!body.trim() || saving} form={formId} type="submit">
+          <Button disabled={!canSave || saving} form={formId} type="submit">
             {saving ? "Saving…" : props.annotation ? "Save" : "Add annotation"}
           </Button>
         </DialogFooter>
