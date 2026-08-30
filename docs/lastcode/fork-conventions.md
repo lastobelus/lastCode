@@ -101,7 +101,7 @@ contribution branches clean.
 ## Contribution Bases
 
 Never use `lastcode/main` as the base for an upstream PR. It contains the entire
-downstream patch stack and would contaminate the upstream diff.
+[downstream carry set](glossary.md#downstream-carry-set) and would contaminate the upstream diff.
 
 Before starting upstream-facing work:
 

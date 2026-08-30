@@ -13,7 +13,7 @@ the installed build to the offered installable:
 - keep hosted T3 Code update notes unchanged.
 
 The result must be truthful even for long update ranges and older builds. It must
-never label the whole rebased LastCode patch stack as new.
+never label the whole rebased LastCode [downstream carry set](glossary.md#downstream-carry-set) as new.
 
 ## Current Failure
 
