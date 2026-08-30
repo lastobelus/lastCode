@@ -16,6 +16,7 @@ const CHECKPOINT_ARGS = [
   "--push-tags",
   "--promote-if-no-open-prs",
   "--mirror-upstream-main",
+  "--supersede-failed-recovery",
 ];
 const DIAGNOSTIC_MAX_CHARACTERS = 1_200;
 const GIT_MAX_BUFFER = 16 * 1024 * 1024;
