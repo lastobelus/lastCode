@@ -7,6 +7,7 @@ import { expect, it } from "vite-plus/test";
 
 import {
   clearNightlyServiceState,
+  nextCheckpointSupervisorConfig,
   parseNightlyServiceArgs,
   renderLaunchAgentPlist,
   runNowArguments,
@@ -55,11 +56,14 @@ it("configures one durable recovery thread only during installation", () => {
       "1234",
       "--recovery-thread",
       "e01b7101-0713-4df7-9b6b-5c46f9d507db",
+      "--trusted-project-action",
+      "lc-wait-for-pr",
     ]),
   ).toEqual({
     command: "install",
     intervalSeconds: 1234,
     recoveryThreadId: "e01b7101-0713-4df7-9b6b-5c46f9d507db",
+    trustedProjectActionIds: ["lc-wait-for-pr"],
   });
   expect(
     parseNightlyServiceArgs(["install", "--interval-seconds", "1234", "--no-recovery-thread"]),
@@ -67,6 +71,7 @@ it("configures one durable recovery thread only during installation", () => {
     command: "install",
     clearRecoveryThread: true,
     intervalSeconds: 1234,
+    trustedProjectActionIds: [],
   });
   expect(() => parseNightlyServiceArgs(["run-now", "--recovery-thread", "thread-1"])).toThrow(
     "accepted only",
@@ -94,6 +99,29 @@ it("configures one durable recovery thread only during installation", () => {
       "thread-maintenance",
     ]),
   ).toThrow("either one recovery thread");
+});
+
+it("persists the Project Action trust allowlist without discarding recovery delivery", () => {
+  expect(
+    nextCheckpointSupervisorConfig(
+      { schemaVersion: 1, recoveryThreadId: "thread-maintenance" },
+      { trustedProjectActionIds: ["lc-wait-for-pr"] },
+    ),
+  ).toEqual({
+    schemaVersion: 1,
+    recoveryThreadId: "thread-maintenance",
+    trustedProjectActionIds: ["lc-wait-for-pr"],
+  });
+  expect(
+    nextCheckpointSupervisorConfig(
+      {
+        schemaVersion: 1,
+        recoveryThreadId: "thread-maintenance",
+        trustedProjectActionIds: ["lc-wait-for-pr"],
+      },
+      { clearRecoveryThread: true, trustedProjectActionIds: [] },
+    ),
+  ).toEqual({ schemaVersion: 1, trustedProjectActionIds: [] });
 });
 
 it("requests an idle service run without terminating an active checkpoint", () => {

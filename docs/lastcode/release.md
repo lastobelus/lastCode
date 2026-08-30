@@ -27,10 +27,28 @@ commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
 receipt without rerunning validation.
 
-For each checkout that agents use, import **Run Quick CI** from `t3.json` in
-Project Settings once, then edit the imported Action and enable **Allow Codex
-and Claude to run and resume**. These are deliberate one-time Project Action
-settings; the repository does not automate or migrate them.
+LastCode setup reconciles non-setup Actions from `t3.json` through the
+event-sourced project command path. The checkpoint supervisor repeats the
+reconciliation after every successful primary `lastcode/main` refresh, including
+an already-current refresh. A separately managed checkout can opt into the same
+behavior; after a checkout update, it refreshes dependencies before invoking
+the checked-in reconciliation code. Ownership state is keyed by workspace so
+multiple managed checkouts can share one T3 home. Each reconciled declaration
+has an explicit stable `id`, so renaming
+its command entrypoint does not change ownership. Exact legacy imports are
+adopted without changing their saved Action IDs, so
+keybindings and local resume permission survive. Managed name, command, icon,
+and preview changes propagate only while the saved Action still matches its last
+managed specification; a locally diverged or removed declaration is retained
+and reported instead of being overwritten or deleted. A managed resume grant is
+revoked while an Action's executable fields are locally diverged.
+
+New Actions remain unavailable to agents until the environment grants trust.
+Setup accepts repeated `--trusted-project-action <lc-id>` flags and saves that
+allowlist for subsequent checkpoint-supervisor refreshes. Managed checkout
+configuration uses `projectActions.trustedActionIds`. Removing a managed trust
+entry revokes only that managed grant; permissions enabled directly in Project
+Settings remain local user state.
 
 The action never pushes: after it resumes, the agent still decides whether and
 what to push. A changed head, changed base tracking ref, or dirty worktree makes
@@ -279,10 +297,14 @@ The managed-checkout tool accepts an absolute JSON configuration:
 ```json
 {
   "backupRefPrefix": "refs/example/managed-checkout-backups",
-  "branch": "release",
+  "branch": "lastcode/main",
   "gitCommonDirectory": "/srv/example/repository.git",
+  "projectActions": {
+    "baseDir": "/srv/example/t3-home",
+    "trustedActionIds": []
+  },
   "remote": "origin",
-  "remoteBranch": "release",
+  "remoteBranch": "lastcode/main",
   "worktree": "/srv/example/managed-checkout"
 }
 ```
@@ -302,6 +324,13 @@ caller must give it exclusive ownership of the checkout for the duration of the
 operation; Git cannot lock arbitrary concurrent filesystem writes. If the ref
 moves but tree verification fails, the tool retains the target ref and reports
 the backup ref for explicit recovery instead of pretending it rolled back.
+
+The optional `projectActions` block is accepted only when the managed branch is
+`lastcode/main`. After a successful refresh—including an already-current
+refresh—the tool verifies the LastCode anchor and reconciles its checked-in
+Actions into the selected T3 home. The configuration file is the explicit
+environment-local management and trust boundary; deployment infrastructure
+owns its concrete location and values.
 
 On an Intel artifact-consumer node, state defaults to
 `~/.lastcode/intel-updates`. `pending.json` is the narrow,
