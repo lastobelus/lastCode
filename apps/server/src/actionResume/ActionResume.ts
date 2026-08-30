@@ -10,20 +10,30 @@
 import {
   ActionResumeState,
   ActionResumeError,
+  ActionRunInspection,
   CommandId,
   EventId,
   MessageId,
   ProviderDriverKind,
+  type ActionProgress,
   type ProviderInstanceId,
   type ProjectScript,
   type ThreadId,
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  ACTION_EVENT_TOKEN_ENV,
+  ACTION_RUN_ID_ENV,
+  createActionProtocolDecoder,
+  type ActionProtocolDecoder,
+} from "@t3tools/shared/actionResumeProtocol";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -67,6 +77,28 @@ interface FinishActionInput {
   readonly deliver?: boolean;
 }
 
+interface ActionProtocolCapture {
+  readonly decoder: ActionProtocolDecoder;
+  report?: ActionResumeState["report"];
+  lastObservedProgress?: ActionProgress;
+  lastAcceptedProgressAtMs?: number;
+  acceptedProgressCount: number;
+  pendingProgress?: ActionProgress;
+  progressFlushGeneration: number;
+  progressFlushScheduled?: boolean;
+  progressLimitWarned?: boolean;
+}
+
+const progressEquals = (left: ActionProgress | undefined, right: ActionProgress) =>
+  left?.version === right.version &&
+  left.state === right.state &&
+  left.summary === right.summary &&
+  left.phase === right.phase &&
+  left.detail === right.detail &&
+  left.current === right.current &&
+  left.total === right.total &&
+  left.unit === right.unit;
+
 export class ActionResume extends Context.Service<
   ActionResume,
   {
@@ -77,6 +109,10 @@ export class ActionResume extends Context.Service<
       invocation: ActionResumeInvocation,
       actionId: string,
     ) => Effect.Effect<ActionResumeState, ActionResumeError>;
+    readonly inspectActionRun: (
+      invocation: ActionResumeInvocation,
+      runId: string,
+    ) => Effect.Effect<ActionRunInspection, ActionResumeError>;
     readonly cancelByUser: (threadId: ThreadId) => Effect.Effect<void>;
     readonly cancelByArchive: (threadId: ThreadId) => Effect.Effect<void>;
     readonly resumeInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
@@ -91,7 +127,9 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const outcomeSummary = (state: ActionResumeState): string => {
   switch (state.outcome) {
     case "running":
-      return `Waiting for Action: ${state.actionName}`;
+      return state.progress === undefined
+        ? `Waiting for Action: ${state.actionName}`
+        : `${state.progress.state === "working" ? "Working" : "Waiting"}: ${state.progress.summary}`;
     case "succeeded":
       return `Action completed: ${state.actionName}`;
     case "failed":
@@ -111,6 +149,8 @@ const outcomeTone = (state: ActionResumeState): "info" | "error" =>
   state.outcome === "failed" || state.outcome === "process_lost" ? "error" : "info";
 
 const MAX_ACTION_OUTPUT_CHARS = 12_000;
+const ACTION_PROGRESS_MIN_INTERVAL_MS = 1_000;
+const ACTION_PROGRESS_MAX_UPDATES = 128;
 const ACTION_OUTPUT_OSC = "777;T3ActionOutput";
 
 type ActionOutputBoundary = "start" | "end";
@@ -208,8 +248,11 @@ const followUpText = (state: ActionResumeState, outputTail: string | undefined):
   return formatActionResumeFollowUp({
     actionName: state.actionName,
     actionId: state.actionId,
+    runId: state.runId,
     validatedStatus: status,
+    lifecycleOutcome: state.outcome,
     exitCode: state.exitCode,
+    report: state.report,
     output: outputTail,
   });
 };
@@ -261,6 +304,8 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const serviceScope = yield* Effect.scope;
+  const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
@@ -272,6 +317,7 @@ const make = Effect.gen(function* () {
   const mutex = yield* Semaphore.make(1);
   const decodeState = Schema.decodeUnknownEffect(ActionResumeState);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
+  const protocolCaptureByRunId = new Map<string, ActionProtocolCapture>();
 
   const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
     function* (providerInstanceId: ProviderInstanceId) {
@@ -282,15 +328,19 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const persistState = Effect.fn("ActionResume.persistState")(function* (state: ActionResumeState) {
-    const previous = registry.getLatest(state.threadId);
+  const persistState = Effect.fn("ActionResume.persistState")(function* (input: ActionResumeState) {
+    const previous = registry.getLatest(input.threadId);
+    const state: ActionResumeState = {
+      ...input,
+      revision:
+        previous?.runId === input.runId ? (previous.revision ?? 0) + 1 : (input.revision ?? 0),
+    };
     registry.record(state);
-    const activityId = EventId.make(
-      `action-resume:${state.runId}:${state.outcome}:${state.delivery}`,
-    );
+    const activityId = EventId.make(`action-resume:${state.runId}`);
     const commandId = CommandId.make(
-      `server:action-resume:${state.runId}:${state.outcome}:${state.delivery}`,
+      `server:action-resume:${state.runId}:${state.revision}:${state.outcome}:${state.delivery}`,
     );
+    const activityCreatedAt = state.finishedAt ?? state.progress?.updatedAt ?? state.startedAt;
     yield* engine
       .dispatch({
         type: "thread.activity.append",
@@ -303,9 +353,9 @@ const make = Effect.gen(function* () {
           summary: outcomeSummary(state),
           payload: state,
           turnId: null,
-          createdAt: state.finishedAt ?? state.startedAt,
+          createdAt: activityCreatedAt,
         },
-        createdAt: state.finishedAt ?? state.startedAt,
+        createdAt: activityCreatedAt,
       })
       .pipe(
         Effect.catchCause((cause) => {
@@ -314,6 +364,109 @@ const make = Effect.gen(function* () {
           return Effect.failCause(cause);
         }),
       );
+    return state;
+  });
+
+  const flushPendingProgressUnlocked = Effect.fn("ActionResume.flushPendingProgressUnlocked")(
+    function* (threadId: ThreadId, runId: string, generation: number) {
+      const protocol = protocolCaptureByRunId.get(runId);
+      if (protocol === undefined || protocol.progressFlushGeneration !== generation) return;
+
+      protocol.progressFlushScheduled = false;
+      const pending = protocol.pendingProgress;
+      const current = registry.getLatest(threadId);
+      if (pending === undefined || current?.runId !== runId || current.outcome !== "running")
+        return;
+
+      const updatedAt = yield* nowIso;
+      yield* persistState({ ...current, progress: { ...pending, updatedAt } });
+      protocol.lastObservedProgress = pending;
+      protocol.lastAcceptedProgressAtMs = yield* clock.currentTimeMillis;
+      protocol.acceptedProgressCount += 1;
+      delete protocol.pendingProgress;
+    },
+  );
+
+  const acceptProgressUnlocked = Effect.fn("ActionResume.acceptProgressUnlocked")(function* (
+    threadId: ThreadId,
+    runId: string,
+    progress: ActionProgress,
+  ) {
+    const current = registry.getLatest(threadId);
+    const protocol = protocolCaptureByRunId.get(runId);
+    if (current?.runId !== runId || current.outcome !== "running" || protocol === undefined) return;
+
+    if (progressEquals(current.progress, progress)) {
+      protocol.lastObservedProgress = progress;
+      if (protocol.pendingProgress !== undefined) {
+        protocol.progressFlushGeneration += 1;
+        protocol.progressFlushScheduled = false;
+        delete protocol.pendingProgress;
+      }
+      return;
+    }
+
+    if (
+      progressEquals(protocol.lastObservedProgress, progress) &&
+      protocol.pendingProgress === undefined
+    ) {
+      return;
+    }
+
+    if (protocol.acceptedProgressCount >= ACTION_PROGRESS_MAX_UPDATES) {
+      protocol.lastObservedProgress = progress;
+      if (protocol.progressLimitWarned !== true) {
+        protocol.progressLimitWarned = true;
+        yield* Effect.logWarning("Action progress update limit reached", {
+          threadId,
+          runId,
+          limit: ACTION_PROGRESS_MAX_UPDATES,
+        });
+      }
+      return;
+    }
+
+    const acceptedAtMs = yield* clock.currentTimeMillis;
+    const stateChanged = current.progress?.state !== progress.state;
+    if (
+      !stateChanged &&
+      protocol.lastAcceptedProgressAtMs !== undefined &&
+      acceptedAtMs - protocol.lastAcceptedProgressAtMs < ACTION_PROGRESS_MIN_INTERVAL_MS
+    ) {
+      protocol.lastObservedProgress = progress;
+      protocol.pendingProgress = progress;
+      if (protocol.progressFlushScheduled !== true) {
+        protocol.progressFlushScheduled = true;
+        const generation = ++protocol.progressFlushGeneration;
+        const remainingMs =
+          ACTION_PROGRESS_MIN_INTERVAL_MS - (acceptedAtMs - protocol.lastAcceptedProgressAtMs);
+        yield* clock.sleep(Duration.millis(remainingMs)).pipe(
+          Effect.andThen(
+            mutex.withPermits(1)(flushPendingProgressUnlocked(threadId, runId, generation)),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.void
+              : Effect.logWarning("Could not flush deferred Action progress", {
+                  threadId,
+                  runId,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+          Effect.forkIn(serviceScope, { startImmediately: true }),
+        );
+      }
+      return;
+    }
+
+    const updatedAt = yield* nowIso;
+    yield* persistState({ ...current, progress: { ...progress, updatedAt } });
+    protocol.progressFlushGeneration += 1;
+    protocol.progressFlushScheduled = false;
+    protocol.lastObservedProgress = progress;
+    protocol.lastAcceptedProgressAtMs = acceptedAtMs;
+    protocol.acceptedProgressCount += 1;
+    delete protocol.pendingProgress;
   });
 
   const eligibleThreadForFollowUp = Effect.fn("ActionResume.eligibleThreadForFollowUp")(function* (
@@ -377,6 +530,7 @@ const make = Effect.gen(function* () {
     });
     yield* persistState({ ...state, delivery: "delivered" });
     outputCaptureByRunId.delete(state.runId);
+    protocolCaptureByRunId.delete(state.runId);
   });
 
   const attemptDeliverPending = (threadId: ThreadId) =>
@@ -411,6 +565,12 @@ const make = Effect.gen(function* () {
       (input.outcome === "succeeded" ||
         input.outcome === "failed" ||
         input.outcome === "cancelled_by_user");
+    const protocol = protocolCaptureByRunId.get(current.runId);
+    const report = input.outcome === "succeeded" ? protocol?.report : undefined;
+    const progress =
+      protocol?.pendingProgress === undefined
+        ? current.progress
+        : { ...protocol.pendingProgress, updatedAt: finishedAt };
     const next: ActionResumeState = {
       ...current,
       outcome: input.outcome,
@@ -422,9 +582,14 @@ const make = Effect.gen(function* () {
       finishedAt,
       exitCode: input.exitCode ?? null,
       exitSignal: input.exitSignal ?? null,
+      ...(progress === undefined ? {} : { progress }),
+      ...(report === undefined ? {} : { report }),
     };
     yield* persistState(next);
-    if (next.delivery === "disposed") outputCaptureByRunId.delete(next.runId);
+    if (next.delivery === "disposed") {
+      outputCaptureByRunId.delete(next.runId);
+      protocolCaptureByRunId.delete(next.runId);
+    }
   });
 
   const finish = (input: FinishActionInput) =>
@@ -465,6 +630,7 @@ const make = Effect.gen(function* () {
             ) {
               yield* persistState({ ...latest, delivery: "disposed" });
               outputCaptureByRunId.delete(latest.runId);
+              protocolCaptureByRunId.delete(latest.runId);
             }
           }),
         );
@@ -536,6 +702,7 @@ const make = Effect.gen(function* () {
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
     const runId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
     const terminalId = `action-${runId}`;
+    const eventToken = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
     const startedAt = yield* nowIso;
     const state: ActionResumeState = {
       runId,
@@ -551,11 +718,16 @@ const make = Effect.gen(function* () {
       finishedAt: null,
       exitCode: null,
       exitSignal: null,
+      revision: 0,
     };
     const cwd = thread.worktreePath ?? project.workspaceRoot;
     const env = projectScriptRuntimeEnv({
       project: { cwd: project.workspaceRoot },
       worktreePath: thread.worktreePath,
+      extraEnv: {
+        [ACTION_RUN_ID_ENV]: runId,
+        [ACTION_EVENT_TOKEN_ENV]: eventToken,
+      },
     });
     const launch = Effect.gen(function* () {
       const terminal = yield* terminals.open({
@@ -572,6 +744,11 @@ const make = Effect.gen(function* () {
       }
       yield* persistState(state);
       outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
+      protocolCaptureByRunId.set(runId, {
+        decoder: createActionProtocolDecoder({ runId, token: eventToken }),
+        acceptedProgressCount: 0,
+        progressFlushGeneration: 0,
+      });
       yield* terminals.write({
         threadId: invocation.threadId,
         terminalId,
@@ -622,6 +799,40 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const inspectActionRunImpl = Effect.fn("ActionResume.inspectActionRun")(function* (
+    invocation: ActionResumeInvocation,
+    runId: string,
+  ) {
+    const rows = yield* activities.listByThreadId({ threadId: invocation.threadId });
+    const decoded = yield* Effect.forEach(
+      rows.filter((row) => row.kind === ACTION_RESUME_ACTIVITY_KIND),
+      (row) => Effect.option(decodeState(row.payload)),
+    );
+    const state = decoded
+      .filter(Option.isSome)
+      .map((entry) => entry.value)
+      .findLast((entry) => entry.runId === runId && entry.threadId === invocation.threadId);
+    if (state === undefined) {
+      return yield* new ActionResumeError({
+        reason: "action_run_not_found",
+        message: "No retained Project Action run with that id belongs to this thread.",
+      });
+    }
+
+    const history = yield* terminals.history({
+      threadId: invocation.threadId,
+      terminalId: state.terminalId,
+    });
+    return ActionRunInspection.make({
+      runId: state.runId,
+      actionName: state.actionName,
+      lifecycleOutcome: state.outcome,
+      exitCode: state.exitCode,
+      exitSignal: state.exitSignal,
+      outputTail: actionOutputFromTranscript(history, state.runId, true) ?? "",
+    });
+  });
+
   const resumeInterruptedImpl = Effect.fn("ActionResume.resumeInterrupted")(function* (
     threadId: ThreadId,
   ) {
@@ -670,6 +881,7 @@ const make = Effect.gen(function* () {
         }
         yield* persistState({ ...current, delivery: "disposed" });
         outputCaptureByRunId.delete(current.runId);
+        protocolCaptureByRunId.delete(current.runId);
       }),
     );
   });
@@ -680,16 +892,56 @@ const make = Effect.gen(function* () {
       return Effect.void;
     }
     if (event.type === "output") {
-      return Effect.sync(() => {
+      return Effect.gen(function* () {
         const capture =
           outputCaptureByRunId.get(state.runId) ?? createActionOutputCapture(state.runId);
         outputCaptureByRunId.set(state.runId, capture);
-        consumeActionTerminalOutput(capture, event.data);
+        const protocol = protocolCaptureByRunId.get(state.runId);
+        if (!protocol) {
+          consumeActionTerminalOutput(capture, event.data);
+          return;
+        }
+        const decoded = protocol.decoder.push(event.data);
+        consumeActionTerminalOutput(capture, decoded.output);
+        for (const actionEvent of decoded.events) {
+          if (actionEvent.kind === "progress") {
+            yield* mutex
+              .withPermits(1)(
+                acceptProgressUnlocked(state.threadId, state.runId, actionEvent.progress),
+              )
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not persist Action progress", {
+                    threadId: state.threadId,
+                    runId: state.runId,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+              );
+          } else if (protocol.report === undefined) protocol.report = actionEvent.report;
+          else {
+            yield* Effect.logWarning("Action emitted more than one terminal result", {
+              threadId: state.threadId,
+              runId: state.runId,
+            });
+          }
+        }
+        if (decoded.invalidFrames > 0) {
+          yield* Effect.logWarning("Action emitted malformed protocol frames", {
+            threadId: state.threadId,
+            runId: state.runId,
+            count: decoded.invalidFrames,
+          });
+        }
       });
     }
     if (event.type === "exited") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
       const capture = outputCaptureByRunId.get(state.runId);
-      if (capture) finishActionOutputCapture(capture);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({
         threadId: state.threadId,
         outcome: event.exitCode === 0 ? "succeeded" : "failed",
@@ -698,8 +950,12 @@ const make = Effect.gen(function* () {
       });
     }
     if (event.type === "closed") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
       const capture = outputCaptureByRunId.get(state.runId);
-      if (capture) finishActionOutputCapture(capture);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({
         threadId: state.threadId,
         outcome: "cancelled_by_user",
@@ -707,6 +963,12 @@ const make = Effect.gen(function* () {
       });
     }
     if (event.type === "error") {
+      const protocol = protocolCaptureByRunId.get(state.runId);
+      const capture = outputCaptureByRunId.get(state.runId);
+      if (capture) {
+        if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
+        finishActionOutputCapture(capture);
+      }
       return finish({ threadId: state.threadId, outcome: "failed" });
     }
     return Effect.void;
@@ -751,7 +1013,12 @@ const make = Effect.gen(function* () {
         const threadId = event.aggregateId as ThreadId;
         if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
         if (event.type === "thread.deleted") {
+          const state = registry.getLatest(threadId);
           registry.clear(threadId);
+          if (state !== null) {
+            outputCaptureByRunId.delete(state.runId);
+            protocolCaptureByRunId.delete(state.runId);
+          }
           return Effect.void;
         }
         return deliverPending(threadId);
@@ -788,6 +1055,8 @@ const make = Effect.gen(function* () {
       runProjectActionAndResumeImpl(invocation, actionId).pipe(
         mapActionResumeError("run the Project Action"),
       ),
+    inspectActionRun: (invocation, runId) =>
+      inspectActionRunImpl(invocation, runId).pipe(mapActionResumeError("inspect the Action run")),
     cancelByUser: (threadId) => cancel(threadId, "cancelled_by_user"),
     cancelByArchive: (threadId) => cancel(threadId, "cancelled_by_archive"),
     resumeInterrupted: (threadId) =>
