@@ -1,6 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, expect, it } from "@effect/vitest";
 
 import {
+  checkpointRecoveryFingerprint,
   checkpointFailureDisposition,
   checkpointMessage,
   checkpointPromotionPushArgs,
@@ -13,11 +20,14 @@ import {
   openPullRequestListArgs,
   promotionNeeded,
   rerereRebaseMadeProgress,
+  rebaseStateFiles,
   resolveCheckpointPlan,
   resolveRevisionPlan,
   resolveUpstreamMainMirror,
   revisionMessage,
   shouldContinueRerereRebase,
+  recoverySupersessionMode,
+  supersededRecoveryNightly,
   unpublishedCheckpointTags,
   upstreamMainMirrorPushArgs,
   worktreeAddArgs,
@@ -74,6 +84,361 @@ it("continues a rebase when rerere staged every remembered conflict", () => {
 it("stops automatic rebase continuation when Git makes no progress", () => {
   assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-b\0step:2"), true);
   assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-a\0step:1"), false);
+});
+
+it("fingerprints retained recovery content so human edits prevent automatic cleanup", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "original\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  const original = checkpointRecoveryFingerprint(directory, branch);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "edited\n");
+
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
+  git(["checkout", "--", "tracked.txt"]);
+  const beforeBranchSwitch = checkpointRecoveryFingerprint(directory, branch);
+  git(["switch", "--quiet", "--create", "operator-review"]);
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(beforeBranchSwitch);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("fingerprints tracked modes even when Git ignores filemode changes", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "tracked\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  git(["config", "core.filemode", "false"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  const original = checkpointRecoveryFingerprint(directory, branch);
+  NodeFS.chmodSync(NodePath.join(directory, "tracked.txt"), 0o755);
+
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("fingerprints tracked parent directory modes", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  const trackedDirectory = NodePath.join(directory, "nested");
+  NodeFS.mkdirSync(trackedDirectory);
+  NodeFS.writeFileSync(NodePath.join(trackedDirectory, "tracked.txt"), "tracked\n");
+  git(["add", "nested/tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  const original = checkpointRecoveryFingerprint(directory, branch);
+  NodeFS.chmodSync(trackedDirectory, 0o700);
+
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("fingerprints tracked content independently of Git's stat cache", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  const trackedPath = NodePath.join(directory, "tracked.txt");
+  NodeFS.writeFileSync(trackedPath, "before\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  git(["config", "core.trustctime", "false"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  const original = checkpointRecoveryFingerprint(directory, branch);
+  const originalTimes = NodeFS.statSync(trackedPath);
+  NodeFS.writeFileSync(trackedPath, "edited\n");
+  NodeFS.utimesSync(trackedPath, originalTimes.atime, originalTimes.mtime);
+
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint recoveries with initialized submodules", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const submodule = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-submodule-"));
+  const git = (cwd: string, args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(submodule, ["init", "--quiet", "--initial-branch=main"]);
+  git(submodule, ["config", "user.email", "checkpoint@example.com"]);
+  git(submodule, ["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(submodule, "tracked.txt"), "tracked\n");
+  git(submodule, ["add", "tracked.txt"]);
+  git(submodule, ["commit", "--quiet", "--message", "base"]);
+  git(directory, ["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(directory, ["config", "user.email", "checkpoint@example.com"]);
+  git(directory, ["config", "user.name", "Checkpoint Test"]);
+  git(directory, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule]);
+  git(directory, ["commit", "--quiet", "--message", "base"]);
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("Initialized recovery submodules");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+  NodeFS.rmSync(submodule, { recursive: true, force: true });
+});
+
+it("refuses nonempty deinitialized gitlinks", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const submodule = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-submodule-"));
+  const git = (cwd: string, args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(submodule, ["init", "--quiet", "--initial-branch=main"]);
+  git(submodule, ["config", "user.email", "checkpoint@example.com"]);
+  git(submodule, ["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(submodule, "tracked.txt"), "tracked\n");
+  git(submodule, ["add", "tracked.txt"]);
+  git(submodule, ["commit", "--quiet", "--message", "base"]);
+  git(directory, ["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(directory, ["config", "user.email", "checkpoint@example.com"]);
+  git(directory, ["config", "user.name", "Checkpoint Test"]);
+  git(directory, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule]);
+  git(directory, ["commit", "--quiet", "--message", "base"]);
+  git(directory, ["submodule", "deinit", "--force", "--all"]);
+  NodeFS.writeFileSync(
+    NodePath.join(directory, NodePath.basename(submodule), "operator.txt"),
+    "keep\n",
+  );
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("Nonempty deinitialized gitlink");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+  NodeFS.rmSync(submodule, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint a locked recovery worktree", () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const repository = NodePath.join(root, "repository");
+  const recovery = NodePath.join(root, "recovery");
+  NodeFS.mkdirSync(repository);
+  const git = (cwd: string, args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(repository, ["init", "--quiet", "--initial-branch=main"]);
+  git(repository, ["config", "user.email", "checkpoint@example.com"]);
+  git(repository, ["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(repository, "tracked.txt"), "tracked\n");
+  git(repository, ["add", "tracked.txt"]);
+  git(repository, ["commit", "--quiet", "--message", "base"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  git(repository, ["worktree", "add", "--quiet", "-b", branch, recovery]);
+  git(repository, ["worktree", "lock", recovery]);
+
+  expect(() => checkpointRecoveryFingerprint(recovery, branch)).toThrow("locked recovery worktree");
+  NodeFS.rmSync(root, { recursive: true, force: true });
+});
+
+it("fingerprints per-worktree Git configuration", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "tracked\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  const original = checkpointRecoveryFingerprint(directory, branch);
+  git(["config", "extensions.worktreeConfig", "true"]);
+  git(["config", "--worktree", "commit.gpgsign", "false"]);
+
+  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint unexpected ignored recovery directories", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, ".gitignore"), ".private/\n");
+  git(["add", ".gitignore"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  NodeFS.mkdirSync(NodePath.join(directory, ".private"));
+  NodeFS.writeFileSync(NodePath.join(directory, ".private", "notes.txt"), "operator notes\n");
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("prevents automatic retirement");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint unexpected ignored recovery files", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, ".gitignore"), ".env.local\n");
+  git(["add", ".gitignore"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  NodeFS.writeFileSync(NodePath.join(directory, ".env.local"), "operator setting\n");
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("Ignored recovery path '.env.local'");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint recoveries with untracked artifacts", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "tracked\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "hook-output.txt"), "generated\n");
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("prevents automatic retirement");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses tracked paths hidden by index flags", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "tracked\n");
+  git(["add", "tracked.txt"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+  git(["update-index", "--assume-unchanged", "tracked.txt"]);
+  expect(() => checkpointRecoveryFingerprint(directory, branch)).toThrow("Hidden index flag");
+  git(["update-index", "--no-assume-unchanged", "tracked.txt"]);
+  git(["update-index", "--skip-worktree", "tracked.txt"]);
+  expect(() => checkpointRecoveryFingerprint(directory, branch)).toThrow("Hidden index flag");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("captures every file in active rebase metadata", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+    return result.stdout.trim();
+  };
+  git(["init", "--quiet"]);
+  const rebaseDirectory = NodePath.join(git(["rev-parse", "--absolute-git-dir"]), "rebase-merge");
+  NodeFS.mkdirSync(rebaseDirectory);
+  const messagePath = NodePath.join(rebaseDirectory, "message");
+  NodeFS.writeFileSync(messagePath, "before\n");
+  const before = rebaseStateFiles(directory);
+  NodeFS.writeFileSync(messagePath, "after\n");
+
+  expect(rebaseStateFiles(directory)).not.toEqual(before);
+  const beforeModeChange = rebaseStateFiles(directory);
+  NodeFS.chmodSync(messagePath, 0o700);
+  expect(rebaseStateFiles(directory)).not.toEqual(beforeModeChange);
+  const beforeRootModeChange = rebaseStateFiles(directory);
+  NodeFS.chmodSync(rebaseDirectory, 0o700);
+  expect(rebaseStateFiles(directory)).not.toEqual(beforeRootModeChange);
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("supersedes only an unchanged automation-owned rebase or smoke recovery", () => {
+  const failedTag = "v0.0.1-nightly.20260812.1";
+  const latestNightly = nightly("v0.0.1-nightly.20260812.3");
+  const run = {
+    schemaVersion: 1 as const,
+    status: "failed" as const,
+    upstreamTag: failedTag,
+    startedAt: "2026-08-12T00:00:00.000Z",
+    finishedAt: "2026-08-12T00:00:01.000Z",
+    durationMs: 1_000,
+    commitsRebased: 3,
+    failurePhase: "rebase" as const,
+    recoveryBranch: `sync/nightly/${failedTag}`,
+    recoveryFingerprint: "same",
+  };
+
+  expect(
+    supersededRecoveryNightly({
+      latestNightly,
+      recoveryFingerprint: "same",
+      recoveryWorktreeExists: true,
+      run,
+    })?.tag,
+  ).toBe(failedTag);
+  expect(
+    supersededRecoveryNightly({
+      latestNightly,
+      recoveryFingerprint: "changed",
+      recoveryWorktreeExists: true,
+      run,
+    }),
+  ).toBeUndefined();
+  expect(
+    supersededRecoveryNightly({
+      latestNightly: nightly(failedTag),
+      recoveryFingerprint: "same",
+      recoveryWorktreeExists: true,
+      run,
+    }),
+  ).toBeUndefined();
+  expect(
+    supersededRecoveryNightly({
+      latestNightly,
+      recoveryFingerprint: "same",
+      recoveryWorktreeExists: true,
+      run: { ...run, failurePhase: "publication" },
+    }),
+  ).toBeUndefined();
+});
+
+it("keeps dry-run checkpoint previews non-destructive", () => {
+  expect(recoverySupersessionMode({ dryRun: true, enabled: true })).toBe("preview");
+  expect(recoverySupersessionMode({ dryRun: false, enabled: true })).toBe("retire");
+  expect(recoverySupersessionMode({ dryRun: false, enabled: false })).toBe("disabled");
 });
 
 it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
@@ -392,6 +757,36 @@ it("bootstraps at the source nightly and checkpoints every later nightly", () =>
     plan.missingNightlies.map(({ tag }) => tag),
     ["v0.0.1-nightly.20260102.2", "v0.0.2-nightly.20260103.3"],
   );
+});
+
+it("skips only the failed nightly when a newer upstream nightly supersedes it", () => {
+  const old = nightly("v0.0.1-nightly.20260101.1");
+  const plan = resolveCheckpointPlan({
+    checkpointRefs: [
+      {
+        checkpointTag: `lastcode/checkpoint/${old.tag}`,
+        commit: "last-checkpoint",
+        nightly: old,
+        sourceCommit: "main",
+      },
+    ],
+    nightlyTags: [
+      old.tag,
+      "v0.0.1-nightly.20260102.2",
+      "v0.0.1-nightly.20260103.3",
+      "v0.0.1-nightly.20260104.4",
+    ],
+    sourceCommit: "main",
+    sourceCheckpointTag: `lastcode/checkpoint/${old.tag}`,
+    sourceNightlyTags: [old.tag],
+    sourceRef: "origin/lastcode/main",
+    supersedeThroughNightlyTag: "v0.0.1-nightly.20260102.2",
+  });
+
+  expect(plan.missingNightlies.map(({ tag }) => tag)).toEqual([
+    "v0.0.1-nightly.20260103.3",
+    "v0.0.1-nightly.20260104.4",
+  ]);
 });
 
 it("continues from a newer unpromoted checkpoint when main has not changed", () => {
