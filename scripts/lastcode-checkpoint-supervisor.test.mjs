@@ -91,6 +91,28 @@ describe("LastCode checkpoint supervisor", () => {
     ).toBe("/srv/example/lastCode");
   });
 
+  it("installs dependencies before returning a current primary checkout", () => {
+    const execute = vi.fn((_phase, _cwd, _command, args) => {
+      if (args[0] === "worktree") return "worktree /srv/example/lastCode\n";
+      if (args[0] === "branch") return "lastcode/main";
+      if (args[0] === "status") return "";
+      if (args[0] === "rev-parse") return "1111111";
+      return "";
+    });
+
+    expect(
+      refreshPrimaryCheckout("/srv/example/lastCode-worktrees/lastcode-automation", {}, execute),
+    ).toBe("/srv/example/lastCode");
+    expect(execute.mock.calls.find(([, , , args]) => args[0] === "install")).toEqual([
+      "checkout-dependencies",
+      "/srv/example/lastCode",
+      "/srv/example/lastCode-worktrees/lastcode-automation/node_modules/.bin/vp",
+      ["install", "--frozen-lockfile"],
+      {},
+    ]);
+    expect(execute.mock.calls.some(([, , command]) => command === process.execPath)).toBe(false);
+  });
+
   it("runs Project Action reconciliation against the refreshed primary checkout", () => {
     const execute = vi.fn();
     reconcilePrimaryProjectActions(

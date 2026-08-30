@@ -157,7 +157,18 @@ export function refreshPrimaryCheckout(repoRoot, environment, execute = runComma
     environment,
     { capture: true },
   );
-  if (previousCommit === promotedCommit) return primaryWorktree;
+  const installDependencies = () =>
+    execute(
+      "checkout-dependencies",
+      primaryWorktree,
+      NodePath.join(repoRoot, "node_modules", ".bin", "vp"),
+      ["install", "--frozen-lockfile"],
+      environment,
+    );
+  if (previousCommit === promotedCommit) {
+    installDependencies();
+    return primaryWorktree;
+  }
   const rawDiff = execute(
     "checkout-refresh",
     primaryWorktree,
@@ -201,13 +212,7 @@ export function refreshPrimaryCheckout(repoRoot, environment, execute = runComma
   if (refreshedCommit !== promotedCommit) {
     throw new Error("Primary LastCode checkout did not reach the promoted commit.");
   }
-  execute(
-    "checkout-dependencies",
-    primaryWorktree,
-    NodePath.join(repoRoot, "node_modules", ".bin", "vp"),
-    ["install", "--frozen-lockfile"],
-    environment,
-  );
+  installDependencies();
   return primaryWorktree;
 }
 
