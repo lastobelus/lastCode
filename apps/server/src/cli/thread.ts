@@ -512,6 +512,7 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     readonly commandId: CommandId;
     readonly messageId: MessageId;
     readonly createdAt: string;
+    readonly sourceThreadId?: ThreadId;
     readonly trackRequestCorrelation?: true;
     readonly rejectWaitForThreadId?: ThreadId;
   },
@@ -558,6 +559,9 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     },
     runtimeMode: resolution.thread.runtimeMode,
     interactionMode: resolution.thread.interactionMode,
+    ...(input.sourceThreadId !== undefined && input.sourceThreadId !== resolution.thread.id
+      ? { sourceThreadId: input.sourceThreadId }
+      : {}),
     ...(input.trackRequestCorrelation === true ? { trackRequestCorrelation: true } : {}),
     createdAt: input.createdAt,
   });
@@ -946,6 +950,9 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
               commandId,
               messageId,
               createdAt: DateTime.formatIso(yield* DateTime.now),
+              ...(process.env.T3CODE_THREAD_ID?.trim()
+                ? { sourceThreadId: ThreadId.make(process.env.T3CODE_THREAD_ID.trim()) }
+                : {}),
               ...(waitForCompletion ? { trackRequestCorrelation: true as const } : {}),
               ...(waitForCompletion && process.env.T3CODE_THREAD_ID?.trim()
                 ? { rejectWaitForThreadId: ThreadId.make(process.env.T3CODE_THREAD_ID.trim()) }
