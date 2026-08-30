@@ -58,6 +58,7 @@
     "lastcode:merge": "mise exec node@24.13.1 -- node scripts/lastcode-merge.ts",
     "lastcode:docs:check": "node scripts/lastcode-docs-features.ts --check",
     "lastcode:docs:readme": "node scripts/lastcode-docs-features.ts --write-readme",
+    "lastcode:docs:fixtures": "mise exec node@24.13.1 -- node scripts/lastcode-public-doc-fixtures.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
     "sync:repos": "node scripts/sync-reference-repos.ts"
   },
