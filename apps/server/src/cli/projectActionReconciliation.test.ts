@@ -2,8 +2,9 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
-  prepareManagedProjectActionGrantIntent,
+  prepareManagedProjectActionPendingState,
   reconcileProjectActions,
+  resolveManagedProjectActionPendingState,
 } from "./projectActionReconciliation.ts";
 
 const waitDeclaration = {
@@ -31,83 +32,47 @@ it.effect("rejects a managed declaration without an explicit stable id", () =>
   ),
 );
 
-it("writes managed grant provenance ahead without advancing other managed fields", () => {
-  const previousState = {
-    schemaVersion: 1 as const,
-    projectWorkspaceRoot: "/srv/example/lastCode",
-    actions: [
-      {
-        sourceId: "lc-wait-for-pr",
-        scriptId: "wait-for-pr",
-        lastManaged: {
-          name: "Wait for PR",
-          command: waitDeclaration.command,
-          icon: "test" as const,
-          runOnWorktreeCreate: false,
-        },
-        managesResumePermission: false,
-      },
-    ],
-  };
-  const intent = prepareManagedProjectActionGrantIntent({
-    projectWorkspaceRoot: previousState.projectWorkspaceRoot,
-    currentScripts: [{ id: "wait-for-pr", ...previousState.actions[0]!.lastManaged }],
-    previousState,
-    nextScripts: [
-      {
-        id: "wait-for-pr",
-        name: "Wait for PR",
-        command: "node scripts/renamed-wait-command.ts",
-        icon: "test",
-        runOnWorktreeCreate: false,
-        allowAgentResume: true,
-      },
-    ],
-    nextState: {
-      ...previousState,
-      actions: [
-        {
-          ...previousState.actions[0]!,
-          lastManaged: {
-            ...previousState.actions[0]!.lastManaged,
-            command: "node scripts/renamed-wait-command.ts",
-          },
-          managesResumePermission: true,
-        },
-      ],
-    },
-  });
-
-  assert.isTrue(intent?.state.actions[0]?.managesResumePermission);
-  assert.equal(intent?.state.actions[0]?.lastManaged.command, waitDeclaration.command);
-  assert.equal(intent?.scripts[0]?.command, waitDeclaration.command);
-  assert.isTrue(intent?.scripts[0]?.allowAgentResume);
-});
-
-it.effect("recovers a managed grant after interruption on either side of the project update", () =>
+it.effect("recovers all managed fields and grant provenance around an interrupted update", () =>
   Effect.gen(function* () {
-    const first = yield* reconcileProjectActions({
+    const initial = yield* reconcileProjectActions({
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [],
       declarations: [waitDeclaration],
+    });
+    const changedDeclaration = {
+      ...waitDeclaration,
+      name: "Wait for Pull Request",
+      command: "node scripts/renamed-wait-command.ts",
+      icon: "build" as const,
+    };
+    const changed = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: initial.scripts,
+      declarations: [changedDeclaration],
+      previousState: initial.state,
       trustedSourceIds: new Set(["lc-wait-for-pr"]),
     });
-    const intent = prepareManagedProjectActionGrantIntent({
+    const pending = prepareManagedProjectActionPendingState({
       projectWorkspaceRoot: "/srv/example/lastCode",
-      currentScripts: [],
-      nextScripts: first.scripts,
-      nextState: first.state,
+      previousState: initial.state,
+      nextScripts: changed.scripts,
+      nextState: changed.state,
     });
-    assert.isDefined(intent);
 
-    for (const currentScripts of [[], intent!.scripts]) {
+    for (const currentScripts of [initial.scripts, changed.scripts]) {
+      const recoveredState = resolveManagedProjectActionPendingState({
+        state: pending,
+        currentScripts,
+      });
       const recovered = yield* reconcileProjectActions({
         projectWorkspaceRoot: "/srv/example/lastCode",
         currentScripts,
-        declarations: [waitDeclaration],
-        previousState: intent!.state,
+        declarations: [changedDeclaration],
+        previousState: recoveredState,
         trustedSourceIds: new Set(["lc-wait-for-pr"]),
       });
+      assert.deepEqual(recovered.report.diverged, []);
+      assert.equal(recovered.scripts[0]?.command, changedDeclaration.command);
       assert.isTrue(recovered.scripts[0]?.allowAgentResume);
       assert.isTrue(recovered.state.actions[0]?.managesResumePermission);
     }

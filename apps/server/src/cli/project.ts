@@ -43,8 +43,9 @@ import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig }
 import {
   ManagedProjectActionState,
   ProjectActionReconciliationError,
-  prepareManagedProjectActionGrantIntent,
+  prepareManagedProjectActionPendingState,
   reconcileProjectActions,
+  resolveManagedProjectActionPendingState,
 } from "./projectActionReconciliation.ts";
 
 type ProjectMutationTarget = {
@@ -699,7 +700,7 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
               }),
           ),
         );
-        const previousState = yield* readManagedProjectActionState(flags.stateFile);
+        const persistedState = yield* readManagedProjectActionState(flags.stateFile);
         const trustedSourceIds = new Set(
           (Option.getOrUndefined(flags.trustedSourceIds) ?? "")
             .split(",")
@@ -738,6 +739,10 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
           return yield* target.failure;
         }
 
+        const previousState = Option.map(persistedState, (state) =>
+          resolveManagedProjectActionPendingState({ state, currentScripts }),
+        );
+
         const reconciled = yield* reconcileProjectActions({
           projectWorkspaceRoot,
           currentScripts,
@@ -760,19 +765,16 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
           });
         }
 
-        const grantIntent = scriptsChanged
-          ? prepareManagedProjectActionGrantIntent({
-              projectWorkspaceRoot,
-              currentScripts,
-              ...(Option.isSome(previousState) ? { previousState: previousState.value } : {}),
-              nextScripts: reconciled.scripts,
-              nextState: reconciled.state,
-            })
-          : undefined;
-        if (grantIntent !== undefined) {
+        if (scriptsChanged) {
+          const pendingState = prepareManagedProjectActionPendingState({
+            projectWorkspaceRoot,
+            ...(Option.isSome(previousState) ? { previousState: previousState.value } : {}),
+            nextScripts: reconciled.scripts,
+            nextState: reconciled.state,
+          });
           yield* writeFileStringAtomically({
             filePath: flags.stateFile,
-            contents: `${encodeManagedProjectActionState(grantIntent.state)}\n`,
+            contents: `${encodeManagedProjectActionState(pendingState)}\n`,
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -787,26 +789,13 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
             type: "project.meta.update",
             commandId: CommandId.make(yield* projectCommandUuid),
             projectId,
-            scripts: Array.from(grantIntent.scripts),
-          });
-        }
-
-        const scriptsBeforeFinalUpdate = grantIntent?.scripts ?? currentScripts;
-        if (
-          encodeProjectScripts(scriptsBeforeFinalUpdate) !==
-          encodeProjectScripts(reconciled.scripts)
-        ) {
-          yield* dispatch({
-            type: "project.meta.update",
-            commandId: CommandId.make(yield* projectCommandUuid),
-            projectId,
             scripts: Array.from(reconciled.scripts),
           });
         }
 
         const encodedState = `${encodeManagedProjectActionState(reconciled.state)}\n`;
-        const previousEncoded = Option.isSome(previousState)
-          ? `${encodeManagedProjectActionState(previousState.value)}\n`
+        const previousEncoded = Option.isSome(persistedState)
+          ? `${encodeManagedProjectActionState(persistedState.value)}\n`
           : null;
         if (encodedState !== previousEncoded) {
           yield* writeFileStringAtomically({

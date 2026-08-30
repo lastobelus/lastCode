@@ -1,4 +1,4 @@
-import { type ProjectScript, type T3ProjectFileScript } from "@t3tools/contracts";
+import { ProjectScript, type T3ProjectFileScript } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -19,10 +19,16 @@ const ManagedProjectActionOwnership = Schema.Struct({
   managesResumePermission: Schema.Boolean,
 });
 
+const ManagedProjectActionPendingUpdate = Schema.Struct({
+  scripts: Schema.Array(ProjectScript),
+  actions: Schema.Array(ManagedProjectActionOwnership),
+});
+
 export const ManagedProjectActionState = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   projectWorkspaceRoot: Schema.String,
   actions: Schema.Array(ManagedProjectActionOwnership),
+  pending: Schema.optional(ManagedProjectActionPendingUpdate),
 });
 export type ManagedProjectActionState = typeof ManagedProjectActionState.Type;
 
@@ -53,53 +59,38 @@ export interface ProjectActionReconciliationResult {
   readonly report: ProjectActionReconciliationReport;
 }
 
-export const prepareManagedProjectActionGrantIntent = (input: {
+const sameScripts = (
+  left: ReadonlyArray<ProjectScript>,
+  right: ReadonlyArray<ProjectScript>,
+): boolean => JSON.stringify(left) === JSON.stringify(right);
+
+export const prepareManagedProjectActionPendingState = (input: {
   readonly projectWorkspaceRoot: string;
-  readonly currentScripts: ReadonlyArray<ProjectScript>;
   readonly previousState?: ManagedProjectActionState;
   readonly nextScripts: ReadonlyArray<ProjectScript>;
   readonly nextState: ManagedProjectActionState;
-}):
-  | {
-      readonly scripts: ReadonlyArray<ProjectScript>;
-      readonly state: ManagedProjectActionState;
-    }
-  | undefined => {
-  const previousRecords = new Map(
-    (input.previousState?.actions ?? []).map((record) => [record.sourceId, record]),
-  );
-  const scripts = [...input.currentScripts];
-  const grantedScriptIds = new Set<string>();
-  for (const next of input.nextState.actions) {
-    const previous = previousRecords.get(next.sourceId);
-    if (!next.managesResumePermission || previous?.managesResumePermission === true) continue;
-    previousRecords.set(
-      next.sourceId,
-      previous === undefined ? next : { ...previous, managesResumePermission: true },
-    );
-    grantedScriptIds.add(next.scriptId);
-  }
-  if (grantedScriptIds.size === 0) return undefined;
-  for (const scriptId of grantedScriptIds) {
-    const currentIndex = scripts.findIndex((script) => script.id === scriptId);
-    const script =
-      currentIndex === -1
-        ? input.nextScripts.find((candidate) => candidate.id === scriptId)
-        : scripts[currentIndex];
-    if (script === undefined) continue;
-    const granted = { ...script, allowAgentResume: true };
-    if (currentIndex === -1) scripts.push(granted);
-    else scripts[currentIndex] = granted;
-  }
-  return {
-    scripts,
-    state: {
-      schemaVersion: 1,
-      projectWorkspaceRoot: input.projectWorkspaceRoot,
-      actions: Array.from(previousRecords.values()),
-    },
-  };
-};
+}): ManagedProjectActionState => ({
+  schemaVersion: 1,
+  projectWorkspaceRoot: input.projectWorkspaceRoot,
+  actions: input.previousState?.actions ?? [],
+  pending: {
+    scripts: Array.from(input.nextScripts),
+    actions: Array.from(input.nextState.actions),
+  },
+});
+
+export const resolveManagedProjectActionPendingState = (input: {
+  readonly state: ManagedProjectActionState;
+  readonly currentScripts: ReadonlyArray<ProjectScript>;
+}): ManagedProjectActionState => ({
+  schemaVersion: 1,
+  projectWorkspaceRoot: input.state.projectWorkspaceRoot,
+  actions:
+    input.state.pending !== undefined &&
+    sameScripts(input.currentScripts, input.state.pending.scripts)
+      ? input.state.pending.actions
+      : input.state.actions,
+});
 
 const managedFieldsFromDeclaration = (
   declaration: T3ProjectFileScript,
