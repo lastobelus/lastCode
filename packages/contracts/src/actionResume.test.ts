@@ -39,7 +39,14 @@ describe("Action resume contracts", () => {
       decodeActionProgress({
         version: 1,
         state: "working",
-        summary: "x".repeat(161),
+        summary: "x".repeat(280),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      decodeActionProgress({
+        version: 1,
+        state: "working",
+        summary: "x".repeat(281),
       }),
     ).toThrow();
     expect(() =>

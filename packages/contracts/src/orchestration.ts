@@ -308,7 +308,7 @@ export type ActionReportOutcome = typeof ActionReportOutcome.Type;
 const ActionReportShortText = TrimmedNonEmptyString.check(Schema.isMaxLength(280));
 const ActionReportDetailText = TrimmedNonEmptyString.check(Schema.isMaxLength(1_000));
 const ActionProgressSummary = TrimmedNonEmptyString.check(
-  Schema.isMaxLength(160),
+  Schema.isMaxLength(280),
   Schema.makeFilter(
     (value) =>
       [...value].every((character) => {
