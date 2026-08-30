@@ -13,6 +13,7 @@ export function parseOptions(argv) {
   let dryRun = false;
   let enableNightlyWrites = false;
   let help = false;
+  const trustedProjectActionIds = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -27,10 +28,23 @@ export function parseOptions(argv) {
       checkpointIntervalSeconds = value;
       index += 1;
     } else if (arg === "-h" || arg === "--help") help = true;
-    else throw new Error(`Unknown argument '${arg}'.`);
+    else if (arg === "--trusted-project-action") {
+      const value = argv[index + 1];
+      if (!value || !/^lc-[a-z0-9-]+$/u.test(value)) {
+        throw new Error("--trusted-project-action requires a stable lc-* Action id.");
+      }
+      trustedProjectActionIds.push(value);
+      index += 1;
+    } else throw new Error(`Unknown argument '${arg}'.`);
   }
 
-  return { checkpointIntervalSeconds, dryRun, enableNightlyWrites, help };
+  return {
+    checkpointIntervalSeconds,
+    dryRun,
+    enableNightlyWrites,
+    help,
+    trustedProjectActionIds: [...new Set(trustedProjectActionIds)].toSorted(),
+  };
 }
 
 export function isCanonicalUpstreamUrl(value) {
@@ -39,12 +53,28 @@ export function isCanonicalUpstreamUrl(value) {
   );
 }
 
-export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSeconds) {
+export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSeconds, options = {}) {
+  const home = options.home ?? NodeOS.homedir();
+  const trustedProjectActionIds = options.trustedProjectActionIds ?? [];
   return [
     {
       kind: "dependencies",
       command: "vp",
       args: ["install", "--frozen-lockfile"],
+      cwd: repoRoot,
+    },
+    {
+      kind: "project-actions",
+      command: nodeExecutable,
+      args: [
+        NodePath.join(repoRoot, "scripts", "lastcode-project-actions.mjs"),
+        "reconcile",
+        "--repo-root",
+        repoRoot,
+        "--base-dir",
+        NodePath.join(home, ".lastcode"),
+        ...trustedProjectActionIds.flatMap((id) => ["--trusted-source-id", id]),
+      ],
       cwd: repoRoot,
     },
     {
@@ -55,6 +85,7 @@ export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSecond
         "install",
         "--interval-seconds",
         String(checkpointIntervalSeconds),
+        ...trustedProjectActionIds.flatMap((id) => ["--trusted-project-action", id]),
       ],
       cwd: repoRoot,
     },
@@ -160,7 +191,7 @@ function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log(
-      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes --checkpoint-interval-seconds <seconds> [--dry-run]",
+      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes --checkpoint-interval-seconds <seconds> [--trusted-project-action <lc-id>]... [--dry-run]",
     );
     console.log();
     console.log(
@@ -206,7 +237,10 @@ function main(argv) {
     });
   }
 
-  const commands = setupCommands(repoRoot, process.execPath, options.checkpointIntervalSeconds);
+  const commands = setupCommands(repoRoot, process.execPath, options.checkpointIntervalSeconds, {
+    home: NodeOS.homedir(),
+    trustedProjectActionIds: options.trustedProjectActionIds,
+  });
   if (options.dryRun) {
     for (const step of commands) console.log(shellDisplay(step.command, step.args));
     return;
