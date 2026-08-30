@@ -6,6 +6,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { acquirePortableLock } from "./lastcode-lock.mjs";
+
 const CANONICAL_UPSTREAM_URL =
   /^(?:git@github\.com:|https:\/\/github\.com\/|ssh:\/\/git@github\.com\/)(?:pingdotgg\/t3code)(?:\.git)?\/?$/u;
 
@@ -94,6 +96,14 @@ export function reconcileLastCodeProjectActions(options, dependencies = {}) {
   const execute = dependencies.execute ?? run;
   const { realRoot, sourceFile } = assertManagedLastCodeAnchor(options.repoRoot, execute);
   const stateFile = managedProjectActionStateFile(options.baseDir, realRoot);
+  const acquireLock =
+    dependencies.acquireLock ??
+    ((filePath) =>
+      acquirePortableLock(
+        NodePath.dirname(filePath),
+        `${NodePath.basename(filePath)}.lock`,
+        "Project Action reconciliation",
+      ));
   const args = [
     NodePath.join(realRoot, "apps", "server", "src", "bin.ts"),
     "project",
@@ -110,8 +120,13 @@ export function reconcileLastCodeProjectActions(options, dependencies = {}) {
   if (options.trustedSourceIds.length > 0) {
     args.push("--trusted-source-ids", options.trustedSourceIds.join(","));
   }
-  const output = execute(process.execPath, args, { cwd: realRoot });
-  return JSON.parse(output);
+  const releaseLock = acquireLock(stateFile);
+  try {
+    const output = execute(process.execPath, args, { cwd: realRoot });
+    return JSON.parse(output);
+  } finally {
+    releaseLock();
+  }
 }
 
 if (import.meta.main) {

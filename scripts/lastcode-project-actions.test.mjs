@@ -2,7 +2,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   assertManagedLastCodeAnchor,
@@ -93,6 +93,8 @@ describe("managed LastCode anchor", () => {
     const baseDir = NodePath.join(repoRoot, "environment");
     NodeFS.writeFileSync(NodePath.join(repoRoot, "t3.json"), "{}\n");
     const calls = [];
+    const releaseLock = vi.fn();
+    const acquireLock = vi.fn(() => releaseLock);
     const execute = (command, args, options) => {
       calls.push({ command, args, options });
       if (command === "git" && args[0] === "rev-parse") return repoRoot;
@@ -108,7 +110,7 @@ describe("managed LastCode anchor", () => {
           baseDir,
           trustedSourceIds: ["lc-wait-for-pr"],
         },
-        { execute },
+        { acquireLock, execute },
       ),
     ).toEqual({ mode: "offline", created: ["lc-wait-for-pr"] });
     const invocation = calls.at(-1);
@@ -118,5 +120,32 @@ describe("managed LastCode anchor", () => {
       managedProjectActionStateFile(baseDir, NodeFS.realpathSync(repoRoot)),
     );
     expect(invocation.args).toContain("lc-wait-for-pr");
+    expect(acquireLock).toHaveBeenCalledWith(
+      managedProjectActionStateFile(baseDir, NodeFS.realpathSync(repoRoot)),
+    );
+    expect(releaseLock).toHaveBeenCalledOnce();
+  });
+
+  it("releases workspace ownership after reconciliation fails", () => {
+    const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-actions-lock-"));
+    const baseDir = NodePath.join(repoRoot, "environment");
+    NodeFS.writeFileSync(NodePath.join(repoRoot, "t3.json"), "{}\n");
+    const releaseLock = vi.fn();
+    const execute = (command, args) => {
+      if (command === "git" && args[0] === "rev-parse") return repoRoot;
+      if (command === "git" && args[0] === "branch") return "lastcode/main";
+      if (command === "git" && args[0] === "remote") {
+        return "https://github.com/pingdotgg/t3code.git";
+      }
+      throw new Error("reconciliation failed");
+    };
+
+    expect(() =>
+      reconcileLastCodeProjectActions(
+        { repoRoot, baseDir, trustedSourceIds: [] },
+        { acquireLock: () => releaseLock, execute },
+      ),
+    ).toThrow("reconciliation failed");
+    expect(releaseLock).toHaveBeenCalledOnce();
   });
 });
