@@ -25,14 +25,22 @@ Action, enable **Allow Codex and Claude to run and resume**, and save it. When t
 that Action, it can end its turn while the command runs in a dedicated terminal. LastCode sends one
 automated follow-up after the command exits so the agent can continue the original task.
 
-Completed Action output is collapsed by default. The compact card shows the Action name and exit
-code on its first line and the command's final output line on its second line. Expand the card to
-read the captured output tail; the dedicated terminal remains available as the longer output
-artifact.
+Protocol-aware Actions can also report a short current status while they run. LastCode shows
+**Working** for active phases and **Waiting** when the command is paused on CI, review, approval, or
+another external condition. The current summary appears in the composer Action shoulder and Action
+details; thread lists keep the narrow row to the status label.
 
-For a useful compact result, make every resumable Action print one concise summary as its final
-output line. Include the result that the agent needs next, such as which checks passed, why a wait
-ended, or what requires attention.
+Completed Actions show a compact result with a standard icon and label for success, attention,
+blocked, execution failure, interruption, or cancellation, plus the structured summary reported
+by protocol-aware commands. The dedicated Action terminal retains the detailed
+output, and the resumed agent can inspect a bounded tail when the compact result is not enough.
+Older Actions still use their final output line as the compact summary and keep their captured tail
+expandable in the thread.
+
+For a useful compact result, have a protocol-aware Action report one concise summary containing the
+result the agent needs next, such as which checks passed, why a wait ended, or what requires
+attention. Actions that do not use the reporting kit should print that summary as their final
+output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
