@@ -20,6 +20,22 @@ export interface CheckpointRunRecord {
   readonly recoveryFingerprint?: string;
 }
 
+export interface CarrySetShadowRecord {
+  readonly schemaVersion: 1;
+  readonly status: "shadow";
+  readonly outcome: "failed" | "success";
+  readonly checkpointTag: string;
+  readonly baseCommit?: string;
+  readonly sourceCommit?: string;
+  readonly tree?: string;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly durationMs: number;
+  readonly error?: string;
+}
+
+export type CheckpointHistoryRecord = CheckpointRunRecord | CarrySetShadowRecord;
+
 function isOptionalBoolean(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === "boolean";
 }
@@ -110,7 +126,7 @@ export function readLatestCheckpointRun(
 }
 
 export function appendCheckpointRun(
-  record: CheckpointRunRecord,
+  record: CheckpointHistoryRecord,
   historyPath = checkpointRunHistoryPath(),
   warn: (message: string) => void = console.warn,
 ): boolean {

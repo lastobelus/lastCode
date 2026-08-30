@@ -48,6 +48,17 @@ export interface CarryPathTouch {
   readonly paths: ReadonlyArray<string>;
 }
 
+export interface CarrySetShadowTarget {
+  readonly checkpointTag: string;
+  readonly baseCommit: string;
+  readonly sourceCommit: string;
+}
+
+export interface CarrySetShadowResult extends CarrySetShadowTarget {
+  readonly groups: ReadonlyArray<CarryGroupPlan>;
+  readonly tree: string;
+}
+
 interface Options {
   readonly base: string;
   readonly json: boolean;
@@ -235,6 +246,29 @@ function readManifest(manifestPath: string): CarrySetManifest {
   return JSON.parse(NodeFS.readFileSync(manifestPath, "utf8")) as CarrySetManifest;
 }
 
+export function carrySetShadowTarget(
+  checkpointTag: string,
+  tagContents: string,
+  taggedCommit: string,
+): CarrySetShadowTarget {
+  const trailers = new Map<string, string>();
+  for (const line of tagContents.split(/\r?\n/u)) {
+    const separator = line.indexOf(": ");
+    if (separator > 0) trailers.set(line.slice(0, separator), line.slice(separator + 2));
+  }
+  const baseCommit = trailers.get("Upstream-Commit");
+  const sourceCommit = trailers.get("LastCode-Commit");
+  if (!baseCommit || !sourceCommit) {
+    throw new Error(`${checkpointTag} is missing immutable carry-set metadata.`);
+  }
+  if (sourceCommit !== taggedCommit) {
+    throw new Error(
+      `${checkpointTag} metadata names ${sourceCommit}, but the tag resolves to ${taggedCommit}.`,
+    );
+  }
+  return { checkpointTag, baseCommit, sourceCommit };
+}
+
 function readCommits(repoRoot: string, base: string, source: string): ReadonlyArray<CarryCommit> {
   run(repoRoot, "git", ["merge-base", "--is-ancestor", base, source]);
   const records = splitLines(
@@ -316,6 +350,24 @@ function reconstruct(
       NodeFS.rmSync(temporaryRoot, { recursive: true, force: true });
     }
   }
+}
+
+export function runCarrySetShadowCheck(
+  repoRoot: string,
+  checkpointTag: string,
+  manifestPath = defaultManifestPath,
+): CarrySetShadowResult {
+  const target = carrySetShadowTarget(
+    checkpointTag,
+    git(repoRoot, ["for-each-ref", "--format=%(contents)", `refs/tags/${checkpointTag}`]),
+    git(repoRoot, ["rev-list", "-n", "1", checkpointTag]),
+  );
+  const plan = planCarrySet(
+    readCommits(repoRoot, target.baseCommit, target.sourceCommit),
+    readManifest(manifestPath),
+  );
+  const proof = reconstruct(repoRoot, target.baseCommit, target.sourceCommit, plan);
+  return { ...target, groups: plan, tree: proof.tree };
 }
 
 function main(): void {
