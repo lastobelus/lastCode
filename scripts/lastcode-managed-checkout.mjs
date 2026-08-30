@@ -133,6 +133,32 @@ export function normalizeManagedCheckoutConfig(config) {
   validateRefName(`refs/heads/${branch}`, "Managed branch");
   validateRefName(`refs/heads/${remoteBranch}`, "Remote branch");
   validateRefName(backupRefPrefix, "Backup ref prefix");
+  let projectActions;
+  if (config.projectActions !== undefined) {
+    if (!config.projectActions || typeof config.projectActions !== "object") {
+      fail("Managed Project Actions configuration must be an object.");
+    }
+    if (branch !== "lastcode/main" || remoteBranch !== "lastcode/main") {
+      fail("Managed Project Actions require the explicitly managed lastcode/main anchor.");
+    }
+    if (
+      typeof config.projectActions.baseDir !== "string" ||
+      !NodePath.isAbsolute(config.projectActions.baseDir)
+    ) {
+      fail("Managed Project Actions base directory must be an absolute path.");
+    }
+    const trustedActionIds = config.projectActions.trustedActionIds ?? [];
+    if (
+      !Array.isArray(trustedActionIds) ||
+      trustedActionIds.some((value) => typeof value !== "string" || !/^lc-[a-z0-9-]+$/u.test(value))
+    ) {
+      fail("Managed Project Actions trust entries must be stable lc-* Action ids.");
+    }
+    projectActions = {
+      baseDir: NodePath.resolve(config.projectActions.baseDir),
+      trustedActionIds: [...new Set(trustedActionIds)].toSorted(),
+    };
+  }
   return {
     backupRefPrefix,
     branch,
@@ -140,6 +166,7 @@ export function normalizeManagedCheckoutConfig(config) {
     remote,
     remoteBranch,
     worktree: NodePath.resolve(worktree),
+    ...(projectActions === undefined ? {} : { projectActions }),
   };
 }
 
@@ -252,6 +279,56 @@ export function syncManagedCheckout(rawConfig, dependencies = {}) {
   }
 }
 
+function reconcileConfiguredProjectActions(config) {
+  const args = [
+    NodePath.join(config.worktree, "scripts", "lastcode-project-actions.mjs"),
+    "reconcile",
+    "--repo-root",
+    config.worktree,
+    "--base-dir",
+    config.projectActions.baseDir,
+    ...config.projectActions.trustedActionIds.flatMap((id) => ["--trusted-source-id", id]),
+  ];
+  const result = NodeChildProcess.spawnSync(process.execPath, args, {
+    cwd: config.worktree,
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    fail(
+      result.stderr.trim() ||
+        result.stdout.trim() ||
+        "Managed Project Action reconciliation failed.",
+    );
+  }
+  return JSON.parse(result.stdout);
+}
+
+function installManagedCheckoutDependencies(config) {
+  const result = NodeChildProcess.spawnSync("vp", ["install", "--frozen-lockfile"], {
+    cwd: config.worktree,
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    fail(result.stderr.trim() || result.stdout.trim() || "Managed checkout install failed.");
+  }
+}
+
+export function syncManagedCheckoutAndActions(rawConfig, dependencies = {}) {
+  const config = normalizeManagedCheckoutConfig(rawConfig);
+  const checkout = syncManagedCheckout(config, dependencies);
+  if (config.projectActions === undefined) return checkout;
+  const installDependencies =
+    dependencies.installDependencies ?? installManagedCheckoutDependencies;
+  installDependencies(config);
+  const reconcile = dependencies.reconcileProjectActions ?? reconcileConfiguredProjectActions;
+  return {
+    ...checkout,
+    projectActions: reconcile(config),
+  };
+}
+
 export function parseManagedCheckoutArgs(argv) {
   if (argv[0] !== "sync") {
     fail("Usage: lastcode-managed-checkout sync --config <absolute-json-path>");
@@ -266,7 +343,7 @@ if (import.meta.main) {
   try {
     const { configPath } = parseManagedCheckoutArgs(process.argv.slice(2));
     const config = JSON.parse(NodeFS.readFileSync(configPath, "utf8"));
-    console.log(JSON.stringify(syncManagedCheckout(config)));
+    console.log(JSON.stringify(syncManagedCheckoutAndActions(config)));
   } catch (error) {
     console.error(
       `[lastcode:managed-checkout] ${error instanceof Error ? error.message : String(error)}`,

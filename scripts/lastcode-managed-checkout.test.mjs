@@ -3,13 +3,14 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   managedCheckoutBackupRef,
   normalizeManagedCheckoutConfig,
   parseManagedCheckoutArgs,
   syncManagedCheckout,
+  syncManagedCheckoutAndActions,
 } from "./lastcode-managed-checkout.mjs";
 
 const temporaryDirectories = [];
@@ -105,6 +106,25 @@ describe("managed checkout configuration", () => {
       /unsupported object format/u,
     );
   });
+
+  it("accepts Project Action management only for an explicit LastCode anchor", () => {
+    const test = fixture();
+    const projectActions = {
+      baseDir: "/srv/example/t3-home",
+      trustedActionIds: ["lc-wait-for-pr"],
+    };
+    expect(() => normalizeManagedCheckoutConfig({ ...test.config, projectActions })).toThrow(
+      "lastcode/main anchor",
+    );
+    expect(
+      normalizeManagedCheckoutConfig({
+        ...test.config,
+        branch: "lastcode/main",
+        remoteBranch: "lastcode/main",
+        projectActions,
+      }).projectActions,
+    ).toEqual(projectActions);
+  });
 });
 
 describe("syncManagedCheckout", () => {
@@ -133,6 +153,57 @@ describe("syncManagedCheckout", () => {
     const test = fixture();
     const commit = git(test.managed, ["rev-parse", "HEAD"]);
     expect(syncManagedCheckout(test.config)).toEqual({ commit, status: "current" });
+  });
+
+  it("installs dependencies before reconciling Project Actions in a current checkout", () => {
+    const test = fixture();
+    git(test.managed, ["branch", "-m", "lastcode/main"]);
+    git(test.managed, ["push", "origin", "HEAD:refs/heads/lastcode/main"]);
+    const reconcileProjectActions = vi.fn(() => ({ created: ["lc-wait-for-pr"] }));
+    const installDependencies = vi.fn();
+    const config = {
+      ...test.config,
+      branch: "lastcode/main",
+      remoteBranch: "lastcode/main",
+      projectActions: {
+        baseDir: NodePath.join(test.managed, ".t3-home"),
+        trustedActionIds: [],
+      },
+    };
+    NodeFS.mkdirSync(NodePath.join(test.managed, "node_modules"));
+
+    expect(
+      syncManagedCheckoutAndActions(config, { installDependencies, reconcileProjectActions }),
+    ).toEqual({
+      commit: git(test.managed, ["rev-parse", "HEAD"]),
+      status: "current",
+      projectActions: { created: ["lc-wait-for-pr"] },
+    });
+    expect(installDependencies).toHaveBeenCalledOnce();
+    expect(reconcileProjectActions).toHaveBeenCalledOnce();
+  });
+
+  it("does not reconcile Project Actions when checkout refresh fails", () => {
+    const test = fixture();
+    git(test.managed, ["branch", "-m", "lastcode/main"]);
+    write(NodePath.join(test.managed, "local.txt"), "local\n");
+    const reconcileProjectActions = vi.fn();
+
+    expect(() =>
+      syncManagedCheckoutAndActions(
+        {
+          ...test.config,
+          branch: "lastcode/main",
+          remoteBranch: "lastcode/main",
+          projectActions: {
+            baseDir: NodePath.join(test.managed, ".t3-home"),
+            trustedActionIds: [],
+          },
+        },
+        { reconcileProjectActions },
+      ),
+    ).toThrow("uncommitted or untracked");
+    expect(reconcileProjectActions).not.toHaveBeenCalled();
   });
 
   it("fetches only the configured branch without tags or submodules", () => {
