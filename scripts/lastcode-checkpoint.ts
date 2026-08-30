@@ -1629,6 +1629,7 @@ function main(argv: ReadonlyArray<string>): void {
       );
       console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
     }
+    runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag);
     throw error;
   } finally {
     if (completed) {
