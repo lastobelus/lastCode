@@ -157,7 +157,18 @@ export function refreshPrimaryCheckout(repoRoot, environment, execute = runComma
     environment,
     { capture: true },
   );
-  if (previousCommit === promotedCommit) return;
+  const installDependencies = () =>
+    execute(
+      "checkout-dependencies",
+      primaryWorktree,
+      NodePath.join(repoRoot, "node_modules", ".bin", "vp"),
+      ["install", "--frozen-lockfile"],
+      environment,
+    );
+  if (previousCommit === promotedCommit) {
+    installDependencies();
+    return primaryWorktree;
+  }
   const rawDiff = execute(
     "checkout-refresh",
     primaryWorktree,
@@ -201,6 +212,45 @@ export function refreshPrimaryCheckout(repoRoot, environment, execute = runComma
   if (refreshedCommit !== promotedCommit) {
     throw new Error("Primary LastCode checkout did not reach the promoted commit.");
   }
+  installDependencies();
+  return primaryWorktree;
+}
+
+export function projectActionTrustAllowlist(config) {
+  const trustedProjectActionIds = config?.trustedProjectActionIds ?? [];
+  if (
+    !Array.isArray(trustedProjectActionIds) ||
+    trustedProjectActionIds.some(
+      (value) => typeof value !== "string" || !/^lc-[a-z0-9-]+$/u.test(value),
+    )
+  ) {
+    throw new Error("Checkpoint supervisor Project Action trust entries are invalid.");
+  }
+  return [...new Set(trustedProjectActionIds)].toSorted();
+}
+
+export function reconcilePrimaryProjectActions(
+  primaryWorktree,
+  home,
+  trustedProjectActionIds,
+  environment,
+  execute = runCommand,
+) {
+  return execute(
+    "project-actions",
+    primaryWorktree,
+    process.execPath,
+    [
+      NodePath.join(primaryWorktree, "scripts", "lastcode-project-actions.mjs"),
+      "reconcile",
+      "--repo-root",
+      primaryWorktree,
+      "--base-dir",
+      NodePath.join(home, ".lastcode"),
+      ...trustedProjectActionIds.flatMap((id) => ["--trusted-source-id", id]),
+    ],
+    environment,
+  );
 }
 
 export function checkpointEnvironment(
@@ -603,6 +653,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
     notify: (title, message) => notify(title, message, environment),
+    reconcileProjectActions: (primaryWorktree, trustedProjectActionIds) =>
+      reconcilePrimaryProjectActions(primaryWorktree, home, trustedProjectActionIds, environment),
     refreshPrimaryCheckout: () => refreshPrimaryCheckout(repoRoot, environment),
     retainedRecoveryMatches: (checkpointRun) =>
       retainedRecoveryMatches(repoRoot, checkpointRun, environment),
@@ -666,7 +718,9 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     }
     dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
     phase = "checkout-refresh";
-    dependencies.refreshPrimaryCheckout();
+    const primaryWorktree = dependencies.refreshPrimaryCheckout();
+    phase = "project-actions";
+    dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config));
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
