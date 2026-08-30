@@ -370,6 +370,11 @@ export function checkpointRecoveryFingerprint(worktree: string, recoveryBranch: 
     try {
       const stat = NodeFS.lstatSync(path);
       const kind = stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : "file";
+      if (stat.isDirectory() && NodeFS.readdirSync(path).length > 0) {
+        throw new Error(
+          `Nonempty deinitialized gitlink '${relativePath}' prevents automatic retirement.`,
+        );
+      }
       add(`tracked-mode:${relativePath}`, `${kind}\0${(stat.mode & 0o7777).toString(8)}`);
       let content: string | Buffer = "";
       if (stat.isSymbolicLink()) content = NodeFS.readlinkSync(path);

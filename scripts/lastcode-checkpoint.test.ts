@@ -218,6 +218,37 @@ it("refuses to fingerprint recoveries with initialized submodules", () => {
   NodeFS.rmSync(submodule, { recursive: true, force: true });
 });
 
+it("refuses nonempty deinitialized gitlinks", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const submodule = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-submodule-"));
+  const git = (cwd: string, args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(submodule, ["init", "--quiet", "--initial-branch=main"]);
+  git(submodule, ["config", "user.email", "checkpoint@example.com"]);
+  git(submodule, ["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(submodule, "tracked.txt"), "tracked\n");
+  git(submodule, ["add", "tracked.txt"]);
+  git(submodule, ["commit", "--quiet", "--message", "base"]);
+  git(directory, ["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(directory, ["config", "user.email", "checkpoint@example.com"]);
+  git(directory, ["config", "user.name", "Checkpoint Test"]);
+  git(directory, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule]);
+  git(directory, ["commit", "--quiet", "--message", "base"]);
+  git(directory, ["submodule", "deinit", "--force", "--all"]);
+  NodeFS.writeFileSync(
+    NodePath.join(directory, NodePath.basename(submodule), "operator.txt"),
+    "keep\n",
+  );
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("Nonempty deinitialized gitlink");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+  NodeFS.rmSync(submodule, { recursive: true, force: true });
+});
+
 it("refuses to fingerprint a locked recovery worktree", () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
   const repository = NodePath.join(root, "repository");
