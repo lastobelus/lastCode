@@ -160,6 +160,7 @@ describe("syncManagedCheckout", () => {
     git(test.managed, ["branch", "-m", "lastcode/main"]);
     git(test.managed, ["push", "origin", "HEAD:refs/heads/lastcode/main"]);
     const reconcileProjectActions = vi.fn(() => ({ created: ["lc-wait-for-pr"] }));
+    const installDependencies = vi.fn();
     const config = {
       ...test.config,
       branch: "lastcode/main",
@@ -170,11 +171,14 @@ describe("syncManagedCheckout", () => {
       },
     };
 
-    expect(syncManagedCheckoutAndActions(config, { reconcileProjectActions })).toEqual({
+    expect(
+      syncManagedCheckoutAndActions(config, { installDependencies, reconcileProjectActions }),
+    ).toEqual({
       commit: git(test.managed, ["rev-parse", "HEAD"]),
       status: "current",
       projectActions: { created: ["lc-wait-for-pr"] },
     });
+    expect(installDependencies).toHaveBeenCalledOnce();
     expect(reconcileProjectActions).toHaveBeenCalledOnce();
   });
 

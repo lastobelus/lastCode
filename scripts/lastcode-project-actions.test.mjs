@@ -6,6 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   assertManagedLastCodeAnchor,
+  managedProjectActionStateFile,
   parseProjectActionArgs,
   reconcileLastCodeProjectActions,
 } from "./lastcode-project-actions.mjs";
@@ -57,6 +58,14 @@ describe("lastcode project action arguments", () => {
 });
 
 describe("managed LastCode anchor", () => {
+  it("keys ownership state by normalized workspace", () => {
+    const baseDir = "/srv/example/t3-home";
+    const first = managedProjectActionStateFile(baseDir, "/srv/example/lastCode");
+    const second = managedProjectActionStateFile(baseDir, "/srv/example/other-lastCode");
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/managed-project-actions\/[0-9a-f]{64}\.json$/u);
+  });
+
   it("requires the canonical branch, repository root, upstream, and t3.json", () => {
     const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-actions-anchor-"));
     NodeFS.writeFileSync(NodePath.join(repoRoot, "t3.json"), "{}\n");
@@ -106,7 +115,7 @@ describe("managed LastCode anchor", () => {
     expect(invocation.command).toBe(process.execPath);
     expect(invocation.args).toContain("reconcile-actions");
     expect(invocation.args).toContain(
-      NodePath.join(baseDir, "userdata", "lastcode", "managed-project-actions.json"),
+      managedProjectActionStateFile(baseDir, NodeFS.realpathSync(repoRoot)),
     );
     expect(invocation.args).toContain("lc-wait-for-pr");
   });

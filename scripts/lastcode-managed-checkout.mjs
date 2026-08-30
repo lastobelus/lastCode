@@ -304,10 +304,29 @@ function reconcileConfiguredProjectActions(config) {
   return JSON.parse(result.stdout);
 }
 
+function installManagedCheckoutDependencies(config) {
+  const result = NodeChildProcess.spawnSync("vp", ["install", "--frozen-lockfile"], {
+    cwd: config.worktree,
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    fail(result.stderr.trim() || result.stdout.trim() || "Managed checkout install failed.");
+  }
+}
+
 export function syncManagedCheckoutAndActions(rawConfig, dependencies = {}) {
   const config = normalizeManagedCheckoutConfig(rawConfig);
   const checkout = syncManagedCheckout(config, dependencies);
   if (config.projectActions === undefined) return checkout;
+  if (
+    checkout.status === "updated" ||
+    !NodeFS.existsSync(NodePath.join(config.worktree, "node_modules"))
+  ) {
+    const installDependencies =
+      dependencies.installDependencies ?? installManagedCheckoutDependencies;
+    installDependencies(config);
+  }
   const reconcile = dependencies.reconcileProjectActions ?? reconcileConfiguredProjectActions;
   return {
     ...checkout,

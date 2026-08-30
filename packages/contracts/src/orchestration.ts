@@ -1001,6 +1001,7 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   // Absent = leave unchanged; null = clear the override.
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
+  expectedScripts: Schema.optional(Schema.Array(ProjectScript)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
 });
 

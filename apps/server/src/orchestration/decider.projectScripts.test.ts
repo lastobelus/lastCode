@@ -78,11 +78,26 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         },
       ] as const;
 
+      const staleFailure = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.meta.update",
+            commandId: CommandId.make("cmd-project-update-stale-scripts"),
+            projectId: asProjectId("project-scripts"),
+            expectedScripts: Array.from(scripts),
+            scripts: Array.from(scripts),
+          },
+          readModel,
+        }),
+      );
+      expect(staleFailure.message).toContain("scripts changed before the update");
+
       const result = yield* decideOrchestrationCommand({
         command: {
           type: "project.meta.update",
           commandId: CommandId.make("cmd-project-update-scripts"),
           projectId: asProjectId("project-scripts"),
+          expectedScripts: [],
           scripts: Array.from(scripts),
         },
         readModel,

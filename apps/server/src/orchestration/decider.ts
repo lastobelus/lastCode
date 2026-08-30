@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
+import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
 import type * as PlatformError from "effect/PlatformError";
 
@@ -339,11 +340,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.meta.update": {
-      yield* requireProject({
+      const project = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
       });
+      if (
+        command.expectedScripts !== undefined &&
+        !Equal.equals(command.expectedScripts, project.scripts)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' scripts changed before the update could be applied.`,
+        });
+      }
       if (command.workspaceRoot !== undefined) {
         yield* requireActiveProjectWorkspaceRootAbsent({
           readModel,

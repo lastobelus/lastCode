@@ -2,6 +2,7 @@
 
 // Reconcile repository-owned Project Actions into one explicitly managed LastCode environment.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -78,15 +79,21 @@ export function assertManagedLastCodeAnchor(repoRoot, execute = run) {
   return { realRoot, sourceFile };
 }
 
+export function managedProjectActionStateFile(baseDir, workspaceRoot) {
+  const workspaceKey = NodeCrypto.createHash("sha256").update(workspaceRoot).digest("hex");
+  return NodePath.join(
+    baseDir,
+    "userdata",
+    "lastcode",
+    "managed-project-actions",
+    `${workspaceKey}.json`,
+  );
+}
+
 export function reconcileLastCodeProjectActions(options, dependencies = {}) {
   const execute = dependencies.execute ?? run;
   const { realRoot, sourceFile } = assertManagedLastCodeAnchor(options.repoRoot, execute);
-  const stateFile = NodePath.join(
-    options.baseDir,
-    "userdata",
-    "lastcode",
-    "managed-project-actions.json",
-  );
+  const stateFile = managedProjectActionStateFile(options.baseDir, realRoot);
   const args = [
     NodePath.join(realRoot, "apps", "server", "src", "bin.ts"),
     "project",

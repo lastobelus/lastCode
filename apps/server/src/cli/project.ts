@@ -789,6 +789,7 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
             type: "project.meta.update",
             commandId: CommandId.make(yield* projectCommandUuid),
             projectId,
+            expectedScripts: Array.from(currentScripts),
             scripts: Array.from(reconciled.scripts),
           });
         }

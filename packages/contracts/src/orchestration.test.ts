@@ -1218,8 +1218,19 @@ it.effect("project favicon overrides accept only supported image files", () =>
       commandId: "cmd-project-favicon",
       projectId: "project-1",
       faviconPath: "brand/icon.svg",
+      expectedScripts: [
+        {
+          id: "test",
+          name: "Test",
+          command: "pnpm test",
+          icon: "test",
+          runOnWorktreeCreate: false,
+        },
+      ],
     });
     assert.strictEqual(valid.type, "project.meta.update");
+    if (valid.type !== "project.meta.update") assert.fail("Expected project.meta.update.");
+    assert.strictEqual(valid.expectedScripts?.[0]?.id, "test");
 
     const invalid = yield* Effect.exit(
       decodeOrchestrationCommand({
