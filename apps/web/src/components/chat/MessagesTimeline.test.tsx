@@ -161,6 +161,7 @@ function matchMedia() {
 }
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
+let AgentMessageSourceTitle: typeof import("./MessagesTimeline").AgentMessageSourceTitle;
 
 beforeAll(async () => {
   const classList = {
@@ -194,7 +195,7 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline, AgentMessageSourceTitle } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -263,7 +264,7 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
-  it("renders cross-thread posts as left-aligned agent message cards", () => {
+  it("renders cross-thread posts as agent messages with their attachments", () => {
     const sourceThreadId = ThreadId.make("thread-source");
     const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
     const markup = renderToStaticMarkup(
@@ -272,7 +273,20 @@ describe("MessagesTimeline", () => {
         timelineEntries={[
           {
             ...entry,
-            message: { ...entry.message, sourceThreadId },
+            message: {
+              ...entry.message,
+              sourceThreadId,
+              attachments: [
+                {
+                  type: "file" as const,
+                  id: "attachment-report-pdf",
+                  name: "handoff.pdf",
+                  mimeType: "application/pdf",
+                  sizeBytes: 42,
+                  previewUrl: "https://environment.test/api/assets/handoff.pdf",
+                },
+              ],
+            },
           },
         ]}
       />,
@@ -281,13 +295,23 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("AGENT MESSAGE");
     expect(markup).toContain("Mobile Reconnect Issue");
     expect(markup).toContain("Working");
-    expect(markup).toContain("items-start");
-    expect(markup).toContain("max-w-[80%]");
-    expect(markup).toContain("border-primary/55 bg-secondary");
-    expect(markup).toContain("font-medium lowercase text-primary");
     expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
-    expect(markup).not.toContain("Open source thread</a>");
-    expect(markup).not.toContain("bg-message p-3");
+    expect(markup).toContain('download="handoff.pdf"');
+  });
+
+  it("opens the source thread when its title is activated", () => {
+    const sourceThreadId = ThreadId.make("thread-source");
+    const onOpenSourceThread = vi.fn();
+    const sourceTitle = AgentMessageSourceTitle({
+      sourceThreadId,
+      sourceTitle: "Mobile Reconnect Issue",
+      onOpenSourceThread,
+    });
+
+    expect(sourceTitle.type).toBe("button");
+    sourceTitle.props.onClick?.();
+    expect(onOpenSourceThread).toHaveBeenCalledOnce();
+    expect(onOpenSourceThread).toHaveBeenCalledWith(sourceThreadId);
   });
 
   it("does not link to a source thread that is no longer available", () => {

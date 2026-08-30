@@ -45,6 +45,8 @@ import {
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import {
+  type ChatAttachment,
+  type ChatFileAttachment as WebChatFileAttachment,
   type ChatImageAttachment,
   isFileAttachment,
   isImageAttachment,
@@ -1270,6 +1272,11 @@ function AgentMessageTimelineRow({
           }))
     : null;
   const sourceTitle = source?.title ?? "source thread";
+  const images = (row.message.attachments ?? []).filter(isImageAttachment);
+  const files = (row.message.attachments ?? []).filter(isFileAttachment);
+  const unknownAttachments = (row.message.attachments ?? []).filter(
+    (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
+  );
 
   return (
     <div className="group flex flex-col items-start gap-1">
@@ -1282,21 +1289,11 @@ function AgentMessageTimelineRow({
             ·
           </span>
           {status ? <ThreadStatusLabel status={status} compact={compactStatus} /> : null}
-          {source ? (
-            <button
-              type="button"
-              onClick={() => ctx.onOpenSourceThread(sourceThreadId)}
-              className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
-              aria-label={`Open source thread: ${sourceTitle}`}
-            >
-              <span className="truncate">{sourceTitle}</span>
-              <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
-            </button>
-          ) : (
-            <span className="min-w-0 truncate font-medium lowercase text-muted-foreground">
-              source thread unavailable
-            </span>
-          )}
+          <AgentMessageSourceTitle
+            sourceThreadId={sourceThreadId}
+            sourceTitle={source ? sourceTitle : null}
+            onOpenSourceThread={ctx.onOpenSourceThread}
+          />
           <Tooltip>
             <TooltipTrigger
               render={<span className="ms-auto text-muted-foreground tabular-nums" />}
@@ -1308,6 +1305,7 @@ function AgentMessageTimelineRow({
             </TooltipPopup>
           </Tooltip>
         </div>
+        <MessageAttachments images={images} files={files} unknown={unknownAttachments} />
         <ChatMarkdown
           text={row.message.text}
           cwd={ctx.markdownCwd}
@@ -1316,6 +1314,128 @@ function AgentMessageTimelineRow({
         />
       </div>
     </div>
+  );
+}
+
+export function AgentMessageSourceTitle({
+  sourceThreadId,
+  sourceTitle,
+  onOpenSourceThread,
+}: {
+  sourceThreadId: ThreadId;
+  sourceTitle: string | null;
+  onOpenSourceThread: (threadId: ThreadId) => void;
+}) {
+  return sourceTitle ? (
+    <button
+      type="button"
+      onClick={() => onOpenSourceThread(sourceThreadId)}
+      className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+      aria-label={`Open source thread: ${sourceTitle}`}
+    >
+      <span className="truncate">{sourceTitle}</span>
+      <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
+    </button>
+  ) : (
+    <span className="min-w-0 truncate font-medium lowercase text-muted-foreground">
+      source thread unavailable
+    </span>
+  );
+}
+
+function MessageAttachments({
+  images,
+  files,
+  unknown,
+  children,
+}: {
+  images: ReadonlyArray<ChatImageAttachment>;
+  files: ReadonlyArray<WebChatFileAttachment>;
+  unknown: ReadonlyArray<ChatAttachment>;
+  children?: ReactNode;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <>
+      {images.length > 0 ? (
+        <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
+          {images.map((image) => (
+            <div
+              key={image.id}
+              className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(images, image.id);
+                    if (!preview) return;
+                    ctx.onImageExpand(preview);
+                  }}
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className="block h-auto max-h-[220px] w-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-[11px]">
+                  {image.name}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {children}
+      {files.length > 0 || unknown.length > 0 ? (
+        <div className="mb-2 flex flex-col gap-1">
+          {files.map((file) => {
+            const content = (
+              <>
+                <FileIcon className="size-4 shrink-0 text-secondary-label" />
+                <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                {file.downloadable === false ? null : <DownloadIcon className="size-4 shrink-0" />}
+              </>
+            );
+            return file.previewUrl ? (
+              <a
+                key={file.id}
+                href={file.previewUrl}
+                download={file.name}
+                className="flex min-w-0 items-center gap-2 rounded-md py-1 text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </a>
+            ) : file.downloadable === false ? (
+              <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                {content}
+              </div>
+            ) : (
+              <button
+                key={file.id}
+                type="button"
+                aria-label={`Download ${file.name}`}
+                onClick={() => ctx.onFileDownload(file)}
+                className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </button>
+            );
+          })}
+          {unknown.map((attachment) => (
+            <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+              <FileIcon className="size-4 shrink-0 text-secondary-label" />
+              <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -1350,91 +1470,15 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   return (
     <div className="group flex flex-col items-end gap-1">
       <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
-        {regularImages.length > 0 && (
-          <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
-            {regularImages.map((image) => (
-              <div
-                key={image.id}
-                className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
-              >
-                {image.previewUrl ? (
-                  <button
-                    type="button"
-                    className="h-full w-full cursor-zoom-in"
-                    aria-label={`Preview ${image.name}`}
-                    onClick={() => {
-                      const preview = buildExpandedImagePreview(regularImages, image.id);
-                      if (!preview) return;
-                      ctx.onImageExpand(preview);
-                    }}
-                  >
-                    <img
-                      src={image.previewUrl}
-                      alt={image.name}
-                      className="block h-auto max-h-[220px] w-full object-cover"
-                    />
-                  </button>
-                ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-[11px]">
-                    {image.name}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {previewAnnotations.map((annotation, index) => (
-          <UserMessagePreviewAnnotationCard
-            key={annotation.id}
-            annotation={annotation}
-            image={previewImages[index] ?? null}
-          />
-        ))}
-        {userFiles.length > 0 || unknownAttachments.length > 0 ? (
-          <div className="mb-2 flex flex-col gap-1">
-            {userFiles.map((file) => {
-              const content = (
-                <>
-                  <FileIcon className="size-4 shrink-0 text-secondary-label" />
-                  <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                  {file.downloadable === false ? null : (
-                    <DownloadIcon className="size-4 shrink-0" />
-                  )}
-                </>
-              );
-              return file.previewUrl ? (
-                <a
-                  key={file.id}
-                  href={file.previewUrl}
-                  download={file.name}
-                  className="flex min-w-0 items-center gap-2 rounded-md py-1 text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-                >
-                  {content}
-                </a>
-              ) : file.downloadable === false ? (
-                <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                  {content}
-                </div>
-              ) : (
-                <button
-                  key={file.id}
-                  type="button"
-                  aria-label={`Download ${file.name}`}
-                  onClick={() => ctx.onFileDownload(file)}
-                  className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-                >
-                  {content}
-                </button>
-              );
-            })}
-            {unknownAttachments.map((attachment) => (
-              <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                <FileIcon className="size-4 shrink-0 text-secondary-label" />
-                <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        <MessageAttachments images={regularImages} files={userFiles} unknown={unknownAttachments}>
+          {previewAnnotations.map((annotation, index) => (
+            <UserMessagePreviewAnnotationCard
+              key={annotation.id}
+              annotation={annotation}
+              image={previewImages[index] ?? null}
+            />
+          ))}
+        </MessageAttachments>
         {elementContexts.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {elementContexts.map((context) => (
