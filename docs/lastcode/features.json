@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "siteBaseUrl": "https://lastobelus.github.io/lastcode-docs/",
+  "features": [
+    {
+      "id": "resumable-actions",
+      "title": "Resumable project actions",
+      "readmeSummary": "Agents can start a Project Action and then pause while it runs. LastCode wakes the thread when the Action finishes; in the meantime, you can inspect or cancel it. We added this because we were tired of paying the polling tax: wasting turns and tokens checking whether a command was done.",
+      "pagePath": "/features/resumable-actions/",
+      "supportedClients": ["web", "desktop", "mobile"],
+      "sourcePrefixes": [
+        "docs/user/resumable-project-actions.md",
+        "docs/user/resumable-project-actions-for-agents.md",
+        "docs/user/project-settings.md",
+        "apps/server/src/actionResume/",
+        "apps/server/src/orchestration/ThreadActionResume.ts",
+        "apps/web/src/components/chat/ComposerActionResume.tsx",
+        "apps/mobile/src/features/threads/ActionResumeNotice.tsx",
+        "packages/contracts/src/orchestration.ts"
+      ],
+      "captureRecipeIds": ["resumable-actions", "workspace-overview"]
+    },
+    {
+      "id": "codex-thread-tools",
+      "title": "Codex thread tools",
+      "readmeSummary": "Let Codex list and inspect LastCode threads, read bounded recent context, and send tracked follow-up work.",
+      "pagePath": "/features/codex-thread-tools/",
+      "supportedClients": ["web", "desktop", "mobile"],
+      "sourcePrefixes": [
+        "docs/user/codex-thread-tools.md",
+        "apps/server/src/cli/thread.ts",
+        "apps/server/src/provider/CodexThreadTool.ts",
+        "apps/server/src/provider/Layers/CodexAdapter.ts"
+      ],
+      "captureRecipeIds": ["codex-thread-tools"]
+    },
+    {
+      "id": "thread-annotations",
+      "title": "Thread annotations",
+      "readmeSummary": "Attach a short note to a thread so its current purpose stays visible in chat and the sidebar; resolve or reopen it as the work changes.",
+      "pagePath": "/features/thread-annotations/",
+      "supportedClients": ["web", "desktop"],
+      "sourcePrefixes": [
+        "docs/user/thread-sidebar.md",
+        "apps/web/src/components/thread-annotation/",
+        "apps/web/src/components/LegacySidebar.tsx",
+        "apps/server/src/orchestration/decider.ts",
+        "apps/server/src/orchestration/projector.ts",
+        "packages/contracts/src/orchestration.ts"
+      ],
+      "captureRecipeIds": ["thread-annotations", "workspace-overview"]
+    },
+    {
+      "id": "legacy-sidebar",
+      "title": "Legacy sidebar conveniences",
+      "readmeSummary": "Use the compact project-and-thread layout with adjustable scale, status indicators, and worktree context.",
+      "pagePath": "/features/legacy-sidebar/",
+      "supportedClients": ["web", "desktop"],
+      "sourcePrefixes": [
+        "docs/user/thread-sidebar.md",
+        "docs/user/keybindings.md",
+        "apps/web/src/components/settings/LastCodeSettings.tsx",
+        "apps/web/src/components/LegacySidebar.tsx",
+        "apps/web/src/legacySidebarScale.ts",
+        "packages/contracts/src/settings.ts"
+      ],
+      "captureRecipeIds": ["workspace-overview"]
+    },
+    {
+      "id": "local-nightly-updates",
+      "title": "Local nightly updates",
+      "readmeSummary": "On Apple Silicon macOS, follow T3 Code nightlies, inspect changes, and build or install isolated LastCode revisions locally.",
+      "pagePath": "/features/local-nightly-updates/",
+      "supportedClients": ["desktop"],
+      "sourcePrefixes": [
+        "docs/lastcode/local-nightly-updates.md",
+        "docs/lastcode/setup.md",
+        "docs/lastcode/nightly-workflow.md",
+        "apps/desktop/src/updates/LastCodeLocalUpdates.ts",
+        "apps/desktop/src/updates/DesktopUpdates.ts",
+        "apps/web/src/components/settings/LastCodeSettings.tsx",
+        "apps/web/src/components/sidebar/SidebarUpdatePill.tsx"
+      ],
+      "captureRecipeIds": ["local-nightly-updates"]
+    }
+  ],
+  "readme": {
+    "intro": "LastCode keeps T3 Code's core experience and adds focused tools for coordinating long-running agent work.",
+    "featureIds": [
+      "resumable-actions",
+      "codex-thread-tools",
+      "thread-annotations",
+      "legacy-sidebar",
+      "local-nightly-updates"
+    ],
+    "panels": [
+      {
+        "captureId": "workspace-overview",
+        "fileStem": "workspace",
+        "alt": "LastCode in the Ocean theme with a scaled legacy sidebar, a thread annotation, and a resumable action running in the active chat."
+      },
+      {
+        "captureId": "local-nightly-updates",
+        "fileStem": "local-nightly",
+        "alt": "LastCode's desktop update panel showing release notes and progress for a local nightly build."
+      }
+    ]
+  }
+}
