@@ -107,6 +107,10 @@
       "types": "./src/actionResume.ts",
       "import": "./src/actionResume.ts"
     },
+    "./actionResumeProtocol": {
+      "types": "./src/actionResumeProtocol.ts",
+      "import": "./src/actionResumeProtocol.ts"
+    },
     "./threadEnvMode": {
       "types": "./src/threadEnvMode.ts",
       "import": "./src/threadEnvMode.ts"

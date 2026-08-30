@@ -1,5 +1,6 @@
 import type { StatusTone } from "../../components/StatusPill";
 import type { OrchestrationLatestTurn, OrchestrationSession } from "@t3tools/contracts";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 
 export type ThreadStatusKind =
@@ -28,7 +29,11 @@ export function shouldShowActionWaitingIndicator(
   thread: Pick<EnvironmentThreadShell, "actionResume">,
   primaryStatus: string | null,
 ): boolean {
-  return thread.actionResume?.outcome === "running" && primaryStatus !== "waiting";
+  return (
+    thread.actionResume?.outcome === "running" &&
+    actionRunningPresentation(thread.actionResume).state === "waiting" &&
+    primaryStatus !== "waiting"
+  );
 }
 
 function isLatestTurnSettled(
@@ -146,13 +151,18 @@ export function resolveThreadStatus(
   }
 
   if (thread.actionResume?.outcome === "running") {
+    const action = actionRunningPresentation(thread.actionResume);
     return {
-      kind: "waiting",
-      label: "Waiting",
-      pillClassName: "bg-adaptive-yellow-500-a12-a16",
-      textClassName: "text-adaptive-yellow-700-300",
-      iconColor: "#eab308",
-      iconBackground: "rgba(234,179,8,0.22)",
+      kind: action.state,
+      label: action.label,
+      pillClassName:
+        action.state === "working"
+          ? "bg-adaptive-sky-500-a12-a16"
+          : "bg-adaptive-yellow-500-a12-a16",
+      textClassName:
+        action.state === "working" ? "text-adaptive-sky-700-300" : "text-adaptive-yellow-700-300",
+      iconColor: action.state === "working" ? "#0a84ff" : "#eab308",
+      iconBackground: action.state === "working" ? "rgba(10,132,255,0.22)" : "rgba(234,179,8,0.22)",
       pulse: false,
     };
   }
