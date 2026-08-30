@@ -80,7 +80,7 @@ interface FinishActionInput {
 interface ActionProtocolCapture {
   readonly decoder: ActionProtocolDecoder;
   report?: ActionResumeState["report"];
-  lastObservedProgressKey?: string;
+  lastObservedProgress?: ActionProgress;
   lastAcceptedProgressAtMs?: number;
   acceptedProgressCount: number;
   pendingProgress?: ActionProgress;
@@ -88,6 +88,16 @@ interface ActionProtocolCapture {
   progressFlushScheduled?: boolean;
   progressLimitWarned?: boolean;
 }
+
+const progressEquals = (left: ActionProgress | undefined, right: ActionProgress) =>
+  left?.version === right.version &&
+  left.state === right.state &&
+  left.summary === right.summary &&
+  left.phase === right.phase &&
+  left.detail === right.detail &&
+  left.current === right.current &&
+  left.total === right.total &&
+  left.unit === right.unit;
 
 export class ActionResume extends Context.Service<
   ActionResume,
@@ -370,7 +380,7 @@ const make = Effect.gen(function* () {
 
       const updatedAt = yield* nowIso;
       yield* persistState({ ...current, progress: { ...pending, updatedAt } });
-      protocol.lastObservedProgressKey = `${pending.state}\u0000${pending.summary}`;
+      protocol.lastObservedProgress = pending;
       protocol.lastAcceptedProgressAtMs = yield* clock.currentTimeMillis;
       protocol.acceptedProgressCount += 1;
       delete protocol.pendingProgress;
@@ -386,16 +396,15 @@ const make = Effect.gen(function* () {
     const protocol = protocolCaptureByRunId.get(runId);
     if (current?.runId !== runId || current.outcome !== "running" || protocol === undefined) return;
 
-    const progressKey = `${progress.state}\u0000${progress.summary}`;
     if (
-      protocol.lastObservedProgressKey === progressKey &&
+      progressEquals(protocol.lastObservedProgress, progress) &&
       protocol.pendingProgress === undefined
     ) {
       return;
     }
 
     if (protocol.acceptedProgressCount >= ACTION_PROGRESS_MAX_UPDATES) {
-      protocol.lastObservedProgressKey = progressKey;
+      protocol.lastObservedProgress = progress;
       if (protocol.progressLimitWarned !== true) {
         protocol.progressLimitWarned = true;
         yield* Effect.logWarning("Action progress update limit reached", {
@@ -414,7 +423,7 @@ const make = Effect.gen(function* () {
       protocol.lastAcceptedProgressAtMs !== undefined &&
       acceptedAtMs - protocol.lastAcceptedProgressAtMs < ACTION_PROGRESS_MIN_INTERVAL_MS
     ) {
-      protocol.lastObservedProgressKey = progressKey;
+      protocol.lastObservedProgress = progress;
       protocol.pendingProgress = progress;
       if (protocol.progressFlushScheduled !== true) {
         protocol.progressFlushScheduled = true;
@@ -444,7 +453,7 @@ const make = Effect.gen(function* () {
     yield* persistState({ ...current, progress: { ...progress, updatedAt } });
     protocol.progressFlushGeneration += 1;
     protocol.progressFlushScheduled = false;
-    protocol.lastObservedProgressKey = progressKey;
+    protocol.lastObservedProgress = progress;
     protocol.lastAcceptedProgressAtMs = acceptedAtMs;
     protocol.acceptedProgressCount += 1;
     delete protocol.pendingProgress;

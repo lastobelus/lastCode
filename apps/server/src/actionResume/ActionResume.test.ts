@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  type ActionProgress,
   type ActionResumeState,
   EventId,
   ProjectId,
@@ -138,8 +139,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
             progressFlushed !== undefined &&
             command.type === "thread.activity.append" &&
             command.activity.kind === ActionResume.ACTION_RESUME_ACTIVITY_KIND &&
-            (command.activity.payload as ActionResumeState).progress?.summary ===
-              "Still waiting for review"
+            (command.activity.payload as ActionResumeState).progress?.phase === "review"
           ) {
             yield* Deferred.succeed(progressFlushed, undefined);
           }
@@ -308,11 +308,15 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.isDefined(terminalListener);
     const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
     const endMarker = ActionResume.actionOutputMarker(running.runId, "end");
-    const progressFrame = (state: "working" | "waiting", summary: string) =>
+    const progressFrame = (
+      state: "working" | "waiting",
+      summary: string,
+      fields: Partial<Omit<ActionProgress, "version" | "state" | "summary">> = {},
+    ) =>
       actionProtocolFrame({
         runId: running.runId,
         token: eventToken!,
-        event: { kind: "progress", progress: { version: 1, state, summary } },
+        event: { kind: "progress", progress: { version: 1, state, summary, ...fields } },
       });
     const resultFrame = actionProtocolFrame({
       runId: running.runId,
@@ -337,7 +341,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${progressFrame("working", "Running checks")}${progressFrame("working", "Running checks")}${progressFrame("working", "Running tests")}${progressFrame("waiting", "Waiting for review")}${resultFrame}${endMarker}prompt`,
+      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${progressFrame("working", "Running checks")}${progressFrame("working", "Running checks")}${progressFrame("working", "Running tests")}${progressFrame("waiting", "Waiting for review", { phase: "ci", current: 1, total: 3, unit: "check" })}${resultFrame}${endMarker}prompt`,
     });
     const registry = yield* ThreadActionResume.ThreadActionResumeService;
     assert.deepInclude(registry.getLatest(threadId), {
@@ -365,13 +369,27 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: progressFrame("waiting", "Still waiting for review"),
+      data: progressFrame("waiting", "Waiting for review", {
+        phase: "review",
+        detail: "Review is still pending",
+        current: 2,
+        total: 3,
+        unit: "check",
+      }),
     });
     yield* TestClock.adjust(999);
     assert.equal(registry.getLatest(threadId)?.progress?.summary, "Waiting for review");
     yield* TestClock.adjust(1);
     yield* Deferred.await(progressFlushed);
-    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Still waiting for review");
+    assert.deepInclude(registry.getLatest(threadId)?.progress, {
+      state: "waiting",
+      summary: "Waiting for review",
+      phase: "review",
+      detail: "Review is still pending",
+      current: 2,
+      total: 3,
+      unit: "check",
+    });
     assert.deepEqual(
       dispatched.flatMap((command) => {
         if (

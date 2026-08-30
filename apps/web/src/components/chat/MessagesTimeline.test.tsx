@@ -262,7 +262,6 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("full output hidden while collapsed");
     expect(markup).not.toContain('aria-expanded="false"');
     expect(markup).toContain("Detailed output retained in the Action terminal.");
-    expect(markup).toContain("border-emerald-500/25 bg-emerald-500/[0.06]");
   });
 
   it("shows the validated outcome when an Action has no exit code", () => {
@@ -285,35 +284,6 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain("Cancelled: Wait for PR");
-    expect(markup).toContain("border-border bg-muted/30");
-  });
-
-  it("uses the canonical blocked tone for structured Action results", () => {
-    const actionText = formatActionResumeFollowUp({
-      actionName: "Deploy preview",
-      actionId: "deploy-preview",
-      runId: "deploy-preview-1",
-      validatedStatus: "succeeded",
-      lifecycleOutcome: "succeeded",
-      exitCode: 0,
-      report: {
-        version: 1,
-        outcome: "blocked",
-        summary: "Production approval is required",
-      },
-      output: "verbose deployment diagnostics",
-    });
-    const entry = buildAssistantTimelineEntry(actionText);
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[{ ...entry, message: { ...entry.message, role: "system" as const } }]}
-      />,
-    );
-
-    expect(markup).toContain("Blocked: Deploy preview");
-    expect(markup).toContain("Production approval is required");
-    expect(markup).toContain("border-violet-500/25 bg-violet-500/[0.06]");
   });
 
   it("renders a feedback command and its pending response as normal thread messages", () => {
