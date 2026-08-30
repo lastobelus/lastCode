@@ -12,6 +12,8 @@ import {
   checkpointIncidentFingerprint,
   changedGitlink,
   latestFailedCheckpointRun,
+  projectActionTrustAllowlist,
+  reconcilePrimaryProjectActions,
   refreshPrimaryCheckout,
   refreshInstalledSupervisor,
   runCheckpointSupervisor,
@@ -36,6 +38,7 @@ function fixture(overrides = {}) {
     loadState: () => state,
     now: () => `2026-08-26T00:00:0${now++}.000Z`,
     notify: vi.fn(),
+    reconcileProjectActions: vi.fn(),
     refreshPrimaryCheckout: vi.fn(),
     refreshSupervisor: vi.fn(),
     runPhase: vi.fn(),
@@ -75,6 +78,7 @@ describe("LastCode checkpoint supervisor", () => {
     );
     expect(test.dependencies.refreshSupervisor).toHaveBeenCalledOnce();
     expect(test.dependencies.refreshPrimaryCheckout).toHaveBeenCalledOnce();
+    expect(test.dependencies.reconcileProjectActions).toHaveBeenCalledWith(undefined, []);
     expect(test.messages).toEqual([]);
     expect(test.states.at(-1)).toMatchObject({ status: "success", phase: "complete" });
   });
@@ -85,6 +89,45 @@ describe("LastCode checkpoint supervisor", () => {
         "worktree /srv/example/lastCode\n\nworktree /srv/example/lastCode-worktrees/lastcode-automation\n",
       ),
     ).toBe("/srv/example/lastCode");
+  });
+
+  it("runs Project Action reconciliation against the refreshed primary checkout", () => {
+    const execute = vi.fn();
+    reconcilePrimaryProjectActions(
+      "/srv/example/lastCode",
+      "/Users/example",
+      ["lc-wait-for-pr"],
+      { HOME: "/Users/example" },
+      execute,
+    );
+
+    expect(execute).toHaveBeenCalledWith(
+      "project-actions",
+      "/srv/example/lastCode",
+      process.execPath,
+      [
+        "/srv/example/lastCode/scripts/lastcode-project-actions.mjs",
+        "reconcile",
+        "--repo-root",
+        "/srv/example/lastCode",
+        "--base-dir",
+        "/Users/example/.lastcode",
+        "--trusted-source-id",
+        "lc-wait-for-pr",
+      ],
+      { HOME: "/Users/example" },
+    );
+  });
+
+  it("validates and normalizes the environment-local Project Action trust allowlist", () => {
+    expect(
+      projectActionTrustAllowlist({
+        trustedProjectActionIds: ["lc-wait-for-pr", "lc-wait-for-pr"],
+      }),
+    ).toEqual(["lc-wait-for-pr"]);
+    expect(() => projectActionTrustAllowlist({ trustedProjectActionIds: ["wait-for-pr"] })).toThrow(
+      "trust entries are invalid",
+    );
   });
 
   it("detects every changed submodule gitlink", () => {
@@ -438,6 +481,26 @@ describe("LastCode checkpoint supervisor", () => {
       status: "failed",
       phase: "checkout-refresh",
       incident: { failure: { phase: "checkout-refresh" } },
+    });
+  });
+
+  it("records Project Action reconciliation failure after a successful checkout refresh", () => {
+    const test = fixture({
+      dependencies: {
+        refreshPrimaryCheckout: () => "/srv/example/lastCode",
+        reconcileProjectActions: () => {
+          throw new Error("Project Action reconciliation failed");
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "Project Action reconciliation failed",
+    );
+    expect(test.state).toMatchObject({
+      status: "failed",
+      phase: "project-actions",
+      incident: { failure: { phase: "project-actions" } },
     });
   });
 
