@@ -29,7 +29,7 @@ const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { getProjectFaviconCacheKey } from "@t3tools/shared/projectFavicon";
-import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import { actionResultPresentation, parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import {
   createContext,
   Fragment,
@@ -1794,33 +1794,65 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
   const actionOutputExpanded = ctx.expandedActionMessageIds.has(row.id);
 
   if (actionFollowUp) {
-    const status = actionFollowUp.exitCode ?? actionFollowUp.validatedStatus;
+    const presentation = actionResultPresentation(actionFollowUp);
+    const toneClass =
+      presentation.outcome === "success"
+        ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-300"
+        : presentation.outcome === "error"
+          ? "border-red-500/25 bg-red-500/[0.06] text-red-700 dark:text-red-300"
+          : presentation.outcome === "cancelled"
+            ? "border-border bg-muted/30 text-muted-foreground"
+            : presentation.outcome === "blocked"
+              ? "border-violet-500/25 bg-violet-500/[0.06] text-violet-700 dark:text-violet-300"
+              : "border-warning/28 bg-warning/8 text-warning-foreground";
+    const OutcomeIcon =
+      presentation.outcome === "success"
+        ? CheckIcon
+        : presentation.outcome === "cancelled" || presentation.outcome === "error"
+          ? XIcon
+          : CircleAlertIcon;
+    const heading = (
+      <>
+        <OutcomeIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          {presentation.label}: {actionFollowUp.actionName}
+        </span>
+      </>
+    );
     return (
-      <div className="mx-1 overflow-hidden rounded-lg border border-warning/28 bg-warning/8">
-        <button
-          type="button"
-          aria-expanded={actionOutputExpanded}
-          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium text-warning-foreground"
-          onClick={() => ctx.onToggleActionFollowUp(row.id)}
-        >
-          <BotIcon aria-hidden className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            Action completed: {actionFollowUp.actionName} Status: {status}
-          </span>
-          {actionOutputExpanded ? (
-            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
-          ) : (
-            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
-          )}
-        </button>
-        {actionOutputExpanded ? (
+      <div className={cn("mx-1 overflow-hidden rounded-lg border", toneClass)}>
+        {actionFollowUp.detailedOutputAvailable ? (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+            {heading}
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={actionOutputExpanded}
+            className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium"
+            onClick={() => ctx.onToggleActionFollowUp(row.id)}
+          >
+            {heading}
+            {actionOutputExpanded ? (
+              <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+            ) : (
+              <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+            )}
+          </button>
+        )}
+        {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
           <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
             {actionFollowUp.output}
           </pre>
         ) : (
-          <p className="truncate px-3 pb-2.5 pt-1 text-sm text-foreground/90">
-            {actionFollowUp.lastOutputLine}
-          </p>
+          <div className="px-3 pb-2.5 pt-1">
+            <p className="truncate text-sm text-foreground/90">{presentation.summary}</p>
+            {actionFollowUp.detailedOutputAvailable ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Detailed output retained in the Action terminal.
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
     );

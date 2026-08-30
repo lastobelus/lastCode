@@ -4,6 +4,7 @@
 import * as NodeChildProcess from "node:child_process";
 
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const LASTCODE_BASE_BRANCH = "lastcode/main";
@@ -520,6 +521,13 @@ export function waitTimeoutClass(
   return null;
 }
 
+export function waitProgressKey(
+  reason: Extract<WaitDecision, { readonly kind: "wait" }>["reason"],
+  observationSummary: string,
+): string {
+  return `${reason}\u0000${observationSummary}`;
+}
+
 function runGhJson<T>(args: ReadonlyArray<string>): T {
   const result = NodeChildProcess.spawnSync("gh", args, {
     encoding: "utf8",
@@ -760,13 +768,20 @@ export function formatWaitForPrFailureSummary(error: unknown): string {
 const sleep = (durationMs: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, durationMs));
 
+const waitProgressSummary = {
+  "ci-pending": "Waiting for CI",
+  "ci-registration": "Waiting for CI registration",
+  "mergeability-pending": "Waiting for GitHub mergeability",
+  "review-pending": "Waiting for review",
+} as const;
+
 async function main(): Promise<void> {
   const branch = currentBranch();
   let baseline = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);
   assertWaitStart(baseline);
   console.log(`[wait-for-pr] Baseline ${summary(baseline)}`);
 
-  let previousSummary = "";
+  let previousProgressKey = "";
   let current = baseline;
   let pendingClass: ReturnType<typeof waitTimeoutClass> = null;
   let pendingSince = Date.now();
@@ -782,13 +797,41 @@ async function main(): Promise<void> {
     }
     if (decision.kind === "wake") {
       console.log(formatWaitForPrSummary(decision, current));
+      lastCodeAction.result({
+        outcome: decision.reason === "ready" ? "success" : "attention",
+        reason: decision.reason,
+        summary: decision.detail,
+        subject: {
+          type: "pull-request",
+          id: String(current.pullRequest.number),
+          revision: current.pullRequest.headRefOid,
+          url: current.pullRequest.url,
+        },
+        facts: {
+          base: current.pullRequest.baseRefOid,
+          ci: current.ci.state,
+          review: current.review.pending
+            ? "pending"
+            : current.review.ready
+              ? "completed"
+              : "attention",
+        },
+        artifacts: [{ label: "Pull request", url: current.pullRequest.url }],
+      });
       return;
     }
 
     const currentSummary = summary(current);
-    if (currentSummary !== previousSummary) {
+    const currentProgressKey = waitProgressKey(decision.reason, currentSummary);
+    if (currentProgressKey !== previousProgressKey) {
       console.log(`[wait-for-pr] Waiting (${decision.reason}) ${currentSummary}`);
-      previousSummary = currentSummary;
+      lastCodeAction.progress({
+        state: "waiting",
+        phase: decision.reason,
+        summary: waitProgressSummary[decision.reason],
+        detail: currentSummary,
+      });
+      previousProgressKey = currentProgressKey;
     }
     await sleep(POLL_INTERVAL_MS);
     current = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);
