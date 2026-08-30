@@ -312,6 +312,7 @@ describe("MessagesTimeline", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
+        revertTurnCountByUserMessageId={new Map([[entry.message.id, 1]])}
         timelineEntries={[
           {
             ...entry,
@@ -337,7 +338,9 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("AGENT MESSAGE");
     expect(markup).toContain("Mobile Reconnect Issue");
     expect(markup).toContain("Working");
+    expect(markup).not.toContain("animate-status-pulse");
     expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
+    expect(markup).toContain('aria-label="Revert to this message"');
     expect(markup).toContain('download="handoff.pdf"');
   });
 

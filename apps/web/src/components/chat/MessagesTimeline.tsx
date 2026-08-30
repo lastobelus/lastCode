@@ -1255,7 +1255,7 @@ function AgentMessageTimelineRow({
 
   const source = useThreadShell(scopeThreadRef(ctx.activeThreadEnvironmentId, sourceThreadId));
   const compactStatus = useClientSettings((settings) => settings.compactLegacySidebarStatuses);
-  const status = source
+  const resolvedStatus = source
     ? (resolveThreadStatusPill({ thread: source }) ??
       (source.session?.status === "error"
         ? {
@@ -1271,6 +1271,8 @@ function AgentMessageTimelineRow({
             pulse: false,
           }))
     : null;
+  const status = resolvedStatus ? { ...resolvedStatus, pulse: false } : null;
+  const canRevertAgentWork = typeof row.revertTurnCount === "number";
   const sourceTitle = source?.title ?? "source thread";
   const images = (row.message.attachments ?? []).filter(isImageAttachment);
   const files = (row.message.attachments ?? []).filter(isFileAttachment);
@@ -1313,6 +1315,11 @@ function AgentMessageTimelineRow({
           skills={ctx.skills}
         />
       </div>
+      {canRevertAgentWork ? (
+        <div className="flex w-full max-w-[80%] items-center justify-start ps-1 text-xs opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+          <RevertUserMessageButton messageId={row.message.id} />
+        </div>
+      ) : null}
     </div>
   );
 }
