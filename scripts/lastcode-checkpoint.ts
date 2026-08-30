@@ -122,11 +122,7 @@ export function checkpointSmokeEnvironment(
 }
 
 export function checkpointSmokeTypecheckCommands(): ReadonlyArray<ReadonlyArray<string>> {
-  return [
-    ["run", "--filter", "@t3tools/scripts", "typecheck"],
-    ["run", "--filter", "@t3tools/client-runtime", "typecheck"],
-    ["run", "--filter", "t3", "typecheck"],
-  ];
+  return [["run", "-r", "--concurrency-limit", "2", "typecheck"]];
 }
 
 export function checkpointSmokeFormatAndLintCommand(): ReadonlyArray<string> {
