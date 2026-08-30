@@ -76,8 +76,8 @@ The command:
 9. optionally promotes the newest checkpoint or revision to `lastcode/main`.
 
 The smoke gate checks fork identity invariants, `git diff --check`, focused
-LastCode tests, desktop protocol tests, and the scripts workspace typecheck. It
-is intentionally smaller than the full build gate.
+LastCode tests, desktop protocol tests, and every workspace typecheck. It is
+intentionally smaller than the full build gate.
 
 Checkpoint-tag publication uses `git push --no-verify` after that dedicated
 smoke gate passes. This avoids rerunning the generic repository-wide pre-push
