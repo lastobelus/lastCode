@@ -44,6 +44,7 @@ import {
   ManagedProjectActionState,
   ProjectActionReconciliationError,
   prepareManagedProjectActionPendingState,
+  markManagedProjectActionPendingStateApplied,
   reconcileProjectActions,
   resolveManagedProjectActionPendingState,
 } from "./projectActionReconciliation.ts";
@@ -792,6 +793,20 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
             expectedScripts: Array.from(currentScripts),
             scripts: Array.from(reconciled.scripts),
           });
+          const appliedState = markManagedProjectActionPendingStateApplied(pendingState);
+          yield* writeFileStringAtomically({
+            filePath: flags.stateFile,
+            contents: `${encodeManagedProjectActionState(appliedState)}\n`,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectActionReconcileFileError({
+                  operation: "write_state",
+                  filePath: flags.stateFile,
+                  cause,
+                }),
+            ),
+          );
         }
 
         const encodedState = `${encodeManagedProjectActionState(reconciled.state)}\n`;

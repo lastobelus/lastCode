@@ -354,9 +354,15 @@ describe("LastCode checkpoint supervisor", () => {
       ["branch", "--show-current"],
       ["status", "--porcelain=v1", "--untracked-files=all"],
       ["rev-parse", "HEAD"],
+      ["install", "--frozen-lockfile"],
     ]);
     const transactionCall = calls.find(({ command }) => command === process.execPath);
     expect(transactionCall?.cwd).toBe("/srv/example/lastCode-worktrees/lastcode-automation");
+    expect(calls.find(({ args }) => args[0] === "install")).toMatchObject({
+      command: "/srv/example/lastCode-worktrees/lastcode-automation/node_modules/.bin/vp",
+      cwd: "/srv/example/lastCode",
+      phase: "checkout-dependencies",
+    });
     expect(
       calls
         .slice(1)

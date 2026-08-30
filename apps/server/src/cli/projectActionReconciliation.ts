@@ -22,6 +22,7 @@ const ManagedProjectActionOwnership = Schema.Struct({
 const ManagedProjectActionPendingUpdate = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   actions: Schema.Array(ManagedProjectActionOwnership),
+  applied: Schema.Boolean,
 });
 
 export const ManagedProjectActionState = Schema.Struct({
@@ -76,7 +77,15 @@ export const prepareManagedProjectActionPendingState = (input: {
   pending: {
     scripts: Array.from(input.nextScripts),
     actions: Array.from(input.nextState.actions),
+    applied: false,
   },
+});
+
+export const markManagedProjectActionPendingStateApplied = (
+  state: ManagedProjectActionState,
+): ManagedProjectActionState => ({
+  ...state,
+  ...(state.pending === undefined ? {} : { pending: { ...state.pending, applied: true } }),
 });
 
 export const resolveManagedProjectActionPendingState = (input: {
@@ -87,7 +96,7 @@ export const resolveManagedProjectActionPendingState = (input: {
   projectWorkspaceRoot: input.state.projectWorkspaceRoot,
   actions:
     input.state.pending !== undefined &&
-    sameScripts(input.currentScripts, input.state.pending.scripts)
+    (input.state.pending.applied || sameScripts(input.currentScripts, input.state.pending.scripts))
       ? input.state.pending.actions
       : input.state.actions,
 });

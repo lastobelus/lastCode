@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
+  markManagedProjectActionPendingStateApplied,
   prepareManagedProjectActionPendingState,
   reconcileProjectActions,
   resolveManagedProjectActionPendingState,
@@ -76,6 +77,48 @@ it.effect("recovers all managed fields and grant provenance around an interrupte
       assert.isTrue(recovered.scripts[0]?.allowAgentResume);
       assert.isTrue(recovered.state.actions[0]?.managesResumePermission);
     }
+  }),
+);
+
+it.effect("preserves a local permission re-granted after a managed revocation", () =>
+  Effect.gen(function* () {
+    const trusted = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [],
+      declarations: [waitDeclaration],
+      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+    });
+    const revoked = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: trusted.scripts,
+      declarations: [waitDeclaration],
+      previousState: trusted.state,
+    });
+    const applied = markManagedProjectActionPendingStateApplied(
+      prepareManagedProjectActionPendingState({
+        projectWorkspaceRoot: "/srv/example/lastCode",
+        previousState: trusted.state,
+        nextScripts: revoked.scripts,
+        nextState: revoked.state,
+      }),
+    );
+    const locallyRegranted = revoked.scripts.map((script) => ({
+      ...script,
+      allowAgentResume: true,
+    }));
+    const recoveredState = resolveManagedProjectActionPendingState({
+      state: applied,
+      currentScripts: locallyRegranted,
+    });
+    const recovered = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: locallyRegranted,
+      declarations: [waitDeclaration],
+      previousState: recoveredState,
+    });
+
+    assert.isTrue(recovered.scripts[0]?.allowAgentResume);
+    assert.isFalse(recovered.state.actions[0]?.managesResumePermission);
   }),
 );
 
