@@ -275,6 +275,24 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
     }),
   );
 
+  it.effect("escapes README panel HTML attributes", () =>
+    Effect.gen(function* () {
+      const fixture = mutableRegistry(yield* loadRegistry());
+      fixture.readme.panels[0]!.alt = 'The "Actions" panel uses <status> & progress.';
+
+      const registry = validateLastCodeDocsFeatureRegistry(fixture, {
+        sourcePathKind: fixturePathKind,
+      });
+      const block = renderLastCodeReadmeFeatureBlock(registry);
+
+      assert.include(
+        block,
+        'alt="The &quot;Actions&quot; panel uses &lt;status&gt; &amp; progress."',
+      );
+      assert.notInclude(block, 'alt="The "Actions" panel');
+    }),
+  );
+
   it.effect("replaces only the delimited block and is idempotent", () =>
     Effect.gen(function* () {
       const registry = yield* loadRegistry();

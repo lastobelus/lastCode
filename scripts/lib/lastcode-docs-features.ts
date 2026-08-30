@@ -180,12 +180,21 @@ function renderPanel(registry: LastCodeDocsFeatureRegistry, panelIndex: number):
     throw new Error(`README panel ${panelIndex + 1} is missing.`);
   }
   const imageUrl = `${registry.siteBaseUrl}media/readme/${panel.fileStem}-dark.png`;
+  const escapedImageUrl = escapeHtmlAttribute(imageUrl);
   return [
     "<picture>",
-    `  <source media="(prefers-color-scheme: dark)" srcset="${imageUrl}">`,
-    `  <img src="${imageUrl}" alt="${panel.alt}">`,
+    `  <source media="(prefers-color-scheme: dark)" srcset="${escapedImageUrl}">`,
+    `  <img src="${escapedImageUrl}" alt="${escapeHtmlAttribute(panel.alt)}">`,
     "</picture>",
   ].join("\n");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 export function renderLastCodeReadmeFeatureBlock(registry: LastCodeDocsFeatureRegistry): string {
