@@ -1056,6 +1056,14 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   scripts: Schema.optional(Schema.Array(ProjectScript)),
 });
 
+const ProjectScriptsReconcileCommand = Schema.Struct({
+  type: Schema.Literal("project.scripts.reconcile"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  expectedScripts: Schema.Array(ProjectScript),
+  scripts: Schema.Array(ProjectScript),
+});
+
 const ProjectDeleteCommand = Schema.Struct({
   type: Schema.Literal("project.delete"),
   commandId: CommandId,
@@ -1362,6 +1370,7 @@ const ThreadSessionStopCommand = Schema.Struct({
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
@@ -1395,6 +1404,7 @@ export type DispatchableClientOrchestrationCommand =
 export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
