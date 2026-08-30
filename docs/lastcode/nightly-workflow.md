@@ -131,8 +131,8 @@ Use `--promote` only when intentionally overriding the open-PR safeguard.
 
 ### Carry-set inventory and reconstruction proof
 
-The initial downstream carry-set tool inventories one checkpoint without changing refs, tags,
-`lastcode/main`, or the scheduled checkpoint workflow:
+The downstream carry-set tool inventories one checkpoint without changing refs, tags, or
+`lastcode/main`:
 
 ```bash
 pnpm lastcode:carry-set -- \
@@ -152,9 +152,18 @@ belongs to Incubator for now. After applying the commits in their declared order
 requires the reconstructed Git tree to exactly match the source tree and then removes its temporary
 worktree.
 
-This is an inventory and losslessness gate, not the active checkpoint implementation. It does not
+After a scheduled checkpoint run successfully publishes a new immutable checkpoint or revision and
+makes its promotion decision, it runs this reconstruction once for the newest immutable produced by
+that service run. The upstream base and LastCode source come from the immutable tag's
+`Upstream-Commit` and `LastCode-Commit` metadata. The result is appended to
+`checkpoint-runs.jsonl`, printed in the service log, and shown by `lastcode-checkpoints` (successful
+proofs appear with `--verbose`; failures are always shown). A failed proof is observable but does
+not fail, roll back, or republish the successfully produced checkpoint.
+
+This remains a shadow losslessness gate, not the active checkpoint implementation. It does not
 claim that intermediate groups build independently, run product validation against them, publish
-the generated commits, or change what the desktop updater installs. Those are later rollout gates.
+the generated commits, create refs or tags for them, alter promotion, or change what the desktop
+updater or operator installs. Those are later rollout gates.
 
 ### Local updater inspection protocol
 
