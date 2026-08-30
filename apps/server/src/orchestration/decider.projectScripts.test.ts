@@ -271,7 +271,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           updatedAt: now,
         },
       });
-      const readModel = yield* projectEvent(withProject, {
+      const withTargetThread = yield* projectEvent(withProject, {
         sequence: 2,
         eventId: asEventId("evt-thread-create"),
         aggregateKind: "thread",
@@ -286,6 +286,33 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           threadId: ThreadId.make("thread-1"),
           projectId: asProjectId("project-1"),
           title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      const readModel = yield* projectEvent(withTargetThread, {
+        sequence: 3,
+        eventId: asEventId("evt-source-thread-create"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-source"),
+        type: "thread.created",
+        occurredAt: now,
+        commandId: CommandId.make("cmd-source-thread-create"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-source-thread-create"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-source"),
+          projectId: asProjectId("project-1"),
+          title: "Source thread",
           modelSelection: {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
@@ -316,6 +343,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           ]),
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
+          sourceThreadId: ThreadId.make("thread-source"),
           createdAt: now,
         },
         readModel,
@@ -325,6 +353,9 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const events = Array.isArray(result) ? result : [result];
       expect(events).toHaveLength(2);
       expect(events[0]?.type).toBe("thread.message-sent");
+      if (events[0]?.type === "thread.message-sent") {
+        expect(events[0].payload.sourceThreadId).toBe("thread-source");
+      }
       const turnStartEvent = events[1];
       expect(turnStartEvent?.type).toBe("thread.turn-start-requested");
       expect(turnStartEvent?.causationEventId).toBe(events[0]?.eventId ?? null);
@@ -340,6 +371,28 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         ]),
         runtimeMode: "approval-required",
       });
+
+      const selfSourceFailure = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-self-source"),
+            threadId: ThreadId.make("thread-1"),
+            sourceThreadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: asMessageId("message-self-source"),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          },
+          readModel,
+        }),
+      );
+      expect(selfSourceFailure.message).toContain("must differ from its target thread");
     }),
   );
 
