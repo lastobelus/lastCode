@@ -521,6 +521,13 @@ export function waitTimeoutClass(
   return null;
 }
 
+export function waitProgressKey(
+  reason: Extract<WaitDecision, { readonly kind: "wait" }>["reason"],
+  observationSummary: string,
+): string {
+  return `${reason}\u0000${observationSummary}`;
+}
+
 function runGhJson<T>(args: ReadonlyArray<string>): T {
   const result = NodeChildProcess.spawnSync("gh", args, {
     encoding: "utf8",
@@ -774,7 +781,7 @@ async function main(): Promise<void> {
   assertWaitStart(baseline);
   console.log(`[wait-for-pr] Baseline ${summary(baseline)}`);
 
-  let previousSummary = "";
+  let previousProgressKey = "";
   let current = baseline;
   let pendingClass: ReturnType<typeof waitTimeoutClass> = null;
   let pendingSince = Date.now();
@@ -815,7 +822,8 @@ async function main(): Promise<void> {
     }
 
     const currentSummary = summary(current);
-    if (currentSummary !== previousSummary) {
+    const currentProgressKey = waitProgressKey(decision.reason, currentSummary);
+    if (currentProgressKey !== previousProgressKey) {
       console.log(`[wait-for-pr] Waiting (${decision.reason}) ${currentSummary}`);
       lastCodeAction.progress({
         state: "waiting",
@@ -823,7 +831,7 @@ async function main(): Promise<void> {
         summary: waitProgressSummary[decision.reason],
         detail: currentSummary,
       });
-      previousSummary = currentSummary;
+      previousProgressKey = currentProgressKey;
     }
     await sleep(POLL_INTERVAL_MS);
     current = readObservation(LASTCODE_GITHUB_REPOSITORY, branch);

@@ -326,9 +326,7 @@ const make = Effect.gen(function* () {
         previous?.runId === input.runId ? (previous.revision ?? 0) + 1 : (input.revision ?? 0),
     };
     registry.record(state);
-    const activityId = EventId.make(
-      `action-resume:${state.runId}:${state.revision}:${state.outcome}:${state.delivery}`,
-    );
+    const activityId = EventId.make(`action-resume:${state.runId}`);
     const commandId = CommandId.make(
       `server:action-resume:${state.runId}:${state.revision}:${state.outcome}:${state.delivery}`,
     );
@@ -359,24 +357,25 @@ const make = Effect.gen(function* () {
     return state;
   });
 
-  const flushPendingProgressUnlocked = Effect.fn(
-    "ActionResume.flushPendingProgressUnlocked",
-  )(function* (threadId: ThreadId, runId: string, generation: number) {
-    const protocol = protocolCaptureByRunId.get(runId);
-    if (protocol === undefined || protocol.progressFlushGeneration !== generation) return;
+  const flushPendingProgressUnlocked = Effect.fn("ActionResume.flushPendingProgressUnlocked")(
+    function* (threadId: ThreadId, runId: string, generation: number) {
+      const protocol = protocolCaptureByRunId.get(runId);
+      if (protocol === undefined || protocol.progressFlushGeneration !== generation) return;
 
-    protocol.progressFlushScheduled = false;
-    const pending = protocol.pendingProgress;
-    const current = registry.getLatest(threadId);
-    if (pending === undefined || current?.runId !== runId || current.outcome !== "running") return;
+      protocol.progressFlushScheduled = false;
+      const pending = protocol.pendingProgress;
+      const current = registry.getLatest(threadId);
+      if (pending === undefined || current?.runId !== runId || current.outcome !== "running")
+        return;
 
-    const updatedAt = yield* nowIso;
-    yield* persistState({ ...current, progress: { ...pending, updatedAt } });
-    protocol.lastObservedProgressKey = `${pending.state}\u0000${pending.summary}`;
-    protocol.lastAcceptedProgressAtMs = yield* clock.currentTimeMillis;
-    protocol.acceptedProgressCount += 1;
-    delete protocol.pendingProgress;
-  });
+      const updatedAt = yield* nowIso;
+      yield* persistState({ ...current, progress: { ...pending, updatedAt } });
+      protocol.lastObservedProgressKey = `${pending.state}\u0000${pending.summary}`;
+      protocol.lastAcceptedProgressAtMs = yield* clock.currentTimeMillis;
+      protocol.acceptedProgressCount += 1;
+      delete protocol.pendingProgress;
+    },
+  );
 
   const acceptProgressUnlocked = Effect.fn("ActionResume.acceptProgressUnlocked")(function* (
     threadId: ThreadId,
@@ -421,13 +420,10 @@ const make = Effect.gen(function* () {
         protocol.progressFlushScheduled = true;
         const generation = ++protocol.progressFlushGeneration;
         const remainingMs =
-          ACTION_PROGRESS_MIN_INTERVAL_MS -
-          (acceptedAtMs - protocol.lastAcceptedProgressAtMs);
+          ACTION_PROGRESS_MIN_INTERVAL_MS - (acceptedAtMs - protocol.lastAcceptedProgressAtMs);
         yield* clock.sleep(Duration.millis(remainingMs)).pipe(
           Effect.andThen(
-            mutex.withPermits(1)(
-              flushPendingProgressUnlocked(threadId, runId, generation),
-            ),
+            mutex.withPermits(1)(flushPendingProgressUnlocked(threadId, runId, generation)),
           ),
           Effect.catchCause((cause) =>
             Cause.hasInterrupts(cause)

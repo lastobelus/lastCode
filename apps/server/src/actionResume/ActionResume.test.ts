@@ -387,6 +387,20 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       }),
       [0, 1, 2, 3],
     );
+    assert.deepEqual(
+      [
+        ...new Set(
+          dispatched.flatMap((command) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === ActionResume.ACTION_RESUME_ACTIVITY_KIND &&
+            (command.activity.payload as ActionResumeState).runId === running.runId
+              ? [command.activity.id]
+              : [],
+          ),
+        ),
+      ],
+      [`action-resume:${running.runId}`],
+    );
     yield* terminalListener!({
       type: "exited",
       threadId,
