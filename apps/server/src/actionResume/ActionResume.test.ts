@@ -19,6 +19,7 @@ import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import {
   ACTION_EVENT_TOKEN_ENV,
   ACTION_RUN_ID_ENV,
@@ -123,15 +124,25 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   let terminalStatus: "running" | "exited" = "running";
   let failWrite = false;
   let admissionClosed = false;
+  let progressFlushed: Deferred.Deferred<void> | undefined;
   const admittedKinds: string[] = [];
   let terminalListener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
 
   const dependencies = Layer.mergeAll(
     Layer.mock(OrchestrationEngineService)({
       dispatch: (command) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           timeline.push(`dispatch:${command.type}`);
           dispatched.push(command);
+          if (
+            progressFlushed !== undefined &&
+            command.type === "thread.activity.append" &&
+            command.activity.kind === ActionResume.ACTION_RESUME_ACTIVITY_KIND &&
+            (command.activity.payload as ActionResumeState).progress?.summary ===
+              "Still waiting for review"
+          ) {
+            yield* Deferred.succeed(progressFlushed, undefined);
+          }
           return { sequence: dispatched.length };
         }),
       streamDomainEvents: Stream.never,
@@ -228,7 +239,10 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   );
 
   return Effect.gen(function* () {
+    progressFlushed = yield* Deferred.make<void>();
     const service = yield* ActionResume.ActionResume;
+    // Let startup reconciliation settle while the registry is still empty.
+    yield* Effect.yieldNow;
     const listed = yield* service.listProjectActions({ threadId, providerInstanceId });
     assert.deepEqual(
       listed.map(({ id, resumeEligible }) => ({ id, resumeEligible })),
@@ -348,6 +362,32 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       [0, 1, 2],
     );
     yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: progressFrame("waiting", "Still waiting for review"),
+    });
+    yield* TestClock.adjust(999);
+    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Waiting for review");
+    yield* TestClock.adjust(1);
+    yield* Deferred.await(progressFlushed);
+    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Still waiting for review");
+    assert.deepEqual(
+      dispatched.flatMap((command) => {
+        if (
+          command.type !== "thread.activity.append" ||
+          command.activity.kind !== ActionResume.ACTION_RESUME_ACTIVITY_KIND
+        ) {
+          return [];
+        }
+        const payload = command.activity.payload as ActionResumeState;
+        return payload.runId === running.runId && payload.outcome === "running"
+          ? [payload.revision]
+          : [];
+      }),
+      [0, 1, 2, 3],
+    );
+    yield* terminalListener!({
       type: "exited",
       threadId,
       terminalId: running.terminalId,
@@ -464,7 +504,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       outcome: "succeeded",
       delivery: "delivered",
     });
-  }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
+  }).pipe(
+    Effect.provide(
+      ActionResume.layer.pipe(Layer.provideMerge(Layer.merge(dependencies, TestClock.layer()))),
+    ),
+    Effect.scoped,
+  );
 });
 
 it.effect("requires an explicit resume after a running Action is found on startup", () =>

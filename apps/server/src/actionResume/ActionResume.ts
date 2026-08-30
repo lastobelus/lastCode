@@ -33,6 +33,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -83,6 +84,8 @@ interface ActionProtocolCapture {
   lastAcceptedProgressAtMs?: number;
   acceptedProgressCount: number;
   pendingProgress?: ActionProgress;
+  progressFlushGeneration: number;
+  progressFlushScheduled?: boolean;
   progressLimitWarned?: boolean;
 }
 
@@ -291,6 +294,8 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const serviceScope = yield* Effect.scope;
+  const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
@@ -354,6 +359,25 @@ const make = Effect.gen(function* () {
     return state;
   });
 
+  const flushPendingProgressUnlocked = Effect.fn(
+    "ActionResume.flushPendingProgressUnlocked",
+  )(function* (threadId: ThreadId, runId: string, generation: number) {
+    const protocol = protocolCaptureByRunId.get(runId);
+    if (protocol === undefined || protocol.progressFlushGeneration !== generation) return;
+
+    protocol.progressFlushScheduled = false;
+    const pending = protocol.pendingProgress;
+    const current = registry.getLatest(threadId);
+    if (pending === undefined || current?.runId !== runId || current.outcome !== "running") return;
+
+    const updatedAt = yield* nowIso;
+    yield* persistState({ ...current, progress: { ...pending, updatedAt } });
+    protocol.lastObservedProgressKey = `${pending.state}\u0000${pending.summary}`;
+    protocol.lastAcceptedProgressAtMs = yield* clock.currentTimeMillis;
+    protocol.acceptedProgressCount += 1;
+    delete protocol.pendingProgress;
+  });
+
   const acceptProgressUnlocked = Effect.fn("ActionResume.acceptProgressUnlocked")(function* (
     threadId: ThreadId,
     runId: string,
@@ -384,7 +408,7 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const acceptedAtMs = yield* Clock.currentTimeMillis;
+    const acceptedAtMs = yield* clock.currentTimeMillis;
     const stateChanged = current.progress?.state !== progress.state;
     if (
       !stateChanged &&
@@ -393,11 +417,37 @@ const make = Effect.gen(function* () {
     ) {
       protocol.lastObservedProgressKey = progressKey;
       protocol.pendingProgress = progress;
+      if (protocol.progressFlushScheduled !== true) {
+        protocol.progressFlushScheduled = true;
+        const generation = ++protocol.progressFlushGeneration;
+        const remainingMs =
+          ACTION_PROGRESS_MIN_INTERVAL_MS -
+          (acceptedAtMs - protocol.lastAcceptedProgressAtMs);
+        yield* clock.sleep(Duration.millis(remainingMs)).pipe(
+          Effect.andThen(
+            mutex.withPermits(1)(
+              flushPendingProgressUnlocked(threadId, runId, generation),
+            ),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.void
+              : Effect.logWarning("Could not flush deferred Action progress", {
+                  threadId,
+                  runId,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+          Effect.forkIn(serviceScope, { startImmediately: true }),
+        );
+      }
       return;
     }
 
     const updatedAt = yield* nowIso;
     yield* persistState({ ...current, progress: { ...progress, updatedAt } });
+    protocol.progressFlushGeneration += 1;
+    protocol.progressFlushScheduled = false;
     protocol.lastObservedProgressKey = progressKey;
     protocol.lastAcceptedProgressAtMs = acceptedAtMs;
     protocol.acceptedProgressCount += 1;
@@ -682,6 +732,7 @@ const make = Effect.gen(function* () {
       protocolCaptureByRunId.set(runId, {
         decoder: createActionProtocolDecoder({ runId, token: eventToken }),
         acceptedProgressCount: 0,
+        progressFlushGeneration: 0,
       });
       yield* terminals.write({
         threadId: invocation.threadId,
