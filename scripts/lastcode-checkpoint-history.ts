@@ -20,6 +20,38 @@ export interface CheckpointRunRecord {
   readonly recoveryFingerprint?: string;
 }
 
+function isOptionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
+}
+
+function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
+  const candidate = record as Record<string, unknown>;
+  return (
+    candidate.schemaVersion === 1 &&
+    (candidate.status === "failed" || candidate.status === "success") &&
+    typeof candidate.upstreamTag === "string" &&
+    typeof candidate.startedAt === "string" &&
+    typeof candidate.finishedAt === "string" &&
+    typeof candidate.durationMs === "number" &&
+    typeof candidate.commitsRebased === "number" &&
+    isOptionalString(candidate.checkpointCommit) &&
+    isOptionalString(candidate.checkpointTag) &&
+    isOptionalString(candidate.error) &&
+    (candidate.failurePhase === undefined ||
+      candidate.failurePhase === "publication" ||
+      candidate.failurePhase === "rebase" ||
+      candidate.failurePhase === "smoke") &&
+    isOptionalBoolean(candidate.localTagRetained) &&
+    isOptionalString(candidate.recoveryBranch) &&
+    isOptionalString(candidate.recoveryFingerprint)
+  );
+}
+
 export function checkpointFailureRecord(
   input: {
     readonly commitsRebased: number;
@@ -63,19 +95,7 @@ export function readLatestCheckpointRun(
       if (!line) continue;
       try {
         const record: unknown = JSON.parse(line);
-        if (
-          record !== null &&
-          typeof record === "object" &&
-          !Array.isArray(record) &&
-          "schemaVersion" in record &&
-          record.schemaVersion === 1 &&
-          "status" in record &&
-          (record.status === "failed" || record.status === "success") &&
-          "upstreamTag" in record &&
-          typeof record.upstreamTag === "string"
-        ) {
-          return record as CheckpointRunRecord;
-        }
+        if (isCheckpointRunRecord(record)) return record;
       } catch {
         // A process can be interrupted while appending. Older valid records remain usable.
       }

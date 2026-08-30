@@ -87,4 +87,25 @@ describe("checkpoint run history", () => {
     expect(readLatestCheckpointRun(historyPath)).toEqual(record);
     NodeFS.rmSync(directory, { recursive: true, force: true });
   });
+
+  it("skips malformed recovery metadata and uses the previous valid record", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-history-"));
+    const historyPath = NodePath.join(directory, "checkpoint-runs.jsonl");
+    const record = checkpointFailureRecord({
+      commitsRebased: 3,
+      error: new Error("rebase failed"),
+      failurePhase: "rebase",
+      recoveryBranch: "sync/nightly/v0.0.1-nightly.20260812.1",
+      recoveryFingerprint: "fingerprint-1",
+      startedAtMs: 1_000,
+      upstreamTag: "v0.0.1-nightly.20260812.1",
+    });
+    NodeFS.writeFileSync(
+      historyPath,
+      `${JSON.stringify(record)}\n${JSON.stringify({ ...record, recoveryBranch: 42 })}\n`,
+    );
+
+    expect(readLatestCheckpointRun(historyPath)).toEqual(record);
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  });
 });
