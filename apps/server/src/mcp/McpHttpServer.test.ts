@@ -99,6 +99,59 @@ it.effect("rejects MCP action launch while update drain admission is closed", ()
   }),
 );
 
+it.effect("inspects retained Action output within the credential-scoped thread", () =>
+  Effect.gen(function* () {
+    let inspected:
+      | { readonly threadId: ThreadId; readonly providerInstanceId: ProviderInstanceId }
+      | undefined;
+    let inspectedRunId: string | undefined;
+    const layer = McpHttpServer.ActionResumeToolkitRegistrationLive.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(
+        Layer.mock(ActionResume)({
+          inspectActionRun: (input, runId) =>
+            Effect.sync(() => {
+              inspected = input;
+              inspectedRunId = runId;
+              return {
+                runId,
+                actionName: "QA",
+                lifecycleOutcome: "succeeded" as const,
+                exitCode: 0,
+                exitSignal: null,
+                outputTail: "retained output",
+              };
+            }),
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.mock(UpdateDrainAdmission)({
+          admit: () => Effect.die("read-only inspection must bypass update drain admission"),
+        }),
+      ),
+    );
+
+    const result = yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const inspectTool = server.tools.find(({ tool }) => tool.name === "inspect_action_run");
+      expect(inspectTool).toBeDefined();
+      return yield* server
+        .callTool({ name: "inspect_action_run", arguments: { runId: "run-1" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocation,
+            capabilities: new Set(["action-resume"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    }).pipe(Effect.provide(layer));
+
+    expect(result.isError).toBe(false);
+    expect(inspected).toEqual({ threadId, providerInstanceId: invocation.providerInstanceId });
+    expect(inspectedRunId).toBe("run-1");
+  }),
+);
+
 it("normalizes empty successful notification responses to accepted", () => {
   const notificationResponse = McpHttpServer.normalizeMcpHttpResponse(
     HttpServerResponse.text("", { status: 200, contentType: "application/json" }),

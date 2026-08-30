@@ -14,6 +14,7 @@ import {
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
@@ -153,7 +154,7 @@ export function resolveThreadListV2Status(
     return "failed";
   }
   if (thread.actionResume?.outcome === "running") {
-    return "waiting";
+    return actionRunningPresentation(thread.actionResume).state;
   }
   return "ready";
 }

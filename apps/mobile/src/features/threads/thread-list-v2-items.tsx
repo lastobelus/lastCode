@@ -33,6 +33,7 @@ import {
   resolveWorktreeCleanupStatus,
   shouldShowActionWaitingIndicator,
 } from "./threadPresentation";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
@@ -459,7 +460,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     settledTimestamp !== null ? relativeTime(settledTimestamp) : threadTimeLabel(thread);
   const threadAccessibilityLabel = [
     thread.title,
-    showActionWaitingIndicator && runningAction ? `Waiting for ${runningAction.actionName}` : null,
+    showActionWaitingIndicator && runningAction
+      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
+      : null,
   ]
     .filter((part): part is string => part !== null)
     .join(", ");
@@ -831,7 +834,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         <View className="flex-row items-center gap-1">
           {showActionWaitingIndicator && runningAction ? (
             <SymbolView
-              accessibilityLabel={`Waiting for ${runningAction.actionName}`}
+              accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
               name="clock.arrow.circlepath"
               size={12}
               tintColor={selected ? String(selectedForegroundColor) : "#eab308"}

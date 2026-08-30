@@ -757,6 +757,20 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("approval");
   });
 
+  it("reports Working when a running Action publishes working progress", () => {
+    const actionResume = {
+      outcome: "running",
+      actionName: "QA",
+      progress: {
+        version: 1,
+        state: "working",
+        summary: "Running checks",
+        updatedAt: "2026-08-29T12:00:00.000Z",
+      },
+    } as never;
+    expect(resolveSidebarThreadStatus({ ...idle, session: null, actionResume })).toBe("working");
+  });
+
   it("reports failed only while the session status is error", () => {
     expect(
       resolveSidebarThreadStatus({

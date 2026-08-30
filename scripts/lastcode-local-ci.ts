@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -751,6 +752,14 @@ function executeLocalCi(
   try {
     for (const [index, step] of steps.entries()) {
       console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
+      lastCodeAction.progress({
+        state: "working",
+        phase: step.kind,
+        summary: step.label,
+        current: index + 1,
+        total: steps.length,
+        unit: "step",
+      });
       if (step.kind === "verify-preload") {
         verifyPreloadBundle(repoRoot);
         continue;
@@ -812,6 +821,12 @@ function executeLocalCi(
     console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Stamp: ${stampPath}`);
     console.log(formatLocalCiSummary("full", commitBefore));
+    lastCodeAction.result({
+      outcome: "success",
+      summary: `Full local CI passed for ${commitBefore}`,
+      subject: { type: "commit", id: commitBefore, revision: commitBefore },
+      facts: { mode: "full" },
+    });
   } else if (options.mode === "quick" && baseCommit && quickBase) {
     const receiptPath = writeVerifiedQuickCiReceipt(repoRoot, repositoryIntegrity, {
       commit: commitBefore,
@@ -822,6 +837,12 @@ function executeLocalCi(
     console.log(`\n[lastcode:ci] Quick local CI passed for ${commitBefore}.`);
     console.log(`[lastcode:ci] Receipt: ${receiptPath}`);
     console.log(formatLocalCiSummary("quick", commitBefore, baseCommit));
+    lastCodeAction.result({
+      outcome: "success",
+      summary: `Quick local CI passed for ${commitBefore}`,
+      subject: { type: "commit", id: commitBefore, revision: commitBefore },
+      facts: { mode: "quick", baseCommit },
+    });
   }
 }
 
