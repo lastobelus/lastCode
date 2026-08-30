@@ -3,6 +3,7 @@ import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import {
   actionResultPresentation,
@@ -114,8 +115,10 @@ import {
 } from "./thread-work-log";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { useAssetUrl, useAssetUrlState } from "../../state/assets";
+import { useThreadShell } from "../../state/entities";
 import { resolveWorkspaceRelativeFilePath } from "../files/filePath";
 import { MARKDOWN_IMAGE_MAX_WIDTH, resolveMarkdownImageDisplaySize } from "./markdownImageSize";
+import { resolveThreadStatus } from "./threadPresentation";
 
 const WIDE_MARKDOWN_BLOCK_OPTIONS = {
   includeOrderedLists: Platform.OS === "android",
@@ -980,6 +983,7 @@ function renderFeedEntry(
     readonly onToggleActionFollowUp: (rowId: string) => void;
     readonly onPressImage: (uri: string, headers?: Record<string, string>) => void;
     readonly onMarkdownLinkPress: (href: string) => void;
+    readonly onOpenSourceThread: (sourceThreadId: ThreadId) => void;
     readonly renderMarkdownImage: MarkdownImageRenderer;
     readonly iconSubtleColor: string | import("react-native").ColorValue;
     readonly userBubbleColor: string | import("react-native").ColorValue;
@@ -1073,6 +1077,25 @@ function renderFeedEntry(
       props.terminalAssistantMessageIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
+
+    if (isUser && message.sourceThreadId !== undefined) {
+      return (
+        <AgentMessageTimelineRow
+          entry={entry}
+          environmentId={props.environmentId}
+          iconSubtleColor={iconSubtleColor}
+          markdownStyles={markdownStyles.assistant}
+          maxWidth={props.userBubbleMaxWidth}
+          onLinkPress={props.onMarkdownLinkPress}
+          onOpenSourceThread={props.onOpenSourceThread}
+          onPressImage={props.onPressImage}
+          renderImage={props.renderMarkdownImage}
+          reviewCommentColors={props.reviewCommentColors}
+          skills={props.skills}
+          sourceThreadId={message.sourceThreadId}
+        />
+      );
+    }
 
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
@@ -1203,6 +1226,117 @@ function renderFeedEntry(
       onCopyRow={props.onCopyWorkRow}
       onToggleRow={props.onToggleWorkRow}
     />
+  );
+}
+
+function AgentMessageTimelineRow(props: {
+  readonly entry: Extract<ThreadFeedEntry, { type: "message" }>;
+  readonly environmentId: EnvironmentId;
+  readonly iconSubtleColor: ColorValue;
+  readonly markdownStyles: MarkdownStyleSet;
+  readonly maxWidth: number;
+  readonly onLinkPress: (href: string) => void;
+  readonly onOpenSourceThread: (sourceThreadId: ThreadId) => void;
+  readonly onPressImage: (uri: string, headers?: Record<string, string>) => void;
+  readonly renderImage: MarkdownImageRenderer;
+  readonly reviewCommentColors: ReviewCommentColors;
+  readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
+  readonly sourceThreadId: ThreadId;
+}) {
+  const source = useThreadShell(scopeThreadRef(props.environmentId, props.sourceThreadId));
+  const resolvedStatus = source ? resolveThreadStatus(source) : null;
+  const status = source
+    ? (resolvedStatus ?? {
+        label: "Ready",
+        iconColor: props.iconSubtleColor,
+      })
+    : null;
+  const sourceTitle = source?.title ?? "Source thread unavailable";
+  const message = props.entry.message;
+  const attachments = (message.attachments ?? []).filter(
+    (attachment) => attachment.type === "image",
+  );
+
+  return (
+    <Animated.View
+      className="mb-5 items-start"
+      {...(isFreshTimestamp(message.createdAt) ? { entering: FadeInUp.duration(220) } : {})}
+    >
+      <View
+        className="min-w-0 gap-2 rounded-[20px] border border-primary bg-secondary px-3.5 py-3"
+        style={{ maxWidth: props.maxWidth }}
+      >
+        <View className="min-w-0 flex-row flex-wrap items-center gap-1.5">
+          <Text className="font-t3-bold text-2xs tracking-wider text-foreground-muted">
+            AGENT MESSAGE
+          </Text>
+          {status ? (
+            <View className="flex-row items-center gap-1">
+              <View
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: status.iconColor }}
+              />
+              <Text className="font-t3-medium text-2xs text-foreground-muted">{status.label}</Text>
+            </View>
+          ) : null}
+          {source ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Open source thread: ${source.title}`}
+              className="min-w-0 flex-row items-center gap-0.5 active:opacity-60"
+              onPress={() => props.onOpenSourceThread(props.sourceThreadId)}
+            >
+              <Text className="shrink font-t3-medium text-2xs text-primary" numberOfLines={1}>
+                {sourceTitle.toLocaleLowerCase()}
+              </Text>
+              <SymbolView
+                name="arrow.up.right"
+                size={11}
+                tintColorClassName="accent-icon-subtle"
+                type="monochrome"
+              />
+            </Pressable>
+          ) : (
+            <Text className="shrink font-t3-medium text-2xs text-foreground-muted">
+              {sourceTitle.toLocaleLowerCase()}
+            </Text>
+          )}
+          <Text className="ml-auto font-t3-medium text-2xs tabular-nums text-foreground-muted">
+            {formatMessageTime(message.createdAt)}
+          </Text>
+        </View>
+        {message.text.trim().length > 0 ? (
+          <UserMessageContent
+            text={message.text}
+            markdownStyles={props.markdownStyles}
+            reviewCommentColors={props.reviewCommentColors}
+            skills={props.skills}
+            onLinkPress={props.onLinkPress}
+            renderImage={props.renderImage}
+          />
+        ) : null}
+        {attachments.map((attachment) => (
+          <MessageAttachmentImage
+            key={attachment.id}
+            environmentId={props.environmentId}
+            attachmentId={attachment.id}
+            className="aspect-[1.3] w-full rounded-[14px] bg-white/15"
+            onPressImage={props.onPressImage}
+          />
+        ))}
+      </View>
+      {message.text.trim().length > 0 ? (
+        <View className="mt-1 pl-0.5">
+          <CopyTextButton
+            accessibilityLabel="Copy agent message"
+            text={message.text}
+            tintColor={props.iconSubtleColor}
+            buttonSize={28}
+            iconSize={13}
+          />
+        </View>
+      ) : null}
+    </Animated.View>
   );
 }
 
@@ -1731,6 +1865,15 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     },
     [props.environmentId, props.threadId, props.workspaceRoot, navigation],
   );
+  const onOpenSourceThread = useCallback(
+    (sourceThreadId: ThreadId) => {
+      navigation.navigate("Thread", {
+        environmentId: String(props.environmentId),
+        threadId: String(sourceThreadId),
+      });
+    },
+    [navigation, props.environmentId],
+  );
   const renderMarkdownImage = useCallback<MarkdownImageRenderer>(
     (image) => {
       const imageSource = classifyMarkdownImageSource(image.href, props.workspaceRoot ?? null);
@@ -2167,6 +2310,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         onToggleActionFollowUp,
         onPressImage,
         onMarkdownLinkPress,
+        onOpenSourceThread,
         renderMarkdownImage,
         iconSubtleColor,
         userBubbleColor,
@@ -2190,6 +2334,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       userBubbleMaxWidth,
       onCopyWorkRow,
       onMarkdownLinkPress,
+      onOpenSourceThread,
       onPressImage,
       onToggleTurnFold,
       onToggleActionFollowUp,

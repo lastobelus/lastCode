@@ -5,9 +5,10 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type ThreadAnnotation,
+  type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   emptyAgentPanelModel,
@@ -16,6 +17,7 @@ import {
 
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
+const NOOP_OPEN_SOURCE_THREAD = (_threadId: ThreadId) => {};
 const NOOP_DOWNLOAD_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { actionResultPresentation, parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
@@ -43,6 +45,8 @@ import {
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import {
+  type ChatAttachment,
+  type ChatFileAttachment as WebChatFileAttachment,
   type ChatImageAttachment,
   isFileAttachment,
   isImageAttachment,
@@ -55,6 +59,7 @@ import {
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
 import {
+  ArrowUpRightIcon,
   BotIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -135,6 +140,10 @@ import {
 } from "./userMessageTerminalContexts";
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import { resolveThreadStatusPill } from "../Sidebar.logic";
+import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { useClientSettings } from "../../hooks/useSettings";
+import { useThreadShell } from "../../state/entities";
 import {
   buildReviewCommentRenderablePatch,
   formatReviewCommentFence,
@@ -158,6 +167,7 @@ interface TimelineRowSharedState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
+  onOpenSourceThread: (threadId: ThreadId) => void;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -244,6 +254,7 @@ interface MessagesTimelineProps {
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onFileDownload?: (attachment: ChatFileAttachment) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  onOpenSourceThread?: (threadId: ThreadId) => void;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
@@ -296,6 +307,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onImageExpand,
   onFileDownload = NOOP_DOWNLOAD_ATTACHMENT,
   activeThreadEnvironmentId,
+  onOpenSourceThread = NOOP_OPEN_SOURCE_THREAD,
   markdownCwd,
   resolvedTheme,
   timestampFormat,
@@ -576,6 +588,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      onOpenSourceThread,
       onRevertUserMessage,
       onImageExpand,
       onFileDownload,
@@ -595,6 +608,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      onOpenSourceThread,
       onRevertUserMessage,
       onImageExpand,
       onFileDownload,
@@ -1206,7 +1220,16 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "message" &&
+      row.message.role === "user" &&
+      row.message.sourceThreadId !== undefined ? (
+        <AgentMessageTimelineRow row={row} sourceThreadId={row.message.sourceThreadId} />
+      ) : null}
+      {row.kind === "message" &&
+      row.message.role === "user" &&
+      row.message.sourceThreadId === undefined ? (
+        <UserTimelineRow row={row} />
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -1220,6 +1243,208 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
     </div>
   );
 });
+
+function AgentMessageTimelineRow({
+  row,
+  sourceThreadId,
+}: {
+  row: Extract<TimelineRow, { kind: "message" }>;
+  sourceThreadId: ThreadId;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  const source = useThreadShell(scopeThreadRef(ctx.activeThreadEnvironmentId, sourceThreadId));
+  const compactStatus = useClientSettings((settings) => settings.compactLegacySidebarStatuses);
+  const resolvedStatus = source
+    ? (resolveThreadStatusPill({ thread: source }) ??
+      (source.session?.status === "error"
+        ? {
+            label: "Failed",
+            colorClass: "text-red-700 dark:text-red-300",
+            dotClass: "bg-red-600 dark:bg-red-300",
+            pulse: false,
+          }
+        : {
+            label: "Ready",
+            colorClass: "text-muted-foreground",
+            dotClass: "bg-muted-foreground/55",
+            pulse: false,
+          }))
+    : null;
+  const status = resolvedStatus ? { ...resolvedStatus, pulse: false } : null;
+  const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  const sourceTitle = source?.title ?? "source thread";
+  const images = (row.message.attachments ?? []).filter(isImageAttachment);
+  const files = (row.message.attachments ?? []).filter(isFileAttachment);
+  const unknownAttachments = (row.message.attachments ?? []).filter(
+    (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
+  );
+
+  return (
+    <div className="group flex flex-col items-start gap-1">
+      <div className="w-fit max-w-[80%] rounded-2xl border border-primary/55 bg-secondary px-3.5 py-3 text-foreground">
+        <div className="mb-2 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] leading-none">
+          <span className="font-semibold tracking-[0.08em] text-muted-foreground">
+            AGENT MESSAGE
+          </span>
+          <span className="text-muted-foreground/45" aria-hidden="true">
+            ·
+          </span>
+          {status ? <ThreadStatusLabel status={status} compact={compactStatus} /> : null}
+          <AgentMessageSourceTitle
+            sourceThreadId={sourceThreadId}
+            sourceTitle={source ? sourceTitle : null}
+            onOpenSourceThread={ctx.onOpenSourceThread}
+          />
+          <Tooltip>
+            <TooltipTrigger
+              render={<span className="ms-auto text-muted-foreground tabular-nums" />}
+            >
+              {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+            </TooltipTrigger>
+            <TooltipPopup>
+              {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
+            </TooltipPopup>
+          </Tooltip>
+        </div>
+        <MessageAttachments images={images} files={files} unknown={unknownAttachments} />
+        <ChatMarkdown
+          text={row.message.text}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          skills={ctx.skills}
+        />
+      </div>
+      {canRevertAgentWork ? (
+        <div className="flex w-full max-w-[80%] items-center justify-start ps-1 text-xs opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+          <RevertUserMessageButton messageId={row.message.id} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentMessageSourceTitle({
+  sourceThreadId,
+  sourceTitle,
+  onOpenSourceThread,
+}: {
+  sourceThreadId: ThreadId;
+  sourceTitle: string | null;
+  onOpenSourceThread: (threadId: ThreadId) => void;
+}) {
+  return sourceTitle ? (
+    <button
+      type="button"
+      onClick={() => onOpenSourceThread(sourceThreadId)}
+      className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+      aria-label={`Open source thread: ${sourceTitle}`}
+    >
+      <span className="truncate">{sourceTitle}</span>
+      <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
+    </button>
+  ) : (
+    <span className="min-w-0 truncate font-medium lowercase text-muted-foreground">
+      source thread unavailable
+    </span>
+  );
+}
+
+function MessageAttachments({
+  images,
+  files,
+  unknown,
+  children,
+}: {
+  images: ReadonlyArray<ChatImageAttachment>;
+  files: ReadonlyArray<WebChatFileAttachment>;
+  unknown: ReadonlyArray<ChatAttachment>;
+  children?: ReactNode;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <>
+      {images.length > 0 ? (
+        <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
+          {images.map((image) => (
+            <div
+              key={image.id}
+              className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(images, image.id);
+                    if (!preview) return;
+                    ctx.onImageExpand(preview);
+                  }}
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className="block h-auto max-h-[220px] w-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-[11px]">
+                  {image.name}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {children}
+      {files.length > 0 || unknown.length > 0 ? (
+        <div className="mb-2 flex flex-col gap-1">
+          {files.map((file) => {
+            const content = (
+              <>
+                <FileIcon className="size-4 shrink-0 text-secondary-label" />
+                <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                {file.downloadable === false ? null : <DownloadIcon className="size-4 shrink-0" />}
+              </>
+            );
+            return file.previewUrl ? (
+              <a
+                key={file.id}
+                href={file.previewUrl}
+                download={file.name}
+                className="flex min-w-0 items-center gap-2 rounded-md py-1 text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </a>
+            ) : file.downloadable === false ? (
+              <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                {content}
+              </div>
+            ) : (
+              <button
+                key={file.id}
+                type="button"
+                aria-label={`Download ${file.name}`}
+                onClick={() => ctx.onFileDownload(file)}
+                className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </button>
+            );
+          })}
+          {unknown.map((attachment) => (
+            <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+              <FileIcon className="size-4 shrink-0 text-secondary-label" />
+              <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
@@ -1252,91 +1477,15 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   return (
     <div className="group flex flex-col items-end gap-1">
       <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
-        {regularImages.length > 0 && (
-          <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
-            {regularImages.map((image) => (
-              <div
-                key={image.id}
-                className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
-              >
-                {image.previewUrl ? (
-                  <button
-                    type="button"
-                    className="h-full w-full cursor-zoom-in"
-                    aria-label={`Preview ${image.name}`}
-                    onClick={() => {
-                      const preview = buildExpandedImagePreview(regularImages, image.id);
-                      if (!preview) return;
-                      ctx.onImageExpand(preview);
-                    }}
-                  >
-                    <img
-                      src={image.previewUrl}
-                      alt={image.name}
-                      className="block h-auto max-h-[220px] w-full object-cover"
-                    />
-                  </button>
-                ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-[11px]">
-                    {image.name}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {previewAnnotations.map((annotation, index) => (
-          <UserMessagePreviewAnnotationCard
-            key={annotation.id}
-            annotation={annotation}
-            image={previewImages[index] ?? null}
-          />
-        ))}
-        {userFiles.length > 0 || unknownAttachments.length > 0 ? (
-          <div className="mb-2 flex flex-col gap-1">
-            {userFiles.map((file) => {
-              const content = (
-                <>
-                  <FileIcon className="size-4 shrink-0 text-secondary-label" />
-                  <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                  {file.downloadable === false ? null : (
-                    <DownloadIcon className="size-4 shrink-0" />
-                  )}
-                </>
-              );
-              return file.previewUrl ? (
-                <a
-                  key={file.id}
-                  href={file.previewUrl}
-                  download={file.name}
-                  className="flex min-w-0 items-center gap-2 rounded-md py-1 text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-                >
-                  {content}
-                </a>
-              ) : file.downloadable === false ? (
-                <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                  {content}
-                </div>
-              ) : (
-                <button
-                  key={file.id}
-                  type="button"
-                  aria-label={`Download ${file.name}`}
-                  onClick={() => ctx.onFileDownload(file)}
-                  className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-                >
-                  {content}
-                </button>
-              );
-            })}
-            {unknownAttachments.map((attachment) => (
-              <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                <FileIcon className="size-4 shrink-0 text-secondary-label" />
-                <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        <MessageAttachments images={regularImages} files={userFiles} unknown={unknownAttachments}>
+          {previewAnnotations.map((annotation, index) => (
+            <UserMessagePreviewAnnotationCard
+              key={annotation.id}
+              annotation={annotation}
+              image={previewImages[index] ?? null}
+            />
+          ))}
+        </MessageAttachments>
         {elementContexts.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {elementContexts.map((context) => (

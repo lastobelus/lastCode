@@ -230,7 +230,11 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
-import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
+import {
+  buildDraftThreadRouteParams,
+  buildThreadRouteLocation,
+  buildThreadRouteParams,
+} from "../threadRoutes";
 import {
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
@@ -1863,6 +1867,13 @@ function ChatViewContent(props: ChatViewProps) {
     : null;
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const clientSettingsHydrated = useClientSettingsHydrated();
+  const openAgentMessageSourceThread = useCallback(
+    (threadId: ThreadId) => {
+      if (!activeThread) return;
+      void navigate(buildThreadRouteLocation(scopeThreadRef(activeThread.environmentId, threadId)));
+    },
+    [activeThread, navigate],
+  );
   const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
     ReadonlyMap<string, ReadonlySet<string>>
   >(() => new Map());
@@ -7405,6 +7416,7 @@ function ChatViewContent(props: ChatViewProps) {
                 runningTurnId={activeRunningTurnId}
                 turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
                 activeThreadEnvironmentId={activeThread.environmentId}
+                onOpenSourceThread={openAgentMessageSourceThread}
                 routeThreadKey={routeThreadKey}
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
