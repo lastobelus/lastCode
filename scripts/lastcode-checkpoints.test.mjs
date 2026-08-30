@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  carrySetShadowDetailLines,
   checkpointTagsWithoutUnpublishedFailures,
   checkpointFreshness,
   failureDetailLines,
@@ -351,6 +352,28 @@ describe("LastCode checkpoint dashboard", () => {
     expect(failedRunsWithoutPublishedTags([], [failedRecord])).toEqual([failedRecord]);
     expect(checkpointTagsWithoutUnpublishedFailures([tag], [tag], [failedRecord])).toEqual([tag]);
     expect(failedRunsWithoutPublishedTags([tag], [failedRecord])).toEqual([]);
+  });
+
+  it("surfaces the latest carry-set shadow result without changing service status", () => {
+    const success = {
+      status: "shadow",
+      outcome: "success",
+      checkpointTag: "lastcode/checkpoint/v1",
+    };
+    const failure = {
+      status: "shadow",
+      outcome: "failed",
+      checkpointTag: "lastcode/checkpoint/v2",
+      error: "tree mismatch",
+    };
+
+    expect(carrySetShadowDetailLines([success], false)).toEqual([]);
+    expect(carrySetShadowDetailLines([success], true)).toEqual([
+      "Carry-set shadow check passed for lastcode/checkpoint/v1.",
+    ]);
+    expect(carrySetShadowDetailLines([success, failure], false)).toEqual([
+      "Carry-set shadow check failed for lastcode/checkpoint/v2: tree mismatch",
+    ]);
   });
 
   it("reads published tags and main from one remote snapshot", () => {

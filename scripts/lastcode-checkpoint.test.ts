@@ -21,6 +21,8 @@ import {
   promotionNeeded,
   rerereRebaseMadeProgress,
   rebaseStateFiles,
+  runCarrySetShadowAfterPublication,
+  runPromotionThenShadow,
   resolveCheckpointPlan,
   resolveRevisionPlan,
   resolveUpstreamMainMirror,
@@ -33,6 +35,7 @@ import {
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
+import type { CarrySetShadowRecord } from "./lastcode-checkpoint-history.ts";
 import { parseNightlyTag } from "./lastcode-nightly.ts";
 
 it("scopes checkpoint PR queries to the configured LastCode repository", () => {
@@ -84,6 +87,101 @@ it("continues a rebase when rerere staged every remembered conflict", () => {
 it("stops automatic rebase continuation when Git makes no progress", () => {
   assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-b\0step:2"), true);
   assert.equal(rerereRebaseMadeProgress("head-a\0step:1", "head-a\0step:1"), false);
+});
+
+it("records a successful carry-set shadow check for a produced installable", () => {
+  const records: Array<CarrySetShadowRecord> = [];
+  const logs: Array<string> = [];
+  const times = [1_000, 1_250];
+  const record = runCarrySetShadowAfterPublication("/repo", "lastcode/checkpoint/v1", {
+    append: (value) => (records.push(value), true),
+    check: () => ({
+      checkpointTag: "lastcode/checkpoint/v1",
+      baseCommit: "upstream",
+      sourceCommit: "lastcode",
+      groups: [],
+      tree: "tree",
+    }),
+    error: (message) => logs.push(message),
+    log: (message) => logs.push(message),
+    now: () => times.shift() ?? 0,
+  });
+
+  assert.deepStrictEqual(record, records[0]);
+  assert.deepStrictEqual(record, {
+    schemaVersion: 1,
+    status: "shadow",
+    outcome: "success",
+    checkpointTag: "lastcode/checkpoint/v1",
+    baseCommit: "upstream",
+    sourceCommit: "lastcode",
+    tree: "tree",
+    startedAt: "1970-01-01T00:00:01.000Z",
+    finishedAt: "1970-01-01T00:00:01.250Z",
+    durationMs: 250,
+  });
+  assert.match(logs[0] ?? "", /shadow check passed/);
+});
+
+it("records carry-set shadow failures without changing the checkpoint result", () => {
+  const records: Array<CarrySetShadowRecord> = [];
+  const errors: Array<string> = [];
+  const times = [1_000, 1_500];
+
+  assert.doesNotThrow(() =>
+    runCarrySetShadowAfterPublication("/repo", "lastcode/checkpoint/v1", {
+      append: (value) => (records.push(value), true),
+      check: () => {
+        throw new Error("tree mismatch");
+      },
+      error: (message) => errors.push(message),
+      log: () => undefined,
+      now: () => times.shift() ?? 0,
+    }),
+  );
+  assert.deepStrictEqual(records[0], {
+    schemaVersion: 1,
+    status: "shadow",
+    outcome: "failed",
+    checkpointTag: "lastcode/checkpoint/v1",
+    startedAt: "1970-01-01T00:00:01.000Z",
+    finishedAt: "1970-01-01T00:00:01.500Z",
+    durationMs: 500,
+    error: "tree mismatch",
+  });
+  assert.match(errors[0] ?? "", /tree mismatch/);
+});
+
+it("does not run a carry-set shadow check when no immutable was produced", () => {
+  let checked = false;
+  const result = runCarrySetShadowAfterPublication("/repo", undefined, {
+    append: () => true,
+    check: () => {
+      checked = true;
+      throw new Error("should not run");
+    },
+    error: () => undefined,
+    log: () => undefined,
+    now: () => 0,
+  });
+
+  assert.equal(result, undefined);
+  assert.equal(checked, false);
+});
+
+it("runs the carry-set shadow check even when promotion fails", () => {
+  const calls: Array<string> = [];
+
+  expect(() =>
+    runPromotionThenShadow(
+      () => {
+        calls.push("promotion");
+        throw new Error("promotion failed");
+      },
+      () => calls.push("shadow"),
+    ),
+  ).toThrow("promotion failed");
+  expect(calls).toEqual(["promotion", "shadow"]);
 });
 
 it("fingerprints retained recovery content so human edits prevent automatic cleanup", () => {
