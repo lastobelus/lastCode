@@ -32,6 +32,7 @@ import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -473,7 +474,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status?.kind ?? null);
   const threadAccessibilityLabel = [
     thread.title,
-    showActionWaitingIndicator && runningAction ? `Waiting for ${runningAction.actionName}` : null,
+    showActionWaitingIndicator && runningAction
+      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
+      : null,
     pr?.accessibilityLabel ?? null,
   ]
     .filter((part): part is string => part !== null)
@@ -616,7 +619,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const actionStatusIndicator =
     showActionWaitingIndicator && runningAction ? (
       <View
-        accessibilityLabel={`Waiting for ${runningAction.actionName}`}
+        accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
         className="size-3 items-center justify-center"
       >
         <View className="size-1.5 rounded-full bg-adaptive-yellow-500-300" />
