@@ -396,19 +396,10 @@ export function checkpointRecoveryFingerprint(worktree: string, recoveryBranch: 
       `Untracked recovery path '${untrackedPaths[0]}' prevents automatic retirement.`,
     );
   }
-  for (const relativePath of unexpectedIgnoredRecoveryPaths(worktree)) {
-    const path = NodePath.join(worktree, relativePath);
-    const stat = NodeFS.lstatSync(path);
-    if (stat.isDirectory()) {
-      throw new Error(
-        `Ignored recovery directory '${relativePath}' prevents automatic retirement.`,
-      );
-    }
-    add(`ignored-kind:${relativePath}`, stat.isSymbolicLink() ? "symlink" : "file");
-    add(`ignored-mode:${relativePath}`, (stat.mode & 0o7777).toString(8));
-    add(
-      `ignored:${relativePath}`,
-      stat.isSymbolicLink() ? NodeFS.readlinkSync(path) : NodeFS.readFileSync(path),
+  const unexpectedIgnoredPath = unexpectedIgnoredRecoveryPaths(worktree)[0];
+  if (unexpectedIgnoredPath) {
+    throw new Error(
+      `Ignored recovery path '${unexpectedIgnoredPath}' prevents automatic retirement.`,
     );
   }
   for (const state of rebaseStateFiles(worktree)) add("rebase-state", state);

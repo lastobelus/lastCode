@@ -189,11 +189,11 @@ nightly appears before anyone changes that retained attempt, the service may
 abort and remove only that unchanged generated worktree and branch, skip the
 superseded nightly, and retry the newer sequence. Any detected human file,
 index, configuration, or rebase-metadata edit present at the final verification,
-plus a branch mismatch, worktree lock, initialized submodule, current-nightly
-failure, or publication failure, keeps the recovery in place for operator
-review. Empty untracked directories contain no recoverable work and are not
-protected. Dry-run mode previews the same skip without aborting or deleting
-anything. The brief final verification-and-removal transaction assumes an
+plus any unexpected ignored path, branch mismatch, worktree lock, initialized
+submodule, current-nightly failure, or publication failure, keeps the recovery
+in place for operator review. Empty untracked directories contain no recoverable
+work and are not protected. Dry-run mode previews the same skip without aborting
+or deleting anything. The brief final verification-and-removal transaction assumes an
 operator is not simultaneously editing that recovery worktree; the service does
 not add cross-process locking for that exceptional race.
 After an operator resolves and completes a retained rebase, Git records those

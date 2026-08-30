@@ -95,10 +95,8 @@ it("fingerprints retained recovery content so human edits prevent automatic clea
   git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
   git(["config", "user.email", "checkpoint@example.com"]);
   git(["config", "user.name", "Checkpoint Test"]);
-  NodeFS.writeFileSync(NodePath.join(directory, ".gitignore"), ".env.local\n");
   NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "original\n");
-  NodeFS.writeFileSync(NodePath.join(directory, ".env.local"), "before\n");
-  git(["add", ".gitignore", "tracked.txt"]);
+  git(["add", "tracked.txt"]);
   git(["commit", "--quiet", "--message", "base"]);
   const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
   const original = checkpointRecoveryFingerprint(directory, branch);
@@ -106,19 +104,6 @@ it("fingerprints retained recovery content so human edits prevent automatic clea
 
   expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(original);
   git(["checkout", "--", "tracked.txt"]);
-  const beforeIgnoredEdit = checkpointRecoveryFingerprint(directory, branch);
-  NodeFS.writeFileSync(NodePath.join(directory, ".env.local"), "after\n");
-  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(beforeIgnoredEdit);
-  const beforeIgnoredModeEdit = checkpointRecoveryFingerprint(directory, branch);
-  NodeFS.chmodSync(NodePath.join(directory, ".env.local"), 0o755);
-  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(beforeIgnoredModeEdit);
-  const ignoredPath = NodePath.join(directory, ".env.local");
-  NodeFS.writeFileSync(ignoredPath, "../shared/helper");
-  NodeFS.chmodSync(ignoredPath, 0o777);
-  const beforeIgnoredKindEdit = checkpointRecoveryFingerprint(directory, branch);
-  NodeFS.rmSync(ignoredPath);
-  NodeFS.symlinkSync("../shared/helper", ignoredPath);
-  expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(beforeIgnoredKindEdit);
   const beforeBranchSwitch = checkpointRecoveryFingerprint(directory, branch);
   git(["switch", "--quiet", "--create", "operator-review"]);
   expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(beforeBranchSwitch);
@@ -311,6 +296,26 @@ it("refuses to fingerprint unexpected ignored recovery directories", () => {
   expect(() =>
     checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
   ).toThrow("prevents automatic retirement");
+  NodeFS.rmSync(directory, { recursive: true, force: true });
+});
+
+it("refuses to fingerprint unexpected ignored recovery files", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+  git(["config", "user.email", "checkpoint@example.com"]);
+  git(["config", "user.name", "Checkpoint Test"]);
+  NodeFS.writeFileSync(NodePath.join(directory, ".gitignore"), ".env.local\n");
+  git(["add", ".gitignore"]);
+  git(["commit", "--quiet", "--message", "base"]);
+  NodeFS.writeFileSync(NodePath.join(directory, ".env.local"), "operator setting\n");
+
+  expect(() =>
+    checkpointRecoveryFingerprint(directory, "sync/nightly/v0.0.1-nightly.20260812.1"),
+  ).toThrow("Ignored recovery path '.env.local'");
   NodeFS.rmSync(directory, { recursive: true, force: true });
 });
 
