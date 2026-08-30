@@ -155,7 +155,7 @@ describe("syncManagedCheckout", () => {
     expect(syncManagedCheckout(test.config)).toEqual({ commit, status: "current" });
   });
 
-  it("reconciles configured Project Actions after a successful checkout refresh", () => {
+  it("installs dependencies before reconciling Project Actions in a current checkout", () => {
     const test = fixture();
     git(test.managed, ["branch", "-m", "lastcode/main"]);
     git(test.managed, ["push", "origin", "HEAD:refs/heads/lastcode/main"]);
@@ -170,6 +170,7 @@ describe("syncManagedCheckout", () => {
         trustedActionIds: [],
       },
     };
+    NodeFS.mkdirSync(NodePath.join(test.managed, "node_modules"));
 
     expect(
       syncManagedCheckoutAndActions(config, { installDependencies, reconcileProjectActions }),

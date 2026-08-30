@@ -319,14 +319,9 @@ export function syncManagedCheckoutAndActions(rawConfig, dependencies = {}) {
   const config = normalizeManagedCheckoutConfig(rawConfig);
   const checkout = syncManagedCheckout(config, dependencies);
   if (config.projectActions === undefined) return checkout;
-  if (
-    checkout.status === "updated" ||
-    !NodeFS.existsSync(NodePath.join(config.worktree, "node_modules"))
-  ) {
-    const installDependencies =
-      dependencies.installDependencies ?? installManagedCheckoutDependencies;
-    installDependencies(config);
-  }
+  const installDependencies =
+    dependencies.installDependencies ?? installManagedCheckoutDependencies;
+  installDependencies(config);
   const reconcile = dependencies.reconcileProjectActions ?? reconcileConfiguredProjectActions;
   return {
     ...checkout,
