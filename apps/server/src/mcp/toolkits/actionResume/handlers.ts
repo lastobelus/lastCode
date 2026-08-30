@@ -60,6 +60,24 @@ const makeHandlers = (admission: UpdateDrainAdmission["Service"]) =>
             }),
           );
       }),
+    inspect_action_run: ({ runId }) =>
+      Effect.gen(function* () {
+        const invocation = yield* McpInvocationContext.requireMcpCapability("action-resume");
+        const service = yield* Effect.serviceOption(ActionResume);
+        if (Option.isNone(service)) {
+          return yield* new ActionResumeError({
+            reason: "internal_error",
+            message: "Action resume is unavailable in this server runtime.",
+          });
+        }
+        return yield* service.value.inspectActionRun(
+          {
+            threadId: invocation.threadId,
+            providerInstanceId: invocation.providerInstanceId,
+          },
+          runId,
+        );
+      }),
   }) satisfies Parameters<typeof ActionResumeToolkit.toLayer>[0];
 
 export const ActionResumeToolkitHandlersLive = Layer.unwrap(

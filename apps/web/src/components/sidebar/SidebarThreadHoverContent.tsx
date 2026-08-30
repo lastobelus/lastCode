@@ -1,6 +1,8 @@
 import { CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SidebarThreadSummary } from "../../types";
 import { cn } from "~/lib/utils";
@@ -39,6 +41,10 @@ function terminalProcessLabel(count: number): string {
 
 export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps) {
   const driverKind = props.providerEntry?.driverKind ?? null;
+  const actionPresentation =
+    props.thread.actionResume?.outcome === "running"
+      ? actionRunningPresentation(props.thread.actionResume)
+      : null;
 
   return (
     <div className="flex min-w-0 max-w-80 flex-col gap-2 p-[var(--floating-content-inset)]">
@@ -117,11 +123,18 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
             </div>
           </div>
         ) : null}
-        {props.thread.actionResume?.outcome === "running" ? (
-          <div className="flex min-w-0 items-center gap-2 text-yellow-700 dark:text-yellow-300">
+        {actionPresentation ? (
+          <div
+            className={cn(
+              "flex min-w-0 items-center gap-2",
+              actionPresentation.state === "working"
+                ? "text-sky-600 dark:text-sky-300"
+                : "text-yellow-700 dark:text-yellow-300",
+            )}
+          >
             <RotateCcwClockIcon aria-hidden className="size-3 shrink-0" />
             <div className="min-w-0 truncate">
-              Waiting for {props.thread.actionResume.actionName}
+              {actionPresentation.label}: {actionPresentation.summary}
             </div>
           </div>
         ) : null}
