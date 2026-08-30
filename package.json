@@ -43,6 +43,7 @@
     "release:smoke": "node scripts/release-smoke.ts",
     "connect:announce-ga": "node scripts/announce-connect-ga.ts",
     "lastcode:checkpoint": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
+    "lastcode:carry-set": "mise exec node@24.13.1 -- node scripts/lastcode-carry-set.ts",
     "lastcode:checkpoints": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoints.mjs",
     "lastcode:build": "mise exec node@24.13.1 -- node scripts/lastcode-build.mjs",
     "lastcode:install": "mise exec node@24.13.1 -- node scripts/lastcode-install.mjs",
