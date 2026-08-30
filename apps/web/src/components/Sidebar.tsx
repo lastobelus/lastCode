@@ -31,6 +31,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import type { ProjectIconOverride, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import type { EnvironmentIconColor, TimestampFormat } from "@t3tools/contracts/settings";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
@@ -160,7 +161,6 @@ import {
   terminalStatusFromRunningIds,
   threadChangeRequestSnapshotsAtom,
   type ThreadChangeRequestSnapshot,
-  type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
 import {
@@ -742,6 +742,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
   const ensureTerminal = useTerminalUiStateStore((state) => state.ensureTerminal);
   const actionResume = thread.actionResume ?? null;
+  const actionPresentation =
+    actionResume?.outcome === "running" ? actionRunningPresentation(actionResume) : null;
   const openActionTerminal = useCallback(
     (event: ReactMouseEvent) => {
       event.preventDefault();
@@ -799,6 +801,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const actionIsPrimary =
+    actionPresentation !== null &&
+    !isCleanupPending &&
+    !isCleanupFailed &&
+    !thread.hasPendingApprovals &&
+    !thread.hasPendingUserInput &&
+    thread.session?.status !== "running" &&
+    thread.session?.status !== "starting" &&
+    thread.session?.status !== "error" &&
+    thread.backgroundLiveness !== "working" &&
+    thread.backgroundLiveness !== "monitoring";
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -1524,7 +1537,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     while the other controls appear beside it. */}
                 <span
                   className={cn(
-                    isWokeStatus || status === "waiting"
+                    isWokeStatus || actionIsPrimary
                       ? "pointer-events-auto"
                       : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-hover/sidebar-row:absolute group-hover/sidebar-row:right-0 group-hover/sidebar-row:opacity-0",
                     "flex items-center self-center justify-self-end tabular-nums text-secondary-label transition-opacity",
@@ -1532,13 +1545,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   )}
                 >
                   {topStatus ? (
-                    status === "waiting" && actionResume !== null ? (
+                    actionIsPrimary && actionResume !== null && actionPresentation !== null ? (
                       <Popover>
                         <PopoverTrigger
                           render={
                             <button
                               type="button"
-                              aria-label={`Waiting for Action: ${actionResume.actionName}`}
+                              aria-label={`${actionPresentation.label} on Action: ${actionResume.actionName}. ${actionPresentation.summary}`}
                               onClick={(event) => event.stopPropagation()}
                               className={cn(
                                 "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring",
@@ -1548,7 +1561,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           }
                         >
                           <RotateCcwClockIcon aria-hidden className="size-4 shrink-0" />
-                          <span role="status">Waiting</span>
+                          <span role="status">{actionPresentation.label}</span>
                         </PopoverTrigger>
                         <PopoverPopup
                           align="end"
@@ -1559,7 +1572,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <div>
                               <p className="text-sm font-medium">{actionResume.actionName}</p>
                               <p className="text-xs text-muted-foreground">
-                                Running for <WorkingDuration startedAt={actionResume.startedAt} />
+                                {actionPresentation.summary}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {actionPresentation.label} for{" "}
+                                <WorkingDuration startedAt={actionResume.startedAt} />
                               </p>
                             </div>
                             <div className="flex justify-end gap-2">
@@ -1605,21 +1622,21 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           topStatus.className,
                         )}
                       >
-                        {actionResume?.outcome === "running" && status !== "waiting" ? (
+                        {actionPresentation?.state === "waiting" &&
+                        actionResume !== null &&
+                        !actionIsPrimary ? (
                           <Tooltip>
                             <TooltipTrigger
                               render={
                                 <span
-                                  aria-label={`Waiting for ${actionResume.actionName}`}
+                                  aria-label={`Waiting for ${actionResume.actionName}. ${actionPresentation.summary}`}
                                   className="inline-flex shrink-0 items-center text-yellow-700 dark:text-yellow-300"
                                 />
                               }
                             >
                               <RotateCcwClockIcon aria-hidden className="size-4 shrink-0" />
                             </TooltipTrigger>
-                            <TooltipPopup side="top">
-                              Waiting for {actionResume.actionName}
-                            </TooltipPopup>
+                            <TooltipPopup side="top">{actionPresentation.summary}</TooltipPopup>
                           </Tooltip>
                         ) : null}
                         {topStatus.icon === "working" || topStatus.icon === "cleanup" ? (

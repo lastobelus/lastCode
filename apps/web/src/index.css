@@ -746,6 +746,12 @@ html[data-rounded-project-icons] [data-slot="project-favicon"] {
 
       border-color: color-mix(in srgb, var(--warning) 28%, transparent);
     }
+
+    &[data-variant="info"] {
+      --chat-composer-shoulder-tint: color-mix(in srgb, var(--info) 4%, transparent);
+
+      border-color: color-mix(in srgb, var(--info) 32%, transparent);
+    }
   }
 
   .chat-composer-banner-stack-cap {
