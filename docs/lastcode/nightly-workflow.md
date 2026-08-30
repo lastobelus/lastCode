@@ -5,7 +5,7 @@
 The workflow has four independent requirements:
 
 1. Track upstream T3 Code nightly tags.
-2. Rebase the complete LastCode patch stack rather than merge upstream history.
+2. Rebase the complete LastCode [downstream carry set](glossary.md#downstream-carry-set) rather than merge upstream history.
 3. Preserve an immutable LastCode checkpoint for every upstream nightly,
    including nightlies that are never packaged.
 4. Publish an ordered installable revision when `lastcode/main` changes between
@@ -127,6 +127,33 @@ Hosts without the optional service skip that request silently; the managed
 checkpoint service repairs a missed request where it is installed.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
+
+### Carry-set inventory and reconstruction proof
+
+The initial downstream carry-set tool inventories one checkpoint without changing refs, tags,
+`lastcode/main`, or the scheduled checkpoint workflow:
+
+```bash
+pnpm lastcode:carry-set -- \
+  --base <upstream-nightly-tag> \
+  --source <lastcode-checkpoint-or-commit> \
+  --reconstruct
+```
+
+[`scripts/lastcode-carry-set.json`](../../scripts/lastcode-carry-set.json) declares the fixed order
+and maps stable LastCode PR numbers to `Upstream bugfixes`, `Tooling`, `Resumable Actions`, and
+`Legacy Sidebar`. Exact subjects identify the few commits that predate the PR workflow. Anything not
+assigned goes to `Incubator`; upstream bugfix entries must also name their upstream PRs.
+
+The proof creates five temporary local commits. A path touched by only one group belongs to that
+group's generated commit. A path touched by multiple groups, or one the inventory cannot attribute,
+belongs to Incubator for now. After applying the commits in their declared order, the command
+requires the reconstructed Git tree to exactly match the source tree and then removes its temporary
+worktree.
+
+This is an inventory and losslessness gate, not the active checkpoint implementation. It does not
+claim that intermediate groups build independently, run product validation against them, publish
+the generated commits, or change what the desktop updater installs. Those are later rollout gates.
 
 ### Local updater inspection protocol
 
