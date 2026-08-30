@@ -17,6 +17,7 @@ export interface CheckpointRunRecord {
   readonly failurePhase?: "publication" | "rebase" | "smoke";
   readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
+  readonly recoveryFingerprint?: string;
 }
 
 export function checkpointFailureRecord(
@@ -26,6 +27,7 @@ export function checkpointFailureRecord(
     readonly failurePhase?: "publication" | "rebase" | "smoke";
     readonly localTagRetained?: boolean;
     readonly recoveryBranch?: string;
+    readonly recoveryFingerprint?: string;
     readonly startedAtMs: number;
     readonly upstreamTag: string;
   },
@@ -43,11 +45,48 @@ export function checkpointFailureRecord(
     ...(input.failurePhase ? { failurePhase: input.failurePhase } : {}),
     ...(input.localTagRetained ? { localTagRetained: true } : {}),
     ...(input.recoveryBranch ? { recoveryBranch: input.recoveryBranch } : {}),
+    ...(input.recoveryFingerprint ? { recoveryFingerprint: input.recoveryFingerprint } : {}),
   };
 }
 
 export function checkpointRunHistoryPath(home = NodeOS.homedir()): string {
   return NodePath.join(home, ".lastcode", "automation", "checkpoint-runs.jsonl");
+}
+
+export function readLatestCheckpointRun(
+  historyPath = checkpointRunHistoryPath(),
+): CheckpointRunRecord | undefined {
+  try {
+    const lines = NodeFS.readFileSync(historyPath, "utf8").trim().split(/\r?\n/u);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line) continue;
+      try {
+        const record: unknown = JSON.parse(line);
+        if (
+          record !== null &&
+          typeof record === "object" &&
+          !Array.isArray(record) &&
+          "schemaVersion" in record &&
+          record.schemaVersion === 1 &&
+          "status" in record &&
+          (record.status === "failed" || record.status === "success") &&
+          "upstreamTag" in record &&
+          typeof record.upstreamTag === "string"
+        ) {
+          return record as CheckpointRunRecord;
+        }
+      } catch {
+        // A process can be interrupted while appending. Older valid records remain usable.
+      }
+    }
+    return undefined;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 export function appendCheckpointRun(
