@@ -246,6 +246,28 @@ describe("resolveThreadListV2Status", () => {
     expect(shouldShowActionWaitingIndicator(working, "working")).toBe(true);
   });
 
+  it("presents Action working progress without a redundant secondary indicator", () => {
+    const actionResume = {
+      outcome: "running",
+      actionName: "QA",
+      progress: {
+        version: 1,
+        state: "working",
+        summary: "Running checks",
+        updatedAt: NOW,
+      },
+    } as NonNullable<EnvironmentThreadShell["actionResume"]>;
+    const working = makeThread({
+      id: ThreadId.make("working-progress"),
+      title: "Working Action",
+      actionResume,
+    });
+
+    expect(resolveThreadListV2Status(working)).toBe("working");
+    expect(resolveThreadStatus(working)).toMatchObject({ kind: "working", label: "Working" });
+    expect(shouldShowActionWaitingIndicator(working, "working")).toBe(false);
+  });
+
   it("resolves ready for quiescent threads", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",
