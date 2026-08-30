@@ -31,6 +31,8 @@ const hydrationDeliveryRank = (delivery: ActionResumeState["delivery"]): number 
   }
 };
 
+const hydrationRevision = (state: ActionResumeState): number => state.revision ?? 0;
+
 export interface ThreadActionResumeShape {
   /** Restore one latest run per thread without reviving superseded delivery states. */
   readonly hydrate: (states: ReadonlyArray<ActionResumeState>) => void;
@@ -53,7 +55,9 @@ export function make(): ThreadActionResumeShape {
           current === undefined ||
           state.startedAt > current.startedAt ||
           (state.runId === current.runId &&
-            hydrationDeliveryRank(state.delivery) > hydrationDeliveryRank(current.delivery))
+            (hydrationRevision(state) > hydrationRevision(current) ||
+              (hydrationRevision(state) === hydrationRevision(current) &&
+                hydrationDeliveryRank(state.delivery) > hydrationDeliveryRank(current.delivery))))
         ) {
           latestByThreadId.set(state.threadId, state);
         }

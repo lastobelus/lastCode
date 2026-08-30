@@ -880,7 +880,7 @@ function shouldStripDcsSequence(content: string): boolean {
 }
 
 function shouldStripOscSequence(content: string): boolean {
-  return /^(10|11|12);(?:\?|rgb:)/.test(content);
+  return /^(10|11|12);(?:\?|rgb:)/.test(content) || content.startsWith("777;T3ActionEvent;");
 }
 
 function stripStringTerminator(value: string): string {
@@ -2768,8 +2768,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  const history: TerminalManager["Service"]["history"] = (input) =>
-    readHistory(input.threadId, input.terminalId);
+  const history: TerminalManager["Service"]["history"] = (input) => {
+    return flushPersist(input.threadId, input.terminalId).pipe(
+      Effect.andThen(readHistory(input.threadId, input.terminalId)),
+    );
+  };
 
   return TerminalManager.of({
     open,
