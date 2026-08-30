@@ -44,6 +44,25 @@ const PROJECT_SCRIPTS = JSON.stringify([
   },
 ]);
 
+const PUBLIC_DOCS_PROJECT_SCRIPTS = JSON.stringify([
+  {
+    id: "preview-docs",
+    name: "Preview documentation",
+    command: "node fixture-action.mjs",
+    icon: "play",
+    runOnWorktreeCreate: false,
+    allowAgentResume: true,
+  },
+  {
+    id: "check-links",
+    name: "Check links",
+    command: "node fixture-action.mjs",
+    icon: "test",
+    runOnWorktreeCreate: false,
+    allowAgentResume: true,
+  },
+]);
+
 const SHOWCASE_TERMINAL_PROMPT =
   "\u001b[1;32m→\u001b[0m \u001b[1;36mt3code\u001b[0m \u001b[1;34mgit:(\u001b[1;31mfeat/remote-command-center\u001b[1;34m)\u001b[0m \u001b[1;33m✗\u001b[0m ";
 
@@ -262,19 +281,135 @@ export const SHOWCASE_THREADS = [
   },
 ] as const;
 
+export const PUBLIC_DOCS_PROJECT_ID = "lastcode-docs-demo";
+export const PUBLIC_DOCS_THREAD_ID = "document-resumable-actions";
+
+export const PUBLIC_DOCS_PROJECTS = [
+  {
+    id: PUBLIC_DOCS_PROJECT_ID,
+    title: "LastCode documentation",
+    directory: "lastcode-docs-demo",
+    repositoryUrl: "https://github.com/example/lastcode-docs-demo.git",
+    favicon: PROJECT_FAVICONS.t3code,
+  },
+] as const;
+
+export const PUBLIC_DOCS_THREADS = [
+  {
+    id: PUBLIC_DOCS_THREAD_ID,
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Document resumable project actions",
+    branch: "docs/resumable-actions",
+    minutesAgo: 4,
+    request:
+      "Explain how a Project Action can run while an agent pauses, including how to inspect or cancel it.",
+    response:
+      "The guide now follows the full flow: start the Action, pause the thread, inspect progress, and cancel it when needed.",
+    annotation: "Keep the polling-tax explanation concrete and show the cancellation path.",
+    pinned: true,
+  },
+  {
+    id: "coordinate-thread-tools",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Coordinate work across threads",
+    branch: "docs/thread-tools",
+    minutesAgo: 18,
+    request:
+      "Show how Codex can inspect another thread and send it a tracked follow-up without copying its whole history.",
+    response:
+      "The example lists the available threads, reads a bounded slice of context, and sends one tracked follow-up.",
+  },
+  {
+    id: "annotate-open-questions",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Annotate open documentation questions",
+    branch: "docs/annotations",
+    minutesAgo: 31,
+    state: "approval" as const,
+    request: "Keep the unresolved installation question visible while the guide is reviewed.",
+    response:
+      "The question is attached to the thread and remains visible in chat and the sidebar until it is resolved.",
+    annotation: "Confirm the minimum supported macOS version before publishing.",
+  },
+  {
+    id: "polish-ocean-captures",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Polish the Ocean captures",
+    branch: "docs/ocean-captures",
+    minutesAgo: 56,
+    state: "plan" as const,
+    request: "Prepare the dark Ocean screenshots and keep the light variants ready for follow-up.",
+    response:
+      "The capture plan uses one deterministic recipe per scene and keeps the README panels on the same path.",
+  },
+  {
+    id: "publish-feature-index",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Publish the feature index",
+    branch: "docs/feature-index",
+    minutesAgo: 5 * 60,
+    settled: true,
+    request: "Add a short feature index without turning the front page into marketing copy.",
+    response:
+      "The index now links to the five first-release guides with one plain-language sentence each.",
+  },
+] as const;
+
+export type ShowcaseFixtureProfile = "mobile" | "public-docs";
+
+interface ShowcaseProjectFixture {
+  readonly id: string;
+  readonly title: string;
+  readonly directory: string;
+  readonly repositoryUrl: string;
+  readonly favicon: string;
+}
+
+interface ShowcaseThreadFixture {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly branch: string;
+  readonly minutesAgo: number;
+  readonly state?: "working" | "approval" | "plan";
+  readonly settled?: boolean;
+  readonly snoozeMinutes?: number;
+  readonly request: string;
+  readonly response: string | null;
+  readonly annotation?: string;
+  readonly pinned?: boolean;
+}
+
 function minutesBefore(now: number, minutes: number): string {
   return new Date(now - minutes * 60_000).toISOString();
 }
 
-async function runGit(workspaceRoot: string, args: ReadonlyArray<string>): Promise<void> {
+async function runGit(
+  workspaceRoot: string,
+  args: ReadonlyArray<string>,
+  profile: ShowcaseFixtureProfile = "mobile",
+): Promise<void> {
+  const identity =
+    profile === "public-docs"
+      ? { name: "LastCode Docs Fixture", email: "fixture@example.invalid" }
+      : { name: "Alex Rivera", email: "alex@lumen.test" };
+  const inheritedEnvironment =
+    profile === "public-docs"
+      ? Object.fromEntries(
+          ["PATH", "PATHEXT", "SYSTEMROOT", "ComSpec", "TMPDIR", "TMP", "TEMP"].flatMap((key) =>
+            process.env[key] === undefined ? [] : [[key, process.env[key]]],
+          ),
+        )
+      : process.env;
   await execFile("git", [...args], {
     cwd: workspaceRoot,
     env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: "Alex Rivera",
-      GIT_AUTHOR_EMAIL: "alex@lumen.test",
-      GIT_COMMITTER_NAME: "Alex Rivera",
-      GIT_COMMITTER_EMAIL: "alex@lumen.test",
+      ...inheritedEnvironment,
+      HOME: profile === "public-docs" ? workspaceRoot : process.env.HOME,
+      GIT_AUTHOR_NAME: identity.name,
+      GIT_AUTHOR_EMAIL: identity.email,
+      GIT_COMMITTER_NAME: identity.name,
+      GIT_COMMITTER_EMAIL: identity.email,
     },
   });
 }
@@ -283,11 +418,16 @@ async function initializeRepository(input: {
   readonly workspaceRoot: string;
   readonly repositoryUrl: string;
   readonly commitMessage: string;
+  readonly profile?: ShowcaseFixtureProfile;
 }): Promise<void> {
-  await runGit(input.workspaceRoot, ["init", "-b", "main"]);
-  await runGit(input.workspaceRoot, ["remote", "add", "origin", input.repositoryUrl]);
-  await runGit(input.workspaceRoot, ["add", "."]);
-  await runGit(input.workspaceRoot, ["commit", "-m", input.commitMessage]);
+  await runGit(input.workspaceRoot, ["init", "-b", "main"], input.profile);
+  await runGit(
+    input.workspaceRoot,
+    ["remote", "add", "origin", input.repositoryUrl],
+    input.profile,
+  );
+  await runGit(input.workspaceRoot, ["add", "."], input.profile);
+  await runGit(input.workspaceRoot, ["commit", "-m", input.commitMessage], input.profile);
 }
 
 async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
@@ -319,6 +459,50 @@ async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
   );
 }
 
+async function seedPublicDocsWorkspace(workspaceRoot: string): Promise<void> {
+  await NodeFSP.mkdir(NodePath.join(workspaceRoot, "docs"), { recursive: true });
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "package.json"),
+    `${JSON.stringify({ name: "lastcode-docs-demo", private: true }, null, 2)}\n`,
+  );
+  await NodeFSP.writeFile(NodePath.join(workspaceRoot, "favicon.svg"), PROJECT_FAVICONS.t3code);
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "README.md"),
+    "# LastCode documentation demo\n\nSynthetic workspace for public documentation captures.\n",
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "docs", "resumable-actions.md"),
+    "# Resumable project actions\n\nDocument the running, inspection, and cancellation states.\n",
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "fixture-action.mjs"),
+    `const phases = ["Preparing the preview", "Checking internal links", "Rendering the guide"];
+let index = 0;
+console.log(phases[index]);
+const interval = setInterval(() => {
+  index += 1;
+  if (index < phases.length) {
+    console.log(phases[index]);
+    return;
+  }
+  clearInterval(interval);
+  console.log("Documentation preview ready");
+}, 4_000);
+`,
+  );
+  await initializeRepository({
+    workspaceRoot,
+    repositoryUrl: "https://github.com/example/lastcode-docs-demo.git",
+    commitMessage: "Seed public documentation workspace",
+    profile: "public-docs",
+  });
+  await runGit(workspaceRoot, ["checkout", "-b", "docs/resumable-actions"], "public-docs");
+  await NodeFSP.appendFile(
+    NodePath.join(workspaceRoot, "docs", "resumable-actions.md"),
+    "\nAgents can inspect or cancel the Action while it runs.\n",
+  );
+}
+
 async function seedCompanionWorkspace(input: {
   readonly workspaceRoot: string;
   readonly title: string;
@@ -338,6 +522,32 @@ async function seedCompanionWorkspace(input: {
   });
 }
 
+export async function seedShowcaseProjectWorkspace(input: {
+  readonly workspaceRoot: string;
+  readonly projectId: string;
+  readonly profile?: ShowcaseFixtureProfile;
+}): Promise<void> {
+  const profile = input.profile ?? "mobile";
+  const projects: ReadonlyArray<ShowcaseProjectFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_PROJECTS : SHOWCASE_PROJECTS;
+  const project = projects.find(({ id }) => id === input.projectId);
+  if (!project) throw new Error(`Unknown ${profile} fixture project '${input.projectId}'.`);
+  if (profile === "public-docs") {
+    await seedPublicDocsWorkspace(input.workspaceRoot);
+    return;
+  }
+  if (project.id === SHOWCASE_PROJECT_ID) {
+    await seedT3CodeWorkspace(input.workspaceRoot);
+    return;
+  }
+  await seedCompanionWorkspace({
+    workspaceRoot: input.workspaceRoot,
+    title: project.title,
+    repositoryUrl: project.repositoryUrl,
+    favicon: project.favicon,
+  });
+}
+
 function insertThread(
   database: NodeSqlite.DatabaseSync,
   now: number,
@@ -350,6 +560,8 @@ function insertThread(
     readonly state?: "working" | "approval" | "plan";
     readonly settled?: boolean;
     readonly snoozeMinutes?: number;
+    readonly annotation?: string;
+    readonly pinned?: boolean;
     readonly workspaceRoot: string;
   },
 ): void {
@@ -370,8 +582,9 @@ function insertThread(
         thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
         branch, worktree_path, latest_turn_id, latest_user_message_at, pending_approval_count,
         pending_user_input_count, has_actionable_proposed_plan, created_at, updated_at,
-        archived_at, deleted_at, settled_override, settled_at, snoozed_until, snoozed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+        archived_at, deleted_at, settled_override, settled_at, snoozed_until, snoozed_at,
+        pinned_at, pin_order_key, annotation_json, latest_user_message_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.id,
@@ -392,6 +605,18 @@ function insertThread(
       input.settled ? updatedAt : null,
       snoozedUntil,
       snoozedAt,
+      input.pinned ? updatedAt : null,
+      input.pinned ? "a0" : null,
+      input.annotation
+        ? JSON.stringify({
+            body: input.annotation,
+            anchorMessageId: `${input.id}-request`,
+            createdAt: updatedAt,
+            updatedAt,
+            resolvedAt: null,
+          })
+        : null,
+      `${input.id}-request`,
     );
   database
     .prepare(
@@ -432,7 +657,14 @@ const SEEDED_PROJECTION_TABLES = [
   "projection_state",
 ] as const;
 
-const SEEDED_THREAD_COLUMNS = ["snoozed_until", "snoozed_at"] as const;
+const SEEDED_THREAD_COLUMNS = [
+  "snoozed_until",
+  "snoozed_at",
+  "pinned_at",
+  "pin_order_key",
+  "annotation_json",
+  "latest_user_message_id",
+] as const;
 
 function hasSeedableSchema(dbPath: string): boolean {
   let database: NodeSqlite.DatabaseSync;
@@ -473,9 +705,10 @@ async function waitForSeedableSchema(dbPath: string, timeoutMs = 60_000): Promis
 function seedDatabase(
   dbPath: string,
   workspaceRoots: ReadonlyMap<string, string>,
-  projects: ReadonlyArray<(typeof SHOWCASE_PROJECTS)[number]>,
-  threads: ReadonlyArray<(typeof SHOWCASE_THREADS)[number]>,
+  projects: ReadonlyArray<ShowcaseProjectFixture>,
+  threads: ReadonlyArray<ShowcaseThreadFixture>,
   now: number,
+  profile: ShowcaseFixtureProfile,
 ): void {
   // The environment server is already running against this file and keeps
   // writing (migrations, projections) while we seed, so the write lock is
@@ -506,7 +739,7 @@ function seedDatabase(
         project.title,
         workspaceRoot,
         MODEL_SELECTION,
-        PROJECT_SCRIPTS,
+        profile === "public-docs" ? PUBLIC_DOCS_PROJECT_SCRIPTS : PROJECT_SCRIPTS,
         minutesBefore(now, 60 * 24 * (90 - index * 12)),
         minutesBefore(now, latestThreadMinutes),
       );
@@ -554,54 +787,61 @@ function seedDatabase(
       }
     }
 
-    const turnId = `${SHOWCASE_THREAD_ID}-turn`;
+    const primaryThreadId = profile === "public-docs" ? PUBLIC_DOCS_THREAD_ID : SHOWCASE_THREAD_ID;
+    const turnId = `${primaryThreadId}-turn`;
     const insertActivity = database.prepare(
       `INSERT INTO projection_thread_activities (
         activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
       ) VALUES (?, ?, ?, 'tool', 'tool.completed', ?, ?, ?, ?)`,
     );
-    insertActivity.run(
-      "trace-remote-handoff",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Traced the remote handoff path",
-      JSON.stringify({
-        itemType: "command_execution",
-        title: "Traced the remote handoff path",
-        detail: "Three environments, one continuous workspace",
-        status: "completed",
-      }),
-      1,
-      minutesBefore(now, 8),
-    );
-    insertActivity.run(
-      "sync-command-center",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Synced the command center",
-      JSON.stringify({
-        itemType: "file_change",
-        title: "Synced the command center",
-        detail: "2 files changed · instant handoffs · calm reconnects",
-        status: "completed",
-      }),
-      2,
-      minutesBefore(now, 6),
-    );
-    insertActivity.run(
-      "run-changed-suite",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Ran the changed workspace",
-      JSON.stringify({
-        itemType: "command_execution",
-        title: "Ran the changed workspace",
-        detail: "612 tests passed · 3 environments online",
-        status: "completed",
-      }),
-      3,
-      minutesBefore(now, 4),
-    );
+    const activities: ReadonlyArray<readonly [string, string, string]> =
+      profile === "public-docs"
+        ? [
+            [
+              "inspect-project-action",
+              "Inspected the running Project Action",
+              "Preview documentation · still running",
+            ],
+            [
+              "update-resumable-guide",
+              "Updated the resumable-actions guide",
+              "1 file changed · inspection and cancellation documented",
+            ],
+            ["check-docs-links", "Checked the documentation links", "10 routes passed"],
+          ]
+        : [
+            [
+              "trace-remote-handoff",
+              "Traced the remote handoff path",
+              "Three environments, one continuous workspace",
+            ],
+            [
+              "sync-command-center",
+              "Synced the command center",
+              "2 files changed · instant handoffs · calm reconnects",
+            ],
+            [
+              "run-changed-suite",
+              "Ran the changed workspace",
+              "612 tests passed · 3 environments online",
+            ],
+          ];
+    for (const [index, [activityId, title, detail]] of activities.entries()) {
+      insertActivity.run(
+        activityId,
+        primaryThreadId,
+        turnId,
+        title,
+        JSON.stringify({
+          itemType: index === 1 ? "file_change" : "command_execution",
+          title,
+          detail,
+          status: "completed",
+        }),
+        index + 1,
+        minutesBefore(now, 8 - index * 2),
+      );
+    }
 
     for (const [index, projector] of PROJECTOR_NAMES.entries()) {
       database
@@ -630,47 +870,47 @@ export async function seedShowcaseEnvironment(input: {
   readonly baseDir: string;
   readonly projectIds?: ReadonlyArray<string>;
   readonly now?: number;
+  readonly profile?: ShowcaseFixtureProfile;
 }): Promise<{ readonly dbPath: string; readonly workspaceRoot: string }> {
   const now = input.now ?? Date.now();
+  const profile = input.profile ?? "mobile";
+  const fixtureProjects: ReadonlyArray<ShowcaseProjectFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_PROJECTS : SHOWCASE_PROJECTS;
+  const fixtureThreads: ReadonlyArray<ShowcaseThreadFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_THREADS : SHOWCASE_THREADS;
+  const primaryProjectId = profile === "public-docs" ? PUBLIC_DOCS_PROJECT_ID : SHOWCASE_PROJECT_ID;
   const selectedProjectIds = new Set(
-    input.projectIds ?? SHOWCASE_PROJECTS.map((project) => project.id),
+    input.projectIds ?? fixtureProjects.map((project) => project.id),
   );
-  const projects = SHOWCASE_PROJECTS.filter((project) => selectedProjectIds.has(project.id));
+  const projects = fixtureProjects.filter((project) => selectedProjectIds.has(project.id));
   if (projects.length === 0) throw new Error("At least one showcase project must be selected.");
-  const threads = SHOWCASE_THREADS.filter((thread) => selectedProjectIds.has(thread.projectId));
+  const threads = fixtureThreads.filter((thread) => selectedProjectIds.has(thread.projectId));
   const workspaceBase = NodePath.join(input.baseDir, "workspace");
   const workspaceRoots = new Map(
     projects.map(
       (project) => [project.id, NodePath.join(workspaceBase, project.directory)] as const,
     ),
   );
-  const primaryProject =
-    projects.find((project) => project.id === SHOWCASE_PROJECT_ID) ?? projects[0];
+  const primaryProject = projects.find((project) => project.id === primaryProjectId) ?? projects[0];
   if (!primaryProject) throw new Error("The primary showcase workspace is not configured.");
   const workspaceRoot = workspaceRoots.get(primaryProject.id);
   if (!workspaceRoot) throw new Error("The primary showcase workspace is not configured.");
   const dbPath = NodePath.join(input.baseDir, "userdata", "state.sqlite");
-  if (primaryProject.id === SHOWCASE_PROJECT_ID) {
-    await seedT3CodeWorkspace(workspaceRoot);
-  }
   await Promise.all(
-    projects
-      .filter((project) => project.id !== SHOWCASE_PROJECT_ID)
-      .map(async (project) => {
-        const projectWorkspaceRoot = workspaceRoots.get(project.id);
-        if (!projectWorkspaceRoot) throw new Error(`Missing workspace root for ${project.id}.`);
-        await seedCompanionWorkspace({
-          workspaceRoot: projectWorkspaceRoot,
-          title: project.title,
-          repositoryUrl: project.repositoryUrl,
-          favicon: project.favicon,
-        });
-      }),
+    projects.map(async (project) => {
+      const projectWorkspaceRoot = workspaceRoots.get(project.id);
+      if (!projectWorkspaceRoot) throw new Error(`Missing workspace root for ${project.id}.`);
+      await seedShowcaseProjectWorkspace({
+        workspaceRoot: projectWorkspaceRoot,
+        projectId: project.id,
+        profile,
+      });
+    }),
   );
   // The environment server begins listening before it finishes migrating the
   // database, so wait for the schema before deleting from and reseeding it.
   await waitForSeedableSchema(dbPath);
-  seedDatabase(dbPath, workspaceRoots, projects, threads, now);
+  seedDatabase(dbPath, workspaceRoots, projects, threads, now, profile);
 
   const terminalDirectory = NodePath.join(input.baseDir, "userdata", "logs", "terminals");
   if (selectedProjectIds.has(SHOWCASE_PROJECT_ID)) {
