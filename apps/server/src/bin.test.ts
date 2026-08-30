@@ -652,6 +652,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           scripts: [
             { name: "Setup Worktree", command: "vp i", runOnWorktreeCreate: true },
             {
+              id: "lc-wait-for-pr",
               name: "Wait for PR",
               command: "node scripts/lastcode-wait-for-pr.ts",
               icon: "test",
@@ -730,6 +731,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         encodeUnknownJson({
           scripts: [
             {
+              id: "lc-local-ci",
               name: "Run Quick CI",
               command: "node scripts/lastcode-local-ci.ts --quick",
               icon: "test",

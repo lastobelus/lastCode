@@ -1,8 +1,4 @@
-import {
-  MAX_SCRIPT_ID_LENGTH,
-  type ProjectScript,
-  type T3ProjectFileScript,
-} from "@t3tools/contracts";
+import { type ProjectScript, type T3ProjectFileScript } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -34,6 +30,7 @@ export class ProjectActionReconciliationError extends Schema.TaggedErrorClass<Pr
   "ProjectActionReconciliationError",
   {
     reason: Schema.Literals([
+      "missing_source_id",
       "duplicate_source_id",
       "ambiguous_legacy_import",
       "ownership_workspace_mismatch",
@@ -56,28 +53,52 @@ export interface ProjectActionReconciliationResult {
   readonly report: ProjectActionReconciliationReport;
 }
 
-const normalizedSlug = (value: string): string =>
-  value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
-
-const commandScriptStem = (command: string): string | null => {
-  const matches = Array.from(
-    command.matchAll(/(?:^|[\s"'=])scripts\/([A-Za-z0-9._/-]+)/gu),
-    (match) => match[1],
-  ).filter((value): value is string => value !== undefined);
-  if (matches.length !== 1) return null;
-  const basename = matches[0]!.split("/").at(-1) ?? "";
-  const stem = basename.replace(/\.(?:[cm]?[jt]s)$/u, "").replace(/^lastcode-/u, "");
-  return stem.length > 0 ? stem : null;
-};
-
-export const projectActionSourceId = (declaration: T3ProjectFileScript): string => {
-  const stem = commandScriptStem(declaration.command) ?? declaration.name;
-  const slug = normalizedSlug(stem) || "action";
-  return `lc-${slug}`.slice(0, MAX_SCRIPT_ID_LENGTH).replace(/-+$/u, "") || "lc-action";
+export const prepareManagedProjectActionGrantIntent = (input: {
+  readonly projectWorkspaceRoot: string;
+  readonly currentScripts: ReadonlyArray<ProjectScript>;
+  readonly previousState?: ManagedProjectActionState;
+  readonly nextScripts: ReadonlyArray<ProjectScript>;
+  readonly nextState: ManagedProjectActionState;
+}):
+  | {
+      readonly scripts: ReadonlyArray<ProjectScript>;
+      readonly state: ManagedProjectActionState;
+    }
+  | undefined => {
+  const previousRecords = new Map(
+    (input.previousState?.actions ?? []).map((record) => [record.sourceId, record]),
+  );
+  const scripts = [...input.currentScripts];
+  const grantedScriptIds = new Set<string>();
+  for (const next of input.nextState.actions) {
+    const previous = previousRecords.get(next.sourceId);
+    if (!next.managesResumePermission || previous?.managesResumePermission === true) continue;
+    previousRecords.set(
+      next.sourceId,
+      previous === undefined ? next : { ...previous, managesResumePermission: true },
+    );
+    grantedScriptIds.add(next.scriptId);
+  }
+  if (grantedScriptIds.size === 0) return undefined;
+  for (const scriptId of grantedScriptIds) {
+    const currentIndex = scripts.findIndex((script) => script.id === scriptId);
+    const script =
+      currentIndex === -1
+        ? input.nextScripts.find((candidate) => candidate.id === scriptId)
+        : scripts[currentIndex];
+    if (script === undefined) continue;
+    const granted = { ...script, allowAgentResume: true };
+    if (currentIndex === -1) scripts.push(granted);
+    else scripts[currentIndex] = granted;
+  }
+  return {
+    scripts,
+    state: {
+      schemaVersion: 1,
+      projectWorkspaceRoot: input.projectWorkspaceRoot,
+      actions: Array.from(previousRecords.values()),
+    },
+  };
 };
 
 const managedFieldsFromDeclaration = (
@@ -177,8 +198,15 @@ export const reconcileProjectActions = Effect.fn("reconcileProjectActions")(func
   const declarations = input.declarations.filter(
     (declaration) => declaration.runOnWorktreeCreate !== true,
   );
+  const missingId = declarations.find((declaration) => declaration.id === undefined);
+  if (missingId !== undefined) {
+    return yield* new ProjectActionReconciliationError({
+      reason: "missing_source_id",
+      message: `Checked-in Action '${missingId.name}' needs a stable id before it can be reconciled.`,
+    });
+  }
   const desired = declarations.map((declaration) => ({
-    sourceId: projectActionSourceId(declaration),
+    sourceId: declaration.id!,
     managed: managedFieldsFromDeclaration(declaration),
   }));
   const seenSourceIds = new Set<string>();

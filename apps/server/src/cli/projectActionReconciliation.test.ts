@@ -1,31 +1,118 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { projectActionSourceId, reconcileProjectActions } from "./projectActionReconciliation.ts";
+import {
+  prepareManagedProjectActionGrantIntent,
+  reconcileProjectActions,
+} from "./projectActionReconciliation.ts";
 
 const waitDeclaration = {
+  id: "lc-wait-for-pr",
   name: "Wait for PR",
   command: "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
   icon: "test" as const,
 };
 
 const quickDeclaration = {
+  id: "lc-local-ci",
   name: "Run Quick CI",
   command: "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
   icon: "test" as const,
 };
 
-it("derives stable bounded ids from repository-owned script entrypoints", () => {
-  assert.equal(projectActionSourceId(waitDeclaration), "lc-wait-for-pr");
-  assert.equal(projectActionSourceId(quickDeclaration), "lc-local-ci");
-  assert.isAtMost(
-    projectActionSourceId({
-      name: "A very long fallback Action name that must be bounded",
-      command: "pnpm run custom-action",
-    }).length,
-    24,
-  );
+it.effect("rejects a managed declaration without an explicit stable id", () =>
+  reconcileProjectActions({
+    projectWorkspaceRoot: "/srv/example/lastCode",
+    currentScripts: [],
+    declarations: [{ name: "Wait for PR", command: waitDeclaration.command }],
+  }).pipe(
+    Effect.flip,
+    Effect.tap((error) => Effect.sync(() => assert.equal(error.reason, "missing_source_id"))),
+  ),
+);
+
+it("writes managed grant provenance ahead without advancing other managed fields", () => {
+  const previousState = {
+    schemaVersion: 1 as const,
+    projectWorkspaceRoot: "/srv/example/lastCode",
+    actions: [
+      {
+        sourceId: "lc-wait-for-pr",
+        scriptId: "wait-for-pr",
+        lastManaged: {
+          name: "Wait for PR",
+          command: waitDeclaration.command,
+          icon: "test" as const,
+          runOnWorktreeCreate: false,
+        },
+        managesResumePermission: false,
+      },
+    ],
+  };
+  const intent = prepareManagedProjectActionGrantIntent({
+    projectWorkspaceRoot: previousState.projectWorkspaceRoot,
+    currentScripts: [{ id: "wait-for-pr", ...previousState.actions[0]!.lastManaged }],
+    previousState,
+    nextScripts: [
+      {
+        id: "wait-for-pr",
+        name: "Wait for PR",
+        command: "node scripts/renamed-wait-command.ts",
+        icon: "test",
+        runOnWorktreeCreate: false,
+        allowAgentResume: true,
+      },
+    ],
+    nextState: {
+      ...previousState,
+      actions: [
+        {
+          ...previousState.actions[0]!,
+          lastManaged: {
+            ...previousState.actions[0]!.lastManaged,
+            command: "node scripts/renamed-wait-command.ts",
+          },
+          managesResumePermission: true,
+        },
+      ],
+    },
+  });
+
+  assert.isTrue(intent?.state.actions[0]?.managesResumePermission);
+  assert.equal(intent?.state.actions[0]?.lastManaged.command, waitDeclaration.command);
+  assert.equal(intent?.scripts[0]?.command, waitDeclaration.command);
+  assert.isTrue(intent?.scripts[0]?.allowAgentResume);
 });
+
+it.effect("recovers a managed grant after interruption on either side of the project update", () =>
+  Effect.gen(function* () {
+    const first = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [],
+      declarations: [waitDeclaration],
+      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+    });
+    const intent = prepareManagedProjectActionGrantIntent({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [],
+      nextScripts: first.scripts,
+      nextState: first.state,
+    });
+    assert.isDefined(intent);
+
+    for (const currentScripts of [[], intent!.scripts]) {
+      const recovered = yield* reconcileProjectActions({
+        projectWorkspaceRoot: "/srv/example/lastCode",
+        currentScripts,
+        declarations: [waitDeclaration],
+        previousState: intent!.state,
+        trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      });
+      assert.isTrue(recovered.scripts[0]?.allowAgentResume);
+      assert.isTrue(recovered.state.actions[0]?.managesResumePermission);
+    }
+  }),
+);
 
 it.effect("creates non-setup Actions without granting agent resume", () =>
   Effect.gen(function* () {

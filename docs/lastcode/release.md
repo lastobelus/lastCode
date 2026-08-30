@@ -31,7 +31,9 @@ LastCode setup reconciles non-setup Actions from `t3.json` through the
 event-sourced project command path. The checkpoint supervisor repeats the
 reconciliation after every successful primary `lastcode/main` refresh, including
 an already-current refresh. A separately managed checkout can opt into the same
-behavior. Exact legacy imports are adopted without changing their Action IDs, so
+behavior. Each reconciled declaration has an explicit stable `id`, so renaming
+its command entrypoint does not change ownership. Exact legacy imports are
+adopted without changing their saved Action IDs, so
 keybindings and local resume permission survive. Managed name, command, icon,
 and preview changes propagate only while the saved Action still matches its last
 managed specification; a locally diverged or removed declaration is retained
