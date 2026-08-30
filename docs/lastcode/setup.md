@@ -63,11 +63,22 @@ positive integer. The explicit flag acknowledges the remote writes described
 above. The command:
 
 1. installs the pinned workspace dependencies;
-2. creates a detached `lastcode-automation` worktree beside the checkout;
-3. installs the managed macOS checkpoint service;
-4. starts the first checkpoint run; and
-5. installs `lastcode-checkpoints`, `lastcode-build`, and `lastcode-install`
+2. registers the LastCode project and reconciles its non-setup `t3.json`
+   Actions into the local LastCode environment;
+3. creates a detached `lastcode-automation` worktree beside the checkout;
+4. installs the managed macOS checkpoint service;
+5. starts the first checkpoint run; and
+6. installs `lastcode-checkpoints`, `lastcode-build`, and `lastcode-install`
    under `~/.local/bin` with their managed files under `~/.lastcode/bin`.
+
+Reconciled Actions are available immediately but are not granted agent resume
+permission by default. Existing imported Actions keep their IDs, keybindings,
+and local permission. To make a repository-owned Action resumable as an
+explicit setup choice, repeat `--trusted-project-action` with its stable source
+ID: `lc-wait-for-pr`, `lc-local-ci`, or `lc-build-intel-package`. Setup saves
+the selected allowlist for reconciliation after later managed checkout
+refreshes; rerunning setup without an ID removes only the corresponding managed
+grant.
 
 If service setup or a later helper installation fails, the bootstrap disables a
 checkpoint service that it newly installed during that run. A service that was
