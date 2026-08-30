@@ -40,6 +40,7 @@ export class ProjectActionReconciliationError extends Schema.TaggedErrorClass<Pr
       "missing_source_id",
       "duplicate_source_id",
       "ambiguous_legacy_import",
+      "source_id_ownership_conflict",
       "ownership_workspace_mismatch",
     ]),
     message: Schema.String,
@@ -293,6 +294,12 @@ export const reconcileProjectActions = Effect.fn("reconcileProjectActions")(func
 
     const deterministic = scripts.find((script) => script.id === entry.sourceId);
     if (deterministic !== undefined) {
+      if (claimedScriptIds.has(deterministic.id)) {
+        return yield* new ProjectActionReconciliationError({
+          reason: "source_id_ownership_conflict",
+          message: `Checked-in Action '${entry.sourceId}' conflicts with existing managed ownership.`,
+        });
+      }
       claimedScriptIds.add(deterministic.id);
       if (!sameManagedFields(managedFieldsFromScript(deterministic), entry.managed)) {
         report.diverged.push(entry.sourceId);

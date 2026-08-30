@@ -234,6 +234,27 @@ it.effect("reserves existing ownership before adopting a legacy match", () =>
   }),
 );
 
+it.effect("rejects a deterministic id already owned by another declaration", () =>
+  Effect.gen(function* () {
+    const initial = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [
+        { ...waitDeclaration, id: "lc-new-declaration", runOnWorktreeCreate: false },
+      ],
+      declarations: [waitDeclaration],
+    });
+
+    const error = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: initial.scripts,
+      declarations: [{ ...waitDeclaration, id: "lc-new-declaration" }, waitDeclaration],
+      previousState: initial.state,
+    }).pipe(Effect.flip);
+
+    assert.equal(error.reason, "source_id_ownership_conflict");
+  }),
+);
+
 it.effect("updates managed fields while preserving local-only state", () =>
   Effect.gen(function* () {
     const first = yield* reconcileProjectActions({
