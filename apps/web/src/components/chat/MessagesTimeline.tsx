@@ -1282,15 +1282,21 @@ function AgentMessageTimelineRow({
             ·
           </span>
           {status ? <ThreadStatusLabel status={status} compact={compactStatus} /> : null}
-          <button
-            type="button"
-            onClick={() => ctx.onOpenSourceThread(sourceThreadId)}
-            className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
-            aria-label={`Open source thread: ${sourceTitle}`}
-          >
-            <span className="truncate">{sourceTitle}</span>
-            <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
-          </button>
+          {source ? (
+            <button
+              type="button"
+              onClick={() => ctx.onOpenSourceThread(sourceThreadId)}
+              className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+              aria-label={`Open source thread: ${sourceTitle}`}
+            >
+              <span className="truncate">{sourceTitle}</span>
+              <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
+            </button>
+          ) : (
+            <span className="min-w-0 truncate font-medium lowercase text-muted-foreground">
+              source thread unavailable
+            </span>
+          )}
           <Tooltip>
             <TooltipTrigger
               render={<span className="ms-auto text-muted-foreground tabular-nums" />}

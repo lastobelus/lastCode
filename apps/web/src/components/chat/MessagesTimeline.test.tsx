@@ -6,6 +6,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
+const threadShellMockState = vi.hoisted(() => ({ available: true }));
+
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
 
@@ -131,19 +133,22 @@ vi.mock("../../state/entities", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../state/entities")>();
   return {
     ...actual,
-    useThreadShell: () => ({
-      id: ThreadId.make("thread-source"),
-      title: "Mobile Reconnect Issue",
-      hasActionableProposedPlan: false,
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
-      interactionMode: "default",
-      latestTurn: null,
-      session: { status: "running" },
-      backgroundLiveness: null,
-      actionResume: null,
-      worktreeCleanup: null,
-    }),
+    useThreadShell: () =>
+      threadShellMockState.available
+        ? {
+            id: ThreadId.make("thread-source"),
+            title: "Mobile Reconnect Issue",
+            hasActionableProposedPlan: false,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            interactionMode: "default",
+            latestTurn: null,
+            session: { status: "running" },
+            backgroundLiveness: null,
+            actionResume: null,
+            worktreeCleanup: null,
+          }
+        : null,
   };
 });
 
@@ -283,6 +288,30 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
     expect(markup).not.toContain("Open source thread</a>");
     expect(markup).not.toContain("bg-message p-3");
+  });
+
+  it("does not link to a source thread that is no longer available", () => {
+    threadShellMockState.available = false;
+    try {
+      const sourceThreadId = ThreadId.make("thread-source");
+      const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              ...entry,
+              message: { ...entry.message, sourceThreadId },
+            },
+          ]}
+        />,
+      );
+
+      expect(markup).toContain("source thread unavailable");
+      expect(markup).not.toContain("Open source thread:");
+    } finally {
+      threadShellMockState.available = true;
+    }
   });
 
   it("shows compact completed Action results without embedding detailed output", () => {
