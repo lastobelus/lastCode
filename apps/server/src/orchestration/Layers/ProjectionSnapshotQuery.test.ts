@@ -130,6 +130,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           turn_id,
           role,
           text,
+          source_thread_id,
           is_streaming,
           created_at,
           updated_at
@@ -140,6 +141,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'turn-1',
           'assistant',
           'hello from projection',
+          'thread-source',
           0,
           '2026-02-24T00:00:04.000Z',
           '2026-02-24T00:00:05.000Z'
@@ -354,6 +356,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               id: asMessageId("message-1"),
               role: "assistant",
               text: "hello from projection",
+              sourceThreadId: ThreadId.make("thread-source"),
               turnId: asTurnId("turn-1"),
               streaming: false,
               createdAt: "2026-02-24T00:00:04.000Z",
