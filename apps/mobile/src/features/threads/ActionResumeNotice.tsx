@@ -1,4 +1,5 @@
 import type { EnvironmentId, OrchestrationThreadShell } from "@t3tools/contracts";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import * as Cause from "effect/Cause";
 import { useCallback, useEffect, useState } from "react";
 import { Alert, View } from "react-native";
@@ -71,16 +72,41 @@ export function ActionResumeNotice(props: {
   );
 
   if (action?.outcome === "running") {
+    const presentation = actionRunningPresentation(action);
+    const working = presentation.state === "working";
     return (
-      <View className="rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3">
+      <View
+        className={
+          working
+            ? "rounded-2xl border border-sky-500/25 bg-sky-500/10 px-3.5 py-3"
+            : "rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3"
+        }
+      >
         <View className="flex-row items-center gap-2.5">
-          <SymbolView name="clock" size={18} tintColor="#eab308" type="monochrome" />
+          <SymbolView
+            name={working ? "gearshape" : "clock"}
+            size={18}
+            tintColor={working ? "#0a84ff" : "#eab308"}
+            type="monochrome"
+          />
           <View className="min-w-0 flex-1">
-            <Text className="text-sm font-t3-bold text-adaptive-yellow-800-200">
-              Waiting for {action.actionName}
+            <Text
+              className={
+                working
+                  ? "text-sm font-t3-bold text-adaptive-sky-700-300"
+                  : "text-sm font-t3-bold text-adaptive-yellow-800-200"
+              }
+            >
+              {presentation.label}: {action.actionName}
             </Text>
-            <Text className="mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70">
-              The agent will resume once this Action finishes and the thread is idle.
+            <Text
+              className={
+                working
+                  ? "mt-0.5 text-xs text-adaptive-sky-700-300 opacity-75"
+                  : "mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70"
+              }
+            >
+              {presentation.summary}
             </Text>
           </View>
           <ControlPill
