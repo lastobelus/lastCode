@@ -114,6 +114,7 @@ describe("immutable Intel release validation", () => {
       NodeFS.readFileSync(NodePath.resolve(import.meta.dirname, "../t3.json"), "utf8"),
     );
     expect(project.scripts).toContainEqual({
+      id: "lc-build-intel-package",
       name: "Build Intel package (macOS)",
       command: "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
       icon: "build",
