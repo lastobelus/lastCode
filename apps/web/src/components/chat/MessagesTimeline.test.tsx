@@ -1,4 +1,4 @@
-import { CheckpointRef, EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
+import { CheckpointRef, EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { codexFeedbackMessage } from "@t3tools/client-runtime/state/threads";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { createRef, type ReactNode, type Ref } from "react";
@@ -127,6 +127,26 @@ vi.mock("@pierre/diffs/react", () => {
   return { FileDiff: MockFileDiff };
 });
 
+vi.mock("../../state/entities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/entities")>();
+  return {
+    ...actual,
+    useThreadShell: () => ({
+      id: ThreadId.make("thread-source"),
+      title: "Mobile Reconnect Issue",
+      hasActionableProposedPlan: false,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      interactionMode: "default",
+      latestTurn: null,
+      session: { status: "running" },
+      backgroundLiveness: null,
+      actionResume: null,
+      worktreeCleanup: null,
+    }),
+  };
+});
+
 function matchMedia() {
   return {
     matches: false,
@@ -238,6 +258,33 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders cross-thread posts as left-aligned agent message cards", () => {
+    const sourceThreadId = ThreadId.make("thread-source");
+    const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            ...entry,
+            message: { ...entry.message, sourceThreadId },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("AGENT MESSAGE");
+    expect(markup).toContain("Mobile Reconnect Issue");
+    expect(markup).toContain("Working");
+    expect(markup).toContain("items-start");
+    expect(markup).toContain("max-w-[80%]");
+    expect(markup).toContain("border-primary/55 bg-secondary");
+    expect(markup).toContain("font-medium lowercase text-primary");
+    expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
+    expect(markup).not.toContain("Open source thread</a>");
+    expect(markup).not.toContain("bg-message p-3");
+  });
+
   it("shows compact completed Action results without embedding detailed output", () => {
     const actionText = formatActionResumeFollowUp({
       actionName: "Run Full CI",
