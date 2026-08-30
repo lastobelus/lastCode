@@ -13,8 +13,10 @@ import {
   appendCheckpointRun,
   checkpointFailureRecord,
   readLatestCheckpointRun,
+  type CarrySetShadowRecord,
   type CheckpointRunRecord,
 } from "./lastcode-checkpoint-history.ts";
+import { runCarrySetShadowCheck, type CarrySetShadowResult } from "./lastcode-carry-set.ts";
 import {
   checkpointTagFromNightlyTag,
   compareLastCodeInstallableTags,
@@ -1025,6 +1027,14 @@ function resolveAutomationWorktree(repoRoot: string): string {
   );
 }
 
+export function runPromotionThenShadow(promote: () => void, shadow: () => void): void {
+  try {
+    promote();
+  } finally {
+    shadow();
+  }
+}
+
 function publishRevisionIfNeeded(
   repoRoot: string,
   sourceRef: string,
@@ -1032,20 +1042,20 @@ function publishRevisionIfNeeded(
   installables: ReadonlyArray<InstallableRef>,
   options: CheckpointOptions,
   platform: NodeJS.Platform,
-): boolean {
+): { readonly handled: boolean } {
   const plan = resolveRevisionPlan({
     installableRefs: installables,
     sourceCommit,
     isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
   });
-  if (plan.kind === "unavailable") return false;
+  if (plan.kind === "unavailable") return { handled: false };
   if (plan.kind === "represented") {
-    if (plan.installable.revision === 0) return false;
+    if (plan.installable.revision === 0) return { handled: false };
     promoteCheckpoint(repoRoot, plan.installable.commit, options, platform, options.pushTags);
     console.log(
       `[lastcode:checkpoint] ${plan.installable.tag} already represents current LastCode main.`,
     );
-    return true;
+    return { handled: true };
   }
 
   const worktree = resolveAutomationWorktree(repoRoot);
@@ -1109,16 +1119,20 @@ function publishRevisionIfNeeded(
     }
   }
 
-  promoteCheckpoint(
-    repoRoot,
-    candidateCommit,
-    options,
-    platform,
-    options.smoke || options.pushTags,
+  runPromotionThenShadow(
+    () =>
+      promoteCheckpoint(
+        repoRoot,
+        candidateCommit,
+        options,
+        platform,
+        options.smoke || options.pushTags,
+      ),
+    () => runCarrySetShadowAfterPublication(repoRoot, plan.installableTag),
   );
   notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
   console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
-  return true;
+  return { handled: true };
 }
 
 export function openPullRequestListArgs(
@@ -1216,6 +1230,64 @@ function mirrorUpstreamMain(repoRoot: string, options: CheckpointOptions): void 
   }
   run(repoRoot, "git", pushArgs);
   console.log(`[lastcode:checkpoint] Mirrored ${upstreamRef} to ${options.pushRemote}/main.`);
+}
+
+export function runCarrySetShadowAfterPublication(
+  repoRoot: string,
+  checkpointTag: string | undefined,
+  dependencies: {
+    readonly append: (record: CarrySetShadowRecord) => boolean;
+    readonly check: (repoRoot: string, checkpointTag: string) => CarrySetShadowResult;
+    readonly error: (message: string) => void;
+    readonly log: (message: string) => void;
+    readonly now: () => number;
+  } = {
+    append: (record) => appendCheckpointRun(record),
+    check: runCarrySetShadowCheck,
+    error: (message) => console.error(message),
+    log: (message) => console.log(message),
+    now: Date.now,
+  },
+): CarrySetShadowRecord | undefined {
+  if (!checkpointTag) return undefined;
+  const startedAtMs = dependencies.now();
+  try {
+    const result = dependencies.check(repoRoot, checkpointTag);
+    const finishedAtMs = dependencies.now();
+    const record: CarrySetShadowRecord = {
+      schemaVersion: 1,
+      status: "shadow",
+      outcome: "success",
+      checkpointTag,
+      baseCommit: result.baseCommit,
+      sourceCommit: result.sourceCommit,
+      tree: result.tree,
+      startedAt: new Date(startedAtMs).toISOString(),
+      finishedAt: new Date(finishedAtMs).toISOString(),
+      durationMs: finishedAtMs - startedAtMs,
+    };
+    dependencies.append(record);
+    dependencies.log(`[lastcode:checkpoint] Carry-set shadow check passed for ${checkpointTag}.`);
+    return record;
+  } catch (error) {
+    const finishedAtMs = dependencies.now();
+    const message = error instanceof Error ? error.message : String(error);
+    const record: CarrySetShadowRecord = {
+      schemaVersion: 1,
+      status: "shadow",
+      outcome: "failed",
+      checkpointTag,
+      startedAt: new Date(startedAtMs).toISOString(),
+      finishedAt: new Date(finishedAtMs).toISOString(),
+      durationMs: finishedAtMs - startedAtMs,
+      error: message,
+    };
+    dependencies.append(record);
+    dependencies.error(
+      `[lastcode:checkpoint] Carry-set shadow check failed for ${checkpointTag}: ${message}`,
+    );
+    return record;
+  }
 }
 
 function main(argv: ReadonlyArray<string>): void {
@@ -1321,6 +1393,7 @@ function main(argv: ReadonlyArray<string>): void {
 
   let candidateRef = plan.candidateRef;
   let candidateCommit = git(repoRoot, ["rev-parse", `${candidateRef}^{commit}`]);
+  let newestProducedInstallableTag: string | undefined;
   if (plan.bootstrapCheckpoint) {
     const startedAtMs = Date.now();
     let pendingCheckpointTag: string | undefined;
@@ -1364,6 +1437,7 @@ function main(argv: ReadonlyArray<string>): void {
         checkpointCommit: candidateCommit,
         checkpointTag,
       });
+      newestProducedInstallableTag = checkpointTag;
     } catch (error) {
       const localTagRetained = pendingCheckpointTag
         ? !deleteCheckpointTag(repoRoot, pendingCheckpointTag)
@@ -1387,21 +1461,24 @@ function main(argv: ReadonlyArray<string>): void {
   }
 
   if (plan.missingNightlies.length === 0) {
-    if (
-      !plan.bootstrapCheckpoint &&
-      publishRevisionIfNeeded(
-        repoRoot,
-        options.sourceRef,
-        sourceCommit,
-        installables,
-        options,
-        hostPlatform,
-      )
-    ) {
+    const revisionPublication = !plan.bootstrapCheckpoint
+      ? publishRevisionIfNeeded(
+          repoRoot,
+          options.sourceRef,
+          sourceCommit,
+          installables,
+          options,
+          hostPlatform,
+        )
+      : { handled: false };
+    if (revisionPublication.handled) {
       console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
       return;
     }
-    promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags);
+    runPromotionThenShadow(
+      () => promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags),
+      () => runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag),
+    );
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
   }
@@ -1495,6 +1572,7 @@ function main(argv: ReadonlyArray<string>): void {
         checkpointCommit: candidateCommit,
         checkpointTag,
       });
+      newestProducedInstallableTag = checkpointTag;
       baseTag = nightly.tag;
       candidateRef = checkpointTag;
       attempt = undefined;
@@ -1551,6 +1629,7 @@ function main(argv: ReadonlyArray<string>): void {
       );
       console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
     }
+    runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag);
     throw error;
   } finally {
     if (completed) {
@@ -1559,12 +1638,16 @@ function main(argv: ReadonlyArray<string>): void {
     }
   }
 
-  promoteCheckpoint(
-    repoRoot,
-    candidateCommit,
-    options,
-    hostPlatform,
-    options.smoke || options.pushTags,
+  runPromotionThenShadow(
+    () =>
+      promoteCheckpoint(
+        repoRoot,
+        candidateCommit,
+        options,
+        hostPlatform,
+        options.smoke || options.pushTags,
+      ),
+    () => runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag),
   );
   notify(hostPlatform, "LastCode nightly checkpoint complete", `${candidateRef} is ready.`);
 }
