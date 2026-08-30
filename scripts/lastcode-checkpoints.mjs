@@ -152,7 +152,7 @@ function readRuns(home) {
     .flatMap((line) => {
       try {
         const record = JSON.parse(line);
-        return record.schemaVersion === 1 && ["failed", "success"].includes(record.status)
+        return record.schemaVersion === 1 && ["failed", "shadow", "success"].includes(record.status)
           ? [record]
           : [];
       } catch {
@@ -183,9 +183,22 @@ export function serviceFailureDetailLines(state, verbose) {
   return lines;
 }
 
+export function carrySetShadowDetailLines(records, verbose) {
+  const latest = records.findLast((record) => record.status === "shadow");
+  if (!latest) return [];
+  if (latest.outcome === "failed") {
+    return [
+      `Carry-set shadow check failed for ${latest.checkpointTag}: ${latest.error ?? "unknown error"}`,
+    ];
+  }
+  return verbose ? [`Carry-set shadow check passed for ${latest.checkpointTag}.`] : [];
+}
+
 export function latestRunsByUpstreamTag(records) {
   const latest = new Map();
-  for (const record of records) latest.set(record.upstreamTag, record);
+  for (const record of records) {
+    if (typeof record.upstreamTag === "string") latest.set(record.upstreamTag, record);
+  }
   return latest;
 }
 
@@ -861,6 +874,9 @@ function printDashboard(repoRoot, home, count, verbose) {
   console.log(style(ansi.lavender, daemon.summary));
   for (const detail of serviceFailureDetailLines(readCheckpointServiceState(home), verbose)) {
     console.log(style(ansi.error, detail));
+  }
+  for (const detail of carrySetShadowDetailLines(readRuns(home), verbose)) {
+    console.log(style(detail.includes(" failed ") ? ansi.error : ansi.green, detail));
   }
   console.log(
     style(
