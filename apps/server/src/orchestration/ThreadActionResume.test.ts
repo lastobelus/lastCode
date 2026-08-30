@@ -59,3 +59,42 @@ it("keeps a genuinely pending newer Action visible after hydration", () => {
     delivery: "pending",
   });
 });
+
+it("hydrates the latest progress revision for one running Action", () => {
+  const registry = make();
+
+  registry.hydrate([
+    state({
+      outcome: "running",
+      delivery: "armed",
+      finishedAt: null,
+      exitCode: null,
+      revision: 2,
+      progress: {
+        version: 1,
+        state: "working",
+        summary: "Running checks",
+        updatedAt: "2026-08-17T00:00:10.000Z",
+      },
+    }),
+    state({
+      outcome: "running",
+      delivery: "armed",
+      finishedAt: null,
+      exitCode: null,
+      revision: 3,
+      progress: {
+        version: 1,
+        state: "waiting",
+        summary: "Waiting for review",
+        updatedAt: "2026-08-17T00:00:20.000Z",
+      },
+    }),
+  ]);
+
+  assert.deepInclude(registry.getForShell(threadId), {
+    revision: 3,
+  });
+  assert.equal(registry.getForShell(threadId)?.progress?.state, "waiting");
+  assert.equal(registry.getForShell(threadId)?.progress?.summary, "Waiting for review");
+});
