@@ -144,6 +144,7 @@ layer("ProjectionThreadMessageRepository", (it) => {
         role: "user",
         text: "initial",
         attachments: persistedAttachments,
+        sourceThreadId: ThreadId.make("thread-source"),
         isStreaming: false,
         createdAt,
         updatedAt,
@@ -170,6 +171,7 @@ layer("ProjectionThreadMessageRepository", (it) => {
       if (rowById._tag === "Some") {
         assert.equal(rowById.value.text, "updated");
         assert.deepEqual(rowById.value.attachments, persistedAttachments);
+        assert.equal(rowById.value.sourceThreadId, "thread-source");
       }
     }),
   );

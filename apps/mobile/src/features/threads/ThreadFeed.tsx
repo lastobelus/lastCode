@@ -27,6 +27,7 @@ import {
   renderCodexFileCitationsAsMarkdown,
   splitCodexArtifactTemplateMarkdown,
 } from "@t3tools/client-runtime/codex-markdown-directives";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
@@ -172,6 +173,7 @@ import {
   useAssetUrlState,
   useRefreshAssetUrl,
 } from "../../state/assets";
+import { useThreadShell } from "../../state/entities";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { usePreparedConnection } from "../../state/session";
 import * as Option from "effect/Option";
@@ -187,6 +189,7 @@ import {
   ThreadMarkdownImageUnavailable,
   ThreadMarkdownImageView,
 } from "./ThreadMarkdownImage";
+import { resolveThreadStatus } from "./threadPresentation";
 
 const WIDE_MARKDOWN_BLOCK_OPTIONS = {
   // Native iOS blockquotes and adjacent selectable text are separate layout
@@ -1330,6 +1333,7 @@ function renderFeedEntry(
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
+    readonly onOpenSourceThread: (sourceThreadId: ThreadId) => void;
     readonly renderMarkdownImage: MarkdownImageRenderer;
     readonly renderViewedImage: MarkdownImageRenderer;
     readonly iconSubtleColor: string | import("react-native").ColorValue;
@@ -1458,6 +1462,25 @@ function renderFeedEntry(
       props.terminalAssistantMessageIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
+
+    if (isUser && message.sourceThreadId !== undefined) {
+      return (
+        <AgentMessageTimelineRow
+          entry={entry}
+          environmentId={props.environmentId}
+          iconSubtleColor={iconSubtleColor}
+          markdownStyles={markdownStyles.assistant}
+          maxWidth={props.userBubbleMaxWidth}
+          linkHandlers={props.markdownLinkHandlers}
+          onOpenSourceThread={props.onOpenSourceThread}
+          onPressPreview={props.onPressPreview}
+          renderImage={props.renderMarkdownImage}
+          reviewCommentColors={props.reviewCommentColors}
+          skills={props.skills}
+          sourceThreadId={message.sourceThreadId}
+        />
+      );
+    }
 
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
@@ -1611,6 +1634,118 @@ function renderFeedEntry(
       onToggleRow={props.onToggleWorkRow}
       renderImage={props.renderViewedImage}
     />
+  );
+}
+
+function AgentMessageTimelineRow(props: {
+  readonly entry: Extract<ThreadFeedEntry, { type: "message" }>;
+  readonly environmentId: EnvironmentId;
+  readonly iconSubtleColor: ColorValue;
+  readonly markdownStyles: MarkdownStyleSet;
+  readonly maxWidth: number;
+  readonly linkHandlers: MarkdownLinkHandlers;
+  readonly onOpenSourceThread: (sourceThreadId: ThreadId) => void;
+  readonly onPressPreview: (source: FilePreviewSource) => void;
+  readonly renderImage: MarkdownImageRenderer;
+  readonly reviewCommentColors: ReviewCommentColors;
+  readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
+  readonly sourceThreadId: ThreadId;
+}) {
+  const source = useThreadShell(scopeThreadRef(props.environmentId, props.sourceThreadId));
+  const resolvedStatus = source ? resolveThreadStatus(source) : null;
+  const status = source
+    ? (resolvedStatus ?? {
+        label: "Ready",
+        iconColor: props.iconSubtleColor,
+      })
+    : null;
+  const sourceTitle = source?.title ?? "Source thread unavailable";
+  const message = props.entry.message;
+  const attachments = (message.attachments ?? []).filter(
+    (attachment) => attachment.type === "image",
+  );
+
+  return (
+    <Animated.View
+      className="mb-5 items-start"
+      {...(isFreshTimestamp(message.createdAt) ? { entering: FadeInUp.duration(220) } : {})}
+    >
+      <View
+        className="min-w-0 gap-2 rounded-[20px] border border-primary bg-secondary px-3.5 py-3"
+        style={{ maxWidth: props.maxWidth }}
+      >
+        <View className="min-w-0 flex-row flex-wrap items-center gap-1.5">
+          <Text className="font-t3-bold text-2xs tracking-wider text-foreground-muted">
+            AGENT MESSAGE
+          </Text>
+          {status ? (
+            <View className="flex-row items-center gap-1">
+              <View
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: status.iconColor }}
+              />
+              <Text className="font-t3-medium text-2xs text-foreground-muted">{status.label}</Text>
+            </View>
+          ) : null}
+          {source ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Open source thread: ${source.title}`}
+              className="min-w-0 flex-row items-center gap-0.5 active:opacity-60"
+              onPress={() => props.onOpenSourceThread(props.sourceThreadId)}
+            >
+              <Text className="shrink font-t3-medium text-2xs text-primary" numberOfLines={1}>
+                {sourceTitle.toLocaleLowerCase()}
+              </Text>
+              <SymbolView
+                name="arrow.up.right"
+                size={11}
+                tintColorClassName="accent-icon-subtle"
+                type="monochrome"
+              />
+            </Pressable>
+          ) : (
+            <Text className="shrink font-t3-medium text-2xs text-foreground-muted">
+              {sourceTitle.toLocaleLowerCase()}
+            </Text>
+          )}
+          <Text className="ml-auto font-t3-medium text-2xs tabular-nums text-foreground-muted">
+            {formatMessageTime(message.createdAt)}
+          </Text>
+        </View>
+        {message.text.trim().length > 0 ? (
+          <UserMessageContent
+            text={message.text}
+            markdownStyles={props.markdownStyles}
+            reviewCommentColors={props.reviewCommentColors}
+            skills={props.skills}
+            linkHandlers={props.linkHandlers}
+            renderImage={props.renderImage}
+          />
+        ) : null}
+        {attachments.map((attachment) => (
+          <MessageAttachmentImage
+            key={attachment.id}
+            environmentId={props.environmentId}
+            attachmentId={attachment.id}
+            name={attachment.name}
+            className="aspect-[1.3] w-full rounded-[14px] bg-white/15"
+            onPressPreview={props.onPressPreview}
+          />
+        ))}
+      </View>
+      {message.text.trim().length > 0 ? (
+        <View className="mt-1 pl-0.5">
+          <CopyTextButton
+            accessibilityLabel="Copy agent message"
+            text={message.text}
+            tintColor={props.iconSubtleColor}
+            buttonSize={28}
+            iconSize={13}
+          />
+        </View>
+      ) : null}
+    </Animated.View>
   );
 }
 
@@ -2247,6 +2382,15 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     }),
     [onMarkdownLinkPress, props.workspaceRoot],
   );
+  const onOpenSourceThread = useCallback(
+    (sourceThreadId: ThreadId) => {
+      navigation.navigate("Thread", {
+        environmentId: String(props.environmentId),
+        threadId: String(sourceThreadId),
+      });
+    },
+    [navigation, props.environmentId],
+  );
   const renderMarkdownImage = useCallback<MarkdownImageRenderer>(
     (image) => {
       const media = resolveMarkdownMediaPreview(image.href, {
@@ -2789,6 +2933,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onPressPreview,
             onPressVideo,
             markdownLinkHandlers,
+            onOpenSourceThread,
             renderMarkdownImage,
             renderViewedImage,
             iconSubtleColor,
@@ -2822,6 +2967,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       userBubbleMaxWidth,
       onCopyWorkRow,
       markdownLinkHandlers,
+      onOpenSourceThread,
       onPressPreview,
       onPressVideo,
       onToggleTurnFold,
