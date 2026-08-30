@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   attributeCarryPaths,
   CARRY_GROUPS,
+  carrySetShadowTarget,
   parseCarryCommit,
   planCarrySet,
   pullRequestFromSubject,
@@ -35,6 +36,30 @@ it("parses commit records without making rebased SHAs part of the grouping key",
     subject: "fix(web): example (#123)",
     pullRequest: 123,
   });
+});
+
+it("selects carry-set base and source from immutable tag metadata", () => {
+  assert.deepStrictEqual(
+    carrySetShadowTarget(
+      "lastcode/checkpoint/v1-nightly.1",
+      "LastCode checkpoint\n\nUpstream-Commit: upstream-sha\nLastCode-Commit: lastcode-sha\n",
+      "lastcode-sha",
+    ),
+    {
+      checkpointTag: "lastcode/checkpoint/v1-nightly.1",
+      baseCommit: "upstream-sha",
+      sourceCommit: "lastcode-sha",
+    },
+  );
+  assert.throws(
+    () =>
+      carrySetShadowTarget(
+        "lastcode/checkpoint/v1-nightly.1",
+        "Upstream-Commit: upstream-sha\nLastCode-Commit: other-sha\n",
+        "lastcode-sha",
+      ),
+    /tag resolves to/,
+  );
 });
 
 it("groups known PRs and subjects in fixed order and sends unknown work to Incubator", () => {
