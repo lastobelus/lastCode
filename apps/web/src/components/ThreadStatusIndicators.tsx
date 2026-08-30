@@ -467,7 +467,7 @@ export function ThreadStatusLabel({
   status,
   compact = false,
 }: {
-  status: ThreadStatusPill;
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse"> & { label: string };
   compact?: boolean;
 }) {
   if (compact) {
