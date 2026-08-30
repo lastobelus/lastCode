@@ -33,6 +33,10 @@ confirms that LastCode persisted the request, not that the provider finished it.
 oversized messages, missing or ambiguous targets, authorization failures, and rejected dispatches
 fail without reporting acceptance.
 
+Messages sent from one LastCode thread to another appear in the target conversation as agent
+message cards. The card links back to the source thread and shows its current status. A plain
+`send` to the caller's own thread remains a normal user message.
+
 Add `--wait` when the caller needs the exact resulting turn rather than dispatch acceptance.
 `send --wait` cannot target the caller's current thread because that queued turn cannot begin
 until the current command returns; use plain `send` for a self-directed follow-up.

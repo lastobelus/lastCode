@@ -318,6 +318,50 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
   }),
 );
 
+it.effect("preserves cross-thread message provenance", () =>
+  Effect.gen(function* () {
+    const sourceThreadId = "thread-source";
+    const command = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-cross-thread",
+      threadId: "thread-target",
+      sourceThreadId,
+      message: {
+        messageId: "msg-cross-thread",
+        role: "user",
+        text: "status update",
+        attachments: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const message = yield* decodeOrchestrationMessage({
+      id: "msg-cross-thread",
+      role: "user",
+      text: "status update",
+      sourceThreadId,
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const payload = yield* decodeThreadMessageSentPayload({
+      threadId: "thread-target",
+      messageId: "msg-cross-thread",
+      role: "user",
+      text: "status update",
+      sourceThreadId,
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(command.sourceThreadId, sourceThreadId);
+    assert.strictEqual(message.sourceThreadId, sourceThreadId);
+    assert.strictEqual(payload.sourceThreadId, sourceThreadId);
+  }),
+);
+
 it.effect("accepts inline images, uploaded images, and uploaded files from clients", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({
