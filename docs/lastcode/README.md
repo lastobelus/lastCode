@@ -1,7 +1,7 @@
 # LastCode Documentation
 
 LastCode is a personal downstream of T3 Code that rebases its complete fork-only
-patch stack onto upstream nightly releases. Tracking an upstream nightly and
+[downstream carry set](glossary.md#downstream-carry-set) onto upstream nightly releases. Tracking an upstream nightly and
 building an application are deliberately separate operations: every nightly can
 be checkpointed, merged LastCode work can become an ordered revision, and only
 selected installable tags need full local CI and a build.
@@ -19,6 +19,8 @@ directories.
 
 ## Documents
 
+- [Glossary](glossary.md): preferred LastCode fork-maintenance terms and their
+  relationship to the current workflow.
 - [Set up alongside T3 Code](setup.md): prerequisites, guarded bootstrap,
   initial source build, runtime isolation, and daemon operation.
 - [Nightly workflow](nightly-workflow.md): checkpoint tags, rebasing, promotion,
