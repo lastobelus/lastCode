@@ -32,11 +32,14 @@ The agent should first make the repository self-describing:
 1. Read the project's agent instructions and current workflow implementation.
 2. Identify the passive portion that should run without an open agent turn.
 3. Implement or tighten the command so it has stable target identity, explicit wake reasons,
-   failure handling, and one concise final summary line.
-4. Add an importable entry to the repository-root `t3.json`.
-5. Update the repository's agent instructions or workflow skill with the exact
+   failure handling, and one concise structured result. If the Action cannot use the reporting kit,
+   print the same summary as its final output line.
+4. For protocol-aware long-running commands, emit coarse `working` and `waiting` progress only when
+   the useful phase or summary changes.
+5. Add an importable entry to the repository-root `t3.json`.
+6. Update the repository's agent instructions or workflow skill with the exact
    list-launch-end-turn-resume sequence.
-6. Run focused checks for the command and validate the `t3.json` syntax.
+7. Run focused checks for the command and validate the `t3.json` syntax.
 
 Do not put credentials or environment-specific secrets in `t3.json`. Do not add a second manual
 polling path unless it is a clearly labeled fallback for an unavailable Action.
