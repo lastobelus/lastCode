@@ -42,7 +42,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
     }),
   );
 
-  it.effect("propagates scripts in project.meta.update payload", () =>
+  it.effect("atomically reconciles project scripts", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";
       const initial = createEmptyReadModel(now);
@@ -81,7 +81,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const staleFailure = yield* Effect.flip(
         decideOrchestrationCommand({
           command: {
-            type: "project.meta.update",
+            type: "project.scripts.reconcile",
             commandId: CommandId.make("cmd-project-update-stale-scripts"),
             projectId: asProjectId("project-scripts"),
             expectedScripts: Array.from(scripts),
@@ -94,7 +94,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
 
       const result = yield* decideOrchestrationCommand({
         command: {
-          type: "project.meta.update",
+          type: "project.scripts.reconcile",
           commandId: CommandId.make("cmd-project-update-scripts"),
           projectId: asProjectId("project-scripts"),
           expectedScripts: [],

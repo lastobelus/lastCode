@@ -58,7 +58,9 @@ type ProjectMutationTarget = {
 type ProjectCommandExecutionMode = "live" | "offline";
 type ProjectCliDispatchCommand = Extract<
   ClientOrchestrationCommand,
-  { type: "project.create" | "project.meta.update" | "project.delete" }
+  {
+    type: "project.create" | "project.meta.update" | "project.scripts.reconcile" | "project.delete";
+  }
 >;
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
@@ -787,7 +789,7 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
             ),
           );
           yield* dispatch({
-            type: "project.meta.update",
+            type: "project.scripts.reconcile",
             commandId: CommandId.make(yield* projectCommandUuid),
             projectId,
             expectedScripts: Array.from(currentScripts),

@@ -340,20 +340,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.meta.update": {
-      const project = yield* requireProject({
+      yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
       });
-      if (
-        command.expectedScripts !== undefined &&
-        !Equal.equals(command.expectedScripts, project.scripts)
-      ) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Project '${command.projectId}' scripts changed before the update could be applied.`,
-        });
-      }
       if (command.workspaceRoot !== undefined) {
         yield* requireActiveProjectWorkspaceRootAbsent({
           readModel,
@@ -390,6 +381,35 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(command.faviconPath !== undefined ? { faviconPath: command.faviconPath } : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "project.scripts.reconcile": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      if (!Equal.equals(command.expectedScripts, project.scripts)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' scripts changed before the update could be applied.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "project.meta-updated",
+        payload: {
+          projectId: command.projectId,
+          scripts: command.scripts,
           updatedAt: occurredAt,
         },
       };

@@ -1001,8 +1001,15 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   // Absent = leave unchanged; null = clear the override.
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
-  expectedScripts: Schema.optional(Schema.Array(ProjectScript)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+});
+
+const ProjectScriptsReconcileCommand = Schema.Struct({
+  type: Schema.Literal("project.scripts.reconcile"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  expectedScripts: Schema.Array(ProjectScript),
+  scripts: Schema.Array(ProjectScript),
 });
 
 const ProjectDeleteCommand = Schema.Struct({
@@ -1303,6 +1310,7 @@ const ThreadSessionStopCommand = Schema.Struct({
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
@@ -1336,6 +1344,7 @@ export type DispatchableClientOrchestrationCommand =
 export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,

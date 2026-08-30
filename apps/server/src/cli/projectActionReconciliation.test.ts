@@ -255,6 +255,25 @@ it.effect("rejects a deterministic id already owned by another declaration", () 
   }),
 );
 
+it.effect("rejects recreation with an id reserved by a missing managed Action", () =>
+  Effect.gen(function* () {
+    const initial = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [{ ...waitDeclaration, id: "lc-reserved", runOnWorktreeCreate: false }],
+      declarations: [waitDeclaration],
+    });
+
+    const error = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [],
+      declarations: [{ ...waitDeclaration, id: "lc-reserved" }, waitDeclaration],
+      previousState: initial.state,
+    }).pipe(Effect.flip);
+
+    assert.equal(error.reason, "source_id_ownership_conflict");
+  }),
+);
+
 it.effect("updates managed fields while preserving local-only state", () =>
   Effect.gen(function* () {
     const first = yield* reconcileProjectActions({

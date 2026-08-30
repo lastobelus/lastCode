@@ -367,6 +367,12 @@ export const reconcileProjectActions = Effect.fn("reconcileProjectActions")(func
       trusted,
       mayAddManagedGrant: true,
     });
+    if (claimedScriptIds.has(entry.sourceId)) {
+      return yield* new ProjectActionReconciliationError({
+        reason: "source_id_ownership_conflict",
+        message: `Checked-in Action '${entry.sourceId}' conflicts with existing managed ownership.`,
+      });
+    }
     const next = withManagedFields(entry.sourceId, entry.managed, permission.allowAgentResume);
     scripts.push(next);
     claimedScriptIds.add(next.id);

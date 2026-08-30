@@ -1218,19 +1218,8 @@ it.effect("project favicon overrides accept only supported image files", () =>
       commandId: "cmd-project-favicon",
       projectId: "project-1",
       faviconPath: "brand/icon.svg",
-      expectedScripts: [
-        {
-          id: "test",
-          name: "Test",
-          command: "pnpm test",
-          icon: "test",
-          runOnWorktreeCreate: false,
-        },
-      ],
     });
     assert.strictEqual(valid.type, "project.meta.update");
-    if (valid.type !== "project.meta.update") assert.fail("Expected project.meta.update.");
-    assert.strictEqual(valid.expectedScripts?.[0]?.id, "test");
 
     const invalid = yield* Effect.exit(
       decodeOrchestrationCommand({
@@ -1241,6 +1230,31 @@ it.effect("project favicon overrides accept only supported image files", () =>
       }),
     );
     assert.strictEqual(invalid._tag, "Failure");
+  }),
+);
+
+it.effect("decodes atomic project script reconciliation commands", () =>
+  Effect.gen(function* () {
+    const reconcile = yield* decodeOrchestrationCommand({
+      type: "project.scripts.reconcile",
+      commandId: "cmd-project-scripts-reconcile",
+      projectId: "project-1",
+      expectedScripts: [],
+      scripts: [
+        {
+          id: "test",
+          name: "Test",
+          command: "pnpm test",
+          icon: "test",
+          runOnWorktreeCreate: false,
+        },
+      ],
+    });
+    assert.strictEqual(reconcile.type, "project.scripts.reconcile");
+    if (reconcile.type !== "project.scripts.reconcile") {
+      assert.fail("Expected project.scripts.reconcile.");
+    }
+    assert.strictEqual(reconcile.scripts[0]?.id, "test");
   }),
 );
 
