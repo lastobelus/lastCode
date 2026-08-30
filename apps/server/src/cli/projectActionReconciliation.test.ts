@@ -157,6 +157,40 @@ it.effect("adopts an exact legacy import and preserves its id and local permissi
   }),
 );
 
+it.effect("reserves existing ownership before adopting a legacy match", () =>
+  Effect.gen(function* () {
+    const initial = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: [],
+      declarations: [waitDeclaration],
+    });
+    const duplicateDeclaration = {
+      ...waitDeclaration,
+      id: "lc-new-duplicate",
+    };
+    const result = yield* reconcileProjectActions({
+      projectWorkspaceRoot: "/srv/example/lastCode",
+      currentScripts: initial.scripts,
+      declarations: [duplicateDeclaration, waitDeclaration],
+      previousState: initial.state,
+    });
+
+    assert.deepEqual(
+      result.state.actions.map(({ sourceId, scriptId }) => ({ sourceId, scriptId })),
+      [
+        { sourceId: "lc-new-duplicate", scriptId: "lc-new-duplicate" },
+        { sourceId: "lc-wait-for-pr", scriptId: "lc-wait-for-pr" },
+      ],
+    );
+    assert.deepEqual(
+      result.scripts.map((script) => script.id),
+      ["lc-wait-for-pr", "lc-new-duplicate"],
+    );
+    assert.deepEqual(result.report.created, ["lc-new-duplicate"]);
+    assert.deepEqual(result.report.adopted, []);
+  }),
+);
+
 it.effect("updates managed fields while preserving local-only state", () =>
   Effect.gen(function* () {
     const first = yield* reconcileProjectActions({

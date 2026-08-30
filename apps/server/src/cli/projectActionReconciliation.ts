@@ -216,7 +216,9 @@ export const reconcileProjectActions = Effect.fn("reconcileProjectActions")(func
     (input.previousState?.actions ?? []).map((record) => [record.sourceId, record]),
   );
   const scripts = [...input.currentScripts];
-  const claimedScriptIds = new Set<string>();
+  const claimedScriptIds = new Set(
+    Array.from(previousRecords.values(), (record) => record.scriptId),
+  );
   const nextRecords: ManagedProjectActionState["actions"][number][] = [];
   const report = {
     created: [] as string[],
@@ -237,7 +239,6 @@ export const reconcileProjectActions = Effect.fn("reconcileProjectActions")(func
     const trusted = trustedSourceIds.has(entry.sourceId);
 
     if (previous !== undefined) {
-      claimedScriptIds.add(previous.scriptId);
       const current = scripts.find((script) => script.id === previous.scriptId);
       if (
         current !== undefined &&
