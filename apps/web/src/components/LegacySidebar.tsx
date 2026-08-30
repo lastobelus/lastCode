@@ -24,6 +24,7 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { SidebarDraftBlock } from "./Sidebar";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import React, {
   useCallback,
   useEffect,
@@ -921,12 +922,14 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               </TooltipPopup>
             </Tooltip>
           )}
-          {thread.actionResume?.outcome === "running" && threadStatus?.label !== "Waiting" ? (
+          {thread.actionResume?.outcome === "running" &&
+          actionRunningPresentation(thread.actionResume).state === "waiting" &&
+          threadStatus?.label !== "Waiting" ? (
             <Tooltip>
               <TooltipTrigger
                 render={
                   <span
-                    aria-label={`Waiting for ${thread.actionResume.actionName}`}
+                    aria-label={`Waiting for ${thread.actionResume.actionName}. ${actionRunningPresentation(thread.actionResume).summary}`}
                     className="inline-flex size-3.5 shrink-0 items-center justify-center text-yellow-700 dark:text-yellow-300"
                   />
                 }
@@ -936,7 +939,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                   className="size-1.5 rounded-full bg-yellow-500 dark:bg-yellow-300"
                 />
               </TooltipTrigger>
-              <TooltipPopup side="top">Waiting for {thread.actionResume.actionName}</TooltipPopup>
+              <TooltipPopup side="top">
+                {actionRunningPresentation(thread.actionResume).summary}
+              </TooltipPopup>
             </Tooltip>
           ) : null}
           {threadStatus && (

@@ -1,4 +1,5 @@
 import type { ActionResumeState } from "@t3tools/contracts";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { TerminalIcon, XIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
@@ -42,7 +43,8 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
   readonly onToggle: () => void;
   readonly placement?: "inline" | "tab";
 }) {
-  const label = `${action.action.actionName} is running and will resume the agent when the thread is idle`;
+  const presentation = actionRunningPresentation(action.action);
+  const label = `${action.action.actionName}: ${presentation.label}. ${presentation.summary}. The agent will resume when the thread is idle.`;
 
   if (placement === "inline") {
     return (
@@ -52,12 +54,16 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
         aria-expanded={expanded}
         aria-label={label}
         disabled={disabled}
-        className="shrink-0 gap-1 px-1.5 text-warning-foreground"
+        className={cn(
+          "shrink-0 gap-1 px-1.5",
+          presentation.state === "working" ? "text-info-foreground" : "text-warning-foreground",
+        )}
         onClick={onToggle}
         onPointerDown={(event) => event.preventDefault()}
       >
         <RotateCcwClockIcon aria-hidden className="size-3 shrink-0" />
-        <span className="max-w-32 truncate">{action.action.actionName}</span>
+        <span className="max-w-32 truncate">{presentation.summary}</span>
+        <span className="text-muted-foreground">{presentation.label}</span>
         <ActionElapsed startedAt={action.action.startedAt} />
       </Button>
     );
@@ -65,9 +71,12 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
 
   return (
     <div
-      className="chat-composer-shoulder-tab absolute -top-7 left-4 right-4 z-0 flex h-8 items-center rounded-t-xl border border-b-0 px-2 pb-1 text-xs leading-none text-warning-foreground"
+      className={cn(
+        "chat-composer-shoulder-tab absolute -top-7 left-4 right-4 z-0 flex h-8 items-center rounded-t-xl border border-b-0 px-2 pb-1 text-xs leading-none",
+        presentation.state === "working" ? "text-info-foreground" : "text-warning-foreground",
+      )}
       data-composer-action-resume-badge="true"
-      data-variant="warning"
+      data-variant={presentation.state === "working" ? "info" : "warning"}
     >
       <button
         type="button"
@@ -79,9 +88,9 @@ export const ComposerActionResumeBadge = memo(function ComposerActionResumeBadge
       >
         <RotateCcwClockIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate font-medium text-foreground/85">
-          {action.action.actionName}
+          {presentation.summary}
         </span>
-        <span className="shrink-0 text-muted-foreground">Running</span>
+        <span className="shrink-0 text-muted-foreground">{presentation.label}</span>
         <ActionElapsed startedAt={action.action.startedAt} />
       </button>
     </div>
@@ -101,11 +110,12 @@ export const ComposerActionResumeDrawer = memo(function ComposerActionResumeDraw
   readonly onCollapse: () => void;
   readonly onOpenTerminal: () => void;
 }) {
+  const presentation = actionRunningPresentation(action.action);
   return (
     <div
       className="chat-composer-top-drawer"
       data-chat-composer-action-resume-drawer="true"
-      data-variant="warning"
+      data-variant={presentation.state === "working" ? "info" : "warning"}
     >
       <div className="flex items-center gap-2 px-3 py-2 sm:px-4">
         <button
@@ -115,13 +125,30 @@ export const ComposerActionResumeDrawer = memo(function ComposerActionResumeDraw
           onClick={onCollapse}
           onPointerDown={(event) => event.preventDefault()}
         >
-          <RotateCcwClockIcon aria-hidden className="size-3.5 shrink-0 text-warning-foreground" />
+          <RotateCcwClockIcon
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0",
+              presentation.state === "working" ? "text-info-foreground" : "text-warning-foreground",
+            )}
+          />
           <span className="min-w-0 flex-1 truncate font-medium text-foreground">
             {action.action.actionName}
           </span>
-          <span className="inline-flex shrink-0 items-center gap-1.5 text-warning-foreground">
-            <span aria-hidden className="size-1.5 rounded-full bg-warning" />
-            Running for <ActionElapsed startedAt={action.action.startedAt} />
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1.5",
+              presentation.state === "working" ? "text-info-foreground" : "text-warning-foreground",
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 rounded-full",
+                presentation.state === "working" ? "bg-info" : "bg-warning",
+              )}
+            />
+            {presentation.label} for <ActionElapsed startedAt={action.action.startedAt} />
           </span>
         </button>
         <Button
@@ -136,6 +163,12 @@ export const ComposerActionResumeDrawer = memo(function ComposerActionResumeDraw
         </Button>
       </div>
       <div className="grid gap-3 px-3 pb-3 text-xs sm:grid-cols-[minmax(0,1fr)_minmax(12rem,0.65fr)] sm:px-4">
+        <div className="min-w-0 sm:col-span-2">
+          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Current status
+          </div>
+          <p className="leading-4 text-foreground/85">{presentation.summary}</p>
+        </div>
         <div className="min-w-0">
           <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             Command
