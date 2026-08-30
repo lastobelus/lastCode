@@ -70,6 +70,9 @@ describe("LastCode checkpoint supervisor", () => {
       "dependencies",
       "checkpoint",
     ]);
+    expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).toContain(
+      "--supersede-failed-recovery",
+    );
     expect(test.dependencies.refreshSupervisor).toHaveBeenCalledOnce();
     expect(test.dependencies.refreshPrimaryCheckout).toHaveBeenCalledOnce();
     expect(test.messages).toEqual([]);
