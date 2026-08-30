@@ -321,6 +321,9 @@ export function applyThreadDetailEvent(
         ...(event.payload.attachments !== undefined
           ? { attachments: event.payload.attachments }
           : {}),
+        ...(event.payload.sourceThreadId !== undefined
+          ? { sourceThreadId: event.payload.sourceThreadId }
+          : {}),
         turnId: event.payload.turnId,
         streaming: event.payload.streaming,
         createdAt: event.payload.createdAt,
