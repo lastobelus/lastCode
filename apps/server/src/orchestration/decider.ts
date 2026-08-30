@@ -1345,6 +1345,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.sourceThreadId === command.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A cross-thread message source must differ from its target thread.",
+        });
+      }
+      if (command.sourceThreadId !== undefined) {
+        yield* requireThread({
+          readModel,
+          command,
+          threadId: command.sourceThreadId,
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1383,6 +1396,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           role: command.message.role,
           text: command.message.text,
           attachments: command.message.attachments,
+          ...(command.sourceThreadId !== undefined
+            ? { sourceThreadId: command.sourceThreadId }
+            : {}),
           turnId: null,
           streaming: false,
           createdAt: command.createdAt,
