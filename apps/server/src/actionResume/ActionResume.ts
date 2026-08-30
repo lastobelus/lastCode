@@ -396,6 +396,16 @@ const make = Effect.gen(function* () {
     const protocol = protocolCaptureByRunId.get(runId);
     if (current?.runId !== runId || current.outcome !== "running" || protocol === undefined) return;
 
+    if (progressEquals(current.progress, progress)) {
+      protocol.lastObservedProgress = progress;
+      if (protocol.pendingProgress !== undefined) {
+        protocol.progressFlushGeneration += 1;
+        protocol.progressFlushScheduled = false;
+        delete protocol.pendingProgress;
+      }
+      return;
+    }
+
     if (
       progressEquals(protocol.lastObservedProgress, progress) &&
       protocol.pendingProgress === undefined

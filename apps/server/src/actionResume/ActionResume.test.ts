@@ -405,6 +405,27 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       }),
       [0, 1, 2, 3],
     );
+    yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: `${progressFrame("waiting", "Waiting for review", {
+        phase: "approval",
+        current: 3,
+        total: 3,
+        unit: "check",
+      })}${progressFrame("waiting", "Waiting for review", {
+        phase: "review",
+        detail: "Review is still pending",
+        current: 2,
+        total: 3,
+        unit: "check",
+      })}`,
+    });
+    yield* TestClock.adjust(1_000);
+    yield* Effect.yieldNow;
+    assert.equal(registry.getLatest(threadId)?.revision, 3);
+    assert.equal(registry.getLatest(threadId)?.progress?.phase, "review");
     assert.deepEqual(
       [
         ...new Set(
