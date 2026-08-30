@@ -15,16 +15,19 @@
       "runOnWorktreeCreate": true
     },
     {
+      "id": "lc-wait-for-pr",
       "name": "Wait for PR",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
       "icon": "test"
     },
     {
+      "id": "lc-local-ci",
       "name": "Run Quick CI",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
       "icon": "test"
     },
     {
+      "id": "lc-build-intel-package",
       "name": "Build Intel package (macOS)",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
       "icon": "build"
