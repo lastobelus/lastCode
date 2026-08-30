@@ -16,6 +16,7 @@ import {
   requiresReadyConfirmation,
   reviewThreadsArgs,
   samePullRequestRevision,
+  waitProgressKey,
   waitTimeoutClass,
   type ReviewState,
   type WaitObservation,
@@ -223,6 +224,16 @@ describe("lastcode-wait-for-pr", () => {
         observation({ ci: satisfiedCi, review: handledReview, mergeStateStatus: "UNKNOWN" }),
       ),
     ).toEqual({ kind: "wait", reason: "mergeability-pending" });
+  });
+
+  it("treats a changed wait reason as new progress even when the observation is unchanged", () => {
+    const unchangedObservation = "PR #87 head 1234567, CI pending, review pending";
+    expect(waitProgressKey("mergeability-pending", unchangedObservation)).not.toBe(
+      waitProgressKey("review-pending", unchangedObservation),
+    );
+    expect(waitProgressKey("review-pending", unchangedObservation)).toBe(
+      waitProgressKey("review-pending", unchangedObservation),
+    );
   });
 
   it("wakes when the exact head or base drifts without treating regenerated merge SHAs as drift", () => {
