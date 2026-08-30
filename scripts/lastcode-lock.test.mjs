@@ -23,9 +23,6 @@ function temporaryDirectory() {
   return directory;
 }
 
-// oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises Darwin O_EXLOCK owner-death behavior.
-const itMacOnly = process.platform === "darwin" ? it : it.skip;
-
 function spawnLockHolder(root) {
   const moduleUrl = new NodeURL.URL("./lastcode-lock.mjs", import.meta.url).href;
   const source = [
@@ -40,7 +37,7 @@ function spawnLockHolder(root) {
 }
 
 describe("LastCode portable update lock", () => {
-  itMacOnly("rejects a concurrent owner and recovers when that owner dies", async () => {
+  it("rejects a concurrent owner and recovers when that owner dies", async () => {
     const root = temporaryDirectory();
     const holder = spawnLockHolder(root);
     await NodeEvents.once(holder.stdout, "data");
@@ -50,7 +47,7 @@ describe("LastCode portable update lock", () => {
     );
 
     // This is the exact child spawned above, not a process located by pattern.
-    holder.kill("SIGKILL");
+    holder.kill();
     await NodeEvents.once(holder, "exit");
 
     const release = acquirePortableLock(root, "update.lock", "test");
