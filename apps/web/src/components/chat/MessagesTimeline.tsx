@@ -1317,7 +1317,7 @@ function AgentMessageTimelineRow({
   );
 }
 
-export function AgentMessageSourceTitle({
+function AgentMessageSourceTitle({
   sourceThreadId,
   sourceTitle,
   onOpenSourceThread,

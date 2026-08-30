@@ -1,10 +1,14 @@
 import { CheckpointRef, EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { codexFeedbackMessage } from "@t3tools/client-runtime/state/threads";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
-import { createRef, type ReactNode, type Ref } from "react";
+import { act, createRef, type ReactNode, type Ref } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
+import { Window } from "happy-dom";
+import { buildThreadRouteLocation } from "../../threadRoutes";
 
 const threadShellMockState = vi.hoisted(() => ({ available: true }));
 
@@ -160,8 +164,46 @@ function matchMedia() {
   };
 }
 
+function installBrowserGlobals(browser: Window) {
+  const values = {
+    window: browser,
+    document: browser.document,
+    navigator: browser.navigator,
+    Node: browser.Node,
+    Element: browser.Element,
+    HTMLElement: browser.HTMLElement,
+    HTMLIFrameElement: browser.HTMLIFrameElement,
+    Event: browser.Event,
+    MouseEvent: browser.MouseEvent,
+    MutationObserver: browser.MutationObserver,
+    ResizeObserver: browser.ResizeObserver,
+    getComputedStyle: browser.getComputedStyle.bind(browser),
+    requestAnimationFrame: browser.requestAnimationFrame.bind(browser),
+    cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  } as const;
+  const descriptors = new Map(
+    Object.keys(values).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+
+  for (const [key, value] of Object.entries(values)) {
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+
+  return {
+    restore() {
+      for (const [key, descriptor] of descriptors) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    },
+  };
+}
+
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
-let AgentMessageSourceTitle: typeof import("./MessagesTimeline").AgentMessageSourceTitle;
 
 beforeAll(async () => {
   const classList = {
@@ -195,7 +237,7 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline, AgentMessageSourceTitle } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -299,19 +341,56 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('download="handoff.pdf"');
   });
 
-  it("opens the source thread when its title is activated", () => {
+  it("navigates to the source thread when the rendered title is activated", async () => {
     const sourceThreadId = ThreadId.make("thread-source");
-    const onOpenSourceThread = vi.fn();
-    const sourceTitle = AgentMessageSourceTitle({
-      sourceThreadId,
-      sourceTitle: "Mobile Reconnect Issue",
-      onOpenSourceThread,
-    });
+    const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+    const navigate = vi.fn();
+    const browser = new Window({ url: "https://lastcode.test" });
+    const globals = installBrowserGlobals(browser);
+    const container = browser.document.createElement("div");
+    browser.document.body.append(container);
+    const root = createRoot(container as unknown as Element);
 
-    expect(sourceTitle.type).toBe("button");
-    sourceTitle.props.onClick?.();
-    expect(onOpenSourceThread).toHaveBeenCalledOnce();
-    expect(onOpenSourceThread).toHaveBeenCalledWith(sourceThreadId);
+    try {
+      await act(() => {
+        root.render(
+          <MessagesTimeline
+            {...buildProps()}
+            onOpenSourceThread={(threadId) => {
+              navigate(
+                buildThreadRouteLocation(scopeThreadRef(ACTIVE_THREAD_ENVIRONMENT_ID, threadId)),
+              );
+            }}
+            timelineEntries={[
+              {
+                ...entry,
+                message: { ...entry.message, sourceThreadId },
+              },
+            ]}
+          />,
+        );
+      });
+
+      const sourceLink = container.querySelector(
+        'button[aria-label="Open source thread: Mobile Reconnect Issue"]',
+      );
+      expect(sourceLink).not.toBeNull();
+      await act(() =>
+        sourceLink?.dispatchEvent(new browser.MouseEvent("click", { bubbles: true })),
+      );
+      expect(navigate).toHaveBeenCalledOnce();
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/$environmentId/$threadId",
+        params: {
+          environmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+          threadId: sourceThreadId,
+        },
+      });
+    } finally {
+      await act(() => root.unmount());
+      globals.restore();
+      await browser.close();
+    }
   });
 
   it("does not link to a source thread that is no longer available", () => {

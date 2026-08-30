@@ -230,7 +230,11 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
-import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
+import {
+  buildDraftThreadRouteParams,
+  buildThreadRouteLocation,
+  buildThreadRouteParams,
+} from "../threadRoutes";
 import {
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
@@ -1866,10 +1870,7 @@ function ChatViewContent(props: ChatViewProps) {
   const openAgentMessageSourceThread = useCallback(
     (threadId: ThreadId) => {
       if (!activeThread) return;
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(scopeThreadRef(activeThread.environmentId, threadId)),
-      });
+      void navigate(buildThreadRouteLocation(scopeThreadRef(activeThread.environmentId, threadId)));
     },
     [activeThread, navigate],
   );
