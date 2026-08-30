@@ -622,6 +622,7 @@ it.effect("prepares and dispatches an exact accepted send using the target threa
       commandId: CommandId.make("command-send"),
       messageId: MessageId.make("message-send"),
       createdAt: "2026-08-22T00:00:00.000Z",
+      sourceThreadId: ThreadId.make("thread-source"),
     });
 
     assert.deepStrictEqual(result, {
@@ -643,9 +644,34 @@ it.effect("prepares and dispatches an exact accepted send using the target threa
         },
         runtimeMode: "approval-required",
         interactionMode: "plan",
+        sourceThreadId: "thread-source",
         createdAt: "2026-08-22T00:00:00.000Z",
       },
     ]);
+  }),
+);
+
+it.effect("does not mark a send to the current thread as cross-thread", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    const dispatched: unknown[] = [];
+    yield* sendThreadOutput(
+      {
+        descriptor: source.descriptor,
+        shell: source.shell,
+        dispatch: (command) => Effect.sync(() => dispatched.push(command)),
+      },
+      {
+        identifier: "thread-runner",
+        message: "status",
+        commandId: CommandId.make("command-self-send"),
+        messageId: MessageId.make("message-self-send"),
+        createdAt: "2026-08-22T00:00:00.000Z",
+        sourceThreadId: ThreadId.make("thread-runner"),
+      },
+    );
+
+    assert.notProperty(dispatched[0] as object, "sourceThreadId");
   }),
 );
 
