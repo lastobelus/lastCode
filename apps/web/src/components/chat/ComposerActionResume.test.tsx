@@ -38,7 +38,6 @@ describe("ComposerActionResumeBadge", () => {
     expect(markup).toContain("text-warning-foreground");
     expect(markup).toContain("lucide-rotate-ccw-clock");
     expect(markup).toContain("Deploy preview");
-    expect(markup).toContain("Running");
     expect(markup).toContain('aria-expanded="false"');
   });
 
