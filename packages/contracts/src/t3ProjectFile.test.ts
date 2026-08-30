@@ -12,6 +12,7 @@ describe("T3ProjectFile", () => {
       iconPath: "assets/logo.svg",
       scripts: [
         {
+          id: "dev-server",
           name: "Dev",
           command: "pnpm dev",
           icon: "play",
@@ -25,6 +26,7 @@ describe("T3ProjectFile", () => {
 
     expect(decoded.iconPath).toBe("assets/logo.svg");
     expect(decoded.scripts).toHaveLength(2);
+    expect(decoded.scripts?.[0]?.id).toBe("dev-server");
     expect(decoded.scripts?.[1]).toEqual({ name: "Test", command: "pnpm test" });
   });
 
@@ -50,6 +52,12 @@ describe("T3ProjectFile", () => {
   it("rejects unknown script icons", () => {
     expect(() =>
       decode({ scripts: [{ name: "Dev", command: "pnpm dev", icon: "rocket" }] }),
+    ).toThrow();
+  });
+
+  it("rejects invalid stable script ids", () => {
+    expect(() =>
+      decode({ scripts: [{ id: "Dev Server", name: "Dev", command: "pnpm dev" }] }),
     ).toThrow();
   });
 
