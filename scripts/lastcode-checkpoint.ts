@@ -2,13 +2,19 @@
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Local Git orchestration intentionally uses host processes.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
-import { appendCheckpointRun, checkpointFailureRecord } from "./lastcode-checkpoint-history.ts";
+import {
+  appendCheckpointRun,
+  checkpointFailureRecord,
+  readLatestCheckpointRun,
+  type CheckpointRunRecord,
+} from "./lastcode-checkpoint-history.ts";
 import {
   checkpointTagFromNightlyTag,
   compareLastCodeInstallableTags,
@@ -40,6 +46,7 @@ interface CheckpointOptions {
   readonly pushTags: boolean;
   readonly smoke: boolean;
   readonly sourceRef: string;
+  readonly supersedeFailedRecovery: boolean;
   readonly upstreamRemote: string;
   readonly pushRemote: string;
 }
@@ -207,6 +214,290 @@ function splitLines(value: string): ReadonlyArray<string> {
     .filter(Boolean);
 }
 
+function splitNul(value: string): ReadonlyArray<string> {
+  return value.split("\0").filter(Boolean);
+}
+
+function isAutomationIgnoredPath(path: string): boolean {
+  return (
+    path === ".DS_Store" ||
+    path.endsWith("/.DS_Store") ||
+    path === ".agents/skills/babysit" ||
+    path.startsWith(".vite-hooks/") ||
+    path === "node_modules/" ||
+    path.endsWith("/node_modules/") ||
+    path.endsWith("/tsconfig.tsbuildinfo") ||
+    path === "apps/marketing/.astro/"
+  );
+}
+
+function unexpectedIgnoredRecoveryPaths(worktree: string): ReadonlyArray<string> {
+  return splitNul(
+    git(
+      worktree,
+      ["status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all"],
+      { cwd: worktree },
+    ),
+  )
+    .filter((entry) => entry.startsWith("!! "))
+    .map((entry) => entry.slice(3))
+    .filter((path) => !isAutomationIgnoredPath(path));
+}
+
+function hasInitializedRecoverySubmodules(worktree: string): boolean {
+  return Boolean(
+    git(worktree, ["submodule", "foreach", "--quiet", "--recursive", "printf x"], {
+      cwd: worktree,
+    }),
+  );
+}
+
+function trackedRecoveryPaths(worktree: string): ReadonlyArray<string> {
+  return splitNul(git(worktree, ["ls-files", "--cached", "-z"], { cwd: worktree }));
+}
+
+export function rebaseStateFiles(worktree: string): ReadonlyArray<string> {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  const state: Array<string> = [];
+  for (const directory of ["rebase-merge", "rebase-apply"]) {
+    const root = NodePath.join(gitDirectory, directory);
+    if (!NodeFS.existsSync(root)) continue;
+    state.push(`${directory}\0directory\0${(NodeFS.lstatSync(root).mode & 0o7777).toString(8)}`);
+    const visit = (path: string, relativePath: string) => {
+      for (const entry of NodeFS.readdirSync(path, { withFileTypes: true }).sort((left, right) =>
+        left.name.localeCompare(right.name),
+      )) {
+        const entryPath = NodePath.join(path, entry.name);
+        const entryRelativePath = NodePath.join(relativePath, entry.name);
+        const mode = (NodeFS.lstatSync(entryPath).mode & 0o7777).toString(8);
+        if (entry.isDirectory()) {
+          state.push(`${entryRelativePath}\0directory\0${mode}`);
+          visit(entryPath, entryRelativePath);
+        } else if (entry.isSymbolicLink()) {
+          state.push(`${entryRelativePath}\0symlink\0${mode}\0${NodeFS.readlinkSync(entryPath)}`);
+        } else {
+          state.push(
+            `${entryRelativePath}\0file\0${mode}\0${NodeFS.readFileSync(entryPath).toString("base64")}`,
+          );
+        }
+      }
+    };
+    visit(root, directory);
+  }
+  return state;
+}
+
+export function checkpointRecoveryFingerprint(worktree: string, recoveryBranch: string): string {
+  const hash = NodeCrypto.createHash("sha256");
+  const add = (label: string, value: string | Buffer) => {
+    hash.update(label);
+    hash.update("\0");
+    hash.update(value);
+    hash.update("\0");
+  };
+  add("branch", recoveryBranch);
+  add(
+    "active-branch",
+    git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+      allowFailure: true,
+      cwd: worktree,
+    }),
+  );
+  for (const ref of ["HEAD", "ORIG_HEAD", "REBASE_HEAD", `refs/heads/${recoveryBranch}`]) {
+    add(ref, git(worktree, ["rev-parse", "--verify", ref], { allowFailure: true, cwd: worktree }));
+  }
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  if (NodeFS.existsSync(NodePath.join(gitDirectory, "locked"))) {
+    throw new Error("A locked recovery worktree prevents automatic retirement.");
+  }
+  const worktreeConfig = NodePath.join(gitDirectory, "config.worktree");
+  if (NodeFS.existsSync(worktreeConfig)) {
+    const stat = NodeFS.lstatSync(worktreeConfig);
+    add("worktree-config-mode", (stat.mode & 0o7777).toString(8));
+    add(
+      "worktree-config",
+      stat.isSymbolicLink()
+        ? NodeFS.readlinkSync(worktreeConfig)
+        : NodeFS.readFileSync(worktreeConfig),
+    );
+  } else {
+    add("worktree-config", "missing");
+  }
+  if (hasInitializedRecoverySubmodules(worktree)) {
+    throw new Error("Initialized recovery submodules prevent automatic retirement.");
+  }
+  const hiddenIndexEntry = splitNul(
+    git(worktree, ["ls-files", "-v", "-z"], { cwd: worktree }),
+  ).find((entry) => entry.startsWith("S ") || /^[a-z] /u.test(entry));
+  if (hiddenIndexEntry) {
+    throw new Error(
+      `Hidden index flag on '${hiddenIndexEntry.slice(2)}' prevents automatic retirement.`,
+    );
+  }
+  add(
+    "status",
+    git(worktree, ["status", "--porcelain=v2", "-z", "--untracked-files=all"], { cwd: worktree }),
+  );
+  add(
+    "worktree-diff",
+    git(worktree, ["diff", "--binary", "--full-index", "--no-ext-diff"], { cwd: worktree }),
+  );
+  add(
+    "index-diff",
+    git(worktree, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"], {
+      cwd: worktree,
+    }),
+  );
+  const trackedPaths = trackedRecoveryPaths(worktree);
+  const trackedDirectories = new Set(["."]);
+  for (const relativePath of trackedPaths) {
+    let directory = NodePath.dirname(relativePath);
+    while (directory !== ".") {
+      trackedDirectories.add(directory);
+      directory = NodePath.dirname(directory);
+    }
+  }
+  for (const relativePath of [...trackedDirectories].sort()) {
+    const path = relativePath === "." ? worktree : NodePath.join(worktree, relativePath);
+    const stat = NodeFS.lstatSync(path);
+    add(
+      `tracked-directory:${relativePath}`,
+      `${stat.isDirectory() ? "directory" : "other"}\0${(stat.mode & 0o7777).toString(8)}`,
+    );
+  }
+  for (const relativePath of trackedPaths) {
+    const path = NodePath.join(worktree, relativePath);
+    try {
+      const stat = NodeFS.lstatSync(path);
+      const kind = stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : "file";
+      if (stat.isDirectory() && NodeFS.readdirSync(path).length > 0) {
+        throw new Error(
+          `Nonempty deinitialized gitlink '${relativePath}' prevents automatic retirement.`,
+        );
+      }
+      add(`tracked-mode:${relativePath}`, `${kind}\0${(stat.mode & 0o7777).toString(8)}`);
+      let content: string | Buffer = "";
+      if (stat.isSymbolicLink()) content = NodeFS.readlinkSync(path);
+      else if (!stat.isDirectory()) content = NodeFS.readFileSync(path);
+      add(`tracked-content:${relativePath}`, content);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        add(`tracked-mode:${relativePath}`, "missing");
+        continue;
+      }
+      throw error;
+    }
+  }
+  const untrackedPaths = splitLines(
+    git(worktree, ["ls-files", "--others", "--exclude-standard"], { cwd: worktree }),
+  );
+  if (untrackedPaths.length > 0) {
+    throw new Error(
+      `Untracked recovery path '${untrackedPaths[0]}' prevents automatic retirement.`,
+    );
+  }
+  const unexpectedIgnoredPath = unexpectedIgnoredRecoveryPaths(worktree)[0];
+  if (unexpectedIgnoredPath) {
+    throw new Error(
+      `Ignored recovery path '${unexpectedIgnoredPath}' prevents automatic retirement.`,
+    );
+  }
+  for (const state of rebaseStateFiles(worktree)) add("rebase-state", state);
+  return hash.digest("hex");
+}
+
+export function supersededRecoveryNightly(input: {
+  readonly latestNightly: NightlyTag | undefined;
+  readonly recoveryFingerprint: string | undefined;
+  readonly recoveryWorktreeExists: boolean;
+  readonly run: CheckpointRunRecord | undefined;
+}): NightlyTag | undefined {
+  const failedNightly = input.run ? parseNightlyTag(input.run.upstreamTag) : undefined;
+  if (
+    input.run?.status !== "failed" ||
+    (input.run.failurePhase !== "rebase" && input.run.failurePhase !== "smoke") ||
+    !input.run.recoveryBranch ||
+    input.run.recoveryBranch !== `sync/nightly/${input.run.upstreamTag}` ||
+    !input.run.recoveryFingerprint ||
+    input.run.recoveryFingerprint !== input.recoveryFingerprint ||
+    !input.recoveryWorktreeExists ||
+    !failedNightly ||
+    !input.latestNightly ||
+    compareNightlyTags(input.latestNightly, failedNightly) <= 0
+  ) {
+    return undefined;
+  }
+  return failedNightly;
+}
+
+export function recoverySupersessionMode(input: {
+  readonly dryRun: boolean;
+  readonly enabled: boolean;
+}): "disabled" | "preview" | "retire" {
+  if (!input.enabled) return "disabled";
+  return input.dryRun ? "preview" : "retire";
+}
+
+function retireSupersededRecovery(
+  repoRoot: string,
+  worktree: string,
+  runRecord: CheckpointRunRecord,
+): void {
+  const recoveryBranch = runRecord.recoveryBranch;
+  const expectedFingerprint = runRecord.recoveryFingerprint;
+  if (!recoveryBranch || !expectedFingerprint) {
+    throw new Error("Superseded recovery is missing its guarded cleanup metadata.");
+  }
+  const branchRef = `refs/heads/${recoveryBranch}`;
+  const branchCommit = git(repoRoot, ["rev-parse", "--verify", branchRef]);
+  if (checkpointRecoveryFingerprint(worktree, recoveryBranch) !== expectedFingerprint) {
+    throw new Error(`Recovery ${recoveryBranch} changed while supersession was being verified.`);
+  }
+  if (rebaseInProgress(worktree)) run(worktree, "git", ["rebase", "--abort"]);
+  const branch = git(worktree, ["branch", "--show-current"], { cwd: worktree });
+  if (branch !== recoveryBranch) {
+    throw new Error(`Recovery worktree changed branches before cleanup; found '${branch}'.`);
+  }
+  if (git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: worktree })) {
+    throw new Error(`Recovery ${recoveryBranch} is not clean after aborting its failed rebase.`);
+  }
+  run(repoRoot, "git", ["worktree", "remove", worktree]);
+  run(repoRoot, "git", ["update-ref", "-d", branchRef, branchCommit]);
+}
+
+function supersedeFailedRecovery(
+  repoRoot: string,
+  nightlyTags: ReadonlyArray<string>,
+  mode: "disabled" | "preview" | "retire",
+): NightlyTag | undefined {
+  if (mode === "disabled") return undefined;
+  const runRecord = readLatestCheckpointRun();
+  if (!runRecord?.recoveryBranch || !runRecord.recoveryFingerprint) return undefined;
+  const worktree = resolveAutomationWorktree(repoRoot);
+  const recoveryWorktreeExists = NodeFS.existsSync(worktree);
+  const latestNightly = resolveLatestNightlyTag(nightlyTags);
+  const failedNightly = supersededRecoveryNightly({
+    latestNightly,
+    recoveryFingerprint: recoveryWorktreeExists
+      ? checkpointRecoveryFingerprint(worktree, runRecord.recoveryBranch)
+      : undefined,
+    recoveryWorktreeExists,
+    run: runRecord,
+  });
+  if (!failedNightly || !latestNightly) return undefined;
+  if (mode === "retire") {
+    retireSupersededRecovery(repoRoot, worktree, runRecord);
+    console.log(
+      `[lastcode:checkpoint] Retired untouched recovery ${runRecord.recoveryBranch}; ${latestNightly.tag} supersedes ${failedNightly.tag}.`,
+    );
+  } else {
+    console.log(
+      `[lastcode:checkpoint] Dry run would retire untouched recovery ${runRecord.recoveryBranch}; ${latestNightly.tag} supersedes ${failedNightly.tag}.`,
+    );
+  }
+  return failedNightly;
+}
+
 function isAncestor(repoRoot: string, ancestor: string, descendant: string): boolean {
   const result = NodeChildProcess.spawnSync(
     "git",
@@ -331,6 +622,7 @@ export function resolveCheckpointPlan(input: {
   readonly sourceCheckpointTag?: string;
   readonly sourceNightlyTags: ReadonlyArray<string>;
   readonly sourceRef: string;
+  readonly supersedeThroughNightlyTag?: string;
 }): CheckpointPlan {
   const latestCheckpoint = input.checkpointRefs.at(-1);
   const sourceCheckpoint = input.checkpointRefs.find(
@@ -353,8 +645,13 @@ export function resolveCheckpointPlan(input: {
   if (!candidateBase) throw new Error("Could not resolve the LastCode checkpoint base.");
 
   const checkpointTags = input.checkpointRefs.map(({ checkpointTag }) => checkpointTag);
+  const supersedeThrough = input.supersedeThroughNightlyTag
+    ? parseNightlyTag(input.supersedeThroughNightlyTag)
+    : undefined;
   const missingNightlies = resolveUncheckpointedNightlies(input.nightlyTags, checkpointTags).filter(
-    (nightly) => compareNightlyTags(nightly, candidateBase) > 0,
+    (nightly) =>
+      compareNightlyTags(nightly, candidateBase) > 0 &&
+      (!supersedeThrough || compareNightlyTags(nightly, supersedeThrough) > 0),
   );
 
   return {
@@ -498,6 +795,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let pushTags = false;
   let smoke = true;
   let sourceRef = DEFAULT_SOURCE_REF;
+  let supersedeFailedRecovery = false;
   let upstreamRemote = DEFAULT_UPSTREAM_REMOTE;
   let pushRemote = DEFAULT_PUSH_REMOTE;
 
@@ -509,6 +807,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     else if (arg === "--mirror-upstream-main") mirrorUpstreamMain = true;
     else if (arg === "--no-smoke") smoke = false;
     else if (arg === "--push-tags") pushTags = true;
+    else if (arg === "--supersede-failed-recovery") supersedeFailedRecovery = true;
     else if (arg === "--promote") promotion = "always";
     else if (arg === "--promote-if-no-open-prs") promotion = "if-no-open-prs";
     else if (arg === "--source-ref" || arg === "--upstream-remote" || arg === "--push-remote") {
@@ -531,6 +830,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     pushTags,
     smoke,
     sourceRef,
+    supersedeFailedRecovery,
     upstreamRemote,
     pushRemote,
   };
@@ -971,6 +1271,14 @@ function main(argv: ReadonlyArray<string>): void {
     git(repoRoot, ["tag", "--merged", options.sourceRef, "--list", "v*-nightly.*"]),
   );
   const nightlyTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
+  const supersededNightly = supersedeFailedRecovery(
+    repoRoot,
+    nightlyTags,
+    recoverySupersessionMode({
+      dryRun: options.dryRun,
+      enabled: options.supersedeFailedRecovery,
+    }),
+  );
   const plan = resolveCheckpointPlan({
     checkpointRefs: checkpoints,
     nightlyTags,
@@ -978,6 +1286,7 @@ function main(argv: ReadonlyArray<string>): void {
     ...(sourceAncestor ? { sourceCheckpointTag: sourceAncestor.checkpointTag } : {}),
     sourceNightlyTags,
     sourceRef: options.sourceRef,
+    ...(supersededNightly ? { supersedeThroughNightlyTag: supersededNightly.tag } : {}),
   });
 
   console.log(`[lastcode:checkpoint] Source: ${plan.candidateRef}`);
@@ -1201,6 +1510,16 @@ function main(argv: ReadonlyArray<string>): void {
     completed = disposition.cleanup;
     if (attempt) {
       const finishedAtMs = Date.now();
+      let recoveryFingerprint: string | undefined;
+      if (disposition.recoveryBranch && (failurePhase === "rebase" || failurePhase === "smoke")) {
+        try {
+          recoveryFingerprint = checkpointRecoveryFingerprint(worktree, disposition.recoveryBranch);
+        } catch (fingerprintError) {
+          console.warn(
+            `[lastcode:checkpoint] Could not fingerprint retained recovery: ${fingerprintError instanceof Error ? fingerprintError.message : String(fingerprintError)}`,
+          );
+        }
+      }
       appendCheckpointRun(
         checkpointFailureRecord(
           {
@@ -1209,6 +1528,7 @@ function main(argv: ReadonlyArray<string>): void {
             ...(failurePhase ? { failurePhase } : {}),
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
+            ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
             startedAtMs: attempt.startedAtMs,
             upstreamTag: attempt.nightly.tag,
           },
