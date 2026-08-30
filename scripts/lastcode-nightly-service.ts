@@ -68,6 +68,7 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   readonly ifInstalled?: boolean;
   readonly intervalSeconds?: number;
   readonly recoveryThreadId?: string;
+  readonly trustedProjectActionIds?: ReadonlyArray<string>;
 } {
   const command = argv[0];
   if (
@@ -77,7 +78,7 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
     command !== "uninstall"
   ) {
     throw new Error(
-      "Usage: pnpm lastcode:checkpoint:service install --interval-seconds <seconds> [--recovery-thread <thread-id> | --no-recovery-thread] | run-now [--if-installed] | <status|uninstall>",
+      "Usage: pnpm lastcode:checkpoint:service install --interval-seconds <seconds> [--recovery-thread <thread-id> | --no-recovery-thread] [--trusted-project-action <lc-id>]... | run-now [--if-installed] | <status|uninstall>",
     );
   }
   if (command !== "install") {
@@ -92,6 +93,7 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   let clearRecoveryThread = false;
   let intervalSeconds: number | undefined;
   let recoveryThreadId: string | undefined;
+  const trustedProjectActionIds: string[] = [];
   for (let index = 1; index < argv.length; index += 1) {
     const option = argv[index];
     if (option === "--interval-seconds") {
@@ -125,6 +127,15 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
       clearRecoveryThread = true;
       continue;
     }
+    if (option === "--trusted-project-action") {
+      const value = argv[index + 1];
+      if (!value || !/^lc-[a-z0-9-]+$/u.test(value)) {
+        throw new Error("--trusted-project-action requires a stable lc-* Action id.");
+      }
+      trustedProjectActionIds.push(value);
+      index += 1;
+      continue;
+    }
     throw new Error(`Unknown install option '${option}'.`);
   }
   if (intervalSeconds === undefined) {
@@ -133,9 +144,33 @@ export function parseNightlyServiceArgs(argv: ReadonlyArray<string>): {
   return {
     command,
     intervalSeconds,
+    trustedProjectActionIds: [...new Set(trustedProjectActionIds)].toSorted(),
     ...(clearRecoveryThread ? { clearRecoveryThread: true } : {}),
     ...(recoveryThreadId ? { recoveryThreadId } : {}),
   } as const;
+}
+
+export function nextCheckpointSupervisorConfig(
+  current: unknown,
+  options: {
+    readonly clearRecoveryThread?: boolean;
+    readonly recoveryThreadId?: string;
+    readonly trustedProjectActionIds: ReadonlyArray<string>;
+  },
+): Record<string, unknown> {
+  const previous = current && typeof current === "object" ? current : {};
+  const previousRecoveryThreadId =
+    "recoveryThreadId" in previous && typeof previous.recoveryThreadId === "string"
+      ? previous.recoveryThreadId
+      : undefined;
+  const recoveryThreadId = options.clearRecoveryThread
+    ? undefined
+    : (options.recoveryThreadId ?? previousRecoveryThreadId);
+  return {
+    schemaVersion: 1,
+    ...(recoveryThreadId ? { recoveryThreadId } : {}),
+    trustedProjectActionIds: [...options.trustedProjectActionIds],
+  };
 }
 
 export function runNowArguments(service: string): ReadonlyArray<string> {
@@ -177,8 +212,14 @@ function run(
 }
 
 function main(argv: ReadonlyArray<string>): void {
-  const { clearRecoveryThread, command, ifInstalled, intervalSeconds, recoveryThreadId } =
-    parseNightlyServiceArgs(argv);
+  const {
+    clearRecoveryThread,
+    command,
+    ifInstalled,
+    intervalSeconds,
+    recoveryThreadId,
+    trustedProjectActionIds = [],
+  } = parseNightlyServiceArgs(argv);
   if (
     !shouldRunNightlyServiceCommand(
       command,
@@ -270,17 +311,19 @@ function main(argv: ReadonlyArray<string>): void {
   NodeFS.mkdirSync(supervisorDirectory, { recursive: true, mode: 0o700 });
   NodeFS.copyFileSync(NodePath.join(repoRoot, "scripts", SUPERVISOR_FILE), supervisorPath);
   NodeFS.chmodSync(supervisorPath, 0o700);
-  if (clearRecoveryThread) {
-    if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
-  } else if (recoveryThreadId) {
-    const temporaryConfigPath = `${supervisorConfigPath}.tmp`;
-    NodeFS.writeFileSync(
-      temporaryConfigPath,
-      `${JSON.stringify({ schemaVersion: 1, recoveryThreadId }, null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    NodeFS.renameSync(temporaryConfigPath, supervisorConfigPath);
-  }
+  const currentSupervisorConfig = NodeFS.existsSync(supervisorConfigPath)
+    ? JSON.parse(NodeFS.readFileSync(supervisorConfigPath, "utf8"))
+    : null;
+  const nextSupervisorConfig = nextCheckpointSupervisorConfig(currentSupervisorConfig, {
+    ...(clearRecoveryThread ? { clearRecoveryThread: true } : {}),
+    ...(recoveryThreadId ? { recoveryThreadId } : {}),
+    trustedProjectActionIds,
+  });
+  const temporaryConfigPath = `${supervisorConfigPath}.tmp`;
+  NodeFS.writeFileSync(temporaryConfigPath, `${JSON.stringify(nextSupervisorConfig, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  NodeFS.renameSync(temporaryConfigPath, supervisorConfigPath);
   NodeFS.writeFileSync(
     plistPath,
     renderLaunchAgentPlist({
