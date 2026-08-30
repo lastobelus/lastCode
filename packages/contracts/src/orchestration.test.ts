@@ -1278,6 +1278,30 @@ it.effect("rejects thread history imports without messages", () =>
   }),
 );
 
+it.effect("decodes atomic project script reconciliation commands", () =>
+  Effect.gen(function* () {
+    const reconcile = yield* decodeOrchestrationCommand({
+      type: "project.scripts.reconcile",
+      commandId: "cmd-project-scripts-reconcile",
+      projectId: "project-1",
+      expectedScripts: [],
+      scripts: [
+        {
+          id: "test",
+          name: "Test",
+          command: "pnpm test",
+          icon: "test",
+          runOnWorktreeCreate: false,
+        },
+      ],
+    });
+    assert.strictEqual(reconcile.type, "project.scripts.reconcile");
+    if (reconcile.type !== "project.scripts.reconcile") {
+      assert.fail("Expected project.scripts.reconcile.");
+    }
+    assert.strictEqual(reconcile.scripts[0]?.id, "test");
+  }),
+);
 it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects svg", () => {
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/png"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);
