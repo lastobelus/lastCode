@@ -307,6 +307,16 @@ export type ActionReportOutcome = typeof ActionReportOutcome.Type;
 
 const ActionReportShortText = TrimmedNonEmptyString.check(Schema.isMaxLength(280));
 const ActionReportDetailText = TrimmedNonEmptyString.check(Schema.isMaxLength(1_000));
+const ActionProgressSummary = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(280),
+  Schema.makeFilter(
+    (value) =>
+      [...value].every((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint > 31 && codePoint !== 127;
+      }) || "Action progress summaries must not contain control characters",
+  ),
+);
 const ActionReportUrl = TrimmedNonEmptyString.check(
   Schema.isMaxLength(2_048),
   Schema.makeFilter((value) => {
@@ -364,7 +374,7 @@ export type ActionProgressState = typeof ActionProgressState.Type;
 const ActionProgressFields = Schema.Struct({
   version: Schema.Literal(1),
   state: ActionProgressState,
-  summary: ActionReportShortText,
+  summary: ActionProgressSummary,
   phase: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(80))),
   detail: Schema.optional(ActionReportDetailText),
   current: Schema.optional(NonNegativeInt),
@@ -381,6 +391,21 @@ export const ActionProgress = ActionProgressFields.check(
   ),
 );
 export type ActionProgress = typeof ActionProgress.Type;
+
+/** Host-stamped progress persisted with the Action lifecycle state. */
+export const ActionResumeProgress = Schema.Struct({
+  ...ActionProgressFields.fields,
+  updatedAt: IsoDateTime,
+}).check(
+  Schema.makeFilter(
+    (progress) =>
+      progress.current === undefined ||
+      progress.total === undefined ||
+      progress.current <= progress.total ||
+      "Action progress current value cannot exceed its total",
+  ),
+);
+export type ActionResumeProgress = typeof ActionResumeProgress.Type;
 
 const ActionProtocolEventFields = Schema.Union([
   Schema.Struct({
@@ -422,8 +447,10 @@ export const ActionResumeState = Schema.Struct({
   finishedAt: Schema.NullOr(IsoDateTime),
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
+  /** Monotonic per-run lifecycle revision; absent persisted rows are revision zero. */
+  revision: Schema.optional(NonNegativeInt),
   /** Latest schema-validated progress emitted by a protocol-aware Action. */
-  progress: Schema.optional(ActionProgress),
+  progress: Schema.optional(ActionResumeProgress),
   /** Terminal domain result emitted by a protocol-aware Action. */
   report: Schema.optional(ActionReport),
 });

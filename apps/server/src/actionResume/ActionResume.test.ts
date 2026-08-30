@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  type ActionProgress,
   type ActionResumeState,
   EventId,
   ProjectId,
@@ -19,6 +20,7 @@ import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import {
   ACTION_EVENT_TOKEN_ENV,
   ACTION_RUN_ID_ENV,
@@ -123,15 +125,24 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   let terminalStatus: "running" | "exited" = "running";
   let failWrite = false;
   let admissionClosed = false;
+  let progressFlushed: Deferred.Deferred<void> | undefined;
   const admittedKinds: string[] = [];
   let terminalListener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
 
   const dependencies = Layer.mergeAll(
     Layer.mock(OrchestrationEngineService)({
       dispatch: (command) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           timeline.push(`dispatch:${command.type}`);
           dispatched.push(command);
+          if (
+            progressFlushed !== undefined &&
+            command.type === "thread.activity.append" &&
+            command.activity.kind === ActionResume.ACTION_RESUME_ACTIVITY_KIND &&
+            (command.activity.payload as ActionResumeState).progress?.phase === "review"
+          ) {
+            yield* Deferred.succeed(progressFlushed, undefined);
+          }
           return { sequence: dispatched.length };
         }),
       streamDomainEvents: Stream.never,
@@ -228,7 +239,10 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
   );
 
   return Effect.gen(function* () {
+    progressFlushed = yield* Deferred.make<void>();
     const service = yield* ActionResume.ActionResume;
+    // Let startup reconciliation settle while the registry is still empty.
+    yield* Effect.yieldNow;
     const listed = yield* service.listProjectActions({ threadId, providerInstanceId });
     assert.deepEqual(
       listed.map(({ id, resumeEligible }) => ({ id, resumeEligible })),
@@ -294,6 +308,16 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.isDefined(terminalListener);
     const startMarker = ActionResume.actionOutputMarker(running.runId, "start");
     const endMarker = ActionResume.actionOutputMarker(running.runId, "end");
+    const progressFrame = (
+      state: "working" | "waiting",
+      summary: string,
+      fields: Partial<Omit<ActionProgress, "version" | "state" | "summary">> = {},
+    ) =>
+      actionProtocolFrame({
+        runId: running.runId,
+        token: eventToken!,
+        event: { kind: "progress", progress: { version: 1, state, summary, ...fields } },
+      });
     const resultFrame = actionProtocolFrame({
       runId: running.runId,
       token: eventToken!,
@@ -317,8 +341,105 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       type: "output",
       threadId,
       terminalId: running.terminalId,
-      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${resultFrame}${endMarker}prompt`,
+      data: `${startMarker.slice(-2)}QA failed: \u001b[31mexpected 2, received 3\u001b[0m\n${progressFrame("working", "Running checks")}${progressFrame("working", "Running checks")}${progressFrame("working", "Running tests")}${progressFrame("waiting", "Waiting for review", { phase: "ci", current: 1, total: 3, unit: "check" })}${resultFrame}${endMarker}prompt`,
     });
+    const registry = yield* ThreadActionResume.ThreadActionResumeService;
+    assert.deepInclude(registry.getLatest(threadId), {
+      outcome: "running",
+      revision: 2,
+    });
+    assert.equal(registry.getLatest(threadId)?.progress?.state, "waiting");
+    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Waiting for review");
+    assert.deepEqual(
+      dispatched.flatMap((command) => {
+        if (
+          command.type !== "thread.activity.append" ||
+          command.activity.kind !== ActionResume.ACTION_RESUME_ACTIVITY_KIND
+        ) {
+          return [];
+        }
+        const payload = command.activity.payload as ActionResumeState;
+        return payload.runId === running.runId && payload.outcome === "running"
+          ? [payload.revision]
+          : [];
+      }),
+      [0, 1, 2],
+    );
+    yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: progressFrame("waiting", "Waiting for review", {
+        phase: "review",
+        detail: "Review is still pending",
+        current: 2,
+        total: 3,
+        unit: "check",
+      }),
+    });
+    yield* TestClock.adjust(999);
+    assert.equal(registry.getLatest(threadId)?.progress?.summary, "Waiting for review");
+    yield* TestClock.adjust(1);
+    yield* Deferred.await(progressFlushed);
+    assert.deepInclude(registry.getLatest(threadId)?.progress, {
+      state: "waiting",
+      summary: "Waiting for review",
+      phase: "review",
+      detail: "Review is still pending",
+      current: 2,
+      total: 3,
+      unit: "check",
+    });
+    assert.deepEqual(
+      dispatched.flatMap((command) => {
+        if (
+          command.type !== "thread.activity.append" ||
+          command.activity.kind !== ActionResume.ACTION_RESUME_ACTIVITY_KIND
+        ) {
+          return [];
+        }
+        const payload = command.activity.payload as ActionResumeState;
+        return payload.runId === running.runId && payload.outcome === "running"
+          ? [payload.revision]
+          : [];
+      }),
+      [0, 1, 2, 3],
+    );
+    yield* terminalListener!({
+      type: "output",
+      threadId,
+      terminalId: running.terminalId,
+      data: `${progressFrame("waiting", "Waiting for review", {
+        phase: "approval",
+        current: 3,
+        total: 3,
+        unit: "check",
+      })}${progressFrame("waiting", "Waiting for review", {
+        phase: "review",
+        detail: "Review is still pending",
+        current: 2,
+        total: 3,
+        unit: "check",
+      })}`,
+    });
+    yield* TestClock.adjust(1_000);
+    yield* Effect.yieldNow;
+    assert.equal(registry.getLatest(threadId)?.revision, 3);
+    assert.equal(registry.getLatest(threadId)?.progress?.phase, "review");
+    assert.deepEqual(
+      [
+        ...new Set(
+          dispatched.flatMap((command) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === ActionResume.ACTION_RESUME_ACTIVITY_KIND &&
+            (command.activity.payload as ActionResumeState).runId === running.runId
+              ? [command.activity.id]
+              : [],
+          ),
+        ),
+      ],
+      [`action-resume:${running.runId}`],
+    );
     yield* terminalListener!({
       type: "exited",
       threadId,
@@ -349,7 +470,6 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
     assert.equal(turnStarts[0]?.runtimeMode, thread.runtimeMode);
     assert.equal(turnStarts[0]?.interactionMode, thread.interactionMode);
 
-    const registry = yield* ThreadActionResume.ThreadActionResumeService;
     assert.deepInclude(registry.getLatest(threadId), {
       outcome: "succeeded",
       delivery: "delivered",
@@ -437,7 +557,12 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       outcome: "succeeded",
       delivery: "delivered",
     });
-  }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provideMerge(dependencies))), Effect.scoped);
+  }).pipe(
+    Effect.provide(
+      ActionResume.layer.pipe(Layer.provideMerge(Layer.merge(dependencies, TestClock.layer()))),
+    ),
+    Effect.scoped,
+  );
 });
 
 it.effect("requires an explicit resume after a running Action is found on startup", () =>

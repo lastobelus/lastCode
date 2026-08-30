@@ -1,4 +1,10 @@
-import { ActionReport, type ActionReport as ActionReportType } from "@t3tools/contracts";
+import {
+  ActionReport,
+  ActionResumeOutcome,
+  type ActionReport as ActionReportType,
+  type ActionResumeOutcome as ActionResumeOutcomeType,
+  type ActionResumeState,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -16,6 +22,9 @@ const ActionInspectionReference = Schema.Struct({
   runId: Schema.String.check(Schema.isNonEmpty()),
 });
 const decodeActionReportJson = Schema.decodeUnknownOption(Schema.fromJsonString(ActionReport));
+const decodeActionResumeOutcomeJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(ActionResumeOutcome),
+);
 const decodeLegacyCompactResultJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(LegacyCompactResult),
 );
@@ -31,6 +40,7 @@ export interface ActionResumeFollowUp {
   readonly actionId: string;
   readonly runId: string | null;
   readonly validatedStatus: string;
+  readonly lifecycleOutcome: ActionResumeOutcomeType | null;
   readonly exitCode: number | null;
   readonly report: ActionReportType | null;
   readonly output: string;
@@ -43,6 +53,7 @@ export function formatActionResumeFollowUp(input: {
   readonly actionId: string;
   readonly runId: string;
   readonly validatedStatus: string;
+  readonly lifecycleOutcome: ActionResumeOutcomeType;
   readonly exitCode: number | null;
   readonly report: ActionReportType | undefined;
   readonly output: string | undefined;
@@ -53,6 +64,7 @@ export function formatActionResumeFollowUp(input: {
     `Action identity: ${JSON.stringify({ name: input.actionName, id: input.actionId })}`,
     `Run identity: ${JSON.stringify(input.runId)}`,
     `Validated status: ${input.validatedStatus}.`,
+    `Lifecycle outcome: ${JSON.stringify(input.lifecycleOutcome)}`,
     `Exit code: ${input.exitCode ?? "unavailable"}`,
     `${ACTION_COMPACT_RESULT_PREFIX}${JSON.stringify(input.report ?? { summary: outputSummary })}`,
     `${ACTION_INSPECTION_PREFIX}${JSON.stringify({ tool: "inspect_action_run", runId: input.runId })}`,
@@ -69,14 +81,25 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
   if (actionIdentity && runIdentityMatch) {
     const runId = parseJsonString(runIdentityMatch[1] ?? "");
     const statusMatch = /^Validated status: (.*)\.$/.exec(lines[3] ?? "");
-    const exitCodeMatch = /^Exit code: (-?\d+|unavailable)$/.exec(lines[4] ?? "");
-    const compact = (lines[5] ?? "").startsWith(ACTION_COMPACT_RESULT_PREFIX)
-      ? (lines[5] ?? "").slice(ACTION_COMPACT_RESULT_PREFIX.length)
+    const lifecycleMatch = /^Lifecycle outcome: (.*)$/.exec(lines[4] ?? "");
+    const lifecycleOutcome = lifecycleMatch
+      ? Option.getOrNull(decodeActionResumeOutcomeJson(lifecycleMatch[1] ?? ""))
       : null;
-    const inspection = (lines[6] ?? "").startsWith(ACTION_INSPECTION_PREFIX)
-      ? (lines[6] ?? "").slice(ACTION_INSPECTION_PREFIX.length)
+    const exitCodeMatch = /^Exit code: (-?\d+|unavailable)$/.exec(lines[5] ?? "");
+    const compact = (lines[6] ?? "").startsWith(ACTION_COMPACT_RESULT_PREFIX)
+      ? (lines[6] ?? "").slice(ACTION_COMPACT_RESULT_PREFIX.length)
       : null;
-    if (runId === null || !statusMatch || !exitCodeMatch || compact === null || !inspection) {
+    const inspection = (lines[7] ?? "").startsWith(ACTION_INSPECTION_PREFIX)
+      ? (lines[7] ?? "").slice(ACTION_INSPECTION_PREFIX.length)
+      : null;
+    if (
+      runId === null ||
+      !statusMatch ||
+      lifecycleOutcome === null ||
+      !exitCodeMatch ||
+      compact === null ||
+      !inspection
+    ) {
       return null;
     }
     const report = Option.getOrNull(decodeActionReportJson(compact));
@@ -91,6 +114,7 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
       actionId: actionIdentity.id,
       runId,
       validatedStatus: statusMatch[1]!,
+      lifecycleOutcome,
       exitCode: exitCodeMatch[1] === "unavailable" ? null : Number(exitCodeMatch[1]),
       report,
       output: summary,
@@ -122,6 +146,7 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
     actionId: actionIdentity.id,
     runId: null,
     validatedStatus: statusMatch[1]!,
+    lifecycleOutcome: inferLegacyLifecycleOutcome(statusMatch[1]!, exitCodeMatch),
     exitCode: exitCodeMatch
       ? exitCodeMatch[1] === "unavailable"
         ? null
@@ -135,6 +160,83 @@ export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | 
     output,
     lastOutputLine,
     detailedOutputAvailable: false,
+  };
+}
+
+function inferLegacyLifecycleOutcome(
+  validatedStatus: string,
+  exitCodeMatch: RegExpExecArray | null,
+): ActionResumeOutcomeType | null {
+  if (validatedStatus === "succeeded" || exitCodeMatch?.[1] === "0") return "succeeded";
+  if (validatedStatus.startsWith("failed")) {
+    return "failed";
+  }
+  if (validatedStatus.includes("cancelled by the user")) return "cancelled_by_user";
+  if (validatedStatus.includes("interrupted because LastCode stopped")) return "process_lost";
+  return null;
+}
+
+export type ActionResultPresentationOutcome =
+  | "success"
+  | "attention"
+  | "blocked"
+  | "error"
+  | "cancelled";
+
+export function actionRunningPresentation(
+  action: Pick<ActionResumeState, "actionName" | "progress">,
+): {
+  readonly state: "working" | "waiting";
+  readonly label: "Working" | "Waiting";
+  readonly summary: string;
+} {
+  const state = action.progress?.state ?? "waiting";
+  return {
+    state,
+    label: state === "working" ? "Working" : "Waiting",
+    summary: action.progress?.summary ?? action.actionName,
+  };
+}
+
+export function actionResultPresentation(
+  followUp: Pick<
+    ActionResumeFollowUp,
+    "lifecycleOutcome" | "validatedStatus" | "exitCode" | "report" | "lastOutputLine"
+  >,
+): {
+  readonly outcome: ActionResultPresentationOutcome;
+  readonly label: string;
+  readonly summary: string;
+} {
+  const summary = followUp.report?.summary ?? followUp.lastOutputLine;
+  if (followUp.lifecycleOutcome === "succeeded") {
+    switch (followUp.report?.outcome) {
+      case "attention":
+        return { outcome: "attention", label: "Needs attention", summary };
+      case "blocked":
+        return { outcome: "blocked", label: "Blocked", summary };
+      case "success":
+      case undefined:
+        return { outcome: "success", label: "Succeeded", summary };
+    }
+  }
+  if (
+    followUp.lifecycleOutcome === "cancelled_by_user" ||
+    followUp.lifecycleOutcome === "cancelled_by_archive" ||
+    followUp.lifecycleOutcome === "cancelled_by_shutdown"
+  ) {
+    return { outcome: "cancelled", label: "Cancelled", summary };
+  }
+  if (followUp.lifecycleOutcome === "process_lost") {
+    return { outcome: "error", label: "Interrupted", summary };
+  }
+  if (followUp.lifecycleOutcome === "failed" || (followUp.exitCode ?? 0) !== 0) {
+    return { outcome: "error", label: "Failed", summary };
+  }
+  return {
+    outcome: "attention",
+    label: followUp.validatedStatus,
+    summary,
   };
 }
 

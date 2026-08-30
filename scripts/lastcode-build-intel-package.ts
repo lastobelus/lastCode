@@ -67,6 +67,11 @@ export interface BuildIntelDependencies {
   readonly removeRequest: (requestToken: string) => void;
   readonly withRequestLock: <T>(operation: () => T) => T;
   readonly log: (message: string) => void;
+  readonly progress?: (input: {
+    readonly state: "working" | "waiting";
+    readonly phase: string;
+    readonly summary: string;
+  }) => void;
   readonly registrationTimeoutMs: number;
   readonly registrationPollMs: number;
   readonly runTimeoutMs: number;
@@ -313,6 +318,7 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
     removeRequest: removeRequestFile,
     withRequestLock: withRequestFileLock,
     log: (message) => console.log(message),
+    progress: (progress) => lastCodeAction.progress(progress),
     registrationTimeoutMs: REGISTRATION_TIMEOUT_MS,
     registrationPollMs: REGISTRATION_POLL_MS,
     runTimeoutMs: RUN_TIMEOUT_MS,
@@ -350,6 +356,11 @@ async function waitForRegistration(
   request: BuildRequest,
   dependencies: BuildIntelDependencies,
 ): Promise<WorkflowRun> {
+  dependencies.progress?.({
+    state: "waiting",
+    phase: "registration",
+    summary: "Waiting for GitHub to register the workflow",
+  });
   const deadline = dependencies.now() + dependencies.registrationTimeoutMs;
   while (true) {
     const run = findCorrelatedRun(request, dependencies.listWorkflowRuns());
@@ -373,6 +384,11 @@ async function waitForCompletion(
   while (run.status !== "completed") {
     if (run.status !== previousStatus) {
       dependencies.log(`[build-intel] Workflow ${run.databaseId} is ${run.status}: ${run.url}`);
+      dependencies.progress?.({
+        state: "waiting",
+        phase: "workflow",
+        summary: `Workflow is ${run.status}`,
+      });
       previousStatus = run.status;
     }
     if (dependencies.now() >= deadline) {
@@ -389,6 +405,11 @@ async function waitForCompletion(
 export async function runSelectedIntelBuild(
   dependencies: BuildIntelDependencies = createBuildIntelDependencies(),
 ): Promise<BuildIntelResult> {
+  dependencies.progress?.({
+    state: "working",
+    phase: "dispatch",
+    summary: "Preparing the Intel package workflow",
+  });
   dependencies.verifyWorkflow();
 
   let { request, run } = dependencies.withRequestLock(() => {

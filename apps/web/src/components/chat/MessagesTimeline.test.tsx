@@ -244,6 +244,7 @@ describe("MessagesTimeline", () => {
       actionId: "run-full-ci",
       runId: "run-full-ci-1",
       validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
       exitCode: 0,
       report: undefined,
       output: "full output hidden while collapsed\n[lastcode:ci] Summary: all checks passed",
@@ -256,13 +257,11 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Action completed: Run Full CI Status: 0");
+    expect(markup).toContain("Succeeded: Run Full CI");
     expect(markup).toContain("[lastcode:ci] Summary: all checks passed");
     expect(markup).not.toContain("full output hidden while collapsed");
     expect(markup).not.toContain('aria-expanded="false"');
     expect(markup).toContain("Detailed output retained in the Action terminal.");
-    expect(markup).toContain("border-warning/28 bg-warning/8");
-    expect(markup).toContain("text-warning-foreground");
   });
 
   it("shows the validated outcome when an Action has no exit code", () => {
@@ -271,6 +270,7 @@ describe("MessagesTimeline", () => {
       actionId: "wait-for-pr",
       runId: "wait-for-pr-1",
       validatedStatus: "was cancelled by the user",
+      lifecycleOutcome: "cancelled_by_user",
       exitCode: null,
       report: undefined,
       output: "Cancellation requested.",
@@ -283,8 +283,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Action completed: Wait for PR Status: was cancelled by the user");
-    expect(markup).not.toContain("Status: unavailable");
+    expect(markup).toContain("Cancelled: Wait for PR");
   });
 
   it("renders a feedback command and its pending response as normal thread messages", () => {

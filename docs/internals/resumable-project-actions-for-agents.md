@@ -96,6 +96,13 @@ lastCodeAction.result({
 });
 ```
 
+Emit progress only when the current phase or useful summary changes. Use `working` while the
+command is actively doing work and `waiting` while it is blocked on an external condition. LastCode
+trims and validates authored fields, ignores exact state/summary duplicates, accepts at most one
+same-state update per second, and caps each run at 128 persisted progress updates. A state
+transition is accepted immediately. The server stamps the update time and lifecycle revision so
+live, remote, and restart-hydrated clients agree on the latest state.
+
 Use `success` when the intended condition was reached, `attention` when the Action observed work or
 a decision for the caller, and `blocked` when progress needs a user or external-state change. A
 script crash, nonzero exit, cancellation, or lost process remains a host lifecycle outcome; do not
@@ -206,6 +213,7 @@ Before relying on a new resumable Action, confirm:
 - Failure and timeout paths exit instead of printing a misleading success.
 - A protocol-aware Action emits one concise, actionable result; a legacy Action prints the same
   summary as its final output line.
+- Progress changes describe coarse `working` and `waiting` phases instead of streaming log lines.
 - `t3.json` contains the importable definition without secrets.
 - Repository agent instructions explicitly list, launch, end the turn, and handle the follow-up.
 - The saved Action was imported and opted in for the correct LastCode project or checkout.
