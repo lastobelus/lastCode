@@ -125,21 +125,27 @@ Those operations remain visible in the agent turn.
 
 ## 6. Make the compact result useful
 
-Long terminal output is available after expansion, but the compact card shows the final output
-line. End with one machine-readable or consistently structured summary containing:
+Long terminal output remains available for inspection, but a protocol-aware Action should send one
+compact result through the Action reporter containing:
 
 - why the Action stopped;
 - the exact target identity;
 - the final external state; and
 - a URL or other useful artifact identifier.
 
-For example:
+For example, LastCode repository scripts use:
 
-```text
-[wait-for-pr] Summary: {"reason":"ready","pr":42,"head":"abc123","ci":"passed","review":"complete"}
+```ts
+lastCodeAction.result({
+  outcome: "success",
+  reason: "ready",
+  summary: "CI and review are ready for pull request 42",
+  subject: { type: "pull-request", id: "42", revision: "abc123", url: pullRequestUrl },
+  facts: { ci: "passed", review: "complete" },
+});
 ```
 
-Avoid putting a progress line after the summary, including cleanup messages from shell traps.
+Existing unstructured Actions should retain their useful final summary line while they migrate.
 
 ## 7. Declare and configure the Action
 
