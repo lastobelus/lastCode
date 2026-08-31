@@ -178,6 +178,33 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
   };
 }
 
+export function buildBulkThreadDeleteContextMenuItem(input: {
+  count: number;
+  hasPersistentThread: boolean;
+}): ContextMenuItem<"delete"> {
+  return {
+    id: "delete",
+    label: input.hasPersistentThread
+      ? `Delete (${input.count}) (disable persistence first)`
+      : `Delete (${input.count})`,
+    destructive: true,
+    disabled: input.hasPersistentThread,
+  };
+}
+
+export function collectUnprotectedBulkThreadEntries<
+  TEntry extends { readonly thread: { readonly persistent?: boolean | undefined } },
+>(input: {
+  threadKeys: readonly string[];
+  getEntry: (threadKey: string) => TEntry | undefined;
+}): readonly TEntry[] | null {
+  const entries = input.threadKeys.flatMap((threadKey) => {
+    const entry = input.getEntry(threadKey);
+    return entry ? [entry] : [];
+  });
+  return entries.some((entry) => entry.thread.persistent === true) ? null : entries;
+}
+
 export interface ThreadStatusPill {
   label:
     | "Working"
