@@ -107,6 +107,7 @@ export const ThreadListResult = Schema.Struct({
     Schema.Struct({
       ...ThreadIdentity.fields,
       title: Schema.String,
+      persistent: Schema.Boolean,
       lifecycle: Schema.String,
       project: ThreadProject,
       workspace: ThreadWorkspace,
@@ -120,6 +121,7 @@ export const ThreadReadResult = Schema.Struct({
   kind: Schema.Literal("read"),
   ...ThreadIdentity.fields,
   title: Schema.String,
+  persistent: Schema.Boolean,
   lifecycle: Schema.String,
   project: ThreadProject,
   workspace: ThreadWorkspace,
@@ -621,7 +623,9 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   const now = DateTime.formatIso(yield* DateTime.now);
   const sortedThreads = source.shell.threads.toSorted(
     (left, right) =>
-      right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
+      Number(right.persistent === true) - Number(left.persistent === true) ||
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      left.id.localeCompare(right.id),
   );
   const threadsTruncated = sortedThreads.length > THREAD_LIST_MAX_RESULTS;
   return yield* decodeThreadListResult({
@@ -636,6 +640,7 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
         environmentId: source.descriptor.environmentId,
         threadId: thread.id,
         title: thread.title,
+        persistent: thread.persistent === true,
         lifecycle: threadLifecycle(thread, { now }),
         project: projectOutput(project),
         workspace: workspaceOutput(project, thread),
@@ -665,6 +670,7 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
     environmentId: source.descriptor.environmentId,
     threadId: resolution.thread.id,
     title: resolution.thread.title,
+    persistent: resolution.thread.persistent === true,
     lifecycle: threadLifecycle(resolution.thread, { now }),
     project: projectOutput(project),
     workspace: workspaceOutput(project, resolution.thread),
