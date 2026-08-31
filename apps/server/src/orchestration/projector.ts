@@ -22,6 +22,7 @@ import {
   ProjectMetaUpdatedPayload,
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
+  ThreadPersistenceChangedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadWorktreeCleanupUpdatedPayload,
@@ -353,6 +354,7 @@ export function projectEvent(
             unsettledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
+            persistent: false,
             annotation: null,
             worktreeCleanup: null,
             deletedAt: null,
@@ -421,6 +423,27 @@ export function projectEvent(
             archivedAt: null,
             updatedAt: payload.updatedAt,
           }),
+        })),
+      );
+
+    case "thread.persistence-changed":
+      return decodeForEvent(
+        ThreadPersistenceChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: nextBase.threads.map((thread) =>
+            thread.id === payload.threadId || thread.id === payload.replacedThreadId
+              ? {
+                  ...thread,
+                  persistent: thread.id === payload.persistentThreadId,
+                  updatedAt: payload.updatedAt,
+                }
+              : thread,
+          ),
         })),
       );
 
