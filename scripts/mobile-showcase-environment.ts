@@ -843,12 +843,15 @@ function seedDatabase(
       );
     }
 
-    for (const [index, projector] of PROJECTOR_NAMES.entries()) {
+    // Directly seeded projections have no matching domain events. Start every
+    // cursor at the empty event store so the first real product command is
+    // projected instead of being mistaken for already-applied history.
+    for (const projector of PROJECTOR_NAMES) {
       database
         .prepare(
           "INSERT INTO projection_state (projector, last_applied_sequence, updated_at) VALUES (?, ?, ?)",
         )
-        .run(projector, index + 1, minutesBefore(now, 1));
+        .run(projector, 0, minutesBefore(now, 1));
     }
     database.exec("COMMIT");
   } catch (error) {
