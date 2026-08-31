@@ -7539,12 +7539,25 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           updatedAt: now,
         },
       };
+      const trailingMessageEvent: OrchestrationEvent = {
+        sequence: 2,
+        eventId: EventId.make("event-after-persistence-transfer"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.message-sent",
+        payload: {} as never,
+      };
 
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
-            latestSequence: Effect.succeed(1),
-            readEvents: () => Stream.make(event),
+            latestSequence: Effect.succeed(2),
+            readEvents: () => Stream.make(event, trailingMessageEvent),
           },
           projectionSnapshotQuery: {
             getThreadShellById: (requestedId) =>
@@ -7574,6 +7587,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(first?.kind, "thread-upserted");
       if (first?.kind !== "thread-upserted") return;
       assert.equal(first.thread.id, threadId);
+      assert.equal(first.sequence, 2);
       assert.isTrue(first.thread.persistent);
       assert.deepEqual(
         first.relatedThreads?.map((thread) => [thread.id, thread.persistent]),
