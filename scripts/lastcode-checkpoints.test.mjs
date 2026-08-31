@@ -15,6 +15,7 @@ import {
   latestPublishedInstallableTag,
   parseRebaseRange,
   parseOptions,
+  persistentThreadRepairStatus,
   parseRemotePublicationState,
   parseRemoteUpstreamTags,
   parseTrailers,
@@ -33,7 +34,36 @@ describe("LastCode checkpoint dashboard", () => {
     expect(parseOptions([]).count).toBe(8);
     expect(parseOptions(["-n", "12"]).count).toBe(12);
     expect(parseOptions(["--verbose"]).verbose).toBe(true);
+    expect(parseOptions(["--repair-persistent-thread"]).repairPersistentThread).toBe(true);
     expect(() => parseOptions(["-n", "0"])).toThrow("Invalid checkpoint count");
+  });
+
+  it("detects stale and unprotected recovery thread configuration", () => {
+    const config = { schemaVersion: 1, recoveryThreadId: "thread-old" };
+    expect(persistentThreadRepairStatus(config, [])).toEqual({
+      kind: "stale",
+      configuredId: "thread-old",
+    });
+    expect(persistentThreadRepairStatus(config, null)).toEqual({
+      kind: "unavailable",
+      configuredId: "thread-old",
+    });
+    expect(
+      persistentThreadRepairStatus(config, [
+        { threadId: "thread-old", title: "Old", persistent: false },
+        { threadId: "thread-new", title: "Maintenance", persistent: true },
+      ]),
+    ).toEqual({
+      kind: "not-persistent",
+      configuredId: "thread-old",
+      replacementId: "thread-new",
+      replacementTitle: "Maintenance",
+    });
+    expect(
+      persistentThreadRepairStatus(config, [
+        { threadId: "thread-old", title: "Maintenance", persistent: true },
+      ]),
+    ).toEqual({ kind: "healthy", configuredId: "thread-old" });
   });
 
   it("parses checkpoint metadata trailers", () => {
