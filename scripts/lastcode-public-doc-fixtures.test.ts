@@ -285,6 +285,13 @@ it("runs the public-doc fixture lifecycle in isolated state", async () => {
         .prepare("SELECT COUNT(*) AS count FROM projection_threads WHERE project_id = ?")
         .get(PUBLIC_DOCS_PROJECT_ID) as { readonly count: number };
       assert.equal(row.count, PUBLIC_DOCS_THREADS.length);
+
+      const projectionState = database
+        .prepare(
+          "SELECT MIN(last_applied_sequence) AS minimum, MAX(last_applied_sequence) AS maximum FROM projection_state",
+        )
+        .get() as { readonly minimum: number; readonly maximum: number };
+      assert.deepEqual(projectionState, { minimum: 0, maximum: 0 });
     } finally {
       database.close();
     }
