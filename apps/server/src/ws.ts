@@ -314,7 +314,6 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
       | "thread.turn-diff-completed"
       | "thread.reverted"
       | "thread.session-set"
-      | "thread.persistence-changed"
       | "thread.annotation-upserted"
       | "thread.annotation-resolved"
       | "thread.annotation-reopened";
@@ -327,20 +326,10 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
     event.type === "thread.turn-diff-completed" ||
     event.type === "thread.reverted" ||
     event.type === "thread.session-set" ||
-    event.type === "thread.persistence-changed" ||
     event.type === "thread.annotation-upserted" ||
     event.type === "thread.annotation-resolved" ||
     event.type === "thread.annotation-reopened"
   );
-}
-
-export function isThreadDetailEventForThread(
-  event: OrchestrationEvent,
-  threadId: ThreadId,
-): event is Extract<OrchestrationEvent, { aggregateKind: "thread" }> {
-  if (!isThreadDetailEvent(event)) return false;
-  if (event.aggregateKind === "thread" && event.aggregateId === threadId) return true;
-  return event.type === "thread.persistence-changed" && event.payload.replacedThreadId === threadId;
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
@@ -1587,7 +1576,9 @@ const makeWsRpcLayer = (
             ORCHESTRATION_WS_METHODS.subscribeThread,
             Effect.gen(function* () {
               const isThisThreadDetailEvent = (event: OrchestrationEvent) =>
-                isThreadDetailEventForThread(event, input.threadId);
+                event.aggregateKind === "thread" &&
+                event.aggregateId === input.threadId &&
+                isThreadDetailEvent(event);
 
               const liveStream = orchestrationEngine.streamDomainEvents.pipe(
                 Stream.filter(isThisThreadDetailEvent),

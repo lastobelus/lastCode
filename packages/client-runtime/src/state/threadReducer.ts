@@ -126,19 +126,6 @@ export function applyThreadDetailEvent(
         thread: { ...thread, archivedAt: null, updatedAt: event.payload.updatedAt },
       };
 
-    case "thread.persistence-changed":
-      if (thread.id !== event.payload.threadId && thread.id !== event.payload.replacedThreadId) {
-        return { kind: "unchanged" };
-      }
-      return {
-        kind: "updated",
-        thread: {
-          ...thread,
-          persistent: thread.id === event.payload.persistentThreadId,
-          updatedAt: event.payload.updatedAt,
-        },
-      };
-
     case "thread.settled":
       return {
         kind: "updated",
