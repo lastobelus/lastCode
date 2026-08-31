@@ -430,6 +430,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const activeThreads = projectThreads.filter((thread) => thread.deletedAt === null);
+      const persistentThread = activeThreads.find((thread) => thread.persistent);
+      if (persistentThread !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' cannot be deleted while thread '${persistentThread.id}' is persistent. Disable persistence or move it to another thread first.`,
+        });
+      }
       if (activeThreads.length > 0 && command.force !== true) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,

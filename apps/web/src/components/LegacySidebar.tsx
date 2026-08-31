@@ -166,6 +166,7 @@ import {
   legacyThreadPersistenceAction,
   protectLegacyThreadActions,
 } from "./legacyThreadPersistence.logic";
+import { projectsContainPersistentThread } from "./projectPersistence.logic";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import {
@@ -1882,6 +1883,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
+      if (
+        projectsContainPersistentThread({
+          members: [member],
+          threads: Array.from(sidebarThreadByKeyRef.current.values()),
+        })
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+
       const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
       const memberThreadCount = memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0;
       if (memberThreadCount > 0) {
@@ -2013,6 +2031,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (!api) return;
 
         const actionHandlers = new Map<string, () => Promise<void> | void>();
+        const isProjectRemovalBlocked = (member: SidebarProjectGroupMember) =>
+          projectsContainPersistentThread({ members: [member], threads: sidebarThreads });
         const makeLeaf = (
           action: "rename" | "grouping" | "copy-path" | "delete",
           member: SidebarProjectGroupMember,
@@ -2040,7 +2060,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
           return {
             id,
-            label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+            label: `${formatProjectMemberActionLabel(member, project.groupedProjectCount)}${
+              action === "delete" && options?.disabled ? " (disable persistence first)" : ""
+            }`,
             ...(options?.destructive ? { destructive: true } : {}),
             ...(options?.disabled ? { disabled: true } : {}),
           };
@@ -2084,9 +2106,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             buildTargetedItem("rename", "Rename"),
             buildTargetedItem("grouping", "Group into..."),
             buildTargetedItem("copy-path", "Copy Path"),
-            buildTargetedItem("delete", "Remove", {
-              destructive: true,
-            }),
+            buildTargetedItem(
+              "delete",
+              project.memberProjects.length === 1 &&
+                isProjectRemovalBlocked(project.memberProjects[0]!)
+                ? "Remove (disable persistence first)"
+                : "Remove",
+              {
+                destructive: true,
+                isDisabled: isProjectRemovalBlocked,
+              },
+            ),
           ],
           {
             x: event.clientX,
@@ -2108,6 +2138,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
+      sidebarThreads,
       suppressProjectClickForContextMenuRef,
     ],
   );

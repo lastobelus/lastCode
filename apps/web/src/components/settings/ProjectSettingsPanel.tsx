@@ -102,6 +102,7 @@ import {
   ProjectFaviconPickerDialog,
 } from "./ProjectFaviconPickerDialog";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
+import { projectsContainPersistentThread } from "../projectPersistence.logic";
 
 export const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
   repository: "Group by repository",
@@ -283,6 +284,10 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
     group.memberProjects.find(
       (member) => member.environmentId === group.environmentId && member.id === group.id,
     ) ?? group.memberProjects[0]!;
+  const projectRemovalBlocked = projectsContainPersistentThread({
+    members: group.memberProjects,
+    threads,
+  });
   const faviconPath = representative.faviconPath ?? null;
   const pickProjectFavicon =
     typeof window !== "undefined" &&
@@ -637,6 +642,18 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
     async (members: ReadonlyArray<SidebarProjectGroupMember>) => {
       const api = readLocalApi();
       if (!api) return;
+
+      if (projectsContainPersistentThread({ members, threads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
 
       const memberKeys = new Set(members.map(memberKey));
       const projectThreads = threads.filter((thread) =>
@@ -1130,17 +1147,24 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
               group.memberProjects.length > 1 ? "Remove this project everywhere" : "Remove project"
             }
             description={
-              group.memberProjects.length > 1
-                ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                : "Deletes the project entry and its threads. Files on disk are not touched."
+              projectRemovalBlocked
+                ? "Disable persistence or move it to another thread before removing this project."
+                : group.memberProjects.length > 1
+                  ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                  : "Deletes the project entry and its threads. Files on disk are not touched."
             }
             control={
               <Button
                 variant="destructive-outline"
+                disabled={projectRemovalBlocked}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
-                {group.memberProjects.length > 1 ? "Remove all entries" : "Remove project"}
+                {projectRemovalBlocked
+                  ? "Disable persistence first"
+                  : group.memberProjects.length > 1
+                    ? "Remove all entries"
+                    : "Remove project"}
               </Button>
             }
           />

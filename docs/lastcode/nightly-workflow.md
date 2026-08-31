@@ -250,8 +250,10 @@ pnpm lastcode:checkpoint:service install \
 The service reuses that thread instead of creating a new thread per failure. A
 message-square-lock marker and italic title identify it in LastCode. The server
 blocks archive and permanent deletion while the thread is persistent. Marking
-another thread persistent atomically transfers the safeguard; choose **Disable
-persistent thread** when recovery delivery no longer needs protection.
+another thread persistent atomically transfers the safeguard. A project that
+contains the persistent thread cannot be removed either, because project removal
+would delete its threads. Choose **Disable persistent thread** when recovery
+delivery no longer needs protection.
 
 A standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
 execution; every run writes terminal state to
