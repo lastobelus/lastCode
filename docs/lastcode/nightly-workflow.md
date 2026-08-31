@@ -237,8 +237,9 @@ pnpm lastcode:checkpoint:service install \
 ```
 
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
-maintenance. In the desktop or web thread list, right-click that thread and
-choose **Mark as persistent thread**, then configure its thread ID once:
+maintenance. Open that thread's context menu (right-click on desktop/web or
+long-press on mobile), choose **Mark as persistent thread**, then configure its
+thread ID once:
 
 ```bash
 pnpm lastcode:checkpoint:service install \

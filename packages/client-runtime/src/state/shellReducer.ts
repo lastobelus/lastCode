@@ -29,9 +29,13 @@ export function applyShellStreamEvent(
         snapshotSequence: event.sequence,
       };
     case "thread-upserted": {
-      const threads = snapshot.threads.some((t) => t.id === event.thread.id)
-        ? Arr.map(snapshot.threads, (t) => (t.id === event.thread.id ? event.thread : t))
-        : Arr.append(snapshot.threads, event.thread);
+      const threads = [event.thread, ...(event.relatedThreads ?? [])].reduce(
+        (current, nextThread) =>
+          current.some((thread) => thread.id === nextThread.id)
+            ? Arr.map(current, (thread) => (thread.id === nextThread.id ? nextThread : thread))
+            : Arr.append(current, nextThread),
+        snapshot.threads,
+      );
       return { ...snapshot, threads, snapshotSequence: event.sequence };
     }
     case "thread-removed":

@@ -33,6 +33,7 @@ import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadP
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 import { PersistentThreadIcon } from "./PersistentThreadIcon";
+import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu";
 
 /**
  * Shared presentation for the thread lists: the compact (phone) Home list and
@@ -440,6 +441,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly titleRegenerationSupported: boolean;
+  readonly persistenceSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<
@@ -472,6 +474,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     reportFailure: false,
   });
   const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
     reportFailure: false,
   });
   const status = resolveThreadStatus(thread);
@@ -512,6 +517,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
+  const handlePersistence = useCallback(async () => {
+    const result = await setThreadPersistence({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id, persistent: thread.persistent !== true },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not update persistent thread",
+        error instanceof Error ? error.message : "The persistent thread could not be updated.",
+      );
+    }
+  }, [setThreadPersistence, thread.environmentId, thread.id, thread.persistent]);
   const handleCancelAction = useCallback(async () => {
     if (runningAction === null) return;
     const result = await closeTerminal({
@@ -569,25 +587,36 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     );
   }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
   const menuActions = useMemo<MenuAction[]>(
-    () => [
-      THREAD_ROW_MENU_ACTIONS[0]!,
-      ...buildThreadTitleRegenerationMenuItems({
-        supported: props.titleRegenerationSupported,
-        isRegenerating: thread.titleRegeneration != null,
+    () =>
+      buildThreadPersistenceMenuItems({
+        persistent: thread.persistent === true,
+        supported: props.persistenceSupported,
+        actions: [
+          THREAD_ROW_MENU_ACTIONS[0]!,
+          ...buildThreadTitleRegenerationMenuItems({
+            supported: props.titleRegenerationSupported,
+            isRegenerating: thread.titleRegeneration != null,
+          }),
+          ...(runningAction === null
+            ? []
+            : [
+                {
+                  id: "cancel-action",
+                  title: `Cancel ${runningAction.actionName}`,
+                  image: "stop.fill",
+                  attributes: { destructive: true },
+                } satisfies MenuAction,
+              ]),
+          THREAD_ROW_MENU_ACTIONS[1]!,
+        ],
       }),
-      ...(runningAction === null
-        ? []
-        : [
-            {
-              id: "cancel-action",
-              title: `Cancel ${runningAction.actionName}`,
-              image: "stop.fill",
-              attributes: { destructive: true },
-            } satisfies MenuAction,
-          ]),
-      THREAD_ROW_MENU_ACTIONS[1]!,
+    [
+      props.persistenceSupported,
+      props.titleRegenerationSupported,
+      runningAction,
+      thread.persistent,
+      thread.titleRegeneration,
     ],
-    [props.titleRegenerationSupported, runningAction, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
     () => ({
@@ -606,12 +635,16 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
+      if (nativeEvent.event === "mark-persistent" || nativeEvent.event === "disable-persistence") {
+        void handlePersistence();
+      }
     },
     [
       handleArchive,
       handleCancelAction,
       handleDelete,
       handleKeepWorktree,
+      handlePersistence,
       handleRegenerateTitle,
       handleRetryWorktreeCleanup,
     ],
@@ -680,7 +713,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         accessibilityHint={
           cleanupFailed
             ? "Thread unavailable. Long-press for worktree recovery actions"
-            : "Swipe left for archive and delete actions"
+            : thread.persistent === true
+              ? "Persistent thread. Long-press to disable persistence"
+              : "Swipe left for archive and delete actions"
         }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
@@ -827,7 +862,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   return (
     <ThreadSwipeable
       backgroundColor={backgroundColor}
-      enabled={!cleanupPending && !cleanupFailed}
+      enabled={!cleanupPending && !cleanupFailed && thread.persistent !== true}
       containerStyle={
         compact ? undefined : { borderRadius: SIDEBAR_ROW_RADIUS, overflow: "hidden" }
       }

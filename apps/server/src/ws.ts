@@ -719,6 +719,12 @@ const makeWsRpcLayer = (
             return threadUpsertOrRemove(event.payload.threadId, event.sequence);
           case "thread.unarchived":
             return threadUpsertOrRemove(event.payload.threadId, event.sequence);
+          case "thread.persistence-changed":
+            return threadPersistenceUpsert(
+              event.payload.threadId,
+              event.payload.replacedThreadId,
+              event.sequence,
+            );
           default:
             if (event.aggregateKind !== "thread") {
               return Effect.succeed(Option.none());
@@ -817,6 +823,31 @@ const makeWsRpcLayer = (
             ),
           ),
         );
+
+      const threadPersistenceUpsert = (
+        threadId: ThreadId,
+        replacedThreadId: ThreadId | null,
+        sequence: number,
+      ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> =>
+        Effect.gen(function* () {
+          const primary = yield* threadUpsertOrRemove(threadId, sequence);
+          if (
+            Option.isNone(primary) ||
+            primary.value.kind !== "thread-upserted" ||
+            replacedThreadId === null ||
+            replacedThreadId === threadId
+          ) {
+            return primary;
+          }
+          const replaced = yield* threadUpsertOrRemove(replacedThreadId, sequence);
+          if (Option.isNone(replaced) || replaced.value.kind !== "thread-upserted") {
+            return primary;
+          }
+          return Option.some({
+            ...primary.value,
+            relatedThreads: [replaced.value.thread],
+          });
+        });
 
       // Turn a batch of domain events into shell stream items, coalescing by
       // aggregate first. `toShellStreamEvent` re-reads the *current* projected

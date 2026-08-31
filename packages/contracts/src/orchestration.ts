@@ -870,6 +870,7 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("thread-upserted"),
     sequence: NonNegativeInt,
     thread: OrchestrationThreadShell,
+    relatedThreads: Schema.optional(Schema.Array(OrchestrationThreadShell)),
   }),
   Schema.Struct({
     kind: Schema.Literal("thread-removed"),
