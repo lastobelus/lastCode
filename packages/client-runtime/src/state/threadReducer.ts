@@ -106,6 +106,7 @@ export function applyThreadDetailEvent(
           unsettledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
+          persistent: false,
           annotation: null,
           deletedAt: null,
           messages: [],

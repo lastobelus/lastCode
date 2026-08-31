@@ -45,6 +45,7 @@ import {
   FolderPlusIcon,
   GitBranchIcon,
   MessageSquareIcon,
+  MessageSquareLockIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
@@ -136,6 +137,8 @@ import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -1204,7 +1207,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   ) : (
     <span
       className={cn(
-        "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+        "flex min-w-0 flex-1 items-center gap-1 text-sm transition-opacity motion-reduce:transition-none",
         shouldRecede ? "font-normal" : "font-medium",
         variant === "card"
           ? cn(
@@ -1228,9 +1231,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     : "text-secondary-label/70",
             ),
         isRegeneratingTitle && "opacity-[0.55]",
+        thread.persistent && "italic",
       )}
     >
-      {thread.title}
+      {thread.persistent ? (
+        <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+      ) : null}
+      <span className="truncate">{thread.title}</span>
     </span>
   );
 
@@ -1922,8 +1929,11 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
             faviconPath={props.projectFaviconPath}
             projectIcon={props.projectIcon}
             className="size-4 shrink-0"
+            fallbackIcon={thread.persistent ? MessageSquareLockIcon : MessageSquareIcon}
           />
-          <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+          <span className={cn("min-w-0 flex-1 truncate", thread.persistent && "italic")}>
+            {thread.title}
+          </span>
           <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
             {threadTimeLabel(thread)}
           </span>
@@ -1975,6 +1985,7 @@ export default function Sidebar() {
     reorderPinnedThread,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -3194,6 +3205,7 @@ export default function Sidebar() {
       const unpinMenuItem = buildBulkUnpinContextMenuItem({
         pinnedCount: pinnedSelectedThreads.length,
       });
+      const hasPersistentThread = selectedThreads.some((thread) => thread.persistent === true);
       const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
@@ -3214,7 +3226,7 @@ export default function Sidebar() {
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
             { id: "mark-unread", label: `Mark unread (${count})` },
-            { id: "delete", label: `Delete (${count})`, destructive: true },
+            buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
           ],
           position,
         ),
@@ -3334,6 +3346,9 @@ export default function Sidebar() {
         return;
       }
       if (clicked.value !== "delete") return;
+      // Keep the handler safe if a platform context-menu implementation ever
+      // returns a disabled item.
+      if (hasPersistentThread) return;
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
           api.dialogs.confirm(
@@ -3346,15 +3361,25 @@ export default function Sidebar() {
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
+      // The menu and confirmation dialog may stay open while another client
+      // changes persistence. Rebuild from live shell state immediately before
+      // the destructive batch so an ordinary thread cannot be deleted before
+      // reaching a newly protected selection member.
+      const deleteEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: (threadKey) => {
+          const thread = threadByKeyRef.current.get(threadKey);
+          return thread ? { threadKey, thread } : undefined;
+        },
+      });
+      if (!deleteEntries) return;
       // Grown as deletions actually land, never seeded with the whole batch:
       // orphaned-worktree detection must only discount threads that are
       // really gone, or the first delete would treat still-alive batch mates
       // as deleted and remove a worktree they still point at.
       const deletedThreadKeys = new Set<string>();
       let firstError: unknown = null;
-      for (const threadKey of threadKeys) {
-        const thread = threadByKeyRef.current.get(threadKey);
-        if (!thread) continue;
+      for (const { threadKey, thread } of deleteEntries) {
         const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
           deletedThreadKeys,
         });
@@ -3439,6 +3464,7 @@ export default function Sidebar() {
             buildThreadActionMenuItems({
               branch: thread.branch ?? null,
               isPinned,
+              isPersistent: thread.persistent === true,
               isSettled,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
@@ -3450,6 +3476,9 @@ export default function Sidebar() {
                 settlement: supportsSettlement,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
+                persistence:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                    .threadPersistence === true,
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
@@ -3515,6 +3544,24 @@ export default function Sidebar() {
           case "unpin":
             attemptUnpin(threadRef);
             return;
+          case "mark-persistent":
+          case "disable-persistence": {
+            const result = await setThreadPersistence(
+              threadRef,
+              clicked.value === "mark-persistent",
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to update persistent thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "rename":
             startThreadRename(threadRef, thread.title);
             return;
@@ -3648,6 +3695,7 @@ export default function Sidebar() {
       markThreadUnread,
       openProjectSettings,
       projectCwdByKey,
+      setThreadPersistence,
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,
