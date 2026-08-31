@@ -25,6 +25,7 @@ import { terminalEnvironment } from "../state/terminal";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsPinning,
+  readEnvironmentSupportsPersistence,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
@@ -73,6 +74,7 @@ export function useThreadActionMenu(input: {
     unsnoozeThread,
     pinThread,
     confirmAndUnpinThread,
+    setThreadPersistence,
     archiveThread,
     deleteThread,
   } = useThreadActions();
@@ -122,6 +124,7 @@ export function useThreadActionMenu(input: {
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
+          persistence: readEnvironmentSupportsPersistence(threadRef.environmentId),
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
@@ -129,6 +132,7 @@ export function useThreadActionMenu(input: {
         const items = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
           isPinned: thread.pinnedAt != null,
+          isPersistent: thread.persistent === true,
           isSettled:
             supports.settlement &&
             effectiveSettled(thread, {
@@ -222,6 +226,16 @@ export function useThreadActionMenu(input: {
             await reportFailure("Failed to unpin thread", () => confirmAndUnpinThread(threadRef));
             return;
           }
+          case "mark-persistent":
+            await reportFailure("Failed to mark persistent thread", () =>
+              setThreadPersistence(threadRef, true),
+            );
+            return;
+          case "disable-persistence":
+            await reportFailure("Failed to disable persistent thread", () =>
+              setThreadPersistence(threadRef, false),
+            );
+            return;
           case "rename":
             onStartRename();
             return;
@@ -342,6 +356,7 @@ export function useThreadActionMenu(input: {
       pinThread,
       projectCwd,
       settleThread,
+      setThreadPersistence,
       snoozeThread,
       threadRef,
       timestampFormat,
