@@ -658,6 +658,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             snoozedUntil: null,
             snoozedAt: null,
             pinnedAt: null,
+            persistent: 0,
             pinOrderKey: null,
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
@@ -701,6 +702,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             archivedAt: null,
             updatedAt: event.payload.updatedAt,
           });
+          return;
+        }
+
+        case "thread.persistence-changed": {
+          const affectedIds = [event.payload.threadId, event.payload.replacedThreadId].filter(
+            (threadId): threadId is ThreadId => threadId !== null,
+          );
+          for (const threadId of new Set(affectedIds)) {
+            const existingRow = yield* projectionThreadRepository.getById({ threadId });
+            if (Option.isNone(existingRow)) continue;
+            yield* projectionThreadRepository.upsert({
+              ...existingRow.value,
+              persistent: threadId === event.payload.persistentThreadId ? 1 : 0,
+              updatedAt: event.payload.updatedAt,
+            });
+          }
           return;
         }
 

@@ -11,6 +11,7 @@ import {
   ThreadDeletedPayload as ContractsThreadDeletedPayloadSchema,
   ThreadWorktreeCleanupUpdatedPayload as ContractsThreadWorktreeCleanupUpdatedPayloadSchema,
   ThreadUnarchivedPayload as ContractsThreadUnarchivedPayloadSchema,
+  ThreadPersistenceChangedPayload as ContractsThreadPersistenceChangedPayloadSchema,
   ThreadUnsettledPayload as ContractsThreadUnsettledPayloadSchema,
   ThreadSnoozedPayload as ContractsThreadSnoozedPayloadSchema,
   ThreadUnsnoozedPayload as ContractsThreadUnsnoozedPayloadSchema,
@@ -46,6 +47,7 @@ export const ThreadDeletedPayload = ContractsThreadDeletedPayloadSchema;
 export const ThreadWorktreeCleanupUpdatedPayload =
   ContractsThreadWorktreeCleanupUpdatedPayloadSchema;
 export const ThreadUnarchivedPayload = ContractsThreadUnarchivedPayloadSchema;
+export const ThreadPersistenceChangedPayload = ContractsThreadPersistenceChangedPayloadSchema;
 export const ThreadUnsettledPayload = ContractsThreadUnsettledPayloadSchema;
 export const ThreadSnoozedPayload = ContractsThreadSnoozedPayloadSchema;
 export const ThreadUnsnoozedPayload = ContractsThreadUnsnoozedPayloadSchema;
