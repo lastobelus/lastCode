@@ -155,6 +155,32 @@ describe("applyShellStreamEvent", () => {
       expect(next.threads).toHaveLength(1);
       expect(next.threads[0]?.title).toBe("Updated Thread");
     });
+
+    it("updates related threads in the same sequence", () => {
+      const replacedThread = {
+        ...stubThread,
+        id: ThreadId.make("thread-2"),
+        title: "Previously persistent",
+        persistent: true,
+      };
+      const snapshotWithThreads: OrchestrationShellSnapshot = {
+        ...baseSnapshot,
+        threads: [stubThread, replacedThread],
+      };
+
+      const next = applyShellStreamEvent(snapshotWithThreads, {
+        kind: "thread-upserted",
+        sequence: 6,
+        thread: { ...stubThread, persistent: true },
+        relatedThreads: [{ ...replacedThread, persistent: false }],
+      });
+
+      expect(next.threads.map((thread) => [thread.id, thread.persistent])).toEqual([
+        ["thread-1", true],
+        ["thread-2", false],
+      ]);
+      expect(next.snapshotSequence).toBe(6);
+    });
   });
 
   describe("thread-removed", () => {
@@ -174,6 +200,32 @@ describe("applyShellStreamEvent", () => {
 
       expect(next.threads).toHaveLength(0);
       expect(next.snapshotSequence).toBe(6);
+    });
+
+    it("refreshes related threads in the removal sequence", () => {
+      const removedThread = { ...stubThread, persistent: true };
+      const relatedThread = {
+        ...stubThread,
+        id: ThreadId.make("thread-2"),
+        title: "Previously persistent",
+        persistent: true,
+      };
+      const snapshotWithThreads: OrchestrationShellSnapshot = {
+        ...baseSnapshot,
+        threads: [removedThread, relatedThread],
+      };
+
+      const next = applyShellStreamEvent(snapshotWithThreads, {
+        kind: "thread-removed",
+        sequence: 7,
+        threadId: removedThread.id,
+        relatedThreads: [{ ...relatedThread, persistent: false }],
+      });
+
+      expect(next.threads.map((thread) => [thread.id, thread.persistent])).toEqual([
+        ["thread-2", false],
+      ]);
+      expect(next.snapshotSequence).toBe(7);
     });
   });
 

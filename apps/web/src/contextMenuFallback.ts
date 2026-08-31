@@ -70,6 +70,16 @@ const ICON_PATHS: Record<string, ReadonlyArray<{ tag: string; attrs: Record<stri
     { tag: "path", attrs: { d: "M12 8v6" } },
     { tag: "path", attrs: { d: "M9 11h6" } },
   ],
+  "message-square-lock": [
+    {
+      tag: "path",
+      attrs: {
+        d: "M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z",
+      },
+    },
+    { tag: "rect", attrs: { width: "8", height: "5", x: "8", y: "10", rx: "1" } },
+    { tag: "path", attrs: { d: "M10 10V8a2 2 0 0 1 4 0v2" } },
+  ],
   pin: [
     { tag: "path", attrs: { d: "M12 17v5" } },
     {
