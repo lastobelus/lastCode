@@ -37,6 +37,7 @@ export type RetryThreadWorktreeCleanupInput = CommandInput<"thread.worktree-clea
 export type AbandonThreadWorktreeCleanupInput = CommandInput<"thread.worktree-cleanup.abandon">;
 export type ArchiveThreadInput = CommandInput<"thread.archive">;
 export type UnarchiveThreadInput = CommandInput<"thread.unarchive">;
+export type SetThreadPersistenceInput = CommandInput<"thread.persistence.set">;
 export type SettleThreadInput = CommandInput<"thread.settle">;
 export type UnsettleThreadInput = CommandInput<"thread.unsettle">;
 export type SnoozeThreadInput = CommandInput<"thread.snooze">;
@@ -182,6 +183,16 @@ export const unarchiveThread: (input: UnarchiveThreadInput) => CommandEffect = E
   return yield* dispatch({
     ...input,
     type: "thread.unarchive",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const setThreadPersistence: (input: SetThreadPersistenceInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.setThreadPersistence",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.persistence.set",
     commandId: yield* commandId(input),
   });
 });
