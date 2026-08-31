@@ -11,6 +11,8 @@ export type ThreadActionMenuId =
   | "project-settings"
   | "pin"
   | "unpin"
+  | "mark-persistent"
+  | "disable-persistence"
   | "settle"
   | "unsettle"
   | "snooze"
@@ -30,6 +32,7 @@ export type ThreadActionMenuId =
 export interface ThreadActionMenuState {
   readonly branch: string | null;
   readonly isPinned: boolean;
+  readonly isPersistent: boolean;
   readonly isSettled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
@@ -41,6 +44,7 @@ export interface ThreadActionMenuState {
     readonly settlement: boolean;
     readonly snooze: boolean;
     readonly pinning: boolean;
+    readonly persistence: boolean;
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
@@ -69,6 +73,21 @@ export function buildThreadActionMenuItems(
           state.isPinned
             ? { id: "unpin" as const, label: "Unpin thread", icon: "pin-off" }
             : { id: "pin" as const, label: "Pin thread", icon: "pin" },
+        ]
+      : []),
+    ...(state.supports.persistence
+      ? [
+          state.isPersistent
+            ? {
+                id: "disable-persistence" as const,
+                label: "Disable persistent thread",
+                icon: "message-square-lock",
+              }
+            : {
+                id: "mark-persistent" as const,
+                label: "Mark as persistent thread",
+                icon: "message-square-lock",
+              },
         ]
       : []),
     // Both lifecycle actions stay available on pinned threads: settling
@@ -133,16 +152,17 @@ export function buildThreadActionMenuItems(
     // styling.
     {
       id: "archive",
-      label: "Archive thread",
+      label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
-      disabled: state.isRunning,
+      disabled: state.isRunning || state.isPersistent,
       separatorBefore: true,
     },
     {
       id: "delete",
-      label: "Delete",
+      label: state.isPersistent ? "Delete (disable persistence first)" : "Delete",
       destructive: true,
       icon: "trash",
+      disabled: state.isPersistent,
     },
   ];
 }
