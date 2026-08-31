@@ -43,6 +43,11 @@ import {
   type ThreadListV2Status,
 } from "./threadListV2";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -388,6 +393,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly pinningSupported: boolean;
   /** False on servers that predate thread title regeneration. */
   readonly titleRegenerationSupported: boolean;
+  /** False on servers that predate thread.persistence.set. */
+  readonly persistenceSupported: boolean;
   /** False on servers that predate thread.pin.reorder. Gates the pinned
       Move up / Move down menu items. */
   readonly pinReorderSupported?: boolean;
@@ -431,6 +438,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     reportFailure: false,
   });
   const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
     reportFailure: false,
   });
 
@@ -546,6 +556,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ],
     );
   }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
+  );
 
   // Swipe: the v2 primary action is the lifecycle transition. Un-settling a
   // settled row keeps it active until new activity clears the user override.
@@ -639,59 +665,79 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           ],
     [runningAction],
   );
+  const withPersistence = useCallback(
+    (actions: ReadonlyArray<MenuAction>) =>
+      buildThreadPersistenceMenuItems({
+        actions,
+        persistent: thread.persistent === true,
+        supported: props.persistenceSupported,
+      }),
+    [props.persistenceSupported, thread.persistent],
+  );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
-    () => [
-      { id: "settle", title: "Settle", image: "checkmark" },
-      {
-        id: "snooze",
-        title: "Snooze",
-        image: "clock",
-        subactions: snoozePresetActions,
-      },
-      ...pinMenuItem,
-      ...titleRegenerationMenuItems,
-      ...actionMenuItems,
-      { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+    () =>
+      withPersistence([
+        { id: "settle", title: "Settle", image: "checkmark" },
+        {
+          id: "snooze",
+          title: "Snooze",
+          image: "clock",
+          subactions: snoozePresetActions,
+        },
+        ...pinMenuItem,
+        ...titleRegenerationMenuItems,
+        ...actionMenuItems,
+        { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+      ]),
+    [
+      actionMenuItems,
+      pinMenuItem,
+      snoozePresetActions,
+      titleRegenerationMenuItems,
+      withPersistence,
     ],
-    [actionMenuItems, pinMenuItem, snoozePresetActions, titleRegenerationMenuItems],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
-    () => [
-      CARD_MENU_ACTIONS[0]!,
-      ...pinMenuItem,
-      ...titleRegenerationMenuItems,
-      ...actionMenuItems,
-      ...CARD_MENU_ACTIONS.slice(1),
-    ],
-    [actionMenuItems, pinMenuItem, titleRegenerationMenuItems],
+    () =>
+      withPersistence([
+        CARD_MENU_ACTIONS[0]!,
+        ...pinMenuItem,
+        ...titleRegenerationMenuItems,
+        ...actionMenuItems,
+        ...CARD_MENU_ACTIONS.slice(1),
+      ]),
+    [actionMenuItems, pinMenuItem, titleRegenerationMenuItems, withPersistence],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
-    () => [
-      SLIM_MENU_ACTIONS[0]!,
-      ...(thread.pinnedAt != null ? pinMenuItem : []),
-      ...titleRegenerationMenuItems,
-      ...actionMenuItems,
-      SLIM_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems],
+    () =>
+      withPersistence([
+        SLIM_MENU_ACTIONS[0]!,
+        ...(thread.pinnedAt != null ? pinMenuItem : []),
+        ...titleRegenerationMenuItems,
+        ...actionMenuItems,
+        SLIM_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems, withPersistence],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
-    () => [
-      SNOOZED_MENU_ACTIONS[0]!,
-      ...titleRegenerationMenuItems,
-      ...actionMenuItems,
-      SNOOZED_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, titleRegenerationMenuItems],
+    () =>
+      withPersistence([
+        SNOOZED_MENU_ACTIONS[0]!,
+        ...titleRegenerationMenuItems,
+        ...actionMenuItems,
+        SNOOZED_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, titleRegenerationMenuItems, withPersistence],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
-    () => [
-      LEGACY_MENU_ACTIONS[0]!,
-      ...titleRegenerationMenuItems,
-      ...actionMenuItems,
-      LEGACY_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, titleRegenerationMenuItems],
+    () =>
+      withPersistence([
+        LEGACY_MENU_ACTIONS[0]!,
+        ...titleRegenerationMenuItems,
+        ...actionMenuItems,
+        LEGACY_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, titleRegenerationMenuItems, withPersistence],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -708,6 +754,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
         displayedPresets: snoozePresets,
@@ -724,6 +772,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleCancelAction,
       handleDelete,
       handleKeepWorktree,
+      handlePersistence,
       handleRegenerateTitle,
       handleRetryWorktreeCleanup,
       handleMovePinnedDown,
@@ -853,15 +902,25 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </Text>
         </View>
       </View>
-      <Text
-        className={cn(
-          "mt-1 text-base font-t3-medium",
-          selected ? "text-user-bubble-foreground" : "text-foreground",
-        )}
-        numberOfLines={2}
-      >
-        {thread.title}
-      </Text>
+      <View className="mt-1 flex-row items-start gap-1.5">
+        {thread.persistent === true ? (
+          <View className="pt-1">
+            <PersistentThreadIcon
+              color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+            />
+          </View>
+        ) : null}
+        <Text
+          className={cn(
+            "flex-1 text-base font-t3-medium",
+            selected ? "text-user-bubble-foreground" : "text-foreground",
+            thread.persistent === true && "italic",
+          )}
+          numberOfLines={2}
+        >
+          {thread.title}
+        </Text>
+      </View>
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -1037,15 +1096,25 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </View>
           ) : null}
           <View className="min-w-0 flex-1">
-            <Text
-              className={cn(
-                "text-base",
-                selected ? "text-user-bubble-foreground" : "text-foreground-muted",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(
+                    selected ? selectedForegroundColor : theme["--color-foreground-muted"],
+                  )}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base",
+                  selected ? "text-user-bubble-foreground" : "text-foreground-muted",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             {props.searchMatch ? (
               <ThreadSearchMatchExcerpt
                 match={props.searchMatch}
@@ -1082,7 +1151,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           sidebarPane ? { borderRadius: SIDEBAR_V2_ROW_RADIUS, overflow: "hidden" } : undefined
         }
         enableTrackpadSwipe
-        enabled={!cleanupPending && !cleanupFailed}
+        enabled={
+          !cleanupPending &&
+          !cleanupFailed &&
+          !(thread.persistent === true && swipeActions.primary === "archive")
+        }
         // Full swipe commits the advertised lifecycle action (Settle /
         // Un-settle), never the secondary snooze action.
         fullSwipeAction="primary"
