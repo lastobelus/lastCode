@@ -125,6 +125,20 @@ export function buildBulkTitleRegenerationContextMenuItem(input: {
   };
 }
 
+export function buildBulkThreadDeleteContextMenuItem(input: {
+  count: number;
+  hasPersistentThread: boolean;
+}): ContextMenuItem<"delete"> {
+  return {
+    id: "delete",
+    label: input.hasPersistentThread
+      ? `Delete (${input.count}) (disable persistence first)`
+      : `Delete (${input.count})`,
+    destructive: true,
+    disabled: input.hasPersistentThread,
+  };
+}
+
 export interface ThreadStatusPill {
   label:
     | "Working"

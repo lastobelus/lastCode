@@ -110,6 +110,7 @@ import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
 import {
   isThreadDetailEvent,
+  isThreadDetailEventForThread,
   resolveAvailableEditorsForConfig,
   resolveFileManagerRevealKindForConfig,
 } from "./ws.ts";
@@ -7083,6 +7084,56 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 2);
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("replays persistence transfers to the replaced thread detail stream", () =>
+    Effect.gen(function* () {
+      const replacedThreadId = defaultThreadId;
+      const persistentThreadId = ThreadId.make("thread-persistent-new");
+      const event = {
+        sequence: 2,
+        eventId: EventId.make("event-persistence-transfer-detail"),
+        aggregateKind: "thread",
+        aggregateId: persistentThreadId,
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.persistence-changed",
+        payload: {
+          threadId: persistentThreadId,
+          persistentThreadId,
+          replacedThreadId,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.persistence-changed" }>;
+
+      assert.isTrue(isThreadDetailEventForThread(event, replacedThreadId));
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(2),
+            readEvents: () => Stream.make(event),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: replacedThreadId,
+            afterSequence: 1,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(2), Stream.runCollect),
+        ),
+      );
+
+      assert.equal(items[0]?.kind, "event");
+      assert.equal(items[0]?.kind === "event" ? items[0].event.type : null, event.type);
+      assert.deepEqual(items[1], { kind: "synchronized" });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("subscribeThread sends a fresh snapshot instead of replaying a large gap", () =>

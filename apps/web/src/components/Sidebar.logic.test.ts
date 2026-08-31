@@ -4,6 +4,7 @@ import {
   animatePinnedLayoutChanges,
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   filterSidebarProjectScopeItems,
@@ -218,6 +219,17 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
         actionableCount: 0,
       }),
     ).toBeNull();
+  });
+});
+
+describe("buildBulkThreadDeleteContextMenuItem", () => {
+  it("blocks a mixed selection containing a persistent thread", () => {
+    expect(buildBulkThreadDeleteContextMenuItem({ count: 3, hasPersistentThread: true })).toEqual({
+      id: "delete",
+      label: "Delete (3) (disable persistence first)",
+      destructive: true,
+      disabled: true,
+    });
   });
 });
 
