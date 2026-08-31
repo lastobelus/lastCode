@@ -740,6 +740,7 @@ const makeWsRpcLayer = (
 
       const toShellStreamEvent = (
         event: OrchestrationEvent,
+        relatedThreadIds: ReadonlyArray<ThreadId> = [],
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> => {
         switch (event.type) {
           case "project.created":
@@ -754,22 +755,54 @@ const makeWsRpcLayer = (
               }),
             );
           case "thread.archived":
-            return Effect.succeed(
-              Option.some({
-                kind: "thread-removed" as const,
-                sequence: event.sequence,
-                threadId: event.payload.threadId,
-              }),
-            );
+            return relatedThreadIds.length === 0
+              ? Effect.succeed(
+                  Option.some({
+                    kind: "thread-removed" as const,
+                    sequence: event.sequence,
+                    threadId: event.payload.threadId,
+                  }),
+                )
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           case "thread.deleted":
-            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           case "thread.unarchived":
-            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
+          case "thread.persistence-changed":
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           default:
             if (event.aggregateKind !== "thread") {
               return Effect.succeed(Option.none());
             }
-            return threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence);
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  ThreadId.make(event.aggregateId),
+                  relatedThreadIds,
+                  event.sequence,
+                );
         }
       };
 
@@ -864,6 +897,30 @@ const makeWsRpcLayer = (
           ),
         );
 
+      const threadUpsertOrRemoveWithRelated = (
+        threadId: ThreadId,
+        relatedThreadIds: ReadonlyArray<ThreadId>,
+        sequence: number,
+      ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> =>
+        Effect.gen(function* () {
+          const primary = yield* threadUpsertOrRemove(threadId, sequence);
+          if (Option.isNone(primary)) {
+            return primary;
+          }
+          const related = yield* Effect.forEach(
+            [...new Set(relatedThreadIds)].filter((relatedId) => relatedId !== threadId),
+            (relatedId) => threadUpsertOrRemove(relatedId, sequence),
+            { concurrency: SHELL_REFETCH_CONCURRENCY },
+          );
+          const relatedThreads = related.flatMap((item) =>
+            Option.isSome(item) && item.value.kind === "thread-upserted" ? [item.value.thread] : [],
+          );
+          return Option.some({
+            ...primary.value,
+            ...(relatedThreads.length > 0 ? { relatedThreads } : {}),
+          });
+        });
+
       // Turn a batch of domain events into shell stream items, coalescing by
       // aggregate first. `toShellStreamEvent` re-reads the *current* projected
       // shell for an aggregate, so within a batch only the latest event per
@@ -885,15 +942,35 @@ const makeWsRpcLayer = (
             return [];
           }
           const latestByAggregate = new Map<string, OrchestrationEvent>();
+          const relatedThreadIdsByAggregate = new Map<string, Set<ThreadId>>();
           for (const event of events) {
-            latestByAggregate.set(`${event.aggregateKind}:${event.aggregateId}`, event);
+            const aggregateKey = `${event.aggregateKind}:${event.aggregateId}`;
+            latestByAggregate.set(aggregateKey, event);
+            if (
+              event.type === "thread.persistence-changed" &&
+              event.payload.replacedThreadId !== null &&
+              event.payload.replacedThreadId !== event.payload.threadId
+            ) {
+              const related = relatedThreadIdsByAggregate.get(aggregateKey) ?? new Set<ThreadId>();
+              related.add(event.payload.replacedThreadId);
+              relatedThreadIdsByAggregate.set(aggregateKey, related);
+            }
           }
           const survivors = Array.from(latestByAggregate.values()).sort(
             (left, right) => left.sequence - right.sequence,
           );
-          const shellEvents = yield* Effect.forEach(survivors, toShellStreamEvent, {
-            concurrency: SHELL_REFETCH_CONCURRENCY,
-          });
+          const shellEvents = yield* Effect.forEach(
+            survivors,
+            (event) =>
+              toShellStreamEvent(
+                event,
+                Array.from(
+                  relatedThreadIdsByAggregate.get(`${event.aggregateKind}:${event.aggregateId}`) ??
+                    [],
+                ),
+              ),
+            { concurrency: SHELL_REFETCH_CONCURRENCY },
+          );
           return shellEvents.flatMap((option) => (Option.isSome(option) ? [option.value] : []));
         });
 
