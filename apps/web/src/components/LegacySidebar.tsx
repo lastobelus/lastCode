@@ -5,6 +5,7 @@ import {
   FolderPlusIcon,
   Globe2Icon,
   LoaderIcon,
+  MessageSquareLockIcon,
   SearchIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -93,6 +94,7 @@ import { isMacPlatform } from "../lib/utils";
 import {
   readThreadShell,
   readEnvironmentSupportsThreadAnnotations,
+  readEnvironmentSupportsPersistence,
   useProject,
   useProjects,
   useThreadShells,
@@ -160,6 +162,11 @@ import {
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
+import {
+  legacyThreadPersistenceAction,
+  protectLegacyThreadActions,
+} from "./legacyThreadPersistence.logic";
+import { projectsContainPersistentThread } from "./projectPersistence.logic";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import {
@@ -198,6 +205,7 @@ import { openCommandPalette } from "../commandPaletteBus";
 import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  collectUnprotectedBulkThreadEntries,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -818,28 +826,31 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       event.preventDefault();
       event.stopPropagation();
       clearConfirmingArchive();
+      if (thread.persistent) return;
       void attemptArchiveThread(threadRef);
     },
-    [attemptArchiveThread, clearConfirmingArchive, threadRef],
+    [attemptArchiveThread, clearConfirmingArchive, thread.persistent, threadRef],
   );
   const handleStartArchiveConfirmation = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      if (thread.persistent) return;
       setConfirmingArchiveThreadKey(threadKey);
       requestAnimationFrame(() => {
         confirmArchiveButtonRefs.current.get(threadKey)?.focus();
       });
     },
-    [confirmArchiveButtonRefs, setConfirmingArchiveThreadKey, threadKey],
+    [confirmArchiveButtonRefs, setConfirmingArchiveThreadKey, thread.persistent, threadKey],
   );
   const handleArchiveImmediateClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      if (thread.persistent) return;
       void attemptArchiveThread(threadRef);
     },
-    [attemptArchiveThread, threadRef],
+    [attemptArchiveThread, thread.persistent, threadRef],
   );
   const threadDetailsTooltipHandle = useMemo(() => TooltipCreateHandle(), []);
   const rowButtonRender = useMemo(
@@ -958,12 +969,17 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               onDoubleClick={handleRenameInputClick}
             />
           ) : (
-            <span
-              className="min-w-0 flex-1 truncate text-sm"
-              data-testid={`thread-title-${thread.id}`}
-            >
-              {thread.title}
-            </span>
+            <>
+              {thread.persistent ? (
+                <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+              ) : null}
+              <span
+                className={`min-w-0 flex-1 truncate text-sm ${thread.persistent ? "italic" : ""}`}
+                data-testid={`thread-title-${thread.id}`}
+              >
+                {thread.title}
+              </span>
+            </>
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -1056,7 +1072,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 </span>
               </>
             ) : null}
-            {isConfirmingArchive ? (
+            {isConfirmingArchive && !thread.persistent ? (
               <button
                 ref={handleConfirmArchiveRef}
                 type="button"
@@ -1069,7 +1085,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               >
                 Confirm
               </button>
-            ) : !isThreadRunning && cleanup === null ? (
+            ) : !thread.persistent && !isThreadRunning && cleanup === null ? (
               appSettingsConfirmThreadArchive ? (
                 <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
                   <button
@@ -1446,6 +1462,7 @@ interface SidebarProjectItemProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -1472,6 +1489,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     handleNewThread,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -1881,6 +1899,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
+      if (
+        projectsContainPersistentThread({
+          members: [member],
+          threads: Array.from(sidebarThreadByKeyRef.current.values()),
+        })
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+
       const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
       const memberThreadCount = memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0;
       if (memberThreadCount > 0) {
@@ -2012,6 +2047,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (!api) return;
 
         const actionHandlers = new Map<string, () => Promise<void> | void>();
+        const isProjectRemovalBlocked = (member: SidebarProjectGroupMember) =>
+          projectsContainPersistentThread({ members: [member], threads: sidebarThreads });
         const makeLeaf = (
           action: "rename" | "grouping" | "copy-path" | "delete",
           member: SidebarProjectGroupMember,
@@ -2039,7 +2076,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
           return {
             id,
-            label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+            label: `${formatProjectMemberActionLabel(member, project.groupedProjectCount)}${
+              action === "delete" && options?.disabled ? " (disable persistence first)" : ""
+            }`,
             ...(options?.destructive ? { destructive: true } : {}),
             ...(options?.disabled ? { disabled: true } : {}),
           };
@@ -2083,9 +2122,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             buildTargetedItem("rename", "Rename"),
             buildTargetedItem("grouping", "Group into..."),
             buildTargetedItem("copy-path", "Copy Path"),
-            buildTargetedItem("delete", "Remove", {
-              destructive: true,
-            }),
+            buildTargetedItem(
+              "delete",
+              project.memberProjects.length === 1 &&
+                isProjectRemovalBlocked(project.memberProjects[0]!)
+                ? "Remove (disable persistence first)"
+                : "Remove",
+              {
+                destructive: true,
+                isDisabled: isProjectRemovalBlocked,
+              },
+            ),
           ],
           {
             x: event.clientX,
@@ -2107,6 +2154,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
+      sidebarThreads,
       suppressProjectClickForContextMenuRef,
     ],
   );
@@ -2199,22 +2247,46 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (!api) return;
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
       if (threadKeys.length === 0) return;
-      const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
+      const readSelectedThreadEntry = (threadKey: string) => {
         const threadRef = parseScopedThreadKey(threadKey);
         const thread = threadRef ? readThreadShell(threadRef) : null;
-        if (!threadRef || !thread || thread.worktreeCleanup != null) return [];
-        return [{ threadKey, threadRef, thread }];
+        if (!threadRef || !thread || thread.worktreeCleanup != null) return undefined;
+        return { threadKey, threadRef, thread };
+      };
+      const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
+        const entry = readSelectedThreadEntry(threadKey);
+        return entry ? [entry] : [];
       });
       const count = selectedThreadEntries.length;
       if (count === 0) return;
       const hasRunningThread = selectedThreadEntries.some(
         ({ thread }) => thread.session?.status === "running" && thread.session.activeTurnId != null,
       );
+      const hasPersistentThread = selectedThreadEntries.some(
+        ({ thread }) => thread.persistent === true,
+      );
+      const warnPersistentThreadProtected = () => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description: "Disable persistence or move it to another thread first.",
+          }),
+        );
+      };
 
       const clicked = await api.contextMenu.show(
-        buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
+        protectLegacyThreadActions(
+          buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
+          hasPersistentThread,
+        ),
         position,
       );
+
+      if (hasPersistentThread && (clicked === "archive" || clicked === "delete")) {
+        warnPersistentThreadProtected();
+        return;
+      }
 
       if (clicked === "mark-unread") {
         for (const { threadKey, thread } of selectedThreadEntries) {
@@ -2232,8 +2304,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           if (!confirmed) return;
         }
 
+        const currentEntries = collectUnprotectedBulkThreadEntries({
+          threadKeys,
+          getEntry: readSelectedThreadEntry,
+        });
+        if (!currentEntries) {
+          warnPersistentThreadProtected();
+          return;
+        }
+
         const archiveOutcome = await archiveSelectedThreadEntries({
-          entries: selectedThreadEntries,
+          entries: currentEntries,
           archive: ({ threadRef }, onArchived) => archiveThread(threadRef, { onArchived }),
         });
         for (const failure of archiveOutcome.followupFailures) {
@@ -2278,8 +2359,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (!confirmed) return;
       }
 
+      const currentEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: readSelectedThreadEntry,
+      });
+      if (!currentEntries) {
+        warnPersistentThreadProtected();
+        return;
+      }
+
       const deletedThreadKeys = new Set<string>();
-      for (const { threadKey, threadRef } of selectedThreadEntries) {
+      for (const { threadKey, threadRef } of currentEntries) {
         const result = await deleteThread(threadRef, {
           deletedThreadKeys,
         });
@@ -2393,6 +2483,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
+      if (readThreadShell(threadRef)?.persistent === true) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread not archived",
+            description: "Disable persistence or move it to another thread first.",
+          }),
+        );
+        return;
+      }
       const result = await archiveThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2611,21 +2711,35 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const supportsThreadAnnotations = readEnvironmentSupportsThreadAnnotations(
         thread.environmentId,
       );
+      const supportsPersistence = readEnvironmentSupportsPersistence(thread.environmentId);
+      const persistenceAction = legacyThreadPersistenceAction({
+        persistent: thread.persistent === true,
+        supported: supportsPersistence,
+      });
       const clicked = await api.contextMenu.show(
-        [
-          ...(thread.branch
-            ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
-            : []),
-          { id: "rename", label: "Rename thread" },
-          ...(supportsThreadAnnotations && thread.latestUserMessageAt !== null
-            ? [{ id: "annotate", label: "Annotate thread…" }]
-            : []),
-          { id: "mark-unread", label: "Mark unread" },
-          { id: "copy-path", label: "Copy Path" },
-          { id: "copy-thread-id", label: "Copy Thread ID" },
-          { id: "project-settings", label: "Project settings" },
-          { id: "delete", label: "Delete", destructive: true, icon: "trash" },
-        ],
+        protectLegacyThreadActions(
+          [
+            ...(thread.branch
+              ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
+              : []),
+            { id: "rename", label: "Rename thread" },
+            ...(supportsThreadAnnotations && thread.latestUserMessageAt !== null
+              ? [{ id: "annotate", label: "Annotate thread…" }]
+              : []),
+            { id: "mark-unread", label: "Mark unread" },
+            ...(persistenceAction ? [persistenceAction] : []),
+            { id: "copy-path", label: "Copy Path" },
+            { id: "copy-thread-id", label: "Copy Thread ID" },
+            { id: "project-settings", label: "Project settings" },
+            {
+              id: "delete",
+              label: "Delete",
+              destructive: true,
+              icon: "trash",
+            },
+          ],
+          thread.persistent === true,
+        ),
         position,
       );
 
@@ -2676,6 +2790,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         markThreadUnread(threadKey, thread.latestTurn?.completedAt);
         return;
       }
+      if (clicked === "mark-persistent" || clicked === "disable-persistence") {
+        const result = await setThreadPersistence(threadRef, clicked === "mark-persistent");
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to update persistent thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
       if (clicked === "copy-path") {
         if (!threadWorkspacePath) {
           toastManager.add(
@@ -2695,6 +2823,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (clicked !== "delete") return;
+      if (thread.persistent) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread not deleted",
+            description: "Disable persistence or move it to another thread first.",
+          }),
+        );
+        return;
+      }
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
           [
@@ -2732,6 +2870,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       project.workspaceRoot,
       router,
       setOpenMobile,
+      setThreadPersistence,
       startThreadRename,
     ],
   );
@@ -3310,6 +3449,7 @@ interface SidebarProjectsContentProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
@@ -3427,6 +3567,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleNewThread,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
     sortedProjects,
     expandedThreadListsByProject,
     activeRouteProjectKey,
@@ -3597,6 +3738,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
                         deleteThread={deleteThread}
+                        setThreadPersistence={setThreadPersistence}
                         threadJumpLabelByKey={threadJumpLabelByKey}
                         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                         expandThreadListForProject={expandThreadListForProject}
@@ -3639,6 +3781,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
                 deleteThread={deleteThread}
+                setThreadPersistence={setThreadPersistence}
                 threadJumpLabelByKey={threadJumpLabelByKey}
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
@@ -3694,7 +3837,7 @@ export default function LegacySidebar() {
   );
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread } = useThreadActions();
+  const { archiveThread, deleteThread, setThreadPersistence } = useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -4358,6 +4501,7 @@ export default function LegacySidebar() {
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
         deleteThread={deleteThread}
+        setThreadPersistence={setThreadPersistence}
         sortedProjects={sortedProjects}
         expandedThreadListsByProject={expandedThreadListsByProject}
         activeRouteProjectKey={activeRouteProjectKey}
