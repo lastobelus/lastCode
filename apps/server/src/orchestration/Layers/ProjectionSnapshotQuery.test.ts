@@ -347,6 +347,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           snoozedUntil: null,
           snoozedAt: null,
           pinnedAt: "2026-02-24T00:00:01.000Z",
+          persistent: false,
           pinOrderKey: "gm",
           titleRegeneration: null,
           annotation: {
@@ -483,6 +484,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           snoozedUntil: null,
           snoozedAt: null,
           pinnedAt: "2026-02-24T00:00:01.000Z",
+          persistent: false,
           pinOrderKey: "gm",
           titleRegeneration: null,
           annotation: {
