@@ -709,28 +709,50 @@ const makeWsRpcLayer = (
               }),
             );
           case "thread.archived":
-            return Effect.succeed(
-              Option.some({
-                kind: "thread-removed" as const,
-                sequence: event.sequence,
-                threadId: event.payload.threadId,
-              }),
-            );
+            return relatedThreadIds.length === 0
+              ? Effect.succeed(
+                  Option.some({
+                    kind: "thread-removed" as const,
+                    sequence: event.sequence,
+                    threadId: event.payload.threadId,
+                  }),
+                )
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           case "thread.deleted":
-            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           case "thread.unarchived":
-            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
+            return relatedThreadIds.length === 0
+              ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           case "thread.persistence-changed":
             return relatedThreadIds.length === 0
               ? threadUpsertOrRemove(event.payload.threadId, event.sequence)
-              : threadPersistenceUpsert(event.payload.threadId, relatedThreadIds, event.sequence);
+              : threadUpsertOrRemoveWithRelated(
+                  event.payload.threadId,
+                  relatedThreadIds,
+                  event.sequence,
+                );
           default:
             if (event.aggregateKind !== "thread") {
               return Effect.succeed(Option.none());
             }
             return relatedThreadIds.length === 0
               ? threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence)
-              : threadPersistenceUpsert(
+              : threadUpsertOrRemoveWithRelated(
                   ThreadId.make(event.aggregateId),
                   relatedThreadIds,
                   event.sequence,
@@ -829,14 +851,14 @@ const makeWsRpcLayer = (
           ),
         );
 
-      const threadPersistenceUpsert = (
+      const threadUpsertOrRemoveWithRelated = (
         threadId: ThreadId,
         relatedThreadIds: ReadonlyArray<ThreadId>,
         sequence: number,
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> =>
         Effect.gen(function* () {
           const primary = yield* threadUpsertOrRemove(threadId, sequence);
-          if (Option.isNone(primary) || primary.value.kind !== "thread-upserted") {
+          if (Option.isNone(primary)) {
             return primary;
           }
           const related = yield* Effect.forEach(
