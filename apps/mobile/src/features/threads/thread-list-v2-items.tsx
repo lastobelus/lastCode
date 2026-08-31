@@ -43,7 +43,10 @@ import {
 } from "./threadListV2";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 import { PersistentThreadIcon } from "./PersistentThreadIcon";
-import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -554,19 +557,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ],
     );
   }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
-  const handlePersistence = useCallback(async () => {
-    const result = await setThreadPersistence({
-      environmentId: thread.environmentId,
-      input: { threadId: thread.id, persistent: thread.persistent !== true },
-    });
-    if (result._tag === "Failure") {
-      const error = Cause.squash(result.cause);
-      Alert.alert(
-        "Could not update persistent thread",
-        error instanceof Error ? error.message : "The persistent thread could not be updated.",
-      );
-    }
-  }, [setThreadPersistence, thread.environmentId, thread.id, thread.persistent]);
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
+  );
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
   // row can un-settle — explicit settles clear the override, auto-settled
@@ -750,9 +756,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
-      if (nativeEvent.event === "mark-persistent" || nativeEvent.event === "disable-persistence") {
-        void handlePersistence();
-      }
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
         displayedPresets: snoozePresets,

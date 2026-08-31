@@ -33,7 +33,10 @@ import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadP
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 import { PersistentThreadIcon } from "./PersistentThreadIcon";
-import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
 
 /**
  * Shared presentation for the thread lists: the compact (phone) Home list and
@@ -517,19 +520,22 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
-  const handlePersistence = useCallback(async () => {
-    const result = await setThreadPersistence({
-      environmentId: thread.environmentId,
-      input: { threadId: thread.id, persistent: thread.persistent !== true },
-    });
-    if (result._tag === "Failure") {
-      const error = Cause.squash(result.cause);
-      Alert.alert(
-        "Could not update persistent thread",
-        error instanceof Error ? error.message : "The persistent thread could not be updated.",
-      );
-    }
-  }, [setThreadPersistence, thread.environmentId, thread.id, thread.persistent]);
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
+  );
   const handleCancelAction = useCallback(async () => {
     if (runningAction === null) return;
     const result = await closeTerminal({
@@ -635,9 +641,8 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
-      if (nativeEvent.event === "mark-persistent" || nativeEvent.event === "disable-persistence") {
-        void handlePersistence();
-      }
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
     },
     [
       handleArchive,

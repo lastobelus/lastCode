@@ -1,5 +1,11 @@
 import type { MenuAction } from "@react-native-menu/menu";
 
+export function persistenceIntentForMenuEvent(event: string): boolean | null {
+  if (event === "mark-persistent") return true;
+  if (event === "disable-persistence") return false;
+  return null;
+}
+
 export function buildThreadPersistenceMenuItems(input: {
   readonly actions: ReadonlyArray<MenuAction>;
   readonly persistent: boolean;

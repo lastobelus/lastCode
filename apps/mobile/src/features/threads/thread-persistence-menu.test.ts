@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu.ts";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu.ts";
 
 describe("buildThreadPersistenceMenuItems", () => {
   const actions = [
@@ -30,5 +33,11 @@ describe("buildThreadPersistenceMenuItems", () => {
         attributes: { destructive: true, disabled: true },
       },
     ]);
+  });
+
+  it("preserves the selected persistence intent even if shell state changes", () => {
+    expect(persistenceIntentForMenuEvent("mark-persistent")).toBe(true);
+    expect(persistenceIntentForMenuEvent("disable-persistence")).toBe(false);
+    expect(persistenceIntentForMenuEvent("archive")).toBeNull();
   });
 });
