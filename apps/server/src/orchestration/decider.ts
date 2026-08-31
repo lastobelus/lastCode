@@ -411,6 +411,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const activeThreads = projectThreads.filter((thread) => thread.deletedAt === null);
+      const persistentThread = activeThreads.find((thread) => thread.persistent);
+      if (persistentThread !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' cannot be deleted while thread '${persistentThread.id}' is persistent. Disable persistence or move it to another thread first.`,
+        });
+      }
       if (activeThreads.length > 0 && command.force !== true) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -505,6 +512,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (thread.persistent) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Persistent thread '${thread.id}' cannot be deleted until persistence is disabled or moved to another thread.`,
+        });
+      }
       const occurredAt = yield* nowIso;
 
       // Deletion commands can be retried after the first deleted event has
@@ -724,11 +737,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.archive": {
-      yield* requireThreadNotArchived({
+      const thread = yield* requireThreadNotArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (thread.persistent) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Persistent thread '${thread.id}' cannot be archived until persistence is disabled or moved to another thread.`,
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -763,6 +782,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.unarchived",
         payload: {
           threadId: command.threadId,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.persistence.set": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.archivedAt !== null || thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Only an active thread can be marked persistent.`,
+        });
+      }
+      const current = readModel.threads.find(
+        (candidate) => candidate.deletedAt === null && candidate.persistent,
+      );
+      if (!command.persistent && current?.id !== thread.id) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' is not the persistent thread.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.persistence-changed",
+        payload: {
+          threadId: command.threadId,
+          persistentThreadId: command.persistent ? command.threadId : null,
+          replacedThreadId: current?.id ?? null,
           updatedAt: occurredAt,
         },
       };
