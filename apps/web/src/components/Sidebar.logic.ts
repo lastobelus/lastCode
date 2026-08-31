@@ -139,6 +139,19 @@ export function buildBulkThreadDeleteContextMenuItem(input: {
   };
 }
 
+export function collectBulkThreadDeleteEntries<
+  TThread extends { readonly persistent?: boolean | undefined },
+>(input: {
+  threadKeys: readonly string[];
+  getThread: (threadKey: string) => TThread | undefined;
+}): readonly { threadKey: string; thread: TThread }[] | null {
+  const entries = input.threadKeys.flatMap((threadKey) => {
+    const thread = input.getThread(threadKey);
+    return thread ? [{ threadKey, thread }] : [];
+  });
+  return entries.some(({ thread }) => thread.persistent === true) ? null : entries;
+}
+
 export interface ThreadStatusPill {
   label:
     | "Working"

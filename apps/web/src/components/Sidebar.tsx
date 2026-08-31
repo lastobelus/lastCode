@@ -128,6 +128,7 @@ import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkThreadDeleteContextMenuItem,
+  collectBulkThreadDeleteEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -3220,7 +3221,7 @@ export default function Sidebar() {
       }
       if (clicked.value !== "delete") return;
       // Keep the handler safe if a platform context-menu implementation ever
-      // returns a disabled item, and avoid partially applying a mixed batch.
+      // returns a disabled item.
       if (hasPersistentThread) return;
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
@@ -3234,14 +3235,21 @@ export default function Sidebar() {
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
+      // The menu and confirmation dialog may stay open while another client
+      // changes persistence. Rebuild from live shell state immediately before
+      // the destructive batch so an ordinary thread cannot be deleted before
+      // reaching a newly protected selection member.
+      const deleteEntries = collectBulkThreadDeleteEntries({
+        threadKeys,
+        getThread: (threadKey) => threadByKeyRef.current.get(threadKey),
+      });
+      if (!deleteEntries) return;
       // Grown as deletions actually land, never seeded with the whole batch:
       // orphaned-worktree detection must only discount threads that are
       // really gone, or the first delete would treat still-alive batch mates
       // as deleted and remove a worktree they still point at.
       const deletedThreadKeys = new Set<string>();
-      for (const threadKey of threadKeys) {
-        const thread = threadByKeyRef.current.get(threadKey);
-        if (!thread) continue;
+      for (const { threadKey, thread } of deleteEntries) {
         const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
           deletedThreadKeys,
         });

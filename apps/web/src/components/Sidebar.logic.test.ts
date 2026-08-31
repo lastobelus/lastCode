@@ -5,6 +5,7 @@ import {
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkThreadDeleteContextMenuItem,
+  collectBulkThreadDeleteEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   filterSidebarProjectScopeItems,
@@ -230,6 +231,26 @@ describe("buildBulkThreadDeleteContextMenuItem", () => {
       destructive: true,
       disabled: true,
     });
+  });
+});
+
+describe("collectBulkThreadDeleteEntries", () => {
+  it("rechecks live persistence before starting a destructive batch", () => {
+    const threads = new Map([
+      ["ordinary", { id: "ordinary", persistent: false }],
+      ["protected", { id: "protected", persistent: false }],
+    ]);
+    const getThread = (threadKey: string) => threads.get(threadKey);
+
+    expect(
+      collectBulkThreadDeleteEntries({ threadKeys: ["ordinary", "protected"], getThread }),
+    ).toHaveLength(2);
+
+    threads.set("protected", { id: "protected", persistent: true });
+
+    expect(
+      collectBulkThreadDeleteEntries({ threadKeys: ["ordinary", "protected"], getThread }),
+    ).toBeNull();
   });
 });
 
