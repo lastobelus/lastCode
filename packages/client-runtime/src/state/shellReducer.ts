@@ -1,5 +1,22 @@
 import * as Arr from "effect/Array";
-import type { OrchestrationShellSnapshot, OrchestrationShellStreamEvent } from "@t3tools/contracts";
+import type {
+  OrchestrationShellSnapshot,
+  OrchestrationShellStreamEvent,
+  OrchestrationThreadShell,
+} from "@t3tools/contracts";
+
+function upsertThreadShells(
+  threads: ReadonlyArray<OrchestrationThreadShell>,
+  updates: ReadonlyArray<OrchestrationThreadShell>,
+): ReadonlyArray<OrchestrationThreadShell> {
+  return updates.reduce(
+    (current, nextThread) =>
+      current.some((thread) => thread.id === nextThread.id)
+        ? Arr.map(current, (thread) => (thread.id === nextThread.id ? nextThread : thread))
+        : Arr.append(current, nextThread),
+    threads,
+  );
+}
 
 /**
  * Reduce a single shell stream event into an existing snapshot, returning a new
@@ -29,17 +46,20 @@ export function applyShellStreamEvent(
         snapshotSequence: event.sequence,
       };
     case "thread-upserted": {
-      const threads = snapshot.threads.some((t) => t.id === event.thread.id)
-        ? Arr.map(snapshot.threads, (t) => (t.id === event.thread.id ? event.thread : t))
-        : Arr.append(snapshot.threads, event.thread);
+      const threads = upsertThreadShells(snapshot.threads, [
+        event.thread,
+        ...(event.relatedThreads ?? []),
+      ]);
       return { ...snapshot, threads, snapshotSequence: event.sequence };
     }
-    case "thread-removed":
+    case "thread-removed": {
+      const refreshedThreads = upsertThreadShells(snapshot.threads, event.relatedThreads ?? []);
       return {
         ...snapshot,
-        threads: Arr.filter(snapshot.threads, (t) => t.id !== event.threadId),
+        threads: Arr.filter(refreshedThreads, (thread) => thread.id !== event.threadId),
         snapshotSequence: event.sequence,
       };
+    }
     default:
       return snapshot;
   }
