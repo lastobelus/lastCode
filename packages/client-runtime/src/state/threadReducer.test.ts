@@ -176,6 +176,45 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("thread.persistence-changed", () => {
+    it("marks and unmarks the affected thread", () => {
+      const marked = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 40,
+        occurredAt: "2026-04-01T04:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.persistence-changed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          persistentThreadId: ThreadId.make("thread-1"),
+          replacedThreadId: null,
+          updatedAt: "2026-04-01T04:00:00.000Z",
+        },
+      });
+      expect(marked.kind).toBe("updated");
+      if (marked.kind !== "updated") return;
+      expect(marked.thread.persistent).toBe(true);
+
+      const unmarked = applyThreadDetailEvent(marked.thread, {
+        ...baseEventFields,
+        sequence: 41,
+        occurredAt: "2026-04-01T04:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-2"),
+        type: "thread.persistence-changed",
+        payload: {
+          threadId: ThreadId.make("thread-2"),
+          persistentThreadId: ThreadId.make("thread-2"),
+          replacedThreadId: ThreadId.make("thread-1"),
+          updatedAt: "2026-04-01T04:01:00.000Z",
+        },
+      });
+      expect(unmarked.kind).toBe("updated");
+      if (unmarked.kind === "updated") expect(unmarked.thread.persistent).toBe(false);
+    });
+  });
+
   describe("thread.settled / thread.unsettled", () => {
     it("sets the settled override and timestamp", () => {
       const settledAt = "2026-04-01T05:00:00.000Z";

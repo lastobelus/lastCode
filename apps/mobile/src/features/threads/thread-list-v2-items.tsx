@@ -42,6 +42,7 @@ import {
   type ThreadListV2Status,
 } from "./threadListV2";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -855,15 +856,25 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </Text>
         </View>
       </View>
-      <Text
-        className={cn(
-          "mt-1 text-base font-t3-medium",
-          selected ? "text-user-bubble-foreground" : "text-foreground",
-        )}
-        numberOfLines={2}
-      >
-        {thread.title}
-      </Text>
+      <View className="mt-1 flex-row items-start gap-1.5">
+        {thread.persistent === true ? (
+          <View className="pt-1">
+            <PersistentThreadIcon
+              color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+            />
+          </View>
+        ) : null}
+        <Text
+          className={cn(
+            "flex-1 text-base font-t3-medium",
+            selected ? "text-user-bubble-foreground" : "text-foreground",
+            thread.persistent === true && "italic",
+          )}
+          numberOfLines={2}
+        >
+          {thread.title}
+        </Text>
+      </View>
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -1025,15 +1036,25 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </View>
           ) : null}
           <View className="min-w-0 flex-1">
-            <Text
-              className={cn(
-                "text-base",
-                selected ? "text-user-bubble-foreground" : "text-foreground-muted",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(
+                    selected ? selectedForegroundColor : theme["--color-foreground-muted"],
+                  )}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base",
+                  selected ? "text-user-bubble-foreground" : "text-foreground-muted",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             {props.searchMatch ? (
               <ThreadSearchMatchExcerpt
                 match={props.searchMatch}

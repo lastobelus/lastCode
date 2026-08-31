@@ -32,6 +32,7 @@ import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regenerati
 import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
 
 /**
  * Shared presentation for the thread lists: the compact (phone) Home list and
@@ -709,9 +710,20 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             }}
           >
             <View className="flex-row items-center justify-between gap-2">
-              <Text className="flex-1 text-lg font-t3-bold text-foreground" numberOfLines={1}>
-                {thread.title}
-              </Text>
+              <View className="flex-1 flex-row items-center gap-1.5">
+                {thread.persistent === true ? (
+                  <PersistentThreadIcon color={String(theme["--color-foreground"])} size={15} />
+                ) : null}
+                <Text
+                  className={cn(
+                    "flex-1 text-lg font-t3-bold text-foreground",
+                    thread.persistent === true && "italic",
+                  )}
+                  numberOfLines={1}
+                >
+                  {thread.title}
+                </Text>
+              </View>
               <View className="flex-row items-center gap-2">
                 {actionStatusIndicator}
                 {statusPill}
@@ -769,15 +781,23 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       >
         <View className="gap-[3px]">
           <View className="flex-row items-center justify-between gap-2">
-            <Text
-              className={cn(
-                "flex-1 text-base font-t3-medium",
-                selected ? "text-user-bubble-foreground" : "text-foreground",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-1 flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base font-t3-medium",
+                  selected ? "text-user-bubble-foreground" : "text-foreground",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             <View className="flex-row items-center gap-2">
               {actionStatusIndicator}
               {statusPill}

@@ -95,6 +95,7 @@ export function applyThreadDetailEvent(
           unsettledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
+          persistent: false,
           annotation: null,
           deletedAt: null,
           messages: [],
@@ -123,6 +124,19 @@ export function applyThreadDetailEvent(
       return {
         kind: "updated",
         thread: { ...thread, archivedAt: null, updatedAt: event.payload.updatedAt },
+      };
+
+    case "thread.persistence-changed":
+      if (thread.id !== event.payload.threadId && thread.id !== event.payload.replacedThreadId) {
+        return { kind: "unchanged" };
+      }
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          persistent: thread.id === event.payload.persistentThreadId,
+          updatedAt: event.payload.updatedAt,
+        },
       };
 
     case "thread.settled":
