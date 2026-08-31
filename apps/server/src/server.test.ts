@@ -7905,6 +7905,182 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
+  it.effect("subscribeShell refreshes both threads when persistence transfers", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-persistent-new");
+      const replacedThreadId = ThreadId.make("thread-persistent-old");
+      const now = "2026-01-01T00:00:00.000Z";
+      const event: OrchestrationEvent = {
+        sequence: 1,
+        eventId: EventId.make("event-persistence-transfer"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.persistence-changed",
+        payload: {
+          threadId,
+          persistentThreadId: threadId,
+          replacedThreadId,
+          updatedAt: now,
+        },
+      };
+      const trailingMessageEvent: OrchestrationEvent = {
+        sequence: 2,
+        eventId: EventId.make("event-after-persistence-transfer"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.message-sent",
+        payload: {} as never,
+      };
+
+      assert.isFalse(isThreadDetailEvent(event));
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(2),
+            readEvents: () => Stream.make(event, trailingMessageEvent),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (requestedId) =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id: requestedId,
+                    persistent: requestedId === threadId,
+                  }),
+                ),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+          ),
+        ),
+      );
+
+      const [first] = Array.from(items);
+      assert.equal(first?.kind, "thread-upserted");
+      if (first?.kind !== "thread-upserted") return;
+      assert.equal(first.thread.id, threadId);
+      assert.equal(first.sequence, 2);
+      assert.isTrue(first.thread.persistent);
+      assert.deepEqual(
+        first.relatedThreads?.map((thread) => [thread.id, thread.persistent]),
+        [[replacedThreadId, false]],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "subscribeShell preserves related refreshes when a transfer batch ends in removal",
+    () =>
+      Effect.gen(function* () {
+        const removedThreadId = ThreadId.make("thread-persistent-removed");
+        const replacedThreadId = ThreadId.make("thread-persistent-replaced");
+        const now = "2026-01-01T00:00:00.000Z";
+        const transferEvent = {
+          sequence: 1,
+          eventId: EventId.make("event-persistence-transfer-before-removal"),
+          aggregateKind: "thread",
+          aggregateId: removedThreadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.persistence-changed",
+          payload: {
+            threadId: removedThreadId,
+            persistentThreadId: removedThreadId,
+            replacedThreadId,
+            updatedAt: now,
+          },
+        } satisfies Extract<OrchestrationEvent, { type: "thread.persistence-changed" }>;
+        const disableEvent = {
+          ...transferEvent,
+          sequence: 2,
+          eventId: EventId.make("event-persistence-disable-before-removal"),
+          payload: {
+            threadId: removedThreadId,
+            persistentThreadId: null,
+            replacedThreadId: removedThreadId,
+            updatedAt: now,
+          },
+        } satisfies Extract<OrchestrationEvent, { type: "thread.persistence-changed" }>;
+        const deletedEvent = {
+          sequence: 3,
+          eventId: EventId.make("event-delete-after-persistence-transfer"),
+          aggregateKind: "thread",
+          aggregateId: removedThreadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.deleted",
+          payload: { threadId: removedThreadId, deletedAt: now },
+        } satisfies Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: {
+              latestSequence: Effect.succeed(3),
+              readEvents: () => Stream.make(transferEvent, disableEvent, deletedEvent),
+            },
+            projectionSnapshotQuery: {
+              getThreadShellById: (requestedId) =>
+                Effect.succeed(
+                  requestedId === removedThreadId
+                    ? Option.none()
+                    : Option.some(
+                        makeDefaultOrchestrationThreadShell({
+                          id: requestedId,
+                          persistent: false,
+                        }),
+                      ),
+                ),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const items = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+            ),
+          ),
+        );
+
+        const [first] = Array.from(items);
+        assert.equal(first?.kind, "thread-removed");
+        if (first?.kind !== "thread-removed") return;
+        assert.equal(first.threadId, removedThreadId);
+        assert.equal(first.sequence, 3);
+        assert.deepEqual(
+          first.relatedThreads?.map((thread) => [thread.id, thread.persistent]),
+          [[replacedThreadId, false]],
+        );
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("subscribeShell coalescing still emits a removal for a deleted thread", () =>
     Effect.gen(function* () {
       const goneThreadId = ThreadId.make("thread-gone");

@@ -779,6 +779,8 @@ export const OrchestrationThread = Schema.Struct({
   // threads remain in their respective shelves even when pinned.
   // Optional so payloads from pre-pinning servers still decode.
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  // Optional on the wire so pre-safeguard clients and cached snapshots decode it as false.
+  persistent: Schema.optional(Schema.Boolean),
   // Fractional index for user-arranged pinned order. Keyed threads sort by
   // string comparison ahead of keyless ones (which keep creation order), so
   // servers never need each other's threads to agree on the merged list.
@@ -854,6 +856,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  persistent: Schema.optional(Schema.Boolean),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
@@ -915,11 +918,13 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("thread-upserted"),
     sequence: NonNegativeInt,
     thread: OrchestrationThreadShell,
+    relatedThreads: Schema.optional(Schema.Array(OrchestrationThreadShell)),
   }),
   Schema.Struct({
     kind: Schema.Literal("thread-removed"),
     sequence: NonNegativeInt,
     threadId: ThreadId,
+    relatedThreads: Schema.optional(Schema.Array(OrchestrationThreadShell)),
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
@@ -1120,6 +1125,13 @@ const ThreadUnarchiveCommand = Schema.Struct({
   type: Schema.Literal("thread.unarchive"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+
+const ThreadPersistenceSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.persistence.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  persistent: Schema.Boolean,
 });
 
 const ThreadSettleCommand = Schema.Struct({
@@ -1378,6 +1390,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
+  ThreadPersistenceSetCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
@@ -1412,6 +1425,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
+  ThreadPersistenceSetCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
@@ -1572,6 +1586,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.worktree-cleanup-updated",
   "thread.archived",
   "thread.unarchived",
+  "thread.persistence-changed",
   "thread.settled",
   "thread.unsettled",
   "thread.snoozed",
@@ -1674,6 +1689,13 @@ export const ThreadArchivedPayload = Schema.Struct({
 
 export const ThreadUnarchivedPayload = Schema.Struct({
   threadId: ThreadId,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadPersistenceChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  persistentThreadId: Schema.NullOr(ThreadId),
+  replacedThreadId: Schema.NullOr(ThreadId),
   updatedAt: IsoDateTime,
 });
 
@@ -1937,6 +1959,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.unarchived"),
     payload: ThreadUnarchivedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.persistence-changed"),
+    payload: ThreadPersistenceChangedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
