@@ -5,6 +5,8 @@ import {
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   filterSidebarProjectScopeItems,
@@ -231,6 +233,46 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
       buildBulkTitleRegenerationContextMenuItem({
         supportedCount: 0,
         actionableCount: 0,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("buildBulkThreadDeleteContextMenuItem", () => {
+  it("blocks a mixed selection containing a persistent thread", () => {
+    expect(buildBulkThreadDeleteContextMenuItem({ count: 3, hasPersistentThread: true })).toEqual({
+      id: "delete",
+      label: "Delete (3) (disable persistence first)",
+      destructive: true,
+      disabled: true,
+    });
+  });
+});
+
+describe("collectUnprotectedBulkThreadEntries", () => {
+  it("rechecks live persistence before starting a destructive batch", () => {
+    const threads = new Map([
+      ["ordinary", { id: "ordinary", persistent: false }],
+      ["protected", { id: "protected", persistent: false }],
+    ]);
+    const getEntry = (threadKey: string) => {
+      const thread = threads.get(threadKey);
+      return thread ? { threadKey, thread } : undefined;
+    };
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
+    ).toHaveLength(2);
+
+    threads.set("protected", { id: "protected", persistent: true });
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
       }),
     ).toBeNull();
   });
