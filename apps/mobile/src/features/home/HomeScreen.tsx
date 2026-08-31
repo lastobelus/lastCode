@@ -628,6 +628,15 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     return supported;
   }, [serverConfigs]);
+  const persistenceEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadPersistence === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   const pinReorderEnvironmentIds = useMemo(() => {
     const supported = new Set<EnvironmentId>();
     for (const [environmentId, config] of serverConfigs) {
@@ -848,6 +857,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onArchiveThread={props.onArchiveThread}
           onRegenerateThreadTitle={handleRegenerateThreadTitle}
           titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+          persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
           settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
           onSettleThread={handleSettleThread}
           snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -888,6 +898,7 @@ export function HomeScreen(props: HomeScreenProps) {
       handleSwipeableWillOpen,
       handleUnsettleThread,
       pinningEnvironmentIds,
+      persistenceEnvironmentIds,
       pinReorderEnvironmentIds,
       projectByKey,
       projectCwdByKey,
@@ -1009,6 +1020,7 @@ export function HomeScreen(props: HomeScreenProps) {
               onDeleteThread={props.onDeleteThread}
               onRegenerateThreadTitle={handleRegenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+              persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
               onSelectThread={props.onSelectThread}
               onSwipeableClose={handleSwipeableClose}
               onSwipeableWillOpen={handleSwipeableWillOpen}
@@ -1040,6 +1052,7 @@ export function HomeScreen(props: HomeScreenProps) {
       props.onSelectThread,
       props.searchQuery,
       props.savedConnectionsById,
+      persistenceEnvironmentIds,
       threadSearchMatchByKey,
       titleRegenerationEnvironmentIds,
       updateGroupDisplay,

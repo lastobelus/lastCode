@@ -237,7 +237,9 @@ pnpm lastcode:checkpoint:service install \
 ```
 
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
-maintenance and configure its thread ID once:
+maintenance. Open that thread's context menu (right-click on desktop/web or
+long-press on mobile), choose **Mark as persistent thread**, then configure its
+thread ID once:
 
 ```bash
 pnpm lastcode:checkpoint:service install \
@@ -246,7 +248,14 @@ pnpm lastcode:checkpoint:service install \
 ```
 
 The service reuses that thread instead of creating a new thread per failure. A
-standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
+message-square-lock marker and italic title identify it in LastCode. The server
+blocks archive and permanent deletion while the thread is persistent. Marking
+another thread persistent atomically transfers the safeguard. A project that
+contains the persistent thread cannot be removed either, because project removal
+would delete its threads. Choose **Disable persistent thread** when recovery
+delivery no longer needs protection.
+
+A standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
 execution; every run writes terminal state to
 `~/.lastcode/automation/checkpoint-service-state.json`. A failed alert remains
 pending until LastCode accepts it, and the same incident is not sent again after
@@ -319,6 +328,15 @@ Show the latest eight checkpoint activities, or choose another count:
 lastcode-checkpoints
 lastcode-checkpoints -n 20
 lastcode-checkpoints --verbose
+```
+
+The dashboard compares the supervisor's configured recovery thread ID with
+LastCode's authoritative thread list. If the ID is missing or no longer marked
+persistent, it prints the mismatch and repair guidance. After designating the
+replacement in LastCode, repair the supervisor configuration atomically with:
+
+```bash
+lastcode-checkpoints --repair-persistent-thread
 ```
 
 The dashboard shows success or failure, upstream nightly, number of downstream
