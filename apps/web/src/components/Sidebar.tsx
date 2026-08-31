@@ -128,7 +128,7 @@ import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkThreadDeleteContextMenuItem,
-  collectBulkThreadDeleteEntries,
+  collectUnprotectedBulkThreadEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -3239,9 +3239,12 @@ export default function Sidebar() {
       // changes persistence. Rebuild from live shell state immediately before
       // the destructive batch so an ordinary thread cannot be deleted before
       // reaching a newly protected selection member.
-      const deleteEntries = collectBulkThreadDeleteEntries({
+      const deleteEntries = collectUnprotectedBulkThreadEntries({
         threadKeys,
-        getThread: (threadKey) => threadByKeyRef.current.get(threadKey),
+        getEntry: (threadKey) => {
+          const thread = threadByKeyRef.current.get(threadKey);
+          return thread ? { threadKey, thread } : undefined;
+        },
       });
       if (!deleteEntries) return;
       // Grown as deletions actually land, never seeded with the whole batch:

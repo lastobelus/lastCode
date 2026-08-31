@@ -205,6 +205,7 @@ import { openCommandPalette } from "../commandPaletteBus";
 import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  collectUnprotectedBulkThreadEntries,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -2231,11 +2232,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (!api) return;
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
       if (threadKeys.length === 0) return;
-      const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
+      const readSelectedThreadEntry = (threadKey: string) => {
         const threadRef = parseScopedThreadKey(threadKey);
         const thread = threadRef ? readThreadShell(threadRef) : null;
-        if (!threadRef || !thread || thread.worktreeCleanup != null) return [];
-        return [{ threadKey, threadRef, thread }];
+        if (!threadRef || !thread || thread.worktreeCleanup != null) return undefined;
+        return { threadKey, threadRef, thread };
+      };
+      const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
+        const entry = readSelectedThreadEntry(threadKey);
+        return entry ? [entry] : [];
       });
       const count = selectedThreadEntries.length;
       if (count === 0) return;
@@ -2245,6 +2250,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const hasPersistentThread = selectedThreadEntries.some(
         ({ thread }) => thread.persistent === true,
       );
+      const warnPersistentThreadProtected = () => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description: "Disable persistence or move it to another thread first.",
+          }),
+        );
+      };
 
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
@@ -2255,13 +2269,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
 
       if (hasPersistentThread && (clicked === "archive" || clicked === "delete")) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread protected",
-            description: "Disable persistence or move it to another thread first.",
-          }),
-        );
+        warnPersistentThreadProtected();
         return;
       }
 
@@ -2281,8 +2289,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           if (!confirmed) return;
         }
 
+        const currentEntries = collectUnprotectedBulkThreadEntries({
+          threadKeys,
+          getEntry: readSelectedThreadEntry,
+        });
+        if (!currentEntries) {
+          warnPersistentThreadProtected();
+          return;
+        }
+
         const archiveOutcome = await archiveSelectedThreadEntries({
-          entries: selectedThreadEntries,
+          entries: currentEntries,
           archive: ({ threadRef }, onArchived) => archiveThread(threadRef, { onArchived }),
         });
         for (const failure of archiveOutcome.followupFailures) {
@@ -2327,8 +2344,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (!confirmed) return;
       }
 
+      const currentEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: readSelectedThreadEntry,
+      });
+      if (!currentEntries) {
+        warnPersistentThreadProtected();
+        return;
+      }
+
       const deletedThreadKeys = new Set<string>();
-      for (const { threadKey, threadRef } of selectedThreadEntries) {
+      for (const { threadKey, threadRef } of currentEntries) {
         const result = await deleteThread(threadRef, {
           deletedThreadKeys,
         });

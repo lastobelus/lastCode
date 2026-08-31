@@ -139,17 +139,17 @@ export function buildBulkThreadDeleteContextMenuItem(input: {
   };
 }
 
-export function collectBulkThreadDeleteEntries<
-  TThread extends { readonly persistent?: boolean | undefined },
+export function collectUnprotectedBulkThreadEntries<
+  TEntry extends { readonly thread: { readonly persistent?: boolean | undefined } },
 >(input: {
   threadKeys: readonly string[];
-  getThread: (threadKey: string) => TThread | undefined;
-}): readonly { threadKey: string; thread: TThread }[] | null {
+  getEntry: (threadKey: string) => TEntry | undefined;
+}): readonly TEntry[] | null {
   const entries = input.threadKeys.flatMap((threadKey) => {
-    const thread = input.getThread(threadKey);
-    return thread ? [{ threadKey, thread }] : [];
+    const entry = input.getEntry(threadKey);
+    return entry ? [entry] : [];
   });
-  return entries.some(({ thread }) => thread.persistent === true) ? null : entries;
+  return entries.some((entry) => entry.thread.persistent === true) ? null : entries;
 }
 
 export interface ThreadStatusPill {

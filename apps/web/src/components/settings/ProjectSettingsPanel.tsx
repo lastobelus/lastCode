@@ -256,6 +256,8 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const threads = useThreadShells();
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
   const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
   const deleteProject = useAtomCommand(projectEnvironment.delete, { reportFailure: false });
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
@@ -689,9 +691,25 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
       );
       if (confirmed._tag === "Failure" || !confirmed.value) return;
 
+      const currentThreads = threadsRef.current;
+      if (projectsContainPersistentThread({ members, threads: currentThreads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+      const currentProjectThreads = currentThreads.filter((thread) =>
+        memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+      );
+
       const draftStore = useComposerDraftStore.getState();
       for (const member of members) {
-        const memberThreads = projectThreads.filter(
+        const memberThreads = currentProjectThreads.filter(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
         );

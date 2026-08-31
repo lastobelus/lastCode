@@ -5,7 +5,7 @@ import {
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkThreadDeleteContextMenuItem,
-  collectBulkThreadDeleteEntries,
+  collectUnprotectedBulkThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   filterSidebarProjectScopeItems,
@@ -234,22 +234,31 @@ describe("buildBulkThreadDeleteContextMenuItem", () => {
   });
 });
 
-describe("collectBulkThreadDeleteEntries", () => {
+describe("collectUnprotectedBulkThreadEntries", () => {
   it("rechecks live persistence before starting a destructive batch", () => {
     const threads = new Map([
       ["ordinary", { id: "ordinary", persistent: false }],
       ["protected", { id: "protected", persistent: false }],
     ]);
-    const getThread = (threadKey: string) => threads.get(threadKey);
+    const getEntry = (threadKey: string) => {
+      const thread = threads.get(threadKey);
+      return thread ? { threadKey, thread } : undefined;
+    };
 
     expect(
-      collectBulkThreadDeleteEntries({ threadKeys: ["ordinary", "protected"], getThread }),
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
     ).toHaveLength(2);
 
     threads.set("protected", { id: "protected", persistent: true });
 
     expect(
-      collectBulkThreadDeleteEntries({ threadKeys: ["ordinary", "protected"], getThread }),
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
     ).toBeNull();
   });
 });
