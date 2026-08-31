@@ -67,6 +67,7 @@ import Migration0052 from "./Migrations/052_ProjectionThreadWorktreeCleanup.ts";
 import Migration0053 from "./Migrations/053_ProjectionThreadLinkedPullRequest.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsUnsettledAt.ts";
 import Migration0055 from "./Migrations/055_ProjectionThreadMessageSource.ts";
+import Migration0056 from "./Migrations/056_ProjectionThreadsPersistent.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -134,6 +135,7 @@ export const migrationEntries = [
   [53, "ProjectionThreadLinkedPullRequest", Migration0053],
   [54, "ProjectionThreadsUnsettledAt", Migration0054],
   [55, "ProjectionThreadMessageSource", Migration0055],
+  [56, "ProjectionThreadsPersistent", Migration0056],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

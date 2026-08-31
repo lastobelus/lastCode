@@ -55,12 +55,14 @@ function splitLines(value) {
 export function parseOptions(argv) {
   let count = DEFAULT_COUNT;
   let install = false;
+  let repairPersistentThread = false;
   let repoRoot;
   let verbose = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--install") install = true;
+    else if (arg === "--repair-persistent-thread") repairPersistentThread = true;
     else if (arg === "-v" || arg === "--verbose") verbose = true;
     else if (arg === "-n" || arg === "--count" || arg === "--repo") {
       const value = argv[index + 1];
@@ -74,12 +76,112 @@ export function parseOptions(argv) {
       }
       index += 1;
     } else if (arg === "-h" || arg === "--help") {
-      return { help: true, count, install, repoRoot, verbose };
+      return { help: true, count, install, repairPersistentThread, repoRoot, verbose };
     } else {
       throw new Error(`Unknown argument '${arg}'.`);
     }
   }
-  return { help: false, count, install, repoRoot, verbose };
+  return { help: false, count, install, repairPersistentThread, repoRoot, verbose };
+}
+
+export function readCheckpointSupervisorConfig(home) {
+  const configPath = NodePath.join(home, ".lastcode", "automation", "checkpoint-supervisor.json");
+  if (!NodeFS.existsSync(configPath)) return { configPath, config: null };
+  try {
+    const config = JSON.parse(NodeFS.readFileSync(configPath, "utf8"));
+    return { configPath, config: config?.schemaVersion === 1 ? config : null };
+  } catch {
+    return { configPath, config: null };
+  }
+}
+
+export function persistentThreadRepairStatus(config, threads) {
+  const configuredId =
+    typeof config?.recoveryThreadId === "string" ? config.recoveryThreadId : undefined;
+  if (!configuredId) return { kind: "disabled" };
+  if (threads === null) return { kind: "unavailable", configuredId };
+  const configuredThread = threads.find((thread) => thread.threadId === configuredId);
+  if (configuredThread?.persistent === true) return { kind: "healthy", configuredId };
+  const replacement = threads.find((thread) => thread.persistent === true);
+  return {
+    kind: configuredThread ? "not-persistent" : "stale",
+    configuredId,
+    ...(replacement
+      ? { replacementId: replacement.threadId, replacementTitle: replacement.title }
+      : {}),
+  };
+}
+
+function readLastCodeThreads(home) {
+  const toolPath = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
+  if (!NodeFS.existsSync(toolPath)) return null;
+  const result = NodeChildProcess.spawnSync(toolPath, ["list", "--json"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  });
+  if (result.error || result.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return Array.isArray(parsed?.threads) ? parsed.threads : [];
+  } catch {
+    return null;
+  }
+}
+
+function readLastCodeThread(home, threadId) {
+  const toolPath = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
+  if (!NodeFS.existsSync(toolPath)) return null;
+  const result = NodeChildProcess.spawnSync(
+    toolPath,
+    ["read", threadId, "--turn-limit", "1", "--json"],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+    },
+  );
+  if (result.error || result.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return parsed?.kind === "read" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readCheckpointThreads(home, config) {
+  const threads = readLastCodeThreads(home);
+  if (threads === null) return null;
+  const configuredId =
+    typeof config?.recoveryThreadId === "string" ? config.recoveryThreadId : undefined;
+  if (!configuredId || threads.some((thread) => thread.threadId === configuredId)) return threads;
+  const configuredThread = readLastCodeThread(home, configuredId);
+  return configuredThread === null ? threads : [...threads, configuredThread];
+}
+
+function repairPersistentThreadConfig(home) {
+  const { configPath, config } = readCheckpointSupervisorConfig(home);
+  if (!config) throw new Error("Checkpoint supervisor configuration is unavailable.");
+  const threads = readLastCodeThreads(home);
+  if (threads === null) throw new Error("LastCode thread state is unavailable.");
+  const persistentThreads = threads.filter((thread) => thread.persistent === true);
+  if (persistentThreads.length !== 1) {
+    throw new Error(
+      persistentThreads.length === 0
+        ? "No persistent thread is designated. Mark one in LastCode, then retry."
+        : "More than one persistent thread was found; disable the extras before retrying.",
+    );
+  }
+  const recoveryThreadId = persistentThreads[0].threadId;
+  const temporaryPath = `${configPath}.tmp`;
+  NodeFS.writeFileSync(
+    temporaryPath,
+    `${JSON.stringify({ ...config, recoveryThreadId }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  NodeFS.renameSync(temporaryPath, configPath);
+  console.log(`Repaired checkpoint recovery delivery to persistent thread ${recoveryThreadId}.`);
 }
 
 function parseNightly(tag) {
@@ -878,6 +980,36 @@ function printDashboard(repoRoot, home, count, verbose) {
   for (const detail of carrySetShadowDetailLines(readRuns(home), verbose)) {
     console.log(style(detail.includes(" failed ") ? ansi.error : ansi.green, detail));
   }
+  const { config: supervisorConfig } = readCheckpointSupervisorConfig(home);
+  const persistentStatus = persistentThreadRepairStatus(
+    supervisorConfig,
+    readCheckpointThreads(home, supervisorConfig),
+  );
+  if (persistentStatus.kind === "stale" || persistentStatus.kind === "not-persistent") {
+    console.log(
+      style(
+        ansi.yellow,
+        persistentStatus.kind === "stale"
+          ? `Persistent thread safeguard: configured recovery thread ${persistentStatus.configuredId} no longer exists.`
+          : `Persistent thread safeguard: configured recovery thread ${persistentStatus.configuredId} is not marked persistent.`,
+      ),
+    );
+    if (persistentStatus.replacementId) {
+      console.log(
+        style(
+          ansi.lavender,
+          `Repair to “${persistentStatus.replacementTitle}” (${persistentStatus.replacementId}): lastcode-checkpoints --repair-persistent-thread`,
+        ),
+      );
+    } else {
+      console.log(
+        style(
+          ansi.lavender,
+          "Right-click the replacement thread in LastCode and choose “Mark as persistent thread”, then run lastcode-checkpoints --repair-persistent-thread.",
+        ),
+      );
+    }
+  }
   console.log(
     style(
       freshness === "Up to date"
@@ -899,13 +1031,19 @@ function printDashboard(repoRoot, home, count, verbose) {
 function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
-    console.log("Usage: lastcode-checkpoints [-n COUNT] [--verbose] [--repo PATH] [--install]");
+    console.log(
+      "Usage: lastcode-checkpoints [-n COUNT] [--verbose] [--repo PATH] [--install] [--repair-persistent-thread]",
+    );
     return;
   }
   const home = NodeOS.homedir();
   const repoRoot = resolveConfiguredRepo(home, options.repoRoot);
   if (options.install) {
     installCommand(repoRoot, home);
+    return;
+  }
+  if (options.repairPersistentThread) {
+    repairPersistentThreadConfig(home);
     return;
   }
   printDashboard(repoRoot, home, options.count, options.verbose);
