@@ -34,6 +34,11 @@ import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regenerati
 import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
 
 /**
  * Shared presentation for the thread lists: the compact (phone) Home list and
@@ -433,6 +438,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly titleRegenerationSupported: boolean;
+  readonly persistenceSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<
@@ -464,6 +470,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     reportFailure: false,
   });
   const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
     reportFailure: false,
   });
   const status = resolveThreadStatus(thread);
@@ -503,6 +512,22 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
+  );
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
   );
   const handleCancelAction = useCallback(async () => {
     if (runningAction === null) return;
@@ -561,25 +586,36 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     );
   }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
   const menuActions = useMemo<MenuAction[]>(
-    () => [
-      THREAD_ROW_MENU_ACTIONS[0]!,
-      ...buildThreadTitleRegenerationMenuItems({
-        supported: props.titleRegenerationSupported,
-        isRegenerating: thread.titleRegeneration != null,
+    () =>
+      buildThreadPersistenceMenuItems({
+        persistent: thread.persistent === true,
+        supported: props.persistenceSupported,
+        actions: [
+          THREAD_ROW_MENU_ACTIONS[0]!,
+          ...buildThreadTitleRegenerationMenuItems({
+            supported: props.titleRegenerationSupported,
+            isRegenerating: thread.titleRegeneration != null,
+          }),
+          ...(runningAction === null
+            ? []
+            : [
+                {
+                  id: "cancel-action",
+                  title: `Cancel ${runningAction.actionName}`,
+                  image: "stop.fill",
+                  attributes: { destructive: true },
+                } satisfies MenuAction,
+              ]),
+          THREAD_ROW_MENU_ACTIONS[1]!,
+        ],
       }),
-      ...(runningAction === null
-        ? []
-        : [
-            {
-              id: "cancel-action",
-              title: `Cancel ${runningAction.actionName}`,
-              image: "stop.fill",
-              attributes: { destructive: true },
-            } satisfies MenuAction,
-          ]),
-      THREAD_ROW_MENU_ACTIONS[1]!,
+    [
+      props.persistenceSupported,
+      props.titleRegenerationSupported,
+      runningAction,
+      thread.persistent,
+      thread.titleRegeneration,
     ],
-    [props.titleRegenerationSupported, runningAction, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
     () => ({
@@ -598,12 +634,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
     },
     [
       handleArchive,
       handleCancelAction,
       handleDelete,
       handleKeepWorktree,
+      handlePersistence,
       handleRegenerateTitle,
       handleRetryWorktreeCleanup,
     ],
@@ -685,7 +724,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         accessibilityHint={
           cleanupFailed
             ? "Thread unavailable. Long-press for worktree recovery actions"
-            : "Swipe left for archive and delete actions"
+            : thread.persistent === true
+              ? "Persistent thread. Long-press to disable persistence"
+              : "Swipe left for archive and delete actions"
         }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
@@ -701,9 +742,20 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         <View className="pr-[18px] pt-[10px]" style={{ paddingLeft: THREAD_LIST_COMPACT_INSET }}>
           <View className={cn("gap-[3px] pb-[10px]", !props.isLast && "border-b border-separator")}>
             <View className="flex-row items-center justify-between gap-2">
-              <Text className="flex-1 text-lg font-t3-bold text-foreground" numberOfLines={1}>
-                {thread.title}
-              </Text>
+              <View className="flex-1 flex-row items-center gap-1.5">
+                {thread.persistent === true ? (
+                  <PersistentThreadIcon color={String(theme["--color-foreground"])} size={15} />
+                ) : null}
+                <Text
+                  className={cn(
+                    "flex-1 text-lg font-t3-bold text-foreground",
+                    thread.persistent === true && "italic",
+                  )}
+                  numberOfLines={1}
+                >
+                  {thread.title}
+                </Text>
+              </View>
               <View className="flex-row items-center gap-2">
                 {actionStatusIndicator}
                 {statusPill}
@@ -761,15 +813,23 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       >
         <View className="gap-[3px]">
           <View className="flex-row items-center justify-between gap-2">
-            <Text
-              className={cn(
-                "flex-1 text-base font-t3-medium",
-                selected ? "text-user-bubble-foreground" : "text-foreground",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-1 flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base font-t3-medium",
+                  selected ? "text-user-bubble-foreground" : "text-foreground",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             <View className="flex-row items-center gap-2">
               {actionStatusIndicator}
               {statusPill}
@@ -799,7 +859,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   return (
     <ThreadSwipeable
       backgroundColor={backgroundColor}
-      enabled={!cleanupPending && !cleanupFailed}
+      enabled={!cleanupPending && !cleanupFailed && thread.persistent !== true}
       containerStyle={
         compact ? undefined : { borderRadius: SIDEBAR_ROW_RADIUS, overflow: "hidden" }
       }
