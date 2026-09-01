@@ -32,7 +32,9 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
+  actionResultDetails,
   actionResultPresentation,
+  type ActionResultDetail,
   type ActionResultPresentationOutcome,
   parseActionResumeFollowUp,
 } from "@t3tools/shared/actionResume";
@@ -1575,6 +1577,7 @@ function renderFeedEntry(
       message.role === "system" ? parseActionResumeFollowUp(message.text) : null;
     if (actionFollowUp) {
       const presentation = actionResultPresentation(actionFollowUp);
+      const details = actionResultDetails(actionFollowUp.report);
       return (
         <ActionFollowUpCard
           actionName={actionFollowUp.actionName}
@@ -1583,6 +1586,7 @@ function renderFeedEntry(
           summary={presentation.summary}
           output={actionFollowUp.output}
           detailedOutputAvailable={actionFollowUp.detailedOutputAvailable}
+          details={details}
           iconColor={iconSubtleColor}
           expanded={props.expandedActionRows[entry.id] ?? false}
           onToggle={() => props.onToggleActionFollowUp(entry.id)}
@@ -1905,10 +1909,13 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
   readonly summary: string;
   readonly output: string;
   readonly detailedOutputAvailable: boolean;
+  readonly details: ReadonlyArray<ActionResultDetail>;
   readonly iconColor: string | ColorValue;
   readonly expanded: boolean;
   readonly onToggle: () => void;
 }) {
+  const detailsAvailable = props.details.length > 0;
+  const expandable = !props.detailedOutputAvailable || detailsAvailable;
   const tone =
     props.outcome === "success"
       ? {
@@ -1955,14 +1962,7 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
 
   return (
     <View className={cn("mb-5 overflow-hidden rounded-xl border", tone.container)}>
-      {props.detailedOutputAvailable ? (
-        <View
-          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
-          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
-        >
-          {heading}
-        </View>
-      ) : (
+      {expandable ? (
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ expanded: props.expanded }}
@@ -1978,6 +1978,13 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
             type="monochrome"
           />
         </Pressable>
+      ) : (
+        <View
+          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
+          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+        >
+          {heading}
+        </View>
       )}
       {!props.detailedOutputAvailable && props.expanded ? (
         <ScrollView
@@ -1993,7 +2000,38 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
           <Text className="text-sm text-foreground" numberOfLines={1}>
             {props.summary}
           </Text>
-          {props.detailedOutputAvailable ? (
+          {detailsAvailable && props.expanded ? (
+            <View className="mt-2 gap-1.5">
+              {props.details.map((detail) => {
+                const href = detail.href;
+                return (
+                  <View key={detail.id} className="gap-0.5">
+                    <Text className="font-t3-medium text-xs text-foreground-muted">
+                      {detail.label}
+                    </Text>
+                    {href ? (
+                      <Pressable
+                        accessibilityRole="link"
+                        accessibilityLabel={`${detail.label}: ${detail.value}`}
+                        onPress={() => {
+                          void tryOpenExternalUrl(href, "action-report");
+                        }}
+                      >
+                        <Text selectable className="text-xs leading-4 text-primary underline">
+                          {detail.value}
+                        </Text>
+                      </Pressable>
+                    ) : (
+                      <Text selectable className="text-xs leading-4 text-foreground">
+                        {detail.value}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
+          {props.detailedOutputAvailable && !detailsAvailable ? (
             <Text className="mt-0.5 text-xs text-foreground-muted">
               Detailed output retained in the Action terminal.
             </Text>
