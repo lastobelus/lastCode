@@ -68,7 +68,6 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
-import { ServerEnvironment } from "./environment/ServerEnvironment.ts";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -413,7 +412,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
       Layer.provide(
         Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer).pipe(
           Layer.provide(
-            Layer.succeed(ServerEnvironment, {
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
               getEnvironmentId: Effect.succeed(EnvironmentId.make("env-thread-live")),
               getDescriptor: Effect.succeed({
                 environmentId: EnvironmentId.make("env-thread-live"),
