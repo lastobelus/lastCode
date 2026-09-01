@@ -1456,7 +1456,7 @@ function renderFeedEntry(
           maxWidth={props.userBubbleMaxWidth}
           onLinkPress={props.onMarkdownLinkPress}
           onOpenSourceThread={props.onOpenSourceThread}
-          onPressImage={props.onPressImage}
+          onPressPreview={props.onPressPreview}
           renderImage={props.renderMarkdownImage}
           reviewCommentColors={props.reviewCommentColors}
           skills={props.skills}
@@ -1618,7 +1618,7 @@ function AgentMessageTimelineRow(props: {
   readonly maxWidth: number;
   readonly onLinkPress: (href: string) => void;
   readonly onOpenSourceThread: (sourceThreadId: ThreadId) => void;
-  readonly onPressImage: (uri: string, headers?: Record<string, string>) => void;
+  readonly onPressPreview: (source: FilePreviewSource) => void;
   readonly renderImage: MarkdownImageRenderer;
   readonly reviewCommentColors: ReviewCommentColors;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
@@ -1701,8 +1701,9 @@ function AgentMessageTimelineRow(props: {
             key={attachment.id}
             environmentId={props.environmentId}
             attachmentId={attachment.id}
+            name={attachment.name}
             className="aspect-[1.3] w-full rounded-[14px] bg-white/15"
-            onPressImage={props.onPressImage}
+            onPressPreview={props.onPressPreview}
           />
         ))}
       </View>
