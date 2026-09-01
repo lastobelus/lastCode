@@ -21,7 +21,11 @@ const NOOP_OPEN_AGENTS = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 const NOOP_OPEN_SOURCE_THREAD = (_threadId: ThreadId) => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
-import { actionResultPresentation, parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  actionResultDetails,
+  actionResultPresentation,
+  parseActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import {
   createContext,
   Fragment,
@@ -1735,6 +1739,9 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
 
   if (actionFollowUp) {
     const presentation = actionResultPresentation(actionFollowUp);
+    const actionDetails = actionResultDetails(actionFollowUp.report);
+    const actionDetailsAvailable = actionDetails.length > 0;
+    const actionExpandable = !actionFollowUp.detailedOutputAvailable || actionDetailsAvailable;
     const toneClass =
       presentation.outcome === "success"
         ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-300"
@@ -1761,11 +1768,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
     );
     return (
       <div className={cn("mx-1 overflow-hidden rounded-lg border", toneClass)}>
-        {actionFollowUp.detailedOutputAvailable ? (
-          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
-            {heading}
-          </div>
-        ) : (
+        {actionExpandable ? (
           <button
             type="button"
             aria-expanded={actionOutputExpanded}
@@ -1779,6 +1782,10 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
               <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
             )}
           </button>
+        ) : (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+            {heading}
+          </div>
         )}
         {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
           <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
@@ -1787,7 +1794,30 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
         ) : (
           <div className="px-3 pb-2.5 pt-1">
             <p className="truncate text-sm text-foreground/90">{presentation.summary}</p>
-            {actionFollowUp.detailedOutputAvailable ? (
+            {actionDetailsAvailable && actionOutputExpanded ? (
+              <dl className="mt-2 space-y-1.5 text-xs text-foreground/90">
+                {actionDetails.map((detail) => (
+                  <div key={detail.id} className="min-w-0">
+                    <dt className="font-medium text-muted-foreground">{detail.label}</dt>
+                    <dd className="break-words">
+                      {detail.href ? (
+                        <a
+                          href={detail.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline underline-offset-2"
+                        >
+                          {detail.value}
+                        </a>
+                      ) : (
+                        detail.value
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+            {actionFollowUp.detailedOutputAvailable && !actionDetailsAvailable ? (
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Detailed output retained in the Action terminal.
               </p>

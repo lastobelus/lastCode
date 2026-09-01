@@ -325,6 +325,12 @@ import {
 } from "./ThreadStatusIndicators";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
+  ComposerActionResumeActions,
+  ComposerActionResumeDescription,
+  ComposerActionResumeTitle,
+} from "./chat/ComposerActionResume";
+import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
+import {
   hasAvailableClaudeCompactionProvider,
   hasDismissedResumeCompaction,
   shouldOfferResumeCompaction,
@@ -5015,17 +5021,11 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
   const [isResumingInterruptedAction, setIsResumingInterruptedAction] = useState(false);
   const [isDiscardingInterruptedAction, setIsDiscardingInterruptedAction] = useState(false);
+  const [cancellingResumableActionRunId, setCancellingResumableActionRunId] = useState<
+    string | null
+  >(null);
   const runningResumableAction =
     activeThreadShell?.actionResume?.outcome === "running" ? activeThreadShell.actionResume : null;
-  const activeComposerResumableAction = useMemo(
-    () =>
-      runningResumableAction === null
-        ? null
-        : {
-            action: runningResumableAction,
-          },
-    [runningResumableAction],
-  );
   const handleOpenResumableActionTerminal = useCallback(() => {
     if (activeThreadRef === null || runningResumableAction === null) return;
     storeEnsureTerminal(activeThreadRef, runningResumableAction.terminalId, {
@@ -5036,21 +5036,57 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThreadRef, runningResumableAction, storeEnsureTerminal]);
   const handleCancelResumableAction = useCallback(async () => {
     if (activeThreadRef === null || runningResumableAction === null) return;
-    const result = await closeTerminalMutation({
-      environmentId: activeThreadRef.environmentId,
-      input: {
-        threadId: activeThreadRef.threadId,
-        terminalId: runningResumableAction.terminalId,
-      },
-    });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThreadRef.threadId,
-        error instanceof Error ? error.message : "Failed to cancel the running Action.",
-      );
+    const runId = runningResumableAction.runId;
+    if (cancellingResumableActionRunId === runId) return;
+    setCancellingResumableActionRunId(runId);
+    try {
+      const result = await closeTerminalMutation({
+        environmentId: activeThreadRef.environmentId,
+        input: {
+          threadId: activeThreadRef.threadId,
+          terminalId: runningResumableAction.terminalId,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to cancel the running Action.",
+        );
+      }
+    } finally {
+      setCancellingResumableActionRunId((current) => (current === runId ? null : current));
     }
-  }, [activeThreadRef, closeTerminalMutation, runningResumableAction, setThreadError]);
+  }, [
+    activeThreadRef,
+    cancellingResumableActionRunId,
+    closeTerminalMutation,
+    runningResumableAction,
+    setThreadError,
+  ]);
+  const runningResumableActionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (runningResumableAction === null) return null;
+    return {
+      id: `action-running:${runningResumableAction.runId}`,
+      variant: runningResumableAction.progress?.state === "working" ? "info" : "warning",
+      icon: <RotateCcwClockIcon aria-hidden className="size-4" />,
+      title: <ComposerActionResumeTitle action={runningResumableAction} />,
+      description: <ComposerActionResumeDescription action={runningResumableAction} />,
+      actions: (
+        <ComposerActionResumeActions
+          action={runningResumableAction}
+          cancelling={cancellingResumableActionRunId === runningResumableAction.runId}
+          onCancel={() => void handleCancelResumableAction()}
+          onOpenTerminal={handleOpenResumableActionTerminal}
+        />
+      ),
+    };
+  }, [
+    cancellingResumableActionRunId,
+    handleCancelResumableAction,
+    handleOpenResumableActionTerminal,
+    runningResumableAction,
+  ]);
   const interruptedAction =
     activeThreadShell?.actionResume?.delivery === "available"
       ? activeThreadShell.actionResume
@@ -5318,12 +5354,15 @@ function ChatViewContent(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const interruptedActionItems =
       interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const runningActionItems =
+      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
         ...interruptedActionItems,
+        ...runningActionItems,
         ...backgroundLivenessItems,
         ...calmSystemItems,
         ...resumeCompactionItems,
@@ -5334,6 +5373,7 @@ function ChatViewContent(props: ChatViewProps) {
     return [
       ...urgentSystemItems,
       ...interruptedActionItems,
+      ...runningActionItems,
       ...backgroundLivenessItems,
       ...calmSystemItems,
       ...resumeCompactionItems,
@@ -5383,6 +5423,7 @@ function ChatViewContent(props: ChatViewProps) {
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
     interruptedActionBannerItem,
+    runningResumableActionBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
@@ -7658,7 +7699,6 @@ function ChatViewContent(props: ChatViewProps) {
                             activeProposedPlan={activeProposedPlan}
                             activeTasksProgress={activeComposerTasksProgress}
                             activeTaskSteps={activeComposerTaskSteps}
-                            activeResumableAction={activeComposerResumableAction}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
@@ -7684,8 +7724,6 @@ function ChatViewContent(props: ChatViewProps) {
                             onSend={onSend}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
-                            onOpenResumableActionTerminal={handleOpenResumableActionTerminal}
-                            onCancelResumableAction={handleCancelResumableAction}
                             onRespondToApproval={onRespondToApproval}
                             onSelectActivePendingUserInputOption={
                               onSelectActivePendingUserInputOption
