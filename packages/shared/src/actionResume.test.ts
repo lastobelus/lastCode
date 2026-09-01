@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  actionResultDetails,
   actionResultPresentation,
   actionRunningPresentation,
   formatActionResumeFollowUp,
@@ -140,5 +141,41 @@ describe("Action resume follow-up presentation", () => {
         lastOutputLine: "Tests failed",
       }),
     ).toEqual({ outcome: "error", label: "Failed", summary: "Tests failed" });
+  });
+
+  it("formats inspectable report details in a stable order", () => {
+    expect(
+      actionResultDetails({
+        version: 1,
+        outcome: "attention",
+        summary: "A review is needed",
+        reason: "Two checks need attention",
+        subject: {
+          type: "pull request",
+          id: "123",
+          revision: "abc123",
+          url: "https://example.com/pull/123",
+        },
+        facts: { zebra: "last", alpha: "first" },
+        artifacts: [{ label: "Build log", url: "https://example.com/logs/123" }],
+      }),
+    ).toEqual([
+      { id: "reason", label: "Reason", value: "Two checks need attention" },
+      {
+        id: "subject",
+        label: "Subject",
+        value: "pull request: 123 (abc123)",
+        href: "https://example.com/pull/123",
+      },
+      { id: "fact:alpha", label: "alpha", value: "first" },
+      { id: "fact:zebra", label: "zebra", value: "last" },
+      {
+        id: "artifact:0",
+        label: "Build log",
+        value: "https://example.com/logs/123",
+        href: "https://example.com/logs/123",
+      },
+    ]);
+    expect(actionResultDetails(null)).toEqual([]);
   });
 });
