@@ -558,6 +558,38 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Cancelled: Wait for PR");
   });
 
+  it("keeps structured Action report details collapsed until the card is expanded", () => {
+    const actionText = formatActionResumeFollowUp({
+      actionName: "Run Full CI",
+      actionId: "run-full-ci",
+      runId: "run-full-ci-1",
+      validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
+      exitCode: 0,
+      report: {
+        version: 1,
+        outcome: "attention",
+        summary: "Two checks need attention",
+        reason: "A review is required",
+        facts: { review: "pending" },
+      },
+      output: undefined,
+    });
+    const entry = buildAssistantTimelineEntry(actionText);
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[{ ...entry, message: { ...entry.message, role: "system" as const } }]}
+      />,
+    );
+
+    expect(markup).toContain("Needs attention: Run Full CI");
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).not.toContain("A review is required");
+    expect(markup).not.toContain("review");
+    expect(markup).not.toContain("Detailed output retained in the Action terminal.");
+  });
+
   it("renders a feedback command and its pending response as normal thread messages", () => {
     const submission = {
       id: MessageId.make("feedback-command"),
