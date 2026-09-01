@@ -183,6 +183,53 @@ export type ActionResultPresentationOutcome =
   | "error"
   | "cancelled";
 
+/** A display-ready piece of structured Action result data. */
+export interface ActionResultDetail {
+  readonly id: string;
+  readonly label: string;
+  readonly value: string;
+  readonly href?: string;
+}
+
+/**
+ * Produces the structured, user-inspectable portion of an Action report in a
+ * stable order. The summary and outcome stay in the collapsed card; this
+ * model is only for details worth disclosing on demand.
+ */
+export function actionResultDetails(
+  report: ActionReportType | null | undefined,
+): ReadonlyArray<ActionResultDetail> {
+  if (!report) return [];
+
+  const details: Array<ActionResultDetail> = [];
+  if (report.reason) {
+    details.push({ id: "reason", label: "Reason", value: report.reason });
+  }
+  if (report.subject) {
+    const { id, revision, type, url } = report.subject;
+    details.push({
+      id: "subject",
+      label: "Subject",
+      value: `${type}: ${id}${revision ? ` (${revision})` : ""}`,
+      ...(url ? { href: url } : {}),
+    });
+  }
+  for (const [key, value] of Object.entries(report.facts ?? {}).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    details.push({ id: `fact:${key}`, label: key, value });
+  }
+  for (const [index, artifact] of (report.artifacts ?? []).entries()) {
+    details.push({
+      id: `artifact:${index}`,
+      label: artifact.label,
+      value: artifact.url,
+      href: artifact.url,
+    });
+  }
+  return details;
+}
+
 export function actionRunningPresentation(
   action: Pick<ActionResumeState, "actionName" | "progress">,
 ): {
