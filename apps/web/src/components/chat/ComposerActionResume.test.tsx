@@ -3,110 +3,83 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  ComposerActionResumeBadge,
-  ComposerActionResumeDrawer,
-  type ComposerResumableAction,
+  ComposerActionResumeActions,
+  ComposerActionResumeDescription,
+  ComposerActionResumeTitle,
 } from "./ComposerActionResume";
 
-const action: ComposerResumableAction = {
-  action: {
-    runId: "run-1",
-    threadId: "thread-1",
-    projectId: "project-1",
-    actionId: "deploy-preview",
-    actionName: "Deploy preview",
-    command: "vp run deploy:preview",
-    terminalId: "terminal-1",
-    outcome: "running",
-    delivery: "armed",
-    startedAt: "2026-08-25T12:00:00.000Z",
-    finishedAt: null,
-    exitCode: null,
-    exitSignal: null,
-  } as ActionResumeState,
-};
+const action = {
+  runId: "run-1",
+  threadId: "thread-1",
+  projectId: "project-1",
+  actionId: "wait-for-pr",
+  actionName: "Wait for PR",
+  command: "vp run wait-for-pr",
+  terminalId: "terminal-1",
+  outcome: "running",
+  delivery: "armed",
+  startedAt: "2026-08-25T12:00:00.000Z",
+  finishedAt: null,
+  exitCode: null,
+  exitSignal: null,
+  progress: {
+    state: "waiting",
+    summary: "Waiting for Codex review",
+    detail: "Watching checks and review feedback",
+  },
+} as ActionResumeState;
 
-describe("ComposerActionResumeBadge", () => {
-  it("renders the running Action as the composer shoulder", () => {
+describe("ComposerActionResume", () => {
+  it("provides compact running content for a composer banner", () => {
     const markup = renderToStaticMarkup(
-      <ComposerActionResumeBadge action={action} expanded={false} onToggle={() => undefined} />,
+      <>
+        <ComposerActionResumeTitle action={action} />
+        <ComposerActionResumeDescription action={action} />
+      </>,
     );
 
-    expect(markup).toContain('data-composer-action-resume-badge="true"');
-    expect(markup).toContain('data-variant="warning"');
-    expect(markup).toContain("chat-composer-shoulder-tab");
-    expect(markup).toContain("text-warning-foreground");
-    expect(markup).toContain("lucide-rotate-ccw-clock");
-    expect(markup).toContain("Deploy preview");
-    expect(markup).toContain('aria-expanded="false"');
-  });
-
-  it("has a compact inline fallback when composer shoulders are occupied", () => {
-    const markup = renderToStaticMarkup(
-      <ComposerActionResumeBadge
-        action={action}
-        expanded={false}
-        onToggle={() => undefined}
-        placement="inline"
-      />,
-    );
-
-    expect(markup).toContain("lucide-rotate-ccw-clock");
-    expect(markup).toContain("Deploy preview");
+    expect(markup).toContain("Waiting");
+    expect(markup).toContain("Waiting for Codex review");
+    expect(markup).toContain("Watching checks and review feedback");
+    expect(markup).toContain("Resumes when this thread is idle.");
     expect(markup).not.toContain("chat-composer-shoulder-tab");
+    expect(markup).not.toContain("chat-composer-top-drawer");
   });
 
-  it("cannot open while a blocking composer drawer is active", () => {
+  it("exposes elapsed time, terminal access, and cancellation", () => {
     const markup = renderToStaticMarkup(
-      <ComposerActionResumeBadge
+      <ComposerActionResumeActions
         action={action}
-        disabled
-        expanded={false}
-        onToggle={() => undefined}
-        placement="inline"
+        cancelling={false}
+        onCancel={() => undefined}
+        onOpenTerminal={() => undefined}
       />,
     );
 
+    expect(markup).toContain('aria-label="Waiting elapsed time"');
+    expect(markup).toContain('aria-label="Open Action terminal"');
+    expect(markup).toContain("Cancel");
+  });
+
+  it("reports cancellation in progress and disables repeat requests", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerActionResumeActions
+        action={action}
+        cancelling
+        onCancel={() => undefined}
+        onOpenTerminal={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Cancelling...");
     expect(markup).toContain("disabled");
-    expect(markup).toContain('aria-expanded="false"');
-  });
-});
-
-describe("ComposerActionResumeDrawer", () => {
-  it("explains the resume behavior and exposes terminal controls", () => {
-    const markup = renderToStaticMarkup(
-      <ComposerActionResumeDrawer
-        action={action}
-        cancelling={false}
-        onCancel={() => undefined}
-        onCollapse={() => undefined}
-        onOpenTerminal={() => undefined}
-      />,
-    );
-
-    expect(markup).toContain('data-chat-composer-action-resume-drawer="true"');
-    expect(markup).toContain('data-variant="warning"');
-    expect(markup).toContain("bg-warning");
-    expect(markup).toContain("vp run deploy:preview");
-    expect(markup).toContain(
-      "When it finishes, LastCode resumes the agent once this thread is idle",
-    );
-    expect(markup).toContain("Open terminal");
-    expect(markup).toContain("Cancel Action");
   });
 
-  it("handles Actions whose configured command is no longer available", () => {
-    const { command: _command, ...legacyAction } = action.action;
+  it("falls back to the resume timing when no progress detail is available", () => {
     const markup = renderToStaticMarkup(
-      <ComposerActionResumeDrawer
-        action={{ action: legacyAction }}
-        cancelling={false}
-        onCancel={() => undefined}
-        onCollapse={() => undefined}
-        onOpenTerminal={() => undefined}
-      />,
+      <ComposerActionResumeDescription action={{ ...action, progress: undefined }} />,
     );
 
-    expect(markup).toContain("Command unavailable");
+    expect(markup).toContain("Resumes when this thread is idle.");
   });
 });
