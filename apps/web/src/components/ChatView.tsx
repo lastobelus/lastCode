@@ -186,8 +186,10 @@ import {
   CircleAlertIcon,
   ChevronDownIcon,
   GitBranchIcon,
+  LoaderCircleIcon,
   Minimize2Icon,
   PaperclipIcon,
+  StickyNoteIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
@@ -338,10 +340,12 @@ import {
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
 import {
   runThreadAnnotationBodySave,
+  ThreadAnnotationActions,
+  ThreadAnnotationBody,
   ThreadAnnotationEditorDialog,
-  ThreadAnnotationPostIt,
+  useThreadAnnotationBodyPending,
 } from "./thread-annotation/ThreadAnnotation";
-import { ThreadSyncStatusPill } from "./chat/ThreadSyncStatusPill";
+import { threadSyncLabel } from "../threadSync";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -4640,6 +4644,7 @@ function ChatViewContent(props: ChatViewProps) {
   const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
   const [annotationMutationPending, setAnnotationMutationPending] = useState(false);
   const [dismissedAnnotationKey, setDismissedAnnotationKey] = useState<string | null>(null);
+  const annotationBodyChangePending = useThreadAnnotationBodyPending(routeThreadRef);
   const annotationVersionKey = threadAnnotation
     ? `${routeThreadKey}:${threadAnnotation.updatedAt}`
     : null;
@@ -5187,13 +5192,11 @@ function ChatViewContent(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
-  // The stack renders items[0] front-most and tucks the rest behind hover, so
-  // ordering is priority: urgent system banners (error/warning variants plus
-  // calm-styled live states flagged `urgent`, like update progress), then
-  // background liveness — its Stop button is the only stop affordance for
-  // settled turns, so a passive "update available" notice must not cover it —
-  // then calm system banners, the woke and branch-mismatch notices, and the
-  // informational parked-thread banner last — it must never cover another.
+  // The stack renders items[0] front-most and tucks the rest behind pointer or
+  // focus expansion. Priority is incomplete thread sync, urgent system state,
+  // interrupted/running Actions, background liveness (its Stop button is the
+  // only stop affordance for settled turns), calm system state, thread state,
+  // and finally the passive annotation.
   const parkedThreadBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (!activeThreadSnoozed && !activeThreadSettled) {
       return null;
@@ -5343,9 +5346,66 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
+  const threadSyncBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (threadSyncPhase === null || activeEnvironmentUnavailable) return null;
+    const label = threadSyncLabel(threadSyncPhase);
+    return {
+      id: `thread-sync:${routeThreadKey}:${threadSyncPhase}`,
+      variant: "default",
+      urgent: true,
+      icon: <LoaderCircleIcon aria-hidden className="size-3.5" />,
+      title: label,
+    };
+  }, [activeEnvironmentUnavailable, routeThreadKey, threadSyncPhase]);
+  const threadAnnotationBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (
+      threadAnnotation === null ||
+      threadAnnotation.resolvedAt !== null ||
+      annotationVersionKey === dismissedAnnotationKey
+    ) {
+      return null;
+    }
+    return {
+      id: `thread-annotation:${annotationVersionKey}`,
+      variant: "warning",
+      icon: <StickyNoteIcon aria-hidden className="size-3.5" />,
+      title: "Thread annotation",
+      description: (
+        <ThreadAnnotationBody
+          annotation={threadAnnotation}
+          className="max-h-48 overflow-y-auto"
+          cwd={gitCwd ?? undefined}
+          onBodyChange={saveThreadAnnotation}
+          threadRef={routeThreadRef}
+        />
+      ),
+      actions: (
+        <ThreadAnnotationActions
+          annotation={threadAnnotation}
+          onEdit={() => setAnnotationEditorOpen(true)}
+          onReopen={() => undefined}
+          onResolve={() => void changeThreadAnnotationResolution("resolve")}
+          pending={annotationMutationPending || annotationBodyChangePending}
+        />
+      ),
+      dismissLabel: "Dismiss thread annotation",
+      onDismiss: () => setDismissedAnnotationKey(annotationVersionKey),
+    };
+  }, [
+    annotationBodyChangePending,
+    annotationMutationPending,
+    annotationVersionKey,
+    changeThreadAnnotationResolution,
+    dismissedAnnotationKey,
+    gitCwd,
+    routeThreadRef,
+    saveThreadAnnotation,
+    threadAnnotation,
+  ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const isUrgentSystemItem = (item: ComposerBannerStackItem) =>
       item.urgent === true || item.variant === "error" || item.variant === "warning";
+    const threadSyncItems = threadSyncBannerItem === null ? [] : [threadSyncBannerItem];
     const urgentSystemItems = systemComposerBannerItems.filter(isUrgentSystemItem);
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const backgroundLivenessItems =
@@ -5358,8 +5418,10 @@ function ChatViewContent(props: ChatViewProps) {
       runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const annotationItems = threadAnnotationBannerItem === null ? [] : [threadAnnotationBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...threadSyncItems,
         ...urgentSystemItems,
         ...interruptedActionItems,
         ...runningActionItems,
@@ -5368,9 +5430,11 @@ function ChatViewContent(props: ChatViewProps) {
         ...resumeCompactionItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
+        ...annotationItems,
       ];
     }
     return [
+      ...threadSyncItems,
       ...urgentSystemItems,
       ...interruptedActionItems,
       ...runningActionItems,
@@ -5418,6 +5482,7 @@ function ChatViewContent(props: ChatViewProps) {
         },
       },
       ...parkedThreadItems,
+      ...annotationItems,
     ];
   }, [
     activeBranchMismatchKey,
@@ -5431,6 +5496,8 @@ function ChatViewContent(props: ChatViewProps) {
     resumeCompactionBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
+    threadAnnotationBannerItem,
+    threadSyncBannerItem,
     wokeThreadBannerItem,
   ]);
   useEffect(() => {
@@ -7423,8 +7490,7 @@ function ChatViewContent(props: ChatViewProps) {
     setDragActive: setIsWorkspaceFileDragActive,
     addFiles: (files) => composerRef.current?.addDroppedFiles(files),
   });
-  const externalComposerDrawerAttached =
-    composerBannerItems.length > 0 || Boolean(threadSyncPhase && !activeEnvironmentUnavailable);
+  const externalComposerDrawerAttached = composerBannerItems.length > 0;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
@@ -7622,23 +7688,6 @@ function ChatViewContent(props: ChatViewProps) {
                   ) : (
                     <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
                   )}
-                  {threadAnnotation &&
-                  threadAnnotation.resolvedAt === null &&
-                  annotationVersionKey !== dismissedAnnotationKey ? (
-                    <ThreadAnnotationPostIt
-                      annotation={threadAnnotation}
-                      cwd={gitCwd ?? undefined}
-                      onBodyChange={saveThreadAnnotation}
-                      onDismiss={() => setDismissedAnnotationKey(annotationVersionKey)}
-                      onEdit={() => setAnnotationEditorOpen(true)}
-                      onResolve={() => void changeThreadAnnotationResolution("resolve")}
-                      pending={annotationMutationPending}
-                      threadRef={routeThreadRef}
-                    />
-                  ) : null}
-                  {threadSyncPhase && !activeEnvironmentUnavailable ? (
-                    <ThreadSyncStatusPill phase={threadSyncPhase} />
-                  ) : null}
                   <div
                     className="relative"
                     style={

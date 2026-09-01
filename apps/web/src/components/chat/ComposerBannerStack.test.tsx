@@ -24,12 +24,10 @@ describe("ComposerBannerStack", () => {
     );
 
     expect(expandedItems?.[1]).toContain("grid-rows-[0fr]");
-    expect(expandedItems?.[1]).toContain("group-hover/banner-stack:grid-rows-[1fr]");
     expect(expandedItems?.[1]).toContain("z-20");
     expect(expandedItems?.[1]).not.toContain("absolute");
     expect(markup.indexOf("front warning")).toBeLessThan(markup.indexOf("stacked warning"));
     expect(markup).toContain("invisible pointer-events-none");
-    expect(markup).toContain("group-focus-within/banner-stack:visible");
   });
 
   it("colors the collapsed stack cap by the hidden banner's variant, not a fixed warning", () => {
@@ -45,6 +43,16 @@ describe("ComposerBannerStack", () => {
       <ComposerBannerStack items={[banner("front", "default"), banner("stacked", "warning")]} />,
     );
     expect(warningBehind).toContain("border-warning/24");
+  });
+
+  it("lets keyboard and touch users focus a collapsed stack to expand it", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerBannerStack items={[banner("front", "default"), banner("stacked", "warning")]} />,
+    );
+
+    expect(markup).toContain('role="group"');
+    expect(markup).toContain('aria-label="2 notifications; focus to expand"');
+    expect(markup).toContain('tabindex="0"');
   });
 
   it("does not render an expandable region for a single banner", () => {
@@ -76,6 +84,8 @@ describe("ComposerBannerStack", () => {
 
     expect(markup).toContain("branch-surface");
     expect(markup).toContain("branch-actions");
+    expect(markup).toContain("max-sm:flex-wrap");
+    expect(markup).toContain("max-sm:basis-[calc(100%-1.5rem)]");
   });
 
   it("renders a disabled compaction action on the shared accessible banner surface", () => {

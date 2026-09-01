@@ -55,6 +55,8 @@ interface ComposerBannerStackProps {
 }
 
 export function ComposerBannerStack({ className, items }: ComposerBannerStackProps) {
+  const [pointerExpanded, setPointerExpanded] = useState(false);
+  const [focusExpanded, setFocusExpanded] = useState(false);
   const [requestedExitingItemId, setExitingItemId] = useState<string | null>(null);
   const dismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const exitingItemId =
@@ -80,6 +82,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
   }
   const stackedItems = items.slice(1);
   const hasStack = stackedItems.length > 0;
+  const stackExpanded = hasStack && (pointerExpanded || focusExpanded);
   const showCollapsedStackCap = hasStack && exitingItemId !== frontItem.id;
   const firstStackedItem = stackedItems[0];
 
@@ -99,15 +102,21 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
 
   return (
     <div
-      className={cn("group/banner-stack chat-composer-drawer-slot", className)}
+      className={cn("chat-composer-drawer-slot", className)}
       data-composer-banner-drawer="true"
+      role={hasStack ? "group" : undefined}
+      aria-label={hasStack ? `${items.length} notifications; focus to expand` : undefined}
+      tabIndex={hasStack ? 0 : undefined}
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "touch") setPointerExpanded(true);
+      }}
+      onPointerLeave={() => setPointerExpanded(false)}
+      onFocus={() => setFocusExpanded(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocusExpanded(false);
+      }}
     >
-      <div
-        className={cn(
-          "relative flex flex-col-reverse",
-          hasStack ? "group-hover/banner-stack:z-50 group-focus-within/banner-stack:z-50" : null,
-        )}
-      >
+      <div className={cn("relative flex flex-col-reverse", stackExpanded && "z-50")}>
         {showCollapsedStackCap && firstStackedItem ? (
           <div
             className={cn(
@@ -115,7 +124,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
               "chat-composer-banner-stack-cap border border-b-0 shadow-[0_6px_18px_rgba(0,0,0,0.06)]",
               stackCapBorderClass[firstStackedItem.variant],
               "transition-opacity duration-150 ease-out",
-              "group-hover/banner-stack:opacity-0 group-focus-within/banner-stack:opacity-0",
+              stackExpanded && "opacity-0",
             )}
             style={{ width: "96%" }}
             aria-hidden="true"
@@ -143,7 +152,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
             data-composer-banner-stack-expanded-items="true"
             className={cn(
               "relative z-20 grid grid-rows-[0fr] transition-[grid-template-rows] duration-150 ease-out",
-              "group-hover/banner-stack:grid-rows-[1fr] group-focus-within/banner-stack:grid-rows-[1fr]",
+              stackExpanded && "grid-rows-[1fr]",
             )}
           >
             <div className="min-h-0 overflow-hidden">
@@ -151,8 +160,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
                 className={cn(
                   "invisible pointer-events-none space-y-2 pb-2 opacity-0",
                   "translate-y-1 transform-gpu transition-[opacity,transform] duration-150 ease-out will-change-[opacity,transform]",
-                  "group-hover/banner-stack:visible group-hover/banner-stack:pointer-events-auto group-hover/banner-stack:translate-y-0 group-hover/banner-stack:opacity-100",
-                  "group-focus-within/banner-stack:visible group-focus-within/banner-stack:pointer-events-auto group-focus-within/banner-stack:translate-y-0 group-focus-within/banner-stack:opacity-100",
+                  stackExpanded && "visible pointer-events-auto translate-y-0 opacity-100",
                 )}
               >
                 {stackedItems.map((item) => (
@@ -197,6 +205,7 @@ function ComposerBannerStackAlert({
   return (
     <Alert
       variant={item.variant}
+      wrapControlsOnNarrow={Boolean(item.actions)}
       className={cn(
         attached
           ? "chat-composer-drawer-surface chat-composer-drawer-attached px-3 pt-2 pb-[calc(var(--chat-composer-attachment-overlap)_+_0.375rem)] text-xs sm:px-4"
