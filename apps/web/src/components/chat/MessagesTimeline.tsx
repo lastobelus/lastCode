@@ -29,7 +29,11 @@ const NOOP_OPEN_AGENTS = () => {};
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
 const NOOP_OPEN_SOURCE_THREAD = (_threadId: ThreadId) => {};
-import { actionResultPresentation, parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  actionResultDetails,
+  actionResultPresentation,
+  parseActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
@@ -2116,6 +2120,9 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
 
   if (actionFollowUp) {
     const presentation = actionResultPresentation(actionFollowUp);
+    const actionDetails = actionResultDetails(actionFollowUp.report);
+    const actionDetailsAvailable = actionDetails.length > 0;
+    const actionExpandable = !actionFollowUp.detailedOutputAvailable || actionDetailsAvailable;
     const toneClass =
       presentation.outcome === "success"
         ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-300"
@@ -2142,11 +2149,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
     );
     return (
       <div className={cn("mx-1 overflow-hidden rounded-lg border", toneClass)}>
-        {actionFollowUp.detailedOutputAvailable ? (
-          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
-            {heading}
-          </div>
-        ) : (
+        {actionExpandable ? (
           <button
             type="button"
             aria-expanded={actionOutputExpanded}
@@ -2160,6 +2163,10 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
               <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
             )}
           </button>
+        ) : (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+            {heading}
+          </div>
         )}
         {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
           <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
@@ -2168,7 +2175,30 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
         ) : (
           <div className="px-3 pb-2.5 pt-1">
             <p className="truncate text-sm text-foreground/90">{presentation.summary}</p>
-            {actionFollowUp.detailedOutputAvailable ? (
+            {actionDetailsAvailable && actionOutputExpanded ? (
+              <dl className="mt-2 space-y-1.5 text-xs text-foreground/90">
+                {actionDetails.map((detail) => (
+                  <div key={detail.id} className="min-w-0">
+                    <dt className="font-medium text-muted-foreground">{detail.label}</dt>
+                    <dd className="break-words">
+                      {detail.href ? (
+                        <a
+                          href={detail.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline underline-offset-2"
+                        >
+                          {detail.value}
+                        </a>
+                      ) : (
+                        detail.value
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+            {actionFollowUp.detailedOutputAvailable && !actionDetailsAvailable ? (
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Detailed output retained in the Action terminal.
               </p>
@@ -2240,106 +2270,6 @@ function ProposedPlanTimelineRow({
     </div>
   );
 }
-
-/**
- * Inline folded plan chip: one row per turn that produced plan/todo steps.
- * Collapsed by default — a segment bar plus the in-progress step label —
- * and expands in place to the full step list. Replaces the old plan sidebar.
- */
-const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
-  row,
-}: {
-  row: Extract<TimelineRow, { kind: "turn-plan" }>;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const { steps } = row.turnPlan.plan;
-  const completedCount = steps.filter((step) => step.status === "completed").length;
-  const allDone = completedCount === steps.length;
-  // Label priority: the in-progress step, else the next pending step (plan
-  // just created), else the last step (plan finished, rendered muted).
-  const label =
-    steps.find((step) => step.status === "inProgress")?.step ??
-    steps.find((step) => step.status === "pending")?.step ??
-    steps.at(-1)?.step ??
-    "Plan";
-  const Chevron = expanded ? ChevronDownIcon : ChevronRightIcon;
-
-  return (
-    <div className="min-w-0 px-1 py-0.5">
-      <button
-        type="button"
-        className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-0.5 py-0.5 text-left text-[12px] leading-5 transition-colors duration-150 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <Chevron className="size-3.5 shrink-0 text-muted-foreground/65" />
-        {steps.length > 1 ? (
-          <span aria-hidden className="flex shrink-0 items-center gap-0.5">
-            {steps.map((step) => (
-              <span
-                key={step.step}
-                className={cn(
-                  "h-[3px] w-2.5 rounded-full",
-                  step.status === "completed"
-                    ? "bg-success"
-                    : step.status === "inProgress"
-                      ? "bg-primary"
-                      : "bg-muted-foreground/25",
-                )}
-              />
-            ))}
-          </span>
-        ) : null}
-        <span
-          className={cn(
-            "min-w-0 truncate",
-            allDone ? "text-muted-foreground/65" : "font-medium text-foreground/85",
-          )}
-        >
-          {label}
-        </span>
-        {steps.length > 1 ? (
-          <span className="shrink-0 text-muted-foreground/50 tabular-nums">
-            {completedCount}/{steps.length}
-          </span>
-        ) : null}
-      </button>
-      {expanded ? (
-        <div className="mt-0.5 space-y-px pl-6">
-          {steps.map((step) => (
-            <div key={step.step} className="flex items-baseline gap-2 text-[12px] leading-5">
-              <span
-                className={cn(
-                  "w-3 shrink-0 text-center font-mono text-[10px]",
-                  step.status === "completed"
-                    ? "text-success"
-                    : step.status === "inProgress"
-                      ? "text-primary"
-                      : "text-muted-foreground/40",
-                )}
-                aria-hidden
-              >
-                {step.status === "completed" ? "✓" : step.status === "inProgress" ? "●" : "○"}
-              </span>
-              <span
-                className={cn(
-                  "min-w-0",
-                  step.status === "completed"
-                    ? "text-muted-foreground/55"
-                    : step.status === "inProgress"
-                      ? "text-foreground/90"
-                      : "text-muted-foreground/70",
-                )}
-              >
-                {step.step}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-});
 
 function ActivityEllipsis() {
   return (
