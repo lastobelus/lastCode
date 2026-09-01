@@ -489,7 +489,7 @@ describe("workEntryIsVisibleInGroup", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
-  it("shows a Waiting row after the turn settles and prefers Working while a turn is active", () => {
+  it("shows Waiting after settlement and active status rows while a turn is working", () => {
     const base = {
       timelineEntries: [],
       activeTurnStartedAt: "2026-01-01T00:01:00Z",
@@ -510,7 +510,11 @@ describe("deriveMessagesTimelineRows", () => {
         kind: "working",
         id: "working-indicator-row",
         createdAt: "2026-01-01T00:01:00Z",
-        showThinking: true,
+      },
+      {
+        kind: "thinking",
+        id: "thinking-indicator-row",
+        createdAt: "2026-01-01T00:01:00Z",
       },
     ]);
   });
