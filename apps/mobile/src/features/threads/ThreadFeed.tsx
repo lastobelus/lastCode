@@ -1595,16 +1595,33 @@ const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
           </Text>
           {detailsAvailable && props.expanded ? (
             <View className="mt-2 gap-1.5">
-              {props.details.map((detail) => (
-                <View key={detail.id} className="gap-0.5">
-                  <Text className="font-t3-medium text-xs text-foreground-muted">
-                    {detail.label}
-                  </Text>
-                  <Text selectable className="text-xs leading-4 text-foreground">
-                    {detail.value}
-                  </Text>
-                </View>
-              ))}
+              {props.details.map((detail) => {
+                const href = detail.href;
+                return (
+                  <View key={detail.id} className="gap-0.5">
+                    <Text className="font-t3-medium text-xs text-foreground-muted">
+                      {detail.label}
+                    </Text>
+                    {href ? (
+                      <Pressable
+                        accessibilityRole="link"
+                        accessibilityLabel={`${detail.label}: ${detail.value}`}
+                        onPress={() => {
+                          void tryOpenExternalUrl(href, "action-report");
+                        }}
+                      >
+                        <Text selectable className="text-xs leading-4 text-primary underline">
+                          {detail.value}
+                        </Text>
+                      </Pressable>
+                    ) : (
+                      <Text selectable className="text-xs leading-4 text-foreground">
+                        {detail.value}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
             </View>
           ) : null}
           {props.detailedOutputAvailable && !detailsAvailable ? (
