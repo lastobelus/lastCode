@@ -269,7 +269,9 @@ describe("DesktopUpdates", () => {
         const downloaded = yield* updates.getState;
         assert.equal(downloaded.status, "downloaded");
         assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089.1");
-        assert.deepEqual(harness.feedUrls(), []);
+        assert.deepEqual(harness.feedUrls(), [
+          { provider: "generic", url: "http://localhost:4141" },
+        ]);
         assert.deepEqual(harness.installEvents(), []);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
@@ -385,6 +387,7 @@ describe("DesktopUpdates", () => {
           "prepare-install",
           "stop-backend",
           "commit-handoff",
+          "destroy-windows",
           "quit-app",
         ]);
       }),
@@ -564,11 +567,7 @@ describe("DesktopUpdates", () => {
 
         yield* updates.install;
         assert.deepEqual(harness.localInstallArgs(), []);
-        assert.deepEqual(harness.installEvents(), [
-          "stop-backend",
-          "destroy-windows",
-          "squirrel-install",
-        ]);
+        assert.deepEqual(harness.installEvents(), ["stop-backend", "squirrel-install"]);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
