@@ -398,7 +398,6 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   return {
     getTurnRequestWaitState: turnRequestWaitQuery.getState,
-    subscribeDomainEvents: PubSub.subscribe(eventPubSub).pipe(Effect.map(Stream.fromSubscription)),
     readEvents,
     dispatch,
     subscribeDomainEvents: PubSub.subscribe(eventPubSub).pipe(Effect.map(Stream.fromSubscription)),
