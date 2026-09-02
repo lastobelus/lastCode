@@ -7,8 +7,12 @@ import * as NodeChildProcess from "node:child_process";
 
 import {
   acquireBuildLock,
+  boundedLocalBuildDiagnostic,
   compareNightlyVersions,
+  deliverLocalBuildFailure,
   isReusableCheckpointCiStamp,
+  localBuildFailureFingerprint,
+  localBuildFailureMessage,
   parseNightlyVersion,
   parseOptions,
   prepareBuildWorktree,
@@ -98,9 +102,85 @@ describe("lastcode-local-update", () => {
       LC_ALL: "en_US.UTF-8",
     });
     assert.match(
-      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }).PATH ?? "",
-      /^\/tmp\/build tree\/node_modules\/\.bin:/,
+      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }, "/mise/node/bin/node")
+        .PATH ?? "",
+      /^\/tmp\/build tree\/node_modules\/\.bin:\/mise\/node\/bin:\/bin$/,
     );
+  });
+
+  it("bounds and redacts local build diagnostics", () => {
+    const diagnostic = boundedLocalBuildDiagnostic(
+      `${"prefix\n".repeat(300)}token=secret-value\u001b[31m final failure`,
+    );
+    assert.isAtMost(diagnostic.length, 1_200);
+    assert.notInclude(diagnostic, "secret-value");
+    assert.notInclude(diagnostic, "\u001b");
+    assert.include(diagnostic, "token=<redacted>");
+    assert.include(diagnostic, "final failure");
+  });
+
+  it("posts a bounded build failure to the checkpoint maintenance thread", () => {
+    const home = "/Users/example";
+    const checkpointTag = "lastcode/checkpoint/v0.0.39-nightly.20260902.1257";
+    let delivery: { readonly threadId: string; readonly message: string } | undefined;
+    const result = deliverLocalBuildFailure(
+      { command: "build", repoRoot: "/repo", home, checkpointTag },
+      new Error("full CI failed"),
+      {
+        readConfig: () => ({
+          schemaVersion: 1,
+          recoveryThreadId: "thread-maintenance",
+        }),
+        readLogTail: () => "ProjectionPipeline.test.ts failed",
+        sendThread: (threadId, message) => {
+          delivery = { threadId, message };
+        },
+      },
+    );
+
+    assert.equal(result.status, "sent");
+    assert.equal(delivery?.threadId, "thread-maintenance");
+    assert.include(delivery?.message ?? "", checkpointTag);
+    assert.include(delivery?.message ?? "", "ProjectionPipeline.test.ts failed");
+    assert.include(
+      delivery?.message ?? "",
+      "/Users/example/.lastcode/local-updates/build-worktree",
+    );
+    assert.include(delivery?.message ?? "", "Use this persistent maintenance thread");
+
+    const failure = {
+      checkpointTag,
+      diagnostic: "ProjectionPipeline.test.ts failed",
+      error: "full CI failed",
+      logPath: "/Users/example/.lastcode/local-updates/build.log",
+      worktreePath: "/Users/example/.lastcode/local-updates/build-worktree",
+    };
+    const fingerprint = localBuildFailureFingerprint(failure);
+    assert.equal(fingerprint.length, 64);
+    assert.include(localBuildFailureMessage(failure, fingerprint), fingerprint.slice(0, 12));
+  });
+
+  it("does not post when the checkpoint maintenance thread is not configured", () => {
+    let sent = false;
+    const result = deliverLocalBuildFailure(
+      {
+        command: "build",
+        repoRoot: "/repo",
+        home: "/Users/example",
+        checkpointTag: "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+      },
+      new Error("build failed"),
+      {
+        readConfig: () => ({ schemaVersion: 1 }),
+        readLogTail: () => "failure",
+        sendThread: () => {
+          sent = true;
+        },
+      },
+    );
+
+    assert.deepEqual(result, { status: "not-configured" });
+    assert.isFalse(sent);
   });
 
   it("only reuses a full CI stamp for the exact checkpoint context", () => {

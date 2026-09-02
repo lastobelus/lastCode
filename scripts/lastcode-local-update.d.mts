@@ -32,12 +32,35 @@ export interface LocalBuildLockOptions {
   readonly pid?: number;
 }
 
+export interface LocalBuildFailure {
+  readonly checkpointTag: string;
+  readonly diagnostic: string;
+  readonly error: string;
+  readonly logPath: string;
+  readonly worktreePath: string;
+}
+
+export interface LocalBuildFailureDeliveryOverrides {
+  readonly readConfig?: (path: string) => unknown;
+  readonly readLogTail?: (path: string) => string;
+  readonly sendThread?: (threadId: string, message: string) => void;
+}
+
+export type LocalBuildFailureDelivery =
+  | { readonly status: "not-configured" }
+  | {
+      readonly status: "sent";
+      readonly fingerprint: string;
+      readonly threadId: string;
+    };
+
 export function resolveDeterministicBuildEnvironment(
   environment?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv;
 export function resolveLocalBuildEnvironment(
   worktreePath: string,
   environment?: NodeJS.ProcessEnv,
+  nodeExecutable?: string,
 ): NodeJS.ProcessEnv;
 export function isReusableCheckpointCiStamp(
   stamp: unknown,
@@ -64,5 +87,17 @@ export function prepareBuildWorktree(
   logFd: number | undefined,
 ): void;
 export function acquireBuildLock(updateRoot: string, options?: LocalBuildLockOptions): () => void;
+export function boundedLocalBuildDiagnostic(raw: string): string;
+export function localBuildFailureFingerprint(failure: {
+  readonly checkpointTag: string;
+  readonly error: string;
+  readonly diagnostic: string;
+}): string;
+export function localBuildFailureMessage(failure: LocalBuildFailure, fingerprint: string): string;
+export function deliverLocalBuildFailure(
+  options: LocalUpdateOptions & { readonly checkpointTag: string },
+  error: unknown,
+  overrides?: LocalBuildFailureDeliveryOverrides,
+): LocalBuildFailureDelivery;
 
 export const RESULT_PREFIX: string;

@@ -158,6 +158,13 @@ Clipboard failures are shown in the app instead of being ignored. Starting a
 retry clears the visible failure and begins progress again for the selected
 build.
 
+When checkpoint maintenance has a persistent recovery thread configured, a
+failed build also posts a bounded, redacted alert to that same thread. The alert
+names the selected checkpoint, retained build worktree, and build log, and asks
+the agent in that thread to fix the concrete failure and leave a working current
+build. Alert delivery is best-effort: a missing configuration or delivery error
+is reported beside the original updater error and never replaces it.
+
 Build output is appended to:
 
 ```text
