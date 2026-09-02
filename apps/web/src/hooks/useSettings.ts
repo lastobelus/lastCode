@@ -569,7 +569,6 @@ export function useUpdatePrimarySettings() {
 export function useUpdateClientSettings() {
   return useCallback(updateClientSettings, []);
 }
-
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
