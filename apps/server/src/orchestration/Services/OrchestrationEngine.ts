@@ -51,11 +51,6 @@ export interface OrchestrationEngineShape {
     readonly threadId: ThreadId;
     readonly messageId: MessageId;
   }) => Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError>;
-  readonly subscribeDomainEvents: Effect.Effect<
-    Stream.Stream<OrchestrationEvent>,
-    never,
-    Scope.Scope
-  >;
   /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
    *
