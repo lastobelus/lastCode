@@ -30,6 +30,7 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
@@ -353,6 +354,7 @@ export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
+  const electronApp = yield* ElectronApp.ElectronApp;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -366,6 +368,12 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const localCheckpointTagRef = yield* Ref.make<Option.Option<string>>(Option.none());
+  const localBuildRef = yield* Ref.make<
+    Option.Option<{
+      readonly build: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+      readonly version: string;
+    }>
+  >(Option.none());
   const checkTransitionMutex = yield* Semaphore.make(1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
@@ -720,18 +728,6 @@ export const make = Effect.gen(function* () {
             return { accepted: true, completed: false };
           },
         ),
-        ElectronUpdaterCheckForUpdatesError: Effect.fn(
-          "desktop.updates.handleLocalFeedCheckFailure",
-        )(function* (error) {
-          yield* updateState((current) =>
-            reduceDesktopUpdateStateOnDownloadFailure(current, error.message),
-          );
-          yield* logUpdaterError(error.message, {
-            errorTag: error._tag,
-            channel: error.channel,
-          });
-          return { accepted: true, completed: false };
-        }),
       }),
       Effect.onInterrupt(() =>
         updateState((current) => (current.status === "downloading" ? state : current)).pipe(
@@ -908,16 +904,23 @@ export const make = Effect.gen(function* () {
                     Effect.catchCause((cause) =>
                       acceptedHandoff.cancel.pipe(
                         Effect.andThen(
-                          Effect.forEach(
-                            previouslyRunningInstances,
-                            (instance) => instance.start,
-                            { concurrency: "unbounded", discard: true },
+                          Effect.forEach(previouslyRunningInstances, (instance) => instance.start, {
+                            concurrency: "unbounded",
+                            discard: true,
+                          }),
+                        ),
+                        Effect.andThen(
+                          Effect.fail(
+                            new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                              operation: "install",
+                              message: Cause.pretty(cause),
+                            }),
                           ),
                         ),
-                        Effect.andThen(Effect.failCause(cause)),
                       ),
                     ),
                   );
+                  yield* electronWindow.destroyAll;
                   yield* electronApp.quit;
                   return { accepted: true, completed: false, failed: false };
                 }),
