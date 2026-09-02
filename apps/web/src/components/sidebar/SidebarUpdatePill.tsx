@@ -253,10 +253,7 @@ function SidebarUpdateControl() {
   const progressPercent = state ? getDesktopUpdateProgressPercent(state) : null;
   const showUpdatePopover =
     localBuildFailure !== null ||
-    shouldUseSidebarUpdateReleaseNotesPopover(
-    showUpdateDetails,
-    state,
-  );
+    shouldUseSidebarUpdateReleaseNotesPopover(showUpdateDetails, state);
 
   useEffect(() => {
     if (!showUpdatePopover) {
@@ -492,7 +489,9 @@ function SidebarUpdateControl() {
         {showUpdatePopover && state ? (
           <PopoverPopup
             align="center"
-            aria-label={localBuildFailure ? "Local build failure details" : "Nightly update release notes"}
+            aria-label={
+              localBuildFailure ? "Local build failure details" : "Nightly update release notes"
+            }
             className="max-w-none text-balance shadow-xl shadow-black/25"
             initialFocus={false}
             onKeyDownCapture={(event) => {
