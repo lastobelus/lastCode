@@ -761,7 +761,6 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
             projectId,
             title: projectTitle,
             workspaceRoot: projectWorkspaceRoot,
-            defaultModelSelection: ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(),
             createdAt: DateTime.formatIso(yield* DateTime.now),
           });
         }
