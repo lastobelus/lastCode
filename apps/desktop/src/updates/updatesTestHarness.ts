@@ -266,6 +266,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const localUpdatesLayer = LastCodeLocalUpdates.layerTest({
     supported: options.localNightliesEnabled ?? false,
+    buildLogPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
     inspect: (currentVersion) =>
       options.localInspect
         ? options.localInspect(currentVersion)
