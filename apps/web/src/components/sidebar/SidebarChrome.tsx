@@ -20,7 +20,6 @@ import {
   useEnvironmentStageLabel,
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
-import { LastCodeWordmark } from "../branding/LastCodeWordmark";
 import {
   SidebarFooter,
   SidebarHeader,
