@@ -1,4 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This test builds a disposable Git repository.
 import { assert, it } from "@effect/vitest";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import {
   attributeCarryPaths,
@@ -7,8 +12,13 @@ import {
   parseCarryCommit,
   planCarrySet,
   pullRequestFromSubject,
+  runCarrySetShadowCheck,
   type CarrySetManifest,
 } from "./lastcode-carry-set.ts";
+
+function git(cwd: string, args: ReadonlyArray<string>): string {
+  return NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
 
 const manifest: CarrySetManifest = {
   schemaVersion: 1,
@@ -117,4 +127,35 @@ it("keeps exclusive files with their group and sends shared files to Incubator",
       incubator: ["shared.ts", "unattributed.ts"],
     },
   );
+});
+
+it("reconstructs renames without retaining the source path", () => {
+  const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-set-test-"));
+  try {
+    git(repo, ["init", "--quiet"]);
+    git(repo, ["config", "user.name", "Carry set test"]);
+    git(repo, ["config", "user.email", "carry-set-test@localhost"]);
+    NodeFS.writeFileSync(NodePath.join(repo, "before.ts"), "export const value = 1;\n");
+    git(repo, ["add", "before.ts"]);
+    git(repo, ["commit", "--quiet", "-m", "upstream base"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
+
+    git(repo, ["mv", "before.ts", "after.ts"]);
+    git(repo, ["commit", "--quiet", "-m", "rename downstream file"]);
+    const source = git(repo, ["rev-parse", "HEAD"]);
+    const tag = "lastcode/checkpoint/test-rename";
+    git(repo, [
+      "tag",
+      "--annotate",
+      tag,
+      source,
+      "--message",
+      `Carry set rename test\n\nUpstream-Commit: ${base}\nLastCode-Commit: ${source}`,
+    ]);
+
+    const result = runCarrySetShadowCheck(repo, tag);
+    assert.equal(result.tree, git(repo, ["rev-parse", `${source}^{tree}`]));
+  } finally {
+    NodeFS.rmSync(repo, { recursive: true, force: true });
+  }
 });
