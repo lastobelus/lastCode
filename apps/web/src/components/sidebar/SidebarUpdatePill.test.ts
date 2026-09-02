@@ -27,9 +27,7 @@ describe("SidebarUpdatePill release notes", () => {
     ).toBe("LastCode changes");
     expect(
       resolveReleaseNoteHeading({ version: "1.2.4-nightly.2", items: [], totalItems: 0 }, 0),
-    ).toBe(
-      "What's changed",
-    );
+    ).toBe("What's changed");
     expect(
       resolveReleaseNoteHeading({ version: "1.2.4-nightly.1", items: [], totalItems: 0 }, 1),
     ).toBe("Changes in 1.2.4-nightly.1");
@@ -102,6 +100,8 @@ describe("SidebarUpdatePill release notes", () => {
           message: null,
           errorContext: null,
           canRetry: false,
+          localBuildProgress: null,
+          localBuildFailure: null,
         },
       }),
     );
