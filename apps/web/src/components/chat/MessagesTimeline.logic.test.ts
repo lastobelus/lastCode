@@ -528,7 +528,7 @@ describe("deriveMessagesTimelineRows", () => {
       },
       {
         kind: "thinking",
-        id: "thinking-indicator-row",
+        id: "live-activity-row",
         createdAt: "2026-01-01T00:01:00Z",
       },
     ]);
