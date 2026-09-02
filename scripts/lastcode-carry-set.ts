@@ -293,7 +293,11 @@ function reconstruct(
   readonly paths: Readonly<Record<CarryGroup, ReadonlyArray<string>>>;
   readonly tree: string;
 } {
-  const changedPaths = splitNulls(git(repoRoot, ["diff", "--name-only", "-z", base, source]));
+  // Reconstruction needs both sides of a rename: the destination is copied from the source tree,
+  // and the source path must be removed from the base tree.
+  const changedPaths = splitNulls(
+    git(repoRoot, ["diff", "--no-renames", "--name-only", "-z", base, source]),
+  );
   const paths = attributeCarryPaths(
     changedPaths,
     plan.flatMap((group) =>
