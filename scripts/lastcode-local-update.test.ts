@@ -7,8 +7,12 @@ import * as NodeChildProcess from "node:child_process";
 
 import {
   acquireBuildLock,
+  boundedLocalBuildDiagnostic,
   compareNightlyVersions,
+  deliverLocalBuildFailure,
   isReusableCheckpointCiStamp,
+  localBuildFailureFingerprint,
+  localBuildFailureMessage,
   parseNightlyVersion,
   parseOptions,
   prepareBuildWorktree,
@@ -98,9 +102,165 @@ describe("lastcode-local-update", () => {
       LC_ALL: "en_US.UTF-8",
     });
     assert.match(
-      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }).PATH ?? "",
-      /^\/tmp\/build tree\/node_modules\/\.bin:/,
+      resolveLocalBuildEnvironment("/tmp/build tree", { PATH: "/bin" }, "/mise/node/bin/node")
+        .PATH ?? "",
+      /^\/tmp\/build tree\/node_modules\/\.bin:\/mise\/node\/bin:\/bin$/,
     );
+  });
+
+  it("bounds and redacts local build diagnostics", () => {
+    const diagnostic = boundedLocalBuildDiagnostic(
+      `${"prefix\n".repeat(300)}token=secret-value\u001b[31m final failure`,
+    );
+    assert.isAtMost(diagnostic.length, 1_200);
+    assert.notInclude(diagnostic, "secret-value");
+    assert.notInclude(diagnostic, "\u001b");
+    assert.include(diagnostic, "token=<redacted>");
+    assert.include(diagnostic, "final failure");
+  });
+
+  it("posts a bounded build failure to the checkpoint maintenance thread", () => {
+    const home = "/Users/example";
+    const checkpointTag = "lastcode/checkpoint/v0.0.39-nightly.20260902.1257";
+    let delivery: { readonly threadId: string; readonly message: string } | undefined;
+    const result = deliverLocalBuildFailure(
+      { command: "build", repoRoot: "/repo", home, checkpointTag },
+      new Error("full CI failed"),
+      {
+        readConfig: () => ({
+          schemaVersion: 1,
+          recoveryThreadId: "thread-maintenance",
+        }),
+        readLogTail: () => "ProjectionPipeline.test.ts failed",
+        sendThread: (threadId, message) => {
+          delivery = { threadId, message };
+        },
+      },
+    );
+
+    assert.equal(result.status, "sent");
+    assert.equal(delivery?.threadId, "thread-maintenance");
+    assert.include(delivery?.message ?? "", checkpointTag);
+    assert.include(delivery?.message ?? "", "Error: full CI failed");
+    assert.include(delivery?.message ?? "", "ProjectionPipeline.test.ts failed");
+    assert.include(
+      delivery?.message ?? "",
+      "/Users/example/.lastcode/local-updates/build-worktree",
+    );
+    assert.include(delivery?.message ?? "", "Use this persistent maintenance thread");
+
+    const failure = {
+      checkpointTag,
+      diagnostic: "ProjectionPipeline.test.ts failed",
+      error: "full CI failed",
+      logPath: "/Users/example/.lastcode/local-updates/build.log",
+      worktreePath: "/Users/example/.lastcode/local-updates/build-worktree",
+    };
+    const fingerprint = localBuildFailureFingerprint(failure);
+    assert.equal(fingerprint.length, 64);
+    assert.include(localBuildFailureMessage(failure, fingerprint), fingerprint.slice(0, 12));
+  });
+
+  it("does not post when the checkpoint maintenance thread is not configured", () => {
+    let sent = false;
+    const result = deliverLocalBuildFailure(
+      {
+        command: "build",
+        repoRoot: "/repo",
+        home: "/Users/example",
+        checkpointTag: "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+      },
+      new Error("build failed"),
+      {
+        readConfig: () => ({ schemaVersion: 1 }),
+        readLogTail: () => "failure",
+        sendThread: () => {
+          sent = true;
+        },
+      },
+    );
+
+    assert.deepEqual(result, { status: "not-configured" });
+    assert.isFalse(sent);
+  });
+
+  it("falls back to the build error when the build log is unavailable", () => {
+    let message = "";
+    const result = deliverLocalBuildFailure(
+      {
+        command: "build",
+        repoRoot: "/repo",
+        home: "/Users/example",
+        checkpointTag: "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+      },
+      new Error("checkpoint lookup failed"),
+      {
+        readConfig: () => ({
+          schemaVersion: 1,
+          recoveryThreadId: "thread-maintenance",
+        }),
+        readLogTail: () => {
+          throw new Error("build.log does not exist");
+        },
+        sendThread: (_threadId, threadMessage) => {
+          message = threadMessage;
+        },
+      },
+    );
+
+    assert.equal(result.status, "sent");
+    assert.include(message, "checkpoint lookup failed");
+  });
+
+  it("posts acquisition failures before a build log exists", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-lock-alert-"));
+    const lastCodeRoot = NodePath.join(root, ".lastcode");
+    const capturePath = NodePath.join(root, "thread-message.json");
+    const threadToolPath = NodePath.join(lastCodeRoot, "userdata", "bin", "lastcode-thread");
+    try {
+      NodeFS.mkdirSync(NodePath.dirname(threadToolPath), { recursive: true });
+      NodeFS.mkdirSync(NodePath.join(lastCodeRoot, "automation"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(lastCodeRoot, "automation", "checkpoint-supervisor.json"),
+        JSON.stringify({ schemaVersion: 1, recoveryThreadId: "thread-maintenance" }),
+      );
+      NodeFS.writeFileSync(
+        threadToolPath,
+        [
+          "#!/usr/bin/env node",
+          'const fs = require("node:fs");',
+          "fs.writeFileSync(process.env.LASTCODE_TEST_THREAD_MESSAGE_PATH, JSON.stringify(process.argv.slice(2)));",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      NodeFS.writeFileSync(NodePath.join(lastCodeRoot, "local-updates"), "not a directory");
+
+      const result = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "lastcode-local-update.mjs"),
+          "build",
+          "--repo",
+          root,
+          "--checkpoint",
+          "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+          "--home",
+          root,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, LASTCODE_TEST_THREAD_MESSAGE_PATH: capturePath },
+        },
+      );
+
+      assert.equal(result.status, 1);
+      const args = JSON.parse(NodeFS.readFileSync(capturePath, "utf8")) as Array<string>;
+      assert.deepEqual(args.slice(0, 2), ["send", "thread-maintenance"]);
+      assert.include(args[3] ?? "", "Automated LastCode local update build alert");
+      assert.include(args[3] ?? "", "EEXIST");
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("only reuses a full CI stamp for the exact checkpoint context", () => {
