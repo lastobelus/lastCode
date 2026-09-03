@@ -982,8 +982,8 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
       "scripts/lastcode-local-ci.test.ts",
       "scripts/build-desktop-artifact.test.ts",
       "apps/desktop/src/electron/ElectronProtocol.test.ts",
-      "apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts",
-      "apps/server/src/persistence/Migrations/050_ProjectionThreadsUnsettledAt.test.ts",
+      "apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts",
+      "apps/server/src/persistence/Migrations/054_ProjectionThreadsUnsettledAt.test.ts",
     ],
     { environment },
   );
