@@ -111,8 +111,8 @@ export function resolveSidebarUpdateButtonToneClassName({
   }
   if (showUpdateIconState) {
     return cn(
-      "bg-sidebar-control-surface text-sidebar-foreground",
-      !isInteractionDisabled && "hover:bg-sidebar-row-hover",
+      "bg-update-surface text-update-foreground ring-update/40",
+      !isInteractionDisabled && "hover:bg-update/18",
     );
   }
   return cn(
