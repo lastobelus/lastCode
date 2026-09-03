@@ -29,8 +29,8 @@ describe("environment icon preferences", () => {
     expect(updateEnvironmentIconColors({ buildbox: "#2563eb" }, buildbox, "")).toEqual({});
   });
 
-  it("uses absolute Monitor and Server identity", () => {
-    expect(environmentIconKind(local, local)).toBe("monitor");
+  it("uses absolute Laptop and Server identity", () => {
+    expect(environmentIconKind(local, local)).toBe("laptop");
     expect(environmentIconKind(buildbox, local)).toBe("server");
     expect(environmentIconKind(local, buildbox)).toBe("server");
   });
@@ -48,7 +48,7 @@ describe("environment icon preferences", () => {
         showLocalEnvironmentIcon: false,
         environmentLabel: "Workstation",
       }),
-    ).toEqual({ kind: "monitor", showRowIcon: false, hoverLabel: null });
+    ).toEqual({ kind: "laptop", showRowIcon: false, hoverLabel: null });
     expect(
       legacyThreadEnvironmentPresentation({
         isPrimary: true,
@@ -56,7 +56,7 @@ describe("environment icon preferences", () => {
         showLocalEnvironmentIcon: true,
         environmentLabel: "Workstation",
       }),
-    ).toEqual({ kind: "monitor", showRowIcon: true, hoverLabel: "Workstation (local)" });
+    ).toEqual({ kind: "laptop", showRowIcon: true, hoverLabel: "Workstation (local)" });
     expect(
       legacyThreadEnvironmentPresentation({
         isPrimary: false,
@@ -93,7 +93,7 @@ describe("project environment icons", () => {
     };
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: false })).toEqual([]);
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: true })).toEqual([
-      { environmentId: local, kind: "monitor", label: "Workstation (local)" },
+      { environmentId: local, kind: "laptop", label: "Workstation (local)" },
     ]);
   });
 
@@ -112,7 +112,7 @@ describe("project environment icons", () => {
         showLocalEnvironmentIcon: false,
       }),
     ).toEqual([
-      { environmentId: local, kind: "monitor", label: "Workstation (local)" },
+      { environmentId: local, kind: "laptop", label: "Workstation (local)" },
       { environmentId: buildbox, kind: "server", label: "Buildbox" },
       { environmentId: production, kind: "server", label: "Production" },
       { environmentId: wsl, kind: "container", label: "Ubuntu" },
@@ -131,8 +131,9 @@ describe("EnvironmentIcon", () => {
 
   it("uses an explicit color without the contextual opacity class", () => {
     const markup = renderToStaticMarkup(
-      <EnvironmentIcon kind="monitor" context="v2-row" color="#2563eb" className="size-3" />,
+      <EnvironmentIcon kind="laptop" context="v2-row" color="#2563eb" className="size-3" />,
     );
+    expect(markup).toContain("lucide-laptop");
     expect(markup).toContain("color:#2563eb");
     expect(markup).not.toContain("text-sidebar-muted-foreground/70");
   });
