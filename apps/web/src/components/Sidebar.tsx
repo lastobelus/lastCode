@@ -985,7 +985,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     props.configuredEnvironmentIconColor,
     props.environmentKnown,
   );
-  const environmentIconKind = isRemote ? "server" : "monitor";
+  const environmentIconKind = isRemote ? "server" : "laptop";
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
       ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
@@ -1946,7 +1946,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           projectFaviconPath={props.projectFaviconPath}
           projectIcon={props.projectIcon}
           environmentLabel={props.environmentLabel}
-          environmentIconKind={thread.environmentId === primaryEnvironmentId ? "monitor" : "server"}
+          environmentIconKind={thread.environmentId === primaryEnvironmentId ? "laptop" : "server"}
           environmentIconColor={environmentIconColor}
           providerEntry={providerEntry}
           showInstanceBadge={showInstanceBadge}
