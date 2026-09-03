@@ -12,6 +12,13 @@ export const LOCK_MODULE_MANAGED_MARKER = "LastCode managed companion: lastcode-
 // Darwin's <fcntl.h> O_EXLOCK. Node exposes the other open(2) flags but not this one.
 export const DARWIN_O_EXLOCK = 0x20;
 
+export class PortableLockContentionError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "PortableLockContentionError";
+  }
+}
+
 function readLockOwner(lockPath) {
   try {
     const owner = JSON.parse(NodeFS.readFileSync(lockPath, "utf8"));
@@ -62,7 +69,7 @@ function acquireDirectoryLock(lockDirectory, lockName, activity) {
         NodeFS.rmSync(stalePath, { force: true, recursive: true });
         return tryAcquire(false);
       }
-      throw new Error(
+      throw new PortableLockContentionError(
         `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
         { cause: error },
       );
@@ -116,9 +123,9 @@ export function acquirePortableLock(lockDirectory, lockName, activity) {
   try {
     descriptor = NodeFS.openSync(lockPath, flags, 0o600);
   } catch (error) {
-    if (error?.code === "EAGAIN" || error?.code === "EACCES") {
+    if (error?.code === "EAGAIN") {
       const existingOwner = readLockOwner(lockPath);
-      throw new Error(
+      throw new PortableLockContentionError(
         `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
         { cause: error },
       );
