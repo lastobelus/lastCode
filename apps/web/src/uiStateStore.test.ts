@@ -13,6 +13,7 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setProjectExpanded,
+  setThreadAnnotationExpanded,
   setThreadChangedFilesExpanded,
   type UiState,
 } from "./uiStateStore";
@@ -23,6 +24,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
+    threadAnnotationExpandedById: {},
     defaultAdvertisedEndpointKey: null,
     ...overrides,
   };
@@ -135,6 +137,17 @@ describe("uiStateStore pure functions", () => {
     });
   });
 
+  it("remembers expanded annotations by scoped thread and removes collapsed defaults", () => {
+    const threadKey = "environment:thread-1";
+    const expanded = setThreadAnnotationExpanded(makeUiState(), threadKey, true);
+
+    expect(expanded.threadAnnotationExpandedById).toEqual({ [threadKey]: true });
+    expect(setThreadAnnotationExpanded(expanded, threadKey, true)).toBe(expanded);
+    expect(
+      setThreadAnnotationExpanded(expanded, threadKey, false).threadAnnotationExpandedById,
+    ).toEqual({});
+  });
+
   it("stores the endpoint preference by stable key", () => {
     const next = setDefaultAdvertisedEndpointKey(makeUiState(), "desktop-core:lan:http");
 
@@ -166,6 +179,9 @@ describe("parsePersistedState", () => {
           "turn-2": true,
         },
       },
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
     });
 
     expect(parsed).toEqual({
@@ -182,6 +198,9 @@ describe("parsePersistedState", () => {
           "turn-1": false,
           "turn-2": true,
         },
+      },
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
       },
     });
   });
@@ -279,6 +298,9 @@ describe("uiStateStore persistence", () => {
           "turn-2": true,
         },
       },
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
+      },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
 
@@ -302,6 +324,9 @@ describe("uiStateStore persistence", () => {
           "turn-1": false,
           "turn-2": true,
         },
+      },
+      threadAnnotationExpandedById: {
+        "environment:thread-1": true,
       },
     });
     expect(parsePersistedState(persisted)).toEqual({

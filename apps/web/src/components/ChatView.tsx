@@ -1455,6 +1455,10 @@ function ChatViewContent(props: ChatViewProps) {
     };
   }, [routeKind, routeThreadRef, routeThreadState]);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
+  const threadAnnotationExpanded = useUiStateStore(
+    (store) => store.threadAnnotationExpandedById[routeThreadKey] === true,
+  );
+  const setThreadAnnotationExpanded = useUiStateStore((store) => store.setThreadAnnotationExpanded);
   const settings = useEnvironmentSettings(environmentId);
   // New-thread defaults live in the primary environment's settings.json (the
   // settings UI never writes to remote environments), so read them from the
@@ -5760,6 +5764,7 @@ function ChatViewContent(props: ChatViewProps) {
       ...threadAnnotationBannerPresentation({
         annotation: threadAnnotation,
         cwd: gitCwd ?? undefined,
+        expanded: threadAnnotationExpanded,
         onBodyChange: saveThreadAnnotation,
         threadRef: routeThreadRef,
       }),
@@ -5769,6 +5774,10 @@ function ChatViewContent(props: ChatViewProps) {
           onEdit={() => setAnnotationEditorOpen(true)}
           onReopen={() => undefined}
           onResolve={() => void changeThreadAnnotationResolution("resolve")}
+          expanded={threadAnnotationExpanded}
+          onToggleExpanded={() =>
+            setThreadAnnotationExpanded(routeThreadKey, !threadAnnotationExpanded)
+          }
           pending={annotationMutationPending || annotationBodyChangePending}
         />
       ),
@@ -5784,7 +5793,9 @@ function ChatViewContent(props: ChatViewProps) {
     gitCwd,
     routeThreadRef,
     saveThreadAnnotation,
+    setThreadAnnotationExpanded,
     threadAnnotation,
+    threadAnnotationExpanded,
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =

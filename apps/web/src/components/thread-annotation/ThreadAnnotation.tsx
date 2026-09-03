@@ -4,6 +4,7 @@ import {
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { ChevronDownIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -210,12 +211,27 @@ export function threadAnnotationBannerPresentation(props: {
   annotation: ThreadAnnotationModel;
   threadRef: ScopedThreadRef;
   cwd?: string | undefined;
+  expanded: boolean;
   onBodyChange: (body: string) => Promise<boolean>;
 }): Pick<ComposerBannerStackItem, "title" | "description" | "children"> {
+  const summary =
+    props.annotation.body
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean)
+      ?.replace(/^#{1,6}\s+/, "") ?? "Annotation";
   return {
     title: "NOTE:",
-    description: <ThreadAnnotationTimestamp annotation={props.annotation} />,
-    children: (
+    description: props.expanded ? (
+      <ThreadAnnotationTimestamp annotation={props.annotation} />
+    ) : (
+      <>
+        <span className="min-w-0 truncate text-foreground/80">{summary}</span>
+        <ComposerBanner.Separator />
+        <ThreadAnnotationTimestamp annotation={props.annotation} />
+      </>
+    ),
+    children: props.expanded ? (
       <ComposerBanner.Body className="pe-1 pb-1">
         <ComposerBanner.Scroll className="max-h-48">
           <ThreadAnnotationBody
@@ -227,7 +243,7 @@ export function threadAnnotationBannerPresentation(props: {
           />
         </ComposerBanner.Scroll>
       </ComposerBanner.Body>
-    ),
+    ) : undefined,
   };
 }
 
@@ -237,6 +253,8 @@ export function ThreadAnnotationActions(props: {
   onResolve: () => void;
   onReopen: () => void;
   pending?: boolean | undefined;
+  expanded?: boolean | undefined;
+  onToggleExpanded?: (() => void) | undefined;
   trailing?: ReactNode;
 }) {
   return (
@@ -257,6 +275,20 @@ export function ThreadAnnotationActions(props: {
       >
         {props.annotation.resolvedAt ? "Reopen" : "Resolve"}
       </button>
+      {props.onToggleExpanded ? (
+        <Button
+          aria-expanded={props.expanded === true}
+          aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
+          className="text-warning-foreground"
+          disabled={props.pending}
+          size="icon-xs"
+          type="button"
+          variant="ghost"
+          onClick={props.onToggleExpanded}
+        >
+          <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
+        </Button>
+      ) : null}
       {props.trailing}
     </div>
   );
