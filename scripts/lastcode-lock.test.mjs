@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const temporaryDirectories = [];
+// oxlint-disable-next-line t3code/no-global-process-runtime -- This regression exercises Darwin's O_EXLOCK behavior.
+const itMacOnly = process.platform === "darwin" ? it : it.skip;
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -52,5 +54,24 @@ describe("LastCode portable update lock", () => {
 
     const release = acquirePortableLock(root, "update.lock", "test");
     release();
+  });
+
+  itMacOnly("does not classify lock-file permission failures as contention", () => {
+    const root = temporaryDirectory();
+    const lockPath = NodePath.join(root, "update.lock");
+    NodeFS.writeFileSync(lockPath, "");
+    NodeFS.chmodSync(lockPath, 0o000);
+
+    let failure;
+    try {
+      acquirePortableLock(root, "update.lock", "test");
+    } catch (error) {
+      failure = error;
+    } finally {
+      NodeFS.chmodSync(lockPath, 0o600);
+    }
+
+    expect(failure).toMatchObject({ code: "EACCES" });
+    expect(failure).not.toBeInstanceOf(PortableLockContentionError);
   });
 });

@@ -123,7 +123,7 @@ export function acquirePortableLock(lockDirectory, lockName, activity) {
   try {
     descriptor = NodeFS.openSync(lockPath, flags, 0o600);
   } catch (error) {
-    if (error?.code === "EAGAIN" || error?.code === "EACCES") {
+    if (error?.code === "EAGAIN") {
       const existingOwner = readLockOwner(lockPath);
       throw new PortableLockContentionError(
         `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
