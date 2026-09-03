@@ -62,6 +62,11 @@ export function resolveLocalBuildEnvironment(
   environment?: NodeJS.ProcessEnv,
   nodeExecutable?: string,
 ): NodeJS.ProcessEnv;
+export function resolveMiseNodeExecutable(
+  cwd: string,
+  mise: string,
+  runCommand?: (cwd: string, command: string, args: ReadonlyArray<string>) => string,
+): string;
 export function isReusableCheckpointCiStamp(
   stamp: unknown,
   checkpointTag: string,
