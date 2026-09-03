@@ -368,7 +368,6 @@ export async function importT3Settings(
     try {
       await restoreWrites(replaced);
     } catch (rollbackError) {
-      // eslint-disable-next-line preserve-caught-error -- Both caught failures are explicit AggregateError members.
       throw new AggregateError(
         [error, rollbackError],
         "Settings import and rollback both failed.",
