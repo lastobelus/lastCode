@@ -11,7 +11,6 @@ import {
 } from "@t3tools/contracts";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { commandProgramName } from "@t3tools/client-runtime/work-log/command-label";
 import {
   resolveWorkEntryToolPresentation,
   resolveViewedImageAsset,
@@ -95,6 +94,7 @@ import {
   CircleAlertIcon,
   DownloadIcon,
   EyeIcon,
+  FileIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
