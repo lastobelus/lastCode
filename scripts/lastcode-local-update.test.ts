@@ -183,6 +183,34 @@ describe("lastcode-local-update", () => {
     assert.isFalse(sent);
   });
 
+  it("falls back to the build error when the build log is unavailable", () => {
+    let message = "";
+    const result = deliverLocalBuildFailure(
+      {
+        command: "build",
+        repoRoot: "/repo",
+        home: "/Users/example",
+        checkpointTag: "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+      },
+      new Error("checkpoint lookup failed"),
+      {
+        readConfig: () => ({
+          schemaVersion: 1,
+          recoveryThreadId: "thread-maintenance",
+        }),
+        readLogTail: () => {
+          throw new Error("build.log does not exist");
+        },
+        sendThread: (_threadId, threadMessage) => {
+          message = threadMessage;
+        },
+      },
+    );
+
+    assert.equal(result.status, "sent");
+    assert.include(message, "checkpoint lookup failed");
+  });
+
   it("only reuses a full CI stamp for the exact checkpoint context", () => {
     const stamp = {
       schemaVersion: 2,

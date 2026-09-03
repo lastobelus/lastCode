@@ -99,7 +99,13 @@ export function deliverLocalBuildFailure(options, error, overrides = {}) {
   if (typeof config?.recoveryThreadId !== "string" || config.recoveryThreadId.length === 0) {
     return { status: "not-configured" };
   }
-  const rawDiagnostic = (overrides.readLogTail ?? readFileTail)(logPath);
+  let rawDiagnostic = "";
+  try {
+    rawDiagnostic = (overrides.readLogTail ?? readFileTail)(logPath);
+  } catch {
+    // Early build failures can happen before build.log exists. The caught build
+    // error is still enough to route an actionable maintenance alert.
+  }
   const diagnostic = boundedLocalBuildDiagnostic(
     rawDiagnostic || (error instanceof Error ? error.message : String(error)),
   );
