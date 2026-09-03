@@ -70,6 +70,7 @@ export function localBuildFailureMessage(failure, fingerprint) {
   return [
     `Automated LastCode local update build alert ${fingerprint.slice(0, 12)}.`,
     `The in-app updater failed while building ${failure.checkpointTag}.`,
+    `Error: ${failure.error}`,
     `Diagnostic: ${failure.diagnostic}`,
     `Build log: ${failure.logPath}`,
     `Retained build worktree: ${failure.worktreePath}`,

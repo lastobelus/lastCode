@@ -141,6 +141,7 @@ describe("lastcode-local-update", () => {
     assert.equal(result.status, "sent");
     assert.equal(delivery?.threadId, "thread-maintenance");
     assert.include(delivery?.message ?? "", checkpointTag);
+    assert.include(delivery?.message ?? "", "Error: full CI failed");
     assert.include(delivery?.message ?? "", "ProjectionPipeline.test.ts failed");
     assert.include(
       delivery?.message ?? "",
