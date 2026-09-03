@@ -71,7 +71,7 @@ export function selectPrimaryWorktree(worktreeList) {
 
 export function changedGitlink(rawDiff) {
   const fields = rawDiff.split("\0");
-  for (let index = 0; index < fields.length; ) {
+  for (let index = 0; index < fields.length;) {
     const metadata = fields[index++];
     if (!metadata) continue;
     const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*$/u.exec(metadata);
