@@ -364,18 +364,19 @@ describe("Cursor skills", () => {
           "not a directory",
         );
 
+        const realWorkspace = yield* fileSystem.realPath(workspace);
         const skills = yield* discoverCursorSkills(workspace, { HOME: userHome });
         expect(skills).toEqual([
           {
             name: "internal",
-            path: path.join(workspace, ".cursor", "skills", "internal", "SKILL.md"),
+            path: path.join(realWorkspace, ".cursor", "skills", "internal", "SKILL.md"),
             scope: "project",
             enabled: true,
             userInvocable: false,
           },
           {
             name: "oversized",
-            path: path.join(workspace, ".cursor", "skills", "oversized", "SKILL.md"),
+            path: path.join(realWorkspace, ".cursor", "skills", "oversized", "SKILL.md"),
             scope: "project",
             enabled: true,
           },
@@ -383,7 +384,7 @@ describe("Cursor skills", () => {
             name: "review",
             displayName: "Review changes",
             description: "project review",
-            path: path.join(workspace, ".agents", "skills", "nested", "review", "SKILL.md"),
+            path: path.join(realWorkspace, ".agents", "skills", "nested", "review", "SKILL.md"),
             scope: "project",
             enabled: true,
           },
