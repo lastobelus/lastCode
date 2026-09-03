@@ -1906,6 +1906,7 @@ function AgentMessageTimelineRow(props: {
             environmentId={props.environmentId}
             attachmentId={attachment.id}
             name={attachment.name}
+            mimeType={attachment.mimeType}
             className="aspect-[1.3] w-full rounded-[14px] bg-white/15"
             onPressPreview={props.onPressPreview}
           />
