@@ -5,62 +5,26 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
 import Migration0048 from "./048_ProjectionThreadAnnotation.ts";
 import Migration0049 from "./049_UpdateDrain.ts";
 import Migration0050 from "./050_UpdateDrainClaim.ts";
 import Migration0051 from "./051_ProjectionTurnRequestCorrelations.ts";
 import Migration0052 from "./052_ProjectionThreadWorktreeCleanup.ts";
 import Migration0053 from "./053_ProjectionThreadLinkedPullRequest.ts";
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-import Migration0043 from "./043_ProjectionThreadAnnotation.ts";
-import Migration0044 from "./044_UpdateDrain.ts";
-import Migration0045 from "./045_UpdateDrainClaim.ts";
-import Migration0046 from "./046_ProjectionTurnRequestCorrelations.ts";
-import Migration0047 from "./047_ProjectionThreadWorktreeCleanup.ts";
-import Migration0048 from "./048_ProjectionThreadLinkedPullRequest.ts";
-========
-import Migration0044 from "./044_ProjectionThreadAnnotation.ts";
-import Migration0045 from "./045_UpdateDrain.ts";
-import Migration0046 from "./046_UpdateDrainClaim.ts";
-import Migration0047 from "./047_ProjectionTurnRequestCorrelations.ts";
-import Migration0048 from "./048_ProjectionThreadWorktreeCleanup.ts";
-import Migration0049 from "./049_ProjectionThreadLinkedPullRequest.ts";
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
 layer("053_ProjectionThreadLinkedPullRequest", (it) => {
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-layer("048_ProjectionThreadLinkedPullRequest", (it) => {
-========
-layer("049_ProjectionThreadLinkedPullRequest", (it) => {
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
   it.effect("bridges databases that recorded the previous LastCode migration numbers", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
       yield* runMigrations({ toMigrationInclusive: 41 });
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
       yield* Migration0048;
       yield* Migration0049;
       yield* Migration0050;
       yield* Migration0051;
       yield* Migration0052;
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-      yield* Migration0043;
-      yield* Migration0044;
-      yield* Migration0045;
-      yield* Migration0046;
-      yield* Migration0047;
-========
-      yield* Migration0044;
-      yield* Migration0045;
-      yield* Migration0046;
-      yield* Migration0047;
-      yield* Migration0048;
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       yield* sql`
         INSERT INTO effect_sql_migrations (migration_id, name)
         VALUES
@@ -76,15 +40,8 @@ layer("049_ProjectionThreadLinkedPullRequest", (it) => {
       `;
       assert.isFalse(before.some((column) => column.name === "linked_pull_request_json"));
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
       const executed = yield* runMigrations({ toMigrationInclusive: 53 });
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-      const executed = yield* runMigrations({ toMigrationInclusive: 48 });
-========
-      const executed = yield* runMigrations({ toMigrationInclusive: 49 });
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       assert.deepStrictEqual(executed, [
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
         [47, "ProjectionProjectIcon"],
         [48, "ProjectionThreadAnnotation"],
         [49, "UpdateDrain"],
@@ -92,23 +49,9 @@ layer("049_ProjectionThreadLinkedPullRequest", (it) => {
         [51, "ProjectionTurnRequestCorrelations"],
         [52, "ProjectionThreadWorktreeCleanup"],
         [53, "ProjectionThreadLinkedPullRequest"],
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-        [47, "ProjectionThreadWorktreeCleanup"],
-        [48, "ProjectionThreadLinkedPullRequest"],
-========
-        [47, "ProjectionTurnRequestCorrelations"],
-        [48, "ProjectionThreadWorktreeCleanup"],
-        [49, "ProjectionThreadLinkedPullRequest"],
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       ]);
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
       yield* Migration0053;
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-      yield* Migration0048;
-========
-      yield* Migration0049;
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       const after = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_threads)
       `;
@@ -119,33 +62,15 @@ layer("049_ProjectionThreadLinkedPullRequest", (it) => {
 
 const partialUpgradeLayer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
 partialUpgradeLayer("053_ProjectionThreadLinkedPullRequest partial upgrades", (it) => {
   it.effect("preserves update drain data when upgrading from the previous migration 44", () =>
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-partialUpgradeLayer("048_ProjectionThreadLinkedPullRequest partial upgrades", (it) => {
-  it.effect("preserves update drain data when upgrading from the previous migration 44", () =>
-========
-partialUpgradeLayer("049_ProjectionThreadLinkedPullRequest partial upgrades", (it) => {
-  it.effect("preserves update drain data recorded with the previous migration numbers", () =>
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
       yield* runMigrations({ toMigrationInclusive: 41 });
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
       yield* Migration0048;
       yield* Migration0049;
       yield* Migration0050;
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-      yield* Migration0043;
-      yield* Migration0044;
-      yield* Migration0045;
-========
-      yield* Migration0044;
-      yield* Migration0045;
-      yield* Migration0046;
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status
@@ -171,15 +96,8 @@ partialUpgradeLayer("049_ProjectionThreadLinkedPullRequest partial upgrades", (i
           (44, 'UpdateDrainClaim')
       `;
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
       const executed = yield* runMigrations({ toMigrationInclusive: 53 });
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-      const executed = yield* runMigrations({ toMigrationInclusive: 48 });
-========
-      const executed = yield* runMigrations({ toMigrationInclusive: 49 });
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       assert.deepStrictEqual(executed, [
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts
         [45, "ProjectionProjectsAutoPull"],
         [46, "RepairAutomaticSettlementTimestamps"],
         [47, "ProjectionProjectIcon"],
@@ -189,18 +107,6 @@ partialUpgradeLayer("049_ProjectionThreadLinkedPullRequest partial upgrades", (i
         [51, "ProjectionTurnRequestCorrelations"],
         [52, "ProjectionThreadWorktreeCleanup"],
         [53, "ProjectionThreadLinkedPullRequest"],
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/048_ProjectionThreadLinkedPullRequest.test.ts
-        [45, "UpdateDrainClaim"],
-        [46, "ProjectionTurnRequestCorrelations"],
-        [47, "ProjectionThreadWorktreeCleanup"],
-        [48, "ProjectionThreadLinkedPullRequest"],
-========
-        [45, "UpdateDrain"],
-        [46, "UpdateDrainClaim"],
-        [47, "ProjectionTurnRequestCorrelations"],
-        [48, "ProjectionThreadWorktreeCleanup"],
-        [49, "ProjectionThreadLinkedPullRequest"],
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/049_ProjectionThreadLinkedPullRequest.test.ts
       ]);
 
       const events = yield* sql<{
