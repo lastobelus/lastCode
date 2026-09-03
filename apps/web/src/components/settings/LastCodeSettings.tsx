@@ -308,7 +308,7 @@ export function LastCodeSettingsPanel() {
               title={
                 <span className="inline-flex min-w-0 items-center gap-2">
                   <EnvironmentIcon
-                    kind={isLocal ? "monitor" : "server"}
+                    kind={isLocal ? "laptop" : "server"}
                     context="settings"
                     color={color}
                     className="size-4 shrink-0"
@@ -341,7 +341,7 @@ export function LastCodeSettingsPanel() {
                     <div className="min-w-0 space-y-1">
                       <div className="text-xs font-medium text-foreground">Show local icon</div>
                       <p className="max-w-xl text-xs leading-[1.45] text-muted-foreground">
-                        Show a Monitor icon for local threads. Legacy rows always reserve its space.
+                        Show a Laptop icon for local threads. Legacy rows always reserve its space.
                       </p>
                     </div>
                     <Switch
