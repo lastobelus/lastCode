@@ -220,6 +220,27 @@ function isInsideRoot(path: Path.Path, root: string, candidate: string): boolean
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+const realPathWithMissingTail = Effect.fn("AntigravityAdapter.realPathWithMissingTail")(
+  function* (input: {
+    readonly fileSystem: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly candidate: string;
+  }) {
+    const missingSegments: Array<string> = [];
+    let current = input.candidate;
+    while (true) {
+      const real = yield* input.fileSystem.realPath(current).pipe(Effect.option);
+      if (Option.isSome(real)) {
+        return input.path.join(real.value, ...missingSegments.reverse());
+      }
+      const parent = input.path.dirname(current);
+      if (parent === current) return input.candidate;
+      missingSegments.push(input.path.basename(current));
+      current = parent;
+    }
+  },
+);
+
 /** Resolves an agent-supplied path and rejects anything outside the session roots. */
 const resolveClientFilePath = Effect.fn("AntigravityAdapter.resolveClientFilePath")(
   function* (input: {
@@ -231,9 +252,11 @@ const resolveClientFilePath = Effect.fn("AntigravityAdapter.resolveClientFilePat
     const { path } = input;
     const resolved = path.resolve(input.requestPath);
     // Follow symlinks on the parent so a link out of the workspace cannot escape it.
-    const parent = yield* input.fileSystem
-      .realPath(path.dirname(resolved))
-      .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
+    const parent = yield* realPathWithMissingTail({
+      fileSystem: input.fileSystem,
+      path,
+      candidate: path.dirname(resolved),
+    });
     const real = path.join(parent, path.basename(resolved));
     const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
       input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
