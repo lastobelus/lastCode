@@ -613,6 +613,15 @@ function resolveMise(home) {
   return found;
 }
 
+export function resolveMiseNodeExecutable(cwd, mise, runCommand = run) {
+  const installRoot = runCommand(cwd, mise, ["where", "node@24.13.1"]);
+  const executable = NodePath.join(installRoot, "bin", "node");
+  if (!NodeFS.existsSync(executable)) {
+    throw new Error(`mise did not provide the expected Node 24 executable at ${executable}.`);
+  }
+  return executable;
+}
+
 export function prepareBuildWorktree(repoRoot, worktreePath, checkpointTag, logFd) {
   const sourceCommonDir = NodePath.resolve(
     repoRoot,
@@ -684,21 +693,23 @@ function buildUnlocked(options, updateRoot) {
     }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
+    const mise = resolveMise(options.home);
+    const nodeExecutable = resolveMiseNodeExecutable(worktreePath, mise);
+    const buildEnvironment = resolveLocalBuildEnvironment(
+      worktreePath,
+      process.env,
+      nodeExecutable,
+    );
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
     }
     // The retained build worktree can otherwise keep stale snapshots of local
     // file dependencies when their source changes without a lockfile change.
-    run(worktreePath, installer, ["install", "--frozen-lockfile", "--force"], { logFd });
-    const mise = resolveMise(options.home);
-    const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
-    const nodeExecutable = run(worktreePath, mise, [...nodeCommand, "-p", "process.execPath"]);
-    const buildEnvironment = resolveLocalBuildEnvironment(
-      worktreePath,
-      process.env,
-      nodeExecutable,
-    );
+    run(worktreePath, installer, ["install", "--frozen-lockfile", "--force"], {
+      logFd,
+      env: buildEnvironment,
+    });
     const installable = parseInstallableTag(options.checkpointTag);
     if (!installable) throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
     const upstreamCommit = git(options.repoRoot, [
@@ -728,22 +739,15 @@ function buildUnlocked(options, updateRoot) {
     } else {
       run(
         worktreePath,
-        mise,
-        [
-          ...nodeCommand,
-          "scripts/lastcode-local-ci.ts",
-          "--full",
-          "--checkpoint",
-          options.checkpointTag,
-        ],
+        nodeExecutable,
+        ["scripts/lastcode-local-ci.ts", "--full", "--checkpoint", options.checkpointTag],
         { logFd, env: buildEnvironment },
       );
     }
     run(
       worktreePath,
-      mise,
+      nodeExecutable,
       [
-        ...nodeCommand,
         "scripts/lastcode-build-mac.ts",
         "--arch",
         "arm64",
