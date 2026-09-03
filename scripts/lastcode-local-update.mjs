@@ -688,7 +688,9 @@ function buildUnlocked(options, updateRoot) {
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
     }
-    run(worktreePath, installer, ["install", "--frozen-lockfile"], { logFd });
+    // The retained build worktree can otherwise keep stale snapshots of local
+    // file dependencies when their source changes without a lockfile change.
+    run(worktreePath, installer, ["install", "--frozen-lockfile", "--force"], { logFd });
     const mise = resolveMise(options.home);
     const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
     const nodeExecutable = run(worktreePath, mise, [...nodeCommand, "-p", "process.execPath"]);
