@@ -19,7 +19,7 @@ export interface SidebarThreadHoverContentProps {
   projectFaviconPath: string | null;
   projectIcon?: ProjectIconOverride | null;
   environmentLabel: string | null;
-  environmentIconKind?: "monitor" | "server";
+  environmentIconKind?: "laptop" | "server";
   environmentIconColor?: EnvironmentIconColor | undefined;
   providerEntry: ProviderInstanceEntry | null;
   showInstanceBadge: boolean;

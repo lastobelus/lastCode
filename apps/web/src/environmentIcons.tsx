@@ -1,11 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
-import { ContainerIcon, MonitorIcon, ServerIcon } from "lucide-react";
+import { ContainerIcon, LaptopIcon, ServerIcon } from "lucide-react";
 import type { CSSProperties } from "react";
 
 import { cn } from "./lib/utils";
 
-export type EnvironmentIconKind = "container" | "monitor" | "server";
+export type EnvironmentIconKind = "container" | "laptop" | "server";
 export type EnvironmentIconContext = "hover" | "legacy-row" | "project" | "settings" | "v2-row";
 
 const DEFAULT_CONTEXT_CLASS: Record<EnvironmentIconContext, string> = {
@@ -44,8 +44,8 @@ export function formatLocalEnvironmentLabel(label: string | null | undefined): s
 export function environmentIconKind(
   environmentId: EnvironmentId,
   primaryEnvironmentId: EnvironmentId | null,
-): "monitor" | "server" {
-  return environmentId === primaryEnvironmentId ? "monitor" : "server";
+): "laptop" | "server" {
+  return environmentId === primaryEnvironmentId ? "laptop" : "server";
 }
 
 export function resolveEnvironmentIconColor(
@@ -61,7 +61,7 @@ export function legacyThreadEnvironmentPresentation(input: {
   readonly showLocalEnvironmentIcon: boolean;
   readonly environmentLabel: string | null | undefined;
 }) {
-  const kind = input.isPrimary ? ("monitor" as const) : ("server" as const);
+  const kind = input.isPrimary ? ("laptop" as const) : ("server" as const);
   return {
     kind,
     showRowIcon: input.isPrimary ? input.showLocalEnvironmentIcon : !input.isDesktopLocal,
@@ -111,7 +111,7 @@ export function projectEnvironmentIconEntries(input: {
       return [
         {
           environmentId: member.environmentId,
-          kind: "monitor",
+          kind: "laptop",
           label: formatLocalEnvironmentLabel(member.environmentLabel),
         },
       ];
@@ -144,7 +144,7 @@ export function EnvironmentIcon(props: {
   readonly "aria-hidden"?: boolean | undefined;
 }) {
   const Icon =
-    props.kind === "monitor" ? MonitorIcon : props.kind === "server" ? ServerIcon : ContainerIcon;
+    props.kind === "laptop" ? LaptopIcon : props.kind === "server" ? ServerIcon : ContainerIcon;
   return (
     <Icon
       aria-hidden={props["aria-hidden"]}
