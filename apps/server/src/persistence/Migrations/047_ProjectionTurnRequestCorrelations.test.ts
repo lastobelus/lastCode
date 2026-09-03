@@ -6,7 +6,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionTurnRequestCorrelationRepositoryLive } from "../Layers/ProjectionTurnRequestCorrelations.ts";
 import { runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ProjectionTurnRequestCorrelationRepository } from "../Services/ProjectionTurnRequestCorrelations.ts";
 
 const layer = it.layer(

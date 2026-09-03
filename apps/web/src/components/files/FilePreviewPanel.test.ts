@@ -6,10 +6,7 @@ import {
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
 import { setMarkdownTaskChecked } from "../../markdownTaskList";
-import {
-  isMarkdownPreviewFile,
-  shouldShowFileExplorer,
-} from "./filePreviewMode";
+import { isMarkdownPreviewFile, shouldShowFileExplorer } from "./filePreviewMode";
 
 describe("file comment annotations", () => {
   it("normalizes and formats selected line ranges", () => {
