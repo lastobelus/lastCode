@@ -149,7 +149,7 @@ each saved remote environment. **Default** preserves the semantic icon treatment
 a custom color is shown at full strength in sidebar rows, project headings, and thread details. The
 icon beside each environment name previews the selection.
 
-Remote environments use a Server icon. The primary machine uses a Monitor icon, which can be shown
+Remote environments use a Server icon. The primary machine uses a Laptop icon, which can be shown
 or hidden in thread cards and legacy thread rows with **Show local icon**. Legacy rows reserve the
 same icon space either way so their columns stay aligned. Mixed legacy project groups always show
 one icon for every environment in the group, including the primary machine, with duplicate
