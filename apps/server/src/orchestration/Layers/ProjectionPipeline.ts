@@ -928,9 +928,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        // A message cannot change any summary field except latestUserMessageAt,
-        // which is a monotonic maximum that folds in directly. The full refresh
-        // would re-read every message body in the thread per user message.
+        // A message cannot change any summary field except the latest user
+        // message identity, which is a monotonic maximum that folds in directly.
+        // The full refresh would re-read every message body in the thread per
+        // user message and is unavailable while this projector bootstraps ahead
+        // of the message projector.
         case "thread.message-sent": {
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
@@ -938,15 +940,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
-          const previousLatest = existingRow.value.latestUserMessageAt;
+          const previousLatestAt = existingRow.value.latestUserMessageAt;
+          const previousLatestId = existingRow.value.latestUserMessageId;
+          const isLatestUserMessage =
+            event.payload.role === "user" &&
+            (previousLatestAt === null ||
+              event.payload.createdAt > previousLatestAt ||
+              (event.payload.createdAt === previousLatestAt &&
+                (previousLatestId === null || event.payload.messageId > previousLatestId)));
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             updatedAt: event.occurredAt,
-            latestUserMessageAt:
-              event.payload.role === "user" &&
-              (previousLatest === null || event.payload.createdAt > previousLatest)
-                ? event.payload.createdAt
-                : previousLatest,
+            latestUserMessageId: isLatestUserMessage ? event.payload.messageId : previousLatestId,
+            latestUserMessageAt: isLatestUserMessage ? event.payload.createdAt : previousLatestAt,
           });
           return;
         }
