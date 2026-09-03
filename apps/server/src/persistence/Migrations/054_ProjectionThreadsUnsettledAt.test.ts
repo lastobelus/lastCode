@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import Migration0048 from "./048_ProjectionThreadAnnotation.ts";
 import Migration0049 from "./049_UpdateDrain.ts";
 import Migration0050 from "./050_UpdateDrainClaim.ts";
