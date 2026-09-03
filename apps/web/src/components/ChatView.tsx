@@ -350,8 +350,8 @@ import {
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
 import {
   runThreadAnnotationBodySave,
+  threadAnnotationBannerPresentation,
   ThreadAnnotationActions,
-  ThreadAnnotationBody,
   ThreadAnnotationEditorDialog,
   useThreadAnnotationBodyPending,
 } from "./thread-annotation/ThreadAnnotation";
@@ -5757,16 +5757,12 @@ function ChatViewContent(props: ChatViewProps) {
       id: `thread-annotation:${annotationVersionKey}`,
       variant: "warning",
       icon: <StickyNoteIcon aria-hidden className="size-3.5" />,
-      title: "Thread annotation",
-      description: (
-        <ThreadAnnotationBody
-          annotation={threadAnnotation}
-          className="max-h-48 overflow-y-auto"
-          cwd={gitCwd ?? undefined}
-          onBodyChange={saveThreadAnnotation}
-          threadRef={routeThreadRef}
-        />
-      ),
+      ...threadAnnotationBannerPresentation({
+        annotation: threadAnnotation,
+        cwd: gitCwd ?? undefined,
+        onBodyChange: saveThreadAnnotation,
+        threadRef: routeThreadRef,
+      }),
       actions: (
         <ThreadAnnotationActions
           annotation={threadAnnotation}

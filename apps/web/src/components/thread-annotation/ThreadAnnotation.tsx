@@ -30,6 +30,8 @@ import {
 } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ComposerBanner } from "../chat/ComposerBanner";
+import type { ComposerBannerStackItem } from "../chat/ComposerBannerStack";
 
 const pendingBodyChanges = new Set<string>();
 const pendingBodyChangeListeners = new Map<string, Set<() => void>>();
@@ -158,7 +160,7 @@ export function ThreadAnnotationEditorDialog(props: {
   );
 }
 
-function AnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
+export function ThreadAnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
   return (
     <span className="text-[11px] text-warning-foreground">
@@ -173,6 +175,7 @@ export function ThreadAnnotationBody(props: {
   cwd?: string | undefined;
   className?: string;
   compact?: boolean;
+  showTimestamp?: boolean;
   onBodyChange?: ((body: string) => Promise<boolean>) | undefined;
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
@@ -196,9 +199,36 @@ export function ThreadAnnotationBody(props: {
         text={props.annotation.body}
         threadRef={props.threadRef}
       />
-      <AnnotationTimestamp annotation={props.annotation} />
+      {props.showTimestamp !== false ? (
+        <ThreadAnnotationTimestamp annotation={props.annotation} />
+      ) : null}
     </div>
   );
+}
+
+export function threadAnnotationBannerPresentation(props: {
+  annotation: ThreadAnnotationModel;
+  threadRef: ScopedThreadRef;
+  cwd?: string | undefined;
+  onBodyChange: (body: string) => Promise<boolean>;
+}): Pick<ComposerBannerStackItem, "title" | "description" | "children"> {
+  return {
+    title: "NOTE:",
+    description: <ThreadAnnotationTimestamp annotation={props.annotation} />,
+    children: (
+      <ComposerBanner.Body className="pe-1 pb-1">
+        <ComposerBanner.Scroll className="max-h-48">
+          <ThreadAnnotationBody
+            annotation={props.annotation}
+            cwd={props.cwd}
+            onBodyChange={props.onBodyChange}
+            showTimestamp={false}
+            threadRef={props.threadRef}
+          />
+        </ComposerBanner.Scroll>
+      </ComposerBanner.Body>
+    ),
+  };
 }
 
 export function ThreadAnnotationActions(props: {
