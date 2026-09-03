@@ -11,7 +11,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
@@ -782,7 +782,15 @@ function build(options) {
     throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
   }
   const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
-  const releaseLock = acquireBuildLock(updateRoot);
+  let releaseLock;
+  try {
+    releaseLock = acquireBuildLock(updateRoot);
+  } catch (error) {
+    if (!(error instanceof PortableLockContentionError)) {
+      reportLocalBuildFailure(options, error);
+    }
+    throw error;
+  }
   let result;
   let buildError;
   try {
@@ -793,21 +801,25 @@ function build(options) {
     releaseLock();
   }
   if (buildError !== undefined) {
-    try {
-      const delivery = deliverLocalBuildFailure(options, buildError);
-      if (delivery.status === "not-configured") {
-        process.stderr.write(
-          "[lastcode:local-update] The maintenance thread is not configured; the build failure was not posted.\n",
-        );
-      }
-    } catch (deliveryError) {
-      process.stderr.write(
-        `[lastcode:local-update] Could not post the build failure to the maintenance thread: ${deliveryError instanceof Error ? deliveryError.message : String(deliveryError)}\n`,
-      );
-    }
+    reportLocalBuildFailure(options, buildError);
     throw buildError;
   }
   return result;
+}
+
+function reportLocalBuildFailure(options, buildError) {
+  try {
+    const delivery = deliverLocalBuildFailure(options, buildError);
+    if (delivery.status === "not-configured") {
+      process.stderr.write(
+        "[lastcode:local-update] The maintenance thread is not configured; the build failure was not posted.\n",
+      );
+    }
+  } catch (deliveryError) {
+    process.stderr.write(
+      `[lastcode:local-update] Could not post the build failure to the maintenance thread: ${deliveryError instanceof Error ? deliveryError.message : String(deliveryError)}\n`,
+    );
+  }
 }
 
 function main(argv) {

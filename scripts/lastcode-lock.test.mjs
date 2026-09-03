@@ -7,7 +7,7 @@ import * as NodeURL from "node:url";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const temporaryDirectories = [];
 
@@ -43,7 +43,7 @@ describe("LastCode portable update lock", () => {
     await NodeEvents.once(holder.stdout, "data");
 
     expect(() => acquirePortableLock(root, "update.lock", "test")).toThrow(
-      `Another LastCode test is already running (PID ${holder.pid}`,
+      PortableLockContentionError,
     );
 
     // This is the exact child spawned above, not a process located by pattern.

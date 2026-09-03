@@ -212,6 +212,57 @@ describe("lastcode-local-update", () => {
     assert.include(message, "checkpoint lookup failed");
   });
 
+  it("posts acquisition failures before a build log exists", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-lock-alert-"));
+    const lastCodeRoot = NodePath.join(root, ".lastcode");
+    const capturePath = NodePath.join(root, "thread-message.json");
+    const threadToolPath = NodePath.join(lastCodeRoot, "userdata", "bin", "lastcode-thread");
+    try {
+      NodeFS.mkdirSync(NodePath.dirname(threadToolPath), { recursive: true });
+      NodeFS.mkdirSync(NodePath.join(lastCodeRoot, "automation"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(lastCodeRoot, "automation", "checkpoint-supervisor.json"),
+        JSON.stringify({ schemaVersion: 1, recoveryThreadId: "thread-maintenance" }),
+      );
+      NodeFS.writeFileSync(
+        threadToolPath,
+        [
+          "#!/usr/bin/env node",
+          'const fs = require("node:fs");',
+          "fs.writeFileSync(process.env.LASTCODE_TEST_THREAD_MESSAGE_PATH, JSON.stringify(process.argv.slice(2)));",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      NodeFS.writeFileSync(NodePath.join(lastCodeRoot, "local-updates"), "not a directory");
+
+      const result = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "lastcode-local-update.mjs"),
+          "build",
+          "--repo",
+          root,
+          "--checkpoint",
+          "lastcode/checkpoint/v0.0.39-nightly.20260902.1257",
+          "--home",
+          root,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, LASTCODE_TEST_THREAD_MESSAGE_PATH: capturePath },
+        },
+      );
+
+      assert.equal(result.status, 1);
+      const args = JSON.parse(NodeFS.readFileSync(capturePath, "utf8")) as Array<string>;
+      assert.deepEqual(args.slice(0, 2), ["send", "thread-maintenance"]);
+      assert.include(args[3] ?? "", "Automated LastCode local update build alert");
+      assert.include(args[3] ?? "", "EEXIST");
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("only reuses a full CI stamp for the exact checkpoint context", () => {
     const stamp = {
       schemaVersion: 2,
