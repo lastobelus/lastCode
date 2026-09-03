@@ -15,19 +15,7 @@ const layer = it.layer(
   ),
 );
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/051_ProjectionTurnRequestCorrelations.test.ts
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/051_ProjectionTurnRequestCorrelations.test.ts
 layer("051_ProjectionTurnRequestCorrelations", (it) => {
-|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/045_ProjectionTurnRequestCorrelations.test.ts
-layer("045_ProjectionTurnRequestCorrelations", (it) => {
-========
-layer("046_ProjectionTurnRequestCorrelations", (it) => {
->>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/046_ProjectionTurnRequestCorrelations.test.ts
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/046_ProjectionTurnRequestCorrelations.test.ts
-layer("046_ProjectionTurnRequestCorrelations", (it) => {
-========
-layer("047_ProjectionTurnRequestCorrelations", (it) => {
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/047_ProjectionTurnRequestCorrelations.test.ts
   it.effect("inserts once, resolves once, and deletes by owning thread", () =>
     Effect.gen(function* () {
       yield* runMigrations();
