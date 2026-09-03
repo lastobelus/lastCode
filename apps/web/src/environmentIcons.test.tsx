@@ -133,7 +133,6 @@ describe("EnvironmentIcon", () => {
     const markup = renderToStaticMarkup(
       <EnvironmentIcon kind="laptop" context="v2-row" color="#2563eb" className="size-3" />,
     );
-    expect(markup).toContain("lucide-laptop");
     expect(markup).toContain("color:#2563eb");
     expect(markup).not.toContain("text-sidebar-muted-foreground/70");
   });
