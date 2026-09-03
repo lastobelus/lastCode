@@ -8,36 +8,12 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
 layer("048_ProjectionThreadAnnotation", (it) => {
-|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/042_ProjectionThreadAnnotation.test.ts
-layer("042_ProjectionThreadAnnotation", (it) => {
-========
-layer("043_ProjectionThreadAnnotation", (it) => {
->>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-layer("043_ProjectionThreadAnnotation", (it) => {
-========
-layer("044_ProjectionThreadAnnotation", (it) => {
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/044_ProjectionThreadAnnotation.test.ts
   it.effect("adds annotation and latest user marker fields to thread projections", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
       yield* runMigrations({ toMigrationInclusive: 47 });
-|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/042_ProjectionThreadAnnotation.test.ts
-      yield* runMigrations({ toMigrationInclusive: 40 });
-========
-      yield* runMigrations({ toMigrationInclusive: 42 });
->>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-      yield* runMigrations({ toMigrationInclusive: 42 });
-========
-      yield* runMigrations({ toMigrationInclusive: 43 });
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/044_ProjectionThreadAnnotation.test.ts
 
       yield* sql`
         INSERT INTO projection_threads (
@@ -91,19 +67,7 @@ layer("044_ProjectionThreadAnnotation", (it) => {
             '2026-02-24T00:01:00.000Z'
           )
       `;
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
-<<<<<<<< HEAD:apps/server/src/persistence/Migrations/048_ProjectionThreadAnnotation.test.ts
       yield* runMigrations({ toMigrationInclusive: 48 });
-|||||||| parent of 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/042_ProjectionThreadAnnotation.test.ts
-      yield* runMigrations({ toMigrationInclusive: 42 });
-========
-      yield* runMigrations({ toMigrationInclusive: 43 });
->>>>>>>> 8104aad471 (fix(lastcode): keep checkpoint migrations replayable (#95)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-|||||||| parent of 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/043_ProjectionThreadAnnotation.test.ts
-      yield* runMigrations({ toMigrationInclusive: 43 });
-========
-      yield* runMigrations({ toMigrationInclusive: 44 });
->>>>>>>> 6f3273be76 (fix(lastcode): make checkpoint failures self-reporting (#101)):apps/server/src/persistence/Migrations/044_ProjectionThreadAnnotation.test.ts
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_threads)
