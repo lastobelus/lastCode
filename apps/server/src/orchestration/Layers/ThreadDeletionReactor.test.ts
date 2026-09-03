@@ -733,6 +733,7 @@ describe("durable worktree cleanup", () => {
                 projectId: ProjectId.make("active-project"),
                 title: "Active project",
                 workspaceRoot: activeProjectRoot,
+                autoPull: false,
                 defaultModelSelection: null,
                 defaultThreadEnvMode: null,
                 scripts: [],
