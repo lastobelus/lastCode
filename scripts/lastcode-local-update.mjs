@@ -5,11 +5,13 @@
 // dependency-free so an older LastCode build can inspect and build a newer
 // checkpoint before that checkpoint's dependencies have been installed.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeUtil from "node:util";
 
-import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
@@ -18,16 +20,132 @@ const RESULT_PREFIX = "LASTCODE_LOCAL_UPDATE_RESULT=";
 const GROUPED_RELEASE_NOTES_FORMAT = "grouped-v1";
 const MAX_RELEASE_NOTE_GROUPS = 6;
 const MAX_RELEASE_NOTE_ITEMS = 8;
+const BUILD_LOG_TAIL_MAX_BYTES = 64 * 1024;
+const BUILD_DIAGNOSTIC_MAX_CHARACTERS = 1_200;
+
+function readJson(path) {
+  return JSON.parse(NodeFS.readFileSync(path, "utf8"));
+}
+
+function readFileTail(path, maxBytes = BUILD_LOG_TAIL_MAX_BYTES) {
+  const stat = NodeFS.statSync(path);
+  const length = Math.min(maxBytes, stat.size);
+  const buffer = Buffer.allocUnsafe(length);
+  const descriptor = NodeFS.openSync(path, "r");
+  try {
+    const bytesRead = NodeFS.readSync(descriptor, buffer, 0, length, stat.size - length);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    NodeFS.closeSync(descriptor);
+  }
+}
+
+export function boundedLocalBuildDiagnostic(raw) {
+  const redacted = NodeUtil.stripVTControlCharacters(raw)
+    .replaceAll(/(https?:\/\/)[^/@\s]+@/giu, "$1<redacted>@")
+    .replaceAll(/\b(?:github_pat_|gh[pousr]_|ctx7sk-|sk-)[A-Za-z0-9_-]{8,}\b/gu, "<redacted>")
+    .replaceAll(/\b((?:api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/giu, "$1<redacted>")
+    .split("")
+    .map((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return (code < 32 && character !== "\n" && character !== "\r" && character !== "\t") ||
+        code === 127
+        ? "�"
+        : character;
+    })
+    .join("")
+    .trim();
+  return redacted.length <= BUILD_DIAGNOSTIC_MAX_CHARACTERS
+    ? redacted
+    : `...${redacted.slice(-(BUILD_DIAGNOSTIC_MAX_CHARACTERS - 3))}`;
+}
+
+export function localBuildFailureFingerprint({ checkpointTag, error, diagnostic }) {
+  return NodeCrypto.createHash("sha256")
+    .update(JSON.stringify({ checkpointTag, error, diagnostic }))
+    .digest("hex");
+}
+
+export function localBuildFailureMessage(failure, fingerprint) {
+  return [
+    `Automated LastCode local update build alert ${fingerprint.slice(0, 12)}.`,
+    `The in-app updater failed while building ${failure.checkpointTag}.`,
+    `Error: ${failure.error}`,
+    `Diagnostic: ${failure.diagnostic}`,
+    `Build log: ${failure.logPath}`,
+    `Retained build worktree: ${failure.worktreePath}`,
+    "Inspect the retained worktree and build log, address the concrete failure, and leave a working up-to-date LastCode build.",
+    "Use this persistent maintenance thread for the recovery; do not create a new thread and do not only report the alert.",
+  ].join("\n");
+}
+
+export function deliverLocalBuildFailure(options, error, overrides = {}) {
+  const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
+  const logPath = NodePath.join(updateRoot, "build.log");
+  const worktreePath = NodePath.join(updateRoot, "build-worktree");
+  const configPath = NodePath.join(
+    options.home,
+    ".lastcode",
+    "automation",
+    "checkpoint-supervisor.json",
+  );
+  const threadToolPath = NodePath.join(
+    options.home,
+    ".lastcode",
+    "userdata",
+    "bin",
+    "lastcode-thread",
+  );
+  const config = (overrides.readConfig ?? readJson)(configPath);
+  if (typeof config?.recoveryThreadId !== "string" || config.recoveryThreadId.length === 0) {
+    return { status: "not-configured" };
+  }
+  let rawDiagnostic = "";
+  try {
+    rawDiagnostic = (overrides.readLogTail ?? readFileTail)(logPath);
+  } catch {
+    // Early build failures can happen before build.log exists. The caught build
+    // error is still enough to route an actionable maintenance alert.
+  }
+  const diagnostic = boundedLocalBuildDiagnostic(
+    rawDiagnostic || (error instanceof Error ? error.message : String(error)),
+  );
+  const failure = {
+    checkpointTag: options.checkpointTag,
+    diagnostic,
+    error: boundedLocalBuildDiagnostic(error instanceof Error ? error.message : String(error)),
+    logPath,
+    worktreePath,
+  };
+  const fingerprint = localBuildFailureFingerprint(failure);
+  const message = localBuildFailureMessage(failure, fingerprint);
+  const sendThread =
+    overrides.sendThread ??
+    ((threadId, threadMessage) =>
+      run(
+        NodePath.dirname(threadToolPath),
+        threadToolPath,
+        ["send", threadId, "--message", threadMessage, "--json"],
+        { env: resolveDeterministicBuildEnvironment() },
+      ));
+  sendThread(config.recoveryThreadId, message);
+  return { status: "sent", fingerprint, threadId: config.recoveryThreadId };
+}
 
 export function resolveDeterministicBuildEnvironment(environment = process.env) {
   return { ...environment, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
 }
 
-export function resolveLocalBuildEnvironment(worktreePath, environment = process.env) {
+export function resolveLocalBuildEnvironment(
+  worktreePath,
+  environment = process.env,
+  nodeExecutable,
+) {
   const resolved = resolveDeterministicBuildEnvironment(environment);
+  const nodePath = nodeExecutable ? `${NodePath.dirname(nodeExecutable)}${NodePath.delimiter}` : "";
   return {
     ...resolved,
-    PATH: `${NodePath.join(worktreePath, "node_modules", ".bin")}${NodePath.delimiter}${resolved.PATH ?? ""}`,
+    PATH: `${NodePath.join(worktreePath, "node_modules", ".bin")}${NodePath.delimiter}${nodePath}${resolved.PATH ?? ""}`,
   };
 }
 
@@ -566,7 +684,6 @@ function buildUnlocked(options, updateRoot) {
     }
     const worktreePath = NodePath.join(updateRoot, "build-worktree");
     prepareBuildWorktree(options.repoRoot, worktreePath, options.checkpointTag, logFd);
-    const buildEnvironment = resolveLocalBuildEnvironment(worktreePath);
     const installer = NodePath.join(options.repoRoot, "node_modules", ".bin", "vp");
     if (!NodeFS.existsSync(installer)) {
       throw new Error(`Checkpoint automation dependencies are missing at ${installer}.`);
@@ -574,6 +691,12 @@ function buildUnlocked(options, updateRoot) {
     run(worktreePath, installer, ["install", "--frozen-lockfile"], { logFd });
     const mise = resolveMise(options.home);
     const nodeCommand = ["exec", "node@24.13.1", "--", "node"];
+    const nodeExecutable = run(worktreePath, mise, [...nodeCommand, "-p", "process.execPath"]);
+    const buildEnvironment = resolveLocalBuildEnvironment(
+      worktreePath,
+      process.env,
+      nodeExecutable,
+    );
     const installable = parseInstallableTag(options.checkpointTag);
     if (!installable) throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
     const upstreamCommit = git(options.repoRoot, [
@@ -659,11 +782,43 @@ function build(options) {
     throw new Error(`Invalid installable tag '${options.checkpointTag}'.`);
   }
   const updateRoot = NodePath.join(options.home, ".lastcode", "local-updates");
-  const releaseLock = acquireBuildLock(updateRoot);
+  let releaseLock;
   try {
-    return buildUnlocked(options, updateRoot);
+    releaseLock = acquireBuildLock(updateRoot);
+  } catch (error) {
+    if (!(error instanceof PortableLockContentionError)) {
+      reportLocalBuildFailure(options, error);
+    }
+    throw error;
+  }
+  let result;
+  let buildError;
+  try {
+    result = buildUnlocked(options, updateRoot);
+  } catch (error) {
+    buildError = error;
   } finally {
     releaseLock();
+  }
+  if (buildError !== undefined) {
+    reportLocalBuildFailure(options, buildError);
+    throw buildError;
+  }
+  return result;
+}
+
+function reportLocalBuildFailure(options, buildError) {
+  try {
+    const delivery = deliverLocalBuildFailure(options, buildError);
+    if (delivery.status === "not-configured") {
+      process.stderr.write(
+        "[lastcode:local-update] The maintenance thread is not configured; the build failure was not posted.\n",
+      );
+    }
+  } catch (deliveryError) {
+    process.stderr.write(
+      `[lastcode:local-update] Could not post the build failure to the maintenance thread: ${deliveryError instanceof Error ? deliveryError.message : String(deliveryError)}\n`,
+    );
   }
 }
 
