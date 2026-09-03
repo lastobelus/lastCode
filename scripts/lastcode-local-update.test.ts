@@ -21,6 +21,7 @@ import {
   resolveExistingBuild,
   resolveLatestInstallableTag,
   resolveLocalBuildEnvironment,
+  resolveMiseNodeExecutable,
 } from "./lastcode-local-update.mjs";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
@@ -106,6 +107,26 @@ describe("lastcode-local-update", () => {
         .PATH ?? "",
       /^\/tmp\/build tree\/node_modules\/\.bin:\/mise\/node\/bin:\/bin$/,
     );
+  });
+
+  it("resolves the pinned Node executable without relying on PATH ordering", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-mise-node-"));
+    const executable = NodePath.join(root, "bin", "node");
+    try {
+      NodeFS.mkdirSync(NodePath.dirname(executable), { recursive: true });
+      NodeFS.writeFileSync(executable, "");
+      assert.equal(
+        resolveMiseNodeExecutable("/build", "/mise", (cwd, command, args) => {
+          assert.equal(cwd, "/build");
+          assert.equal(command, "/mise");
+          assert.deepEqual(args, ["where", "node@24.13.1"]);
+          return root;
+        }),
+        executable,
+      );
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("bounds and redacts local build diagnostics", () => {
