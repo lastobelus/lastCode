@@ -69,6 +69,9 @@ export class ThreadCliError extends Schema.TaggedErrorClass<ThreadCliError>()("T
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const isThreadCliError = Schema.is(ThreadCliError);
 
+const currentThreadIdForHome = (home: string): string | undefined =>
+  process.env.T3CODE_HOME?.trim() === home ? process.env.T3CODE_THREAD_ID?.trim() : undefined;
+
 const ThreadIdentity = Schema.Struct({
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -890,6 +893,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
     Effect.mapError((cause) => new ThreadSendServerUnavailableError({ cause })),
   );
   const minimumLogLevel = config.logLevel;
+  const currentThreadId = currentThreadIdForHome(config.baseDir);
 
   return yield* Effect.gen(function* () {
     const auth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -956,12 +960,10 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
               commandId,
               messageId,
               createdAt: DateTime.formatIso(yield* DateTime.now),
-              ...(process.env.T3CODE_THREAD_ID?.trim()
-                ? { sourceThreadId: ThreadId.make(process.env.T3CODE_THREAD_ID.trim()) }
-                : {}),
+              ...(currentThreadId ? { sourceThreadId: ThreadId.make(currentThreadId) } : {}),
               ...(waitForCompletion ? { trackRequestCorrelation: true as const } : {}),
-              ...(waitForCompletion && process.env.T3CODE_THREAD_ID?.trim()
-                ? { rejectWaitForThreadId: ThreadId.make(process.env.T3CODE_THREAD_ID.trim()) }
+              ...(waitForCompletion && currentThreadId
+                ? { rejectWaitForThreadId: ThreadId.make(currentThreadId) }
                 : {}),
             },
           );
@@ -1046,7 +1048,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
       ),
     });
   }
-  const currentThreadId = process.env.T3CODE_THREAD_ID?.trim();
+  const currentThreadId = currentThreadIdForHome(config.baseDir);
   const waitingOnCurrentThread = currentThreadId === waitHandle.threadId;
   return yield* Effect.gen(function* () {
     const auth = yield* EnvironmentAuth.EnvironmentAuth;
