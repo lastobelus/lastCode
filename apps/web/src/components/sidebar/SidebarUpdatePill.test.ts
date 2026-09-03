@@ -116,7 +116,7 @@ describe("SidebarUpdatePill release notes", () => {
 });
 
 describe("SidebarUpdatePill local failure", () => {
-  it("uses a destructive button tone without changing the ordinary update tone", () => {
+  it("uses the themed update tone and lets a local failure override it", () => {
     expect(
       resolveSidebarUpdateButtonToneClassName({
         hasLocalBuildFailure: true,
@@ -130,7 +130,7 @@ describe("SidebarUpdatePill local failure", () => {
         isInteractionDisabled: false,
         showUpdateIconState: true,
       }),
-    ).toContain("bg-sidebar-control-surface");
+    ).toContain("bg-update-surface text-update-foreground ring-update/40");
   });
 
   it("keeps disabled update details hoverable without applying action hover styling", () => {
