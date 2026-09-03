@@ -3526,6 +3526,13 @@ function LegacySidebarDraftList() {
       ),
     [projects],
   );
+  const projectIconByKey = useMemo(
+    () =>
+      new Map(
+        projects.map((project) => [`${project.environmentId}:${project.id}`, project.projectIcon]),
+      ),
+    [projects],
+  );
   const navigateToDraft = useCallback(
     (draftId: DraftId) => {
       clearSelection();
@@ -3542,6 +3549,7 @@ function LegacySidebarDraftList() {
         projectDisplayNameByKey={projectTitleByKey}
         projectCwdByKey={projectCwdByKey}
         projectFaviconPathByKey={projectFaviconPathByKey}
+        projectIconByKey={projectIconByKey}
         scopedProjectKeys={null}
         routeDraftId={routeDraftId}
         onNavigateToDraft={navigateToDraft}
