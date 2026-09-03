@@ -280,7 +280,8 @@ function terminalProcessLabel(count: number): string {
   return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
 }
 
-function SidebarThreadTooltip(props: SidebarThreadHoverContentProps) {  return (
+function SidebarThreadTooltip(props: SidebarThreadHoverContentProps) {
+  return (
     <TooltipPopup
       side="right"
       align="start"
