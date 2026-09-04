@@ -23,8 +23,10 @@ it.effect("dispatches attention commands only to the authenticated thread", () =
       Effect.sync(() => {
         commands.push(command);
         return { sequence: commands.length };
-      }),
+    }),
     readEvents: () => Stream.empty,
+    readThreadEvents: () => Stream.empty,
+    getThreadReplayStats: () => Effect.die("unused thread replay stats"),
     streamDomainEvents: Stream.empty,
     subscribeDomainEvents: Effect.succeed(Stream.empty),
     latestSequence: Effect.succeed(0),
