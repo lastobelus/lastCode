@@ -27,6 +27,7 @@ import {
   ModelSelection,
   ProjectId,
   ThreadLinkedPullRequest,
+  ThreadAttention,
   ThreadId,
   ThreadAnnotation,
   ThreadWorktreeCleanup,
@@ -107,6 +108,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
     worktreeCleanup: Schema.optional(Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup))),
+    attention: Schema.NullOr(Schema.fromJsonString(ThreadAttention)),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -501,6 +503,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -543,6 +546,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -587,6 +591,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1054,6 +1059,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1996,6 +2002,7 @@ pending_approval_requests AS (
                 titleRegeneration: mapTitleRegeneration(row),
                 ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                 ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
+                attention: row.attention,
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2213,6 +2220,7 @@ pending_approval_requests AS (
                   ...(row.annotation !== null ? { annotation: row.annotation } : {}),
                   latestUserMessageId: row.latestUserMessageId,
                   ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
+                  attention: row.attention,
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2358,6 +2366,7 @@ pending_approval_requests AS (
                       ...(row.worktreeCleanup != null
                         ? { worktreeCleanup: row.worktreeCleanup }
                         : {}),
+                      attention: row.attention,
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
                       hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2508,6 +2517,7 @@ pending_approval_requests AS (
                 persistent: (row.persistent ?? 0) > 0,
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                attention: row.attention,
                 session: sessionByThread.get(row.threadId) ?? null,
                 latestUserMessageAt: row.latestUserMessageAt,
                 hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2810,6 +2820,7 @@ pending_approval_requests AS (
         ...(threadRow.value.worktreeCleanup != null
           ? { worktreeCleanup: threadRow.value.worktreeCleanup }
           : {}),
+        attention: threadRow.value.attention,
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -3051,6 +3062,7 @@ pending_approval_requests AS (
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         ...(threadRow.value.annotation !== null ? { annotation: threadRow.value.annotation } : {}),
+        attention: threadRow.value.attention,
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {
