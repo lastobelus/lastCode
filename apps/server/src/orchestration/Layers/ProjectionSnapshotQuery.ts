@@ -1130,6 +1130,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
