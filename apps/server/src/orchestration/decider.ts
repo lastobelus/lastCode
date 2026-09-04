@@ -1059,12 +1059,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const interruptRequestedEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1077,7 +1077,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
         },
-      };
+      } as const;
+      if (thread.attention == null) {
+        return interruptRequestedEvent;
+      }
+      return [
+        interruptRequestedEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.attention-cleared",
+          payload: {
+            threadId: command.threadId,
+            updatedAt: command.createdAt,
+          },
+        },
+      ];
     }
 
     case "thread.approval.respond": {
@@ -1281,6 +1300,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           session: command.session,
         },
       };
+      const terminalAttentionClearEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        thread.attention != null &&
+        (command.session.status === "error" || command.session.status === "interrupted")
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.attention-cleared",
+              payload: {
+                threadId: command.threadId,
+                updatedAt: command.createdAt,
+              },
+            }
+          : null;
       // Only a session coming alive is activity worth waking a settled thread
       // for — status writes like ready/stopped/error arrive after the fact and
       // must not fight a user's explicit settle. Snooze is deliberately NOT
@@ -1293,7 +1329,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.session.status === "starting" || command.session.status === "running";
       // Real activity resets ANY override (settled wakes, active unpins).
       if (thread.settledOverride === null || !isSessionActivity) {
-        return sessionSetEvent;
+        return terminalAttentionClearEvent === null
+          ? sessionSetEvent
+          : [sessionSetEvent, terminalAttentionClearEvent];
       }
       const unsettledEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
