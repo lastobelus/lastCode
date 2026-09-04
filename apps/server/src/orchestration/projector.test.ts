@@ -77,6 +77,7 @@ describe("orchestration projector", () => {
       {
         id: "thread-1",
         annotation: null,
+        attention: null,
         projectId: "project-1",
         title: "demo",
         modelSelection: {
