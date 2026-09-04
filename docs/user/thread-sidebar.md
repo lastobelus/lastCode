@@ -28,6 +28,19 @@ The order syncs across devices.
 
 Pinning does not prevent automatic settlement. Settling a thread removes its pin.
 
+## Questions from agents
+
+Agents can mark a thread when their latest response contains a question that blocks further work.
+The sidebar shows a violet `?`, or **Question** when long status labels are enabled, so the thread
+does not get lost among other conversations. Sending a reply clears the marker automatically.
+Settling the thread yourself also dismisses it; automatic settlement waits until the question has
+been answered or cleared.
+
+This marker is separate from a provider's structured approval and input prompts. Those keep their
+existing, higher-priority status. The agent can currently raise only the `question` attention kind;
+the stored attention record is typed so future user-actionable kinds can be added without treating
+terminal output as an API.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list
