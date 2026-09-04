@@ -15,7 +15,7 @@ import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
   projectTitle: string | null;
-  projectDisplayName: string | null;
+  projectDisplayName?: string | null;
   projectCwd: string | null;
   projectFaviconPath: string | null;
   projectIcon?: ProjectIconOverride | null;
@@ -42,6 +42,7 @@ function terminalProcessLabel(count: number): string {
 
 export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps) {
   const driverKind = props.providerEntry?.driverKind ?? null;
+  const projectDisplayName = props.projectDisplayName ?? props.projectTitle;
   const actionPresentation =
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
@@ -53,17 +54,17 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {props.thread.title}
       </div>
       <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
-        {props.projectDisplayName ? (
+        {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
               environmentId={props.thread.environmentId}
               cwd={props.projectCwd ?? ""}
-              projectName={props.projectTitle}
+              projectName={props.projectTitle ?? ""}
               faviconPath={props.projectFaviconPath}
               projectIcon={props.projectIcon ?? null}
               className="size-3 shrink-0"
             />
-            <div className="min-w-0 truncate text-foreground/75">{props.projectDisplayName}</div>
+            <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
           </div>
         ) : null}
         {props.environmentLabel ? (
