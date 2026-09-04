@@ -494,6 +494,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
     id: "scale-legacy-sidebar",
     title: "Scale legacy sidebar",
     to: "/settings/lastcode",

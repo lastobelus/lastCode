@@ -76,6 +76,26 @@ describe("ClientSettings proactive panels", () => {
   });
 });
 
+describe("ClientSettings larger scrollbars", () => {
+  it("is opt-in with defaults that clear the pane resize target", () => {
+    const settings = decodeClientSettings({});
+
+    expect(settings.largerScrollbarsEnabled).toBe(false);
+    expect(settings.scrollbarWidth).toBe(10);
+    expect(settings.scrollbarMargin).toBe(4);
+  });
+
+  it.each([
+    ["scrollbarWidth", 1, 12],
+    ["scrollbarMargin", 0, 6],
+  ] as const)("accepts the inclusive %s range", (key, minimum, maximum) => {
+    expect(decodeClientSettingsPatch({ [key]: minimum })).toEqual({ [key]: minimum });
+    expect(decodeClientSettingsPatch({ [key]: maximum })).toEqual({ [key]: maximum });
+    expect(() => decodeClientSettingsPatch({ [key]: minimum - 1 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ [key]: maximum + 1 })).toThrow();
+  });
+});
+
 describe("ClientSettings quit confirmation", () => {
   it("defaults to hold", () => {
     expect(decodeClientSettings({}).confirmQuit).toBe("hold");
