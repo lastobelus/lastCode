@@ -69,6 +69,7 @@ import Migration0054 from "./Migrations/054_ProjectionThreadsUnsettledAt.ts";
 import Migration0055 from "./Migrations/055_ProjectionThreadMessageSource.ts";
 import Migration0056 from "./Migrations/056_ProjectionThreadsPersistent.ts";
 import Migration0057 from "./Migrations/057_ProjectionThreadAttention.ts";
+import Migration0058 from "./Migrations/058_RepairMigration57ProjectionColumns.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -138,6 +139,7 @@ export const migrationEntries = [
   [55, "ProjectionThreadMessageSource", Migration0055],
   [56, "ProjectionThreadsPersistent", Migration0056],
   [57, "ProjectionThreadAttention", Migration0057],
+  [58, "RepairMigration57ProjectionColumns", Migration0058],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
