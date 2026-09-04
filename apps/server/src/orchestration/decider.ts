@@ -1935,12 +1935,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.revert.complete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const revertedEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1952,7 +1952,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           turnCount: command.turnCount,
         },
-      };
+      } as const;
+      if (thread.attention == null) {
+        return revertedEvent;
+      }
+      return [
+        revertedEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.attention-cleared",
+          payload: {
+            threadId: command.threadId,
+            updatedAt: command.createdAt,
+          },
+        },
+      ];
     }
 
     case "thread.activity.append": {

@@ -163,4 +163,24 @@ it.layer(NodeServices.layer)("thread attention decider", (it) => {
       expect(error._tag).toBe("OrchestrationCommandInvariantError");
     }),
   );
+
+  it.effect("clears question attention after reverting past the question", () =>
+    Effect.gen(function* () {
+      const events = yield* decide(
+        {
+          type: "thread.revert.complete",
+          commandId: CommandId.make("revert-complete"),
+          threadId,
+          turnCount: 1,
+          createdAt: NOW,
+        },
+        makeReadModel({ attention: { kind: "question", raisedAt: NOW } }),
+      );
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.reverted",
+        "thread.attention-cleared",
+      ]);
+    }),
+  );
 });
