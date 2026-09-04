@@ -118,6 +118,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
           resolvedAt: null,
         },
         latestUserMessageId: MessageId.make("message-1"),
+        attention: null,
         latestUserMessageAt: null,
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
@@ -176,7 +177,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
     }),
   );
 
-  it.effect("stores SQL NULL for thread fields omitted by pre-annotation events", () =>
+  it.effect("stores SQL NULL for thread fields omitted by older events", () =>
     Effect.gen(function* () {
       const threads = yield* ProjectionThreadRepository;
       const sql = yield* SqlClient.SqlClient;
@@ -212,16 +213,19 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
 
       const rows = yield* sql<{
         readonly annotation: string | null;
+        readonly attention: string | null;
         readonly latestUserMessageId: string | null;
       }>`
         SELECT
           annotation_json AS annotation,
+          attention_json AS attention,
           latest_user_message_id AS "latestUserMessageId"
         FROM projection_threads
         WHERE thread_id = 'thread-before-annotations'
       `;
       assert.deepStrictEqual(rows[0], {
         annotation: null,
+        attention: null,
         latestUserMessageId: null,
       });
 
@@ -229,6 +233,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         threadId: ThreadId.make("thread-before-annotations"),
       });
       assert.strictEqual(Option.getOrNull(persisted)?.annotation, null);
+      assert.strictEqual(Option.getOrNull(persisted)?.attention, null);
       assert.strictEqual(Option.getOrNull(persisted)?.latestUserMessageId, null);
     }),
   );
@@ -261,6 +266,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pinnedAt: "2026-03-25T00:00:00.000Z",
         annotation: null,
         latestUserMessageId: null,
+        attention: null,
         latestUserMessageAt: null,
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
@@ -338,6 +344,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         snoozedUntil: null,
         snoozedAt: null,
         pinnedAt: null,
+        attention: null,
         latestUserMessageAt: null,
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,

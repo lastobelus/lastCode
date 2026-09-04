@@ -217,18 +217,21 @@ export interface ThreadStatusPill {
     | "Plan Ready"
     | "Deleting"
     | "Deleting (Queued)"
+    | "Question"
     | "Cleanup failed";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
+  marker?: string;
 }
 
 // Rollup order mirrors the per-thread resolver exactly: attention states,
 // then active work, then the actionable plan prompt, then passive
 // monitoring. A Monitoring sibling must never hide a Plan Ready thread.
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 6,
-  "Awaiting Input": 5,
+  "Pending Approval": 7,
+  "Awaiting Input": 6,
+  Question: 5,
   Working: 4,
   Connecting: 4,
   Waiting: 3,
@@ -242,6 +245,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
+  | "attention"
   | "hasActionableProposedPlan"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
@@ -553,6 +557,7 @@ export function resolveThreadRowClassName(input: {
 export type SidebarThreadStatus =
   | "approval"
   | "input"
+  | "question"
   | "working"
   | "waiting"
   | "monitoring"
@@ -564,11 +569,12 @@ export type SidebarThreadStatus =
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
+  | "actionResume"
+  | "attention"
+  | "backgroundLiveness"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
   | "session"
-  | "backgroundLiveness"
-  | "actionResume"
   | "worktreeCleanup"
 >;
 
@@ -582,6 +588,10 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.hasPendingUserInput) {
     return "input";
   }
+  if (thread.attention?.kind === "question") {
+    return "question";
+  }
+
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
   }
@@ -802,6 +812,16 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
+    };
+  }
+
+  if (thread.attention?.kind === "question") {
+    return {
+      label: "Question",
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      pulse: false,
+      marker: "?",
     };
   }
 
