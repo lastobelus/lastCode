@@ -3561,6 +3561,7 @@ function LegacySidebarDraftList() {
   return (
     <SidebarMenu>
       <SidebarDraftBlock
+        projectTitleByKey={projectTitleByKey}
         projectDisplayNameByKey={projectTitleByKey}
         projectCwdByKey={projectCwdByKey}
         projectFaviconPathByKey={projectFaviconPathByKey}
