@@ -5,6 +5,7 @@
 - [Install T3 Code](./user/install.md)
 - [Messages and context](./user/composer.md)
 - [Working with threads](./user/thread-sidebar.md)
+- [LastCode appearance preferences](./user/lastcode-appearance.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
 - [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
 - [Permission modes](./user/permission-modes.md)
