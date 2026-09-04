@@ -183,4 +183,66 @@ it.layer(NodeServices.layer)("thread attention decider", (it) => {
       ]);
     }),
   );
+
+  it.effect("clears question attention when the user interrupts the turn", () =>
+    Effect.gen(function* () {
+      const events = yield* decide(
+        {
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("turn-interrupt"),
+          threadId,
+          createdAt: NOW,
+        },
+        makeReadModel({ attention: { kind: "question", raisedAt: NOW } }),
+      );
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.turn-interrupt-requested",
+        "thread.attention-cleared",
+      ]);
+    }),
+  );
+
+  it.effect("clears question attention on failed turns but preserves delivered questions", () =>
+    Effect.gen(function* () {
+      const session = {
+        threadId,
+        providerName: "Codex",
+        runtimeMode: "full-access" as const,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: NOW,
+      };
+      const readModel = makeReadModel({ attention: { kind: "question", raisedAt: NOW } });
+
+      for (const status of ["error", "interrupted"] as const) {
+        const events = yield* decide(
+          {
+            type: "thread.session.set",
+            commandId: CommandId.make(`session-${status}`),
+            threadId,
+            session: { ...session, status },
+            createdAt: NOW,
+          },
+          readModel,
+        );
+        expect(events.map((event) => event.type)).toEqual([
+          "thread.session-set",
+          "thread.attention-cleared",
+        ]);
+      }
+
+      const readyEvents = yield* decide(
+        {
+          type: "thread.session.set",
+          commandId: CommandId.make("session-ready"),
+          threadId,
+          session: { ...session, status: "ready" },
+          createdAt: NOW,
+        },
+        readModel,
+      );
+      expect(readyEvents.map((event) => event.type)).toEqual(["thread.session-set"]);
+    }),
+  );
 });
