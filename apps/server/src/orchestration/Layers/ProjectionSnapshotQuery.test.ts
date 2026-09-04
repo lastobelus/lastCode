@@ -614,8 +614,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           id: ThreadId.make("thread-1"),
           title: "Thread 1",
           session: {
-            ...snapshot.threads[0]?.session,
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
             providerThreadId: "provider-thread-1",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: "2026-02-24T00:00:07.000Z",
           },
         });
       }
