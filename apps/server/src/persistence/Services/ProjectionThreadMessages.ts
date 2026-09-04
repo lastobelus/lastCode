@@ -95,8 +95,7 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly getLatestUserMessage: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<
-    | Pick<ProjectionThreadMessage, "messageId" | "createdAt">
-    | null,
+    Pick<ProjectionThreadMessage, "messageId" | "createdAt"> | null,
     ProjectionRepositoryError
   >;
 
