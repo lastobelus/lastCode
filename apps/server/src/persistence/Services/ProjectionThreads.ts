@@ -17,6 +17,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadAnnotation,
+  ThreadAttention,
   ThreadWorktreeCleanup,
   ThreadId,
   TurnId,
@@ -55,6 +56,7 @@ export const ProjectionThread = Schema.Struct({
   annotation: Schema.NullOr(ThreadAnnotation),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   latestUserMessageId: Schema.NullOr(MessageId),
+  attention: Schema.NullOr(ThreadAttention),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
@@ -66,6 +68,7 @@ export type ProjectionThread = typeof ProjectionThread.Type;
 export const UpsertProjectionThreadInput = Schema.Struct({
   ...ProjectionThread.fields,
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   latestUserMessageId: Schema.optional(Schema.NullOr(MessageId)),
 });
 export type UpsertProjectionThreadInput = typeof UpsertProjectionThreadInput.Type;
