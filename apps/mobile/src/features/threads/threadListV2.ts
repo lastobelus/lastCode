@@ -28,7 +28,14 @@ export { snoozeWakeLabel };
  * (approval), "in motion" (working), and "broken" (failed). Ready is the
  * unlabeled resting state.
  */
-export type ThreadListV2Status = "approval" | "input" | "working" | "waiting" | "failed" | "ready";
+export type ThreadListV2Status =
+  | "approval"
+  | "input"
+  | "question"
+  | "working"
+  | "waiting"
+  | "failed"
+  | "ready";
 export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooze" | "unsnooze";
 
 export type ThreadListV2CleanupAction = "retry-worktree-cleanup" | "keep-worktree";
@@ -138,7 +145,7 @@ export function resolveThreadListV2Enabled(input: {
 export function resolveThreadListV2Status(
   thread: Pick<
     EnvironmentThreadShell,
-    "hasPendingApprovals" | "hasPendingUserInput" | "session" | "actionResume"
+    "actionResume" | "attention" | "hasPendingApprovals" | "hasPendingUserInput" | "session"
   >,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
@@ -146,6 +153,9 @@ export function resolveThreadListV2Status(
   }
   if (thread.hasPendingUserInput) {
     return "input";
+  }
+  if (thread.attention?.kind === "question") {
+    return "question";
   }
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";

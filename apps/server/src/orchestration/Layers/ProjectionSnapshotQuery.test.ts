@@ -96,6 +96,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinned_at,
           pin_order_key,
           annotation_json,
+          attention_json,
           created_at,
           updated_at,
           deleted_at
@@ -119,6 +120,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '2026-02-24T00:00:01.000Z',
           'gm',
           '{"body":"# Follow up","anchorMessageId":"message-1","createdAt":"2026-02-24T00:00:02.500Z","updatedAt":"2026-02-24T00:00:02.500Z","resolvedAt":null}',
+          '{"kind":"question","raisedAt":"2026-02-24T00:00:02.500Z"}',
           '2026-02-24T00:00:02.000Z',
           '2026-02-24T00:00:03.000Z',
           NULL
@@ -355,6 +357,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             updatedAt: "2026-02-24T00:00:02.500Z",
             resolvedAt: null,
           },
+          attention: { kind: "question", raisedAt: "2026-02-24T00:00:02.500Z" },
           deletedAt: null,
           messages: [
             {
@@ -492,6 +495,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             updatedAt: "2026-02-24T00:00:02.500Z",
             resolvedAt: null,
           },
+          attention: { kind: "question", raisedAt: "2026-02-24T00:00:02.500Z" },
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
