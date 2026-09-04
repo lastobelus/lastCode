@@ -6,6 +6,7 @@
 - [Permission modes](./user/permission-modes.md)
 - [Keyboard shortcuts](./user/keybindings.md)
 - [Organizing threads](./user/thread-sidebar.md)
+- [LastCode appearance preferences](./user/lastcode-appearance.md)
 - [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
 - [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
 - [Review usage](./user/usage.md)

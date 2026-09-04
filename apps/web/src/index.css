@@ -78,6 +78,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 :root {
   --app-scrollbar-width: 6px;
+  --app-scrollbar-margin: 1px;
+  --app-scrollbar-lane-width: var(--app-scrollbar-width);
+  --app-native-scrollbar-margin: 0px;
+  --app-native-scrollbar-width: thin;
+  --app-compact-scrollbar-height: 6px;
+  --app-code-scrollbar-height: 7px;
+  --app-scrollbar-thumb-inset: 1px;
   --appearance-contrast-base: 100%;
   --appearance-contrast-boost: 0%;
   --appearance-contrast-border-boost: 0%;
@@ -361,7 +368,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   -webkit-mask-size:
     100% var(--workspace-titlebar-scroll-fade-height),
     100% calc(100% - var(--workspace-titlebar-scroll-fade-height)),
-    var(--app-scrollbar-width) 100%;
+    var(--app-scrollbar-lane-width) 100%;
   mask-image:
     linear-gradient(
       to bottom,
@@ -379,7 +386,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   mask-size:
     100% var(--workspace-titlebar-scroll-fade-height),
     100% calc(100% - var(--workspace-titlebar-scroll-fade-height)),
-    var(--app-scrollbar-width) 100%;
+    var(--app-scrollbar-lane-width) 100%;
 }
 
 /* Virtualizers own their native scroll element, so they cannot use ScrollArea's
@@ -393,11 +400,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
   -webkit-mask-size:
-    calc(100% - var(--app-scrollbar-width)) 100%,
-    var(--app-scrollbar-width) 100%;
+    calc(100% - var(--app-scrollbar-lane-width)) 100%,
+    var(--app-scrollbar-lane-width) 100%;
   mask-size:
-    calc(100% - var(--app-scrollbar-width)) 100%,
-    var(--app-scrollbar-width) 100%;
+    calc(100% - var(--app-scrollbar-lane-width)) 100%,
+    var(--app-scrollbar-lane-width) 100%;
 }
 
 /* Stage-channel art needs a mask and pseudo-element gradient, so keep the
@@ -1999,7 +2006,12 @@ code {
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: var(--app-scrollbar-width);
+  width: var(--app-scrollbar-lane-width);
+}
+
+html[data-larger-scrollbars]::-webkit-scrollbar,
+html[data-larger-scrollbars] ::-webkit-scrollbar {
+  height: var(--app-scrollbar-lane-width);
 }
 
 ::-webkit-scrollbar-track {
@@ -2007,12 +2019,21 @@ code {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--app-scrollbar-thumb);
+  background-color: var(--app-scrollbar-thumb);
+  background-clip: padding-box;
   border-radius: 3px;
 }
 
+::-webkit-scrollbar-thumb:vertical {
+  border-right: var(--app-native-scrollbar-margin) solid transparent;
+}
+
+::-webkit-scrollbar-thumb:horizontal {
+  border-bottom: var(--app-native-scrollbar-margin) solid transparent;
+}
+
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--app-scrollbar-thumb-hover);
+  background-color: var(--app-scrollbar-thumb-hover);
 }
 
 /* Chat markdown rendering */
@@ -2247,7 +2268,7 @@ code {
   border-radius: 0.75rem;
   background: var(--muted);
   padding: 0.8rem 0.9rem;
-  scrollbar-width: thin;
+  scrollbar-width: var(--app-native-scrollbar-width);
   scrollbar-color: color-mix(in srgb, var(--contrast-border) 78%, transparent) transparent;
 }
 
@@ -2258,12 +2279,12 @@ code {
 }
 
 .chat-markdown pre::-webkit-scrollbar {
-  height: 7px;
+  height: var(--app-code-scrollbar-height);
 }
 
 .chat-markdown pre::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: color-mix(in srgb, var(--contrast-border) 78%, transparent);
+  background-color: color-mix(in srgb, var(--contrast-border) 78%, transparent);
 }
 
 .chat-markdown .chat-markdown-codeblock-header,
