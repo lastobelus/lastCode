@@ -188,6 +188,7 @@ interface ChatMarkdownProps {
   /** Environment that owns non-thread markdown, such as a pull request panel. */
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  taskListDisabled?: boolean;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -2131,6 +2132,7 @@ function useChatMarkdownState({
   threadRef,
   environmentId: explicitEnvironmentId,
   onTaskListChange,
+  taskListDisabled = false,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   onUseArtifactTemplate,
