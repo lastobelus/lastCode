@@ -21,6 +21,7 @@ import {
 import {
   ModelSelection,
   ThreadAnnotation,
+  ThreadAttention,
   ThreadLinkedPullRequest,
   ThreadWorktreeCleanup,
 } from "@t3tools/contracts";
@@ -31,6 +32,7 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
     worktreeCleanup: Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup)),
+    attention: Schema.NullOr(Schema.fromJsonString(ThreadAttention)),
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -69,6 +71,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           annotation_json,
           worktree_cleanup_json,
           latest_user_message_id,
+          attention_json,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -102,6 +105,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.annotation == null ? null : JSON.stringify(row.annotation)},
           ${row.worktreeCleanup == null ? null : JSON.stringify(row.worktreeCleanup)},
           ${row.latestUserMessageId ?? null},
+          ${row.attention == null ? null : JSON.stringify(row.attention)},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
@@ -135,6 +139,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           annotation_json = excluded.annotation_json,
           worktree_cleanup_json = excluded.worktree_cleanup_json,
           latest_user_message_id = excluded.latest_user_message_id,
+          attention_json = excluded.attention_json,
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
@@ -175,6 +180,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -217,6 +223,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
