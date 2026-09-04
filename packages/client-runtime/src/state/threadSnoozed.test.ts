@@ -29,6 +29,7 @@ function makeShell(input: {
   readonly snoozedAt?: string | null;
   readonly sessionStatus?: "starting" | "running" | "ready" | "error";
   readonly pending?: "approval" | "user-input";
+  readonly question?: boolean;
   readonly turnCompletedAt?: string | null;
 }): ThreadSnoozeShell {
   const threadId = ThreadId.make("thread-1");
@@ -37,6 +38,7 @@ function makeShell(input: {
     snoozedAt: input.snoozedAt ?? (input.snoozedUntil != null ? SNOOZED_AT : null),
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
+    attention: input.question ? { kind: "question", raisedAt: SNOOZED_AT } : null,
     session:
       input.sessionStatus === undefined
         ? null
@@ -73,6 +75,11 @@ function makeQueuedTurnShell(overrides: Partial<QueuedTurnShell> = {}): QueuedTu
 }
 
 describe("effectiveSnoozed", () => {
+  it("raises a question attention even before the scheduled wake", () => {
+    expect(
+      effectiveSnoozed(makeShell({ snoozedUntil: FUTURE_WAKE, question: true }), { now: NOW }),
+    ).toBe(false);
+  });
   it("hides a thread whose wake time is in the future", () => {
     expect(effectiveSnoozed(makeShell({ snoozedUntil: FUTURE_WAKE }), { now: NOW })).toBe(true);
   });
@@ -173,6 +180,11 @@ describe("threadRaisedHandWhileSnoozed", () => {
 });
 
 describe("canSnooze", () => {
+  it("refuses question attention", () => {
+    expect(
+      canSnooze({ ...makeShell({ question: true }), latestUserMessageAt: null }, { now: NOW }),
+    ).toBe(false);
+  });
   it("allows snoozing quiet and working threads alike", () => {
     expect(canSnooze({ ...makeShell({}), latestUserMessageAt: null }, { now: NOW })).toBe(true);
     expect(

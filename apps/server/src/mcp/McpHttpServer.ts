@@ -24,6 +24,8 @@ import {
 } from "./toolkits/preview/tools.ts";
 import { ActionResumeToolkitHandlersLive } from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
+import { ThreadAttentionToolkitHandlersLive } from "./toolkits/threadAttention/handlers.ts";
+import { ThreadAttentionToolkit } from "./toolkits/threadAttention/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -221,14 +223,27 @@ export const ActionResumeToolkitRegistrationLive = McpServer.toolkit(ActionResum
   Layer.provide(ActionResumeToolkitHandlersLive),
 );
 
-const McpTransportLive = McpServer.layerHttp({
-  name: "T3 Code",
-  version: packageJson.version,
-  path: "/mcp",
-  protocols: [McpProtocol.v2025_06_18],
-}).pipe(Layer.provide(McpAuthMiddlewareLive));
+const threadAttentionToolkitRegistration = () =>
+  McpServer.toolkit(ThreadAttentionToolkit).pipe(Layer.provide(ThreadAttentionToolkitHandlersLive));
 
-export const layer = Layer.mergeAll(
+const makeMcpTransport = (path: "/mcp" | "/mcp/thread") =>
+  McpServer.layerHttp({
+    name: "T3 Code",
+    version: packageJson.version,
+    path,
+    protocols: [McpProtocol.v2025_06_18],
+  }).pipe(Layer.provide(McpAuthMiddlewareLive));
+
+const FullToolkitLive = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   ActionResumeToolkitRegistrationLive,
-).pipe(Layer.provideMerge(McpTransportLive));
+  threadAttentionToolkitRegistration(),
+).pipe(Layer.provideMerge(makeMcpTransport("/mcp")));
+
+// Sessions created while agent browser access is disabled still receive the
+// attention tools, but preview tools stay absent from discovery entirely.
+const ThreadAttentionOnlyToolkitLive = threadAttentionToolkitRegistration().pipe(
+  Layer.provideMerge(makeMcpTransport("/mcp/thread")),
+);
+
+export const layer = Layer.mergeAll(FullToolkitLive, ThreadAttentionOnlyToolkitLive);
