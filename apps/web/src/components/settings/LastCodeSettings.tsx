@@ -5,9 +5,15 @@ import {
 } from "@t3tools/contracts";
 import {
   DEFAULT_LEGACY_SIDEBAR_SCALE,
+  DEFAULT_SCROLLBAR_MARGIN,
+  DEFAULT_SCROLLBAR_WIDTH,
   LEGACY_SIDEBAR_SCALE_REFERENCE,
   MAX_LEGACY_SIDEBAR_SCALE,
+  MAX_SCROLLBAR_MARGIN,
+  MAX_SCROLLBAR_WIDTH,
   MIN_LEGACY_SIDEBAR_SCALE,
+  MIN_SCROLLBAR_MARGIN,
+  MIN_SCROLLBAR_WIDTH,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
 import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
@@ -45,6 +51,56 @@ const WORKTREE_INDICATOR_PREVIEW_THREAD = {
   branch: "feature/example",
   worktreePath: "/example/worktrees/example",
 };
+
+function PixelSlider({
+  id,
+  label,
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const ratio = (value - min) / (max - min);
+  const sliderStyle = {
+    "--settings-slider-progress": `${ratio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - ratio}rem`,
+  } as CSSProperties;
+
+  return (
+    <div className="flex w-full items-center gap-3 sm:w-64">
+      <output
+        className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+        htmlFor={id}
+      >
+        {value}px
+      </output>
+      <input
+        aria-label={label}
+        className="settings-slider block min-w-0 flex-1"
+        id={id}
+        max={max}
+        min={min}
+        onChange={(event) => {
+          const nextValue = Number(event.currentTarget.value);
+          if (Number.isInteger(nextValue) && nextValue >= min && nextValue <= max) {
+            onChange(nextValue);
+          }
+        }}
+        step={1}
+        style={sliderStyle}
+        type="range"
+        value={value}
+      />
+    </div>
+  );
+}
 
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
@@ -182,6 +238,72 @@ export function LastCodeSettingsPanel() {
         />
       </SettingsSection>
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("larger-scrollbars")}
+          description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
+          status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
+          control={
+            <Switch
+              checked={clientSettings.largerScrollbarsEnabled}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ largerScrollbarsEnabled: Boolean(checked) })
+              }
+              aria-label="Larger scrollbars"
+            />
+          }
+        />
+        {clientSettings.largerScrollbarsEnabled ? (
+          <>
+            <SettingsRow
+              title="Scrollbar width"
+              description="Set the visible scrollbar thumb width in one-pixel increments."
+              resetAction={
+                clientSettings.scrollbarWidth !== DEFAULT_SCROLLBAR_WIDTH ? (
+                  <SettingResetButton
+                    label="scrollbar width"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarWidth: DEFAULT_SCROLLBAR_WIDTH })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <PixelSlider
+                  id="scrollbar-width"
+                  label="Scrollbar width"
+                  min={MIN_SCROLLBAR_WIDTH}
+                  max={MAX_SCROLLBAR_WIDTH}
+                  value={clientSettings.scrollbarWidth}
+                  onChange={(scrollbarWidth) => updateClientSettings({ scrollbarWidth })}
+                />
+              }
+            />
+            <SettingsRow
+              title="Scrollbar margin"
+              description="Set the clear space between a scrollbar thumb and the pane edge."
+              resetAction={
+                clientSettings.scrollbarMargin !== DEFAULT_SCROLLBAR_MARGIN ? (
+                  <SettingResetButton
+                    label="scrollbar margin"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarMargin: DEFAULT_SCROLLBAR_MARGIN })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <PixelSlider
+                  id="scrollbar-margin"
+                  label="Scrollbar margin"
+                  min={MIN_SCROLLBAR_MARGIN}
+                  max={MAX_SCROLLBAR_MARGIN}
+                  value={clientSettings.scrollbarMargin}
+                  onChange={(scrollbarMargin) => updateClientSettings({ scrollbarMargin })}
+                />
+              }
+            />
+          </>
+        ) : null}
         <SettingsRow
           {...searchableSetting("scale-legacy-sidebar")}
           description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
