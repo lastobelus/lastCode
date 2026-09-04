@@ -30,6 +30,7 @@ function makeShell(input: {
   readonly sessionStatus?: "starting" | "running" | "ready" | "error";
   readonly pending?: "approval" | "user-input";
   readonly question?: boolean;
+  readonly questionRaisedAt?: string;
   readonly turnCompletedAt?: string | null;
 }): ThreadSnoozeShell {
   const threadId = ThreadId.make("thread-1");
@@ -38,7 +39,9 @@ function makeShell(input: {
     snoozedAt: input.snoozedAt ?? (input.snoozedUntil != null ? SNOOZED_AT : null),
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
-    attention: input.question ? { kind: "question", raisedAt: SNOOZED_AT } : null,
+    attention: input.question
+      ? { kind: "question", raisedAt: input.questionRaisedAt ?? SNOOZED_AT }
+      : null,
     session:
       input.sessionStatus === undefined
         ? null
@@ -291,6 +294,19 @@ describe("threadWokeAt", () => {
         { now: NOW },
       ),
     ).toBe("2026-04-10T10:30:00.000Z");
+  });
+
+  it("reports when a question raised the thread from snooze", () => {
+    expect(
+      threadWokeAt(
+        makeShell({
+          snoozedUntil: FUTURE_WAKE,
+          question: true,
+          questionRaisedAt: "2026-04-10T11:30:00.000Z",
+        }),
+        { now: NOW },
+      ),
+    ).toBe("2026-04-10T11:30:00.000Z");
   });
 
   it("falls back to session activity for blocked/failed early wakes", () => {

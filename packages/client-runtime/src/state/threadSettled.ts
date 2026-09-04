@@ -165,6 +165,9 @@ export function threadWokeAt(
   // indicator the user already cleared by visiting (snoozedUntil is newer
   // than that visit's lastVisitedAt).
   if (threadRaisedHandWhileSnoozed(shell)) {
+    if (shell.attention?.kind === "question") {
+      return shell.attention.raisedAt;
+    }
     if (
       shell.snoozedAt != null &&
       shell.latestTurn?.state === "completed" &&
