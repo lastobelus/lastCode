@@ -63,9 +63,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
               projectIcon={props.projectIcon ?? null}
               className="size-3 shrink-0"
             />
-            <div className="min-w-0 truncate text-foreground/75">
-              {props.projectDisplayName}
-            </div>
+            <div className="min-w-0 truncate text-foreground/75">{props.projectDisplayName}</div>
           </div>
         ) : null}
         {props.environmentLabel ? (
