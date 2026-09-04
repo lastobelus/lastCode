@@ -241,6 +241,7 @@ export function LastCodeSettingsPanel() {
         <SettingsRow
           {...searchableSetting("larger-scrollbars")}
           description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
+          status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
           control={
             <Switch
               checked={clientSettings.largerScrollbarsEnabled}

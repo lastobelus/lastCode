@@ -12,3 +12,8 @@ thumb clear of the resize handle between adjacent panes. Changes apply immediate
 scrollbars, styled scroll areas, and terminal scrollback, and are stored in the current LastCode
 profile. Turning the setting off restores the standard scrollbar appearance without discarding the
 chosen width and margin.
+
+LastCode desktop and Chromium-based web browsers apply the exact pixel values to native
+scrollbars. Firefox exposes only system scrollbar sizes: enabling the setting selects its larger
+system scrollbar, while the width and margin sliders continue to apply exactly to LastCode's
+styled scroll areas.
