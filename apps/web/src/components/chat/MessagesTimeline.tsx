@@ -1386,8 +1386,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" &&
       row.message.role === "user" &&
       row.message.sourceThreadId === undefined ? (
-         <UserTimelineRow row={row} />
-       ) : null}
+        <UserTimelineRow row={row} />
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}

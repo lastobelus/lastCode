@@ -1029,9 +1029,11 @@ const buildAppUnderTest = (options?: {
       ),
     );
 
-    const appLayer = servedRoutesLayer.pipe(
+    const servedRoutesWithUpdateDrain = servedRoutesLayer.pipe(
       Layer.provide(updateDrainAdmissionLayer),
       Layer.provide(updateDrainLayer),
+    );
+    const appLayer = servedRoutesWithUpdateDrain.pipe(
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
