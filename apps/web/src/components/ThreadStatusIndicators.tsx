@@ -521,7 +521,7 @@ export function ThreadStatusLabel({
           </span>
         ) : (
           <span
-            className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
+            className={`size-1.5 rounded-full ${status.dotClass} ${
               status.pulse ? "animate-status-pulse" : ""
             }`}
           />
