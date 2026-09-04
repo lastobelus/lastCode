@@ -37,6 +37,7 @@ import {
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
+import { applyScrollbarAppearance } from "~/scrollbarAppearance";
 import { useClientSettings } from "../hooks/useSettings";
 import { PlanAgentSelectionHeal } from "../planAgentSelectionHeal";
 import {
@@ -167,6 +168,7 @@ function RootRouteView() {
         <GlassAppearanceSync />
         <FontAppearanceSync />
         <ProjectIconAppearanceSync />
+        <ScrollbarAppearanceSync />
         <FirstRunGate
           enabled={primaryEnvironmentAuthenticated}
           hostedStatic={authGateState.status === "hosted-static"}
@@ -232,6 +234,30 @@ function ProjectIconAppearanceSync() {
       document.documentElement.removeAttribute("data-rounded-project-icons");
     };
   }, [roundedProjectIcons]);
+
+  return null;
+}
+
+function ScrollbarAppearanceSync() {
+  const largerScrollbarsEnabled = useClientSettings((settings) => settings.largerScrollbarsEnabled);
+  const scrollbarWidth = useClientSettings((settings) => settings.scrollbarWidth);
+  const scrollbarMargin = useClientSettings((settings) => settings.scrollbarMargin);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    applyScrollbarAppearance(root, {
+      enabled: largerScrollbarsEnabled,
+      width: scrollbarWidth,
+      margin: scrollbarMargin,
+    });
+    return () => {
+      applyScrollbarAppearance(root, {
+        enabled: false,
+        width: scrollbarWidth,
+        margin: scrollbarMargin,
+      });
+    };
+  }, [largerScrollbarsEnabled, scrollbarMargin, scrollbarWidth]);
 
   return null;
 }
