@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { Button } from "./ui/button";
-import { setMarkdownTaskChecked } from "./files/filePreviewMode";
+import { setMarkdownTaskChecked } from "../markdownTaskList";
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
@@ -164,8 +164,9 @@ describe("ChatMarkdown streaming", () => {
         cwd="/tmp/project"
         text={text}
         onTaskListChange={({ markerOffset, checked }) => {
-          editedText = setMarkdownTaskChecked(text, markerOffset, checked);
-          renderer!.update(message(editedText));
+          const nextText = setMarkdownTaskChecked(text, markerOffset, checked);
+          editedText = nextText;
+          renderer!.update(message(nextText));
         }}
       />
     );
