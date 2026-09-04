@@ -13,6 +13,9 @@ describe("applyScrollbarAppearance", () => {
     expect(setProperty).toHaveBeenCalledWith("--app-scrollbar-margin", "5px");
     expect(setProperty).toHaveBeenCalledWith("--app-scrollbar-lane-width", "14px");
     expect(setProperty).toHaveBeenCalledWith("--app-native-scrollbar-margin", "5px");
+    expect(setProperty).toHaveBeenCalledWith("--app-native-scrollbar-width", "auto");
+    expect(setProperty).toHaveBeenCalledWith("--app-compact-scrollbar-height", "14px");
+    expect(setProperty).toHaveBeenCalledWith("--app-code-scrollbar-height", "14px");
     expect(setProperty).toHaveBeenCalledWith("--app-scrollbar-thumb-inset", "0px");
   });
 
@@ -26,6 +29,9 @@ describe("applyScrollbarAppearance", () => {
     expect(removeProperty).toHaveBeenCalledWith("--app-scrollbar-margin");
     expect(removeProperty).toHaveBeenCalledWith("--app-scrollbar-lane-width");
     expect(removeProperty).toHaveBeenCalledWith("--app-native-scrollbar-margin");
+    expect(removeProperty).toHaveBeenCalledWith("--app-native-scrollbar-width");
+    expect(removeProperty).toHaveBeenCalledWith("--app-compact-scrollbar-height");
+    expect(removeProperty).toHaveBeenCalledWith("--app-code-scrollbar-height");
     expect(removeProperty).toHaveBeenCalledWith("--app-scrollbar-thumb-inset");
   });
 });

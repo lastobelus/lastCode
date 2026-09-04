@@ -81,6 +81,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --app-scrollbar-margin: 1px;
   --app-scrollbar-lane-width: var(--app-scrollbar-width);
   --app-native-scrollbar-margin: 0px;
+  --app-native-scrollbar-width: thin;
+  --app-compact-scrollbar-height: 6px;
+  --app-code-scrollbar-height: 7px;
   --app-scrollbar-thumb-inset: 1px;
   --appearance-contrast-base: 100%;
   --appearance-contrast-boost: 0%;
@@ -2346,7 +2349,7 @@ html[data-larger-scrollbars] ::-webkit-scrollbar {
   border-radius: 0.75rem;
   background: var(--muted);
   padding: 0.8rem 0.9rem;
-  scrollbar-width: thin;
+  scrollbar-width: var(--app-native-scrollbar-width);
   scrollbar-color: color-mix(in srgb, var(--contrast-border) 78%, transparent) transparent;
 }
 
@@ -2357,12 +2360,12 @@ html[data-larger-scrollbars] ::-webkit-scrollbar {
 }
 
 .chat-markdown pre::-webkit-scrollbar {
-  height: 7px;
+  height: var(--app-code-scrollbar-height);
 }
 
 .chat-markdown pre::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: color-mix(in srgb, var(--contrast-border) 78%, transparent);
+  background-color: color-mix(in srgb, var(--contrast-border) 78%, transparent);
 }
 
 .chat-markdown .chat-markdown-codeblock-header,
