@@ -250,7 +250,12 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
     // intermediate scrollports with them (CSS2 overflow / CSS Position 3 section 2.1).
     if (
       (position === "fixed" || position === "absolute") &&
-      !establishesPositioningBlock(style, position)
+      !establishesPositioningBlock(style, position) &&
+      // A foreignObject establishes the containing block for its HTML content.
+      !(
+        ancestor.namespaceURI === "http://www.w3.org/2000/svg" &&
+        ancestor.localName === "foreignObject"
+      )
     )
       continue;
     position = style.position;

@@ -374,56 +374,58 @@ try {
   );
 
   for (const scale of [1, 1.5]) {
-    for (const percent of [false, true]) {
-      const foreignPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
-      await foreignPage.setContent(
-        '<body style="margin:0"><iframe style="position:absolute;left:40px;top:40px;width:700px;height:500px;border:0"></iframe>',
-      );
-      await foreignPage.locator("iframe").evaluate(
-        (frame, { scale, percent }) => {
-          frame.srcdoc = `<body style="margin:0"><div style="padding:50px;transform:scale(${scale});transform-origin:0 0">
+    for (const variant of ["relative", "absolute", "fixed"]) {
+      for (const percent of [false, true]) {
+        const foreignPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+        await foreignPage.setContent(
+          '<body style="margin:0"><iframe style="position:absolute;left:40px;top:40px;width:700px;height:500px;border:0"></iframe>',
+        );
+        await foreignPage.locator("iframe").evaluate(
+          (frame, { scale, percent, variant }) => {
+            frame.srcdoc = `<body style="margin:0"><div style="padding:50px;transform:scale(${scale});transform-origin:0 0">
           <svg width="400" height="200" viewBox="0 0 200 100"><foreignObject x="20" y="10" width="100" height="50"
           style="overflow:hidden;${percent ? "x:10%;y:10%;width:50%;height:50%" : ""}">
-          <div xmlns="http://www.w3.org/1999/xhtml" id="foreign-target" style="position:relative;left:-20px;top:-20px;width:300px;height:200px;background:lime">Foreign target</div>
+          <div xmlns="http://www.w3.org/1999/xhtml" id="foreign-target" style="position:${variant};left:-20px;top:-20px;width:300px;height:200px;background:lime">Foreign target</div>
           </foreignObject></svg></div>`;
-        },
-        { scale, percent },
-      );
-      const selected = foreignPage.frameLocator("iframe").locator("#foreign-target");
-      await selected.waitFor();
-      const local = { x: 90 * scale, y: 70 * scale, width: 200 * scale, height: 100 * scale };
-      for (const axis of ["x", "y"]) {
-        for (const end of [false, true]) {
-          for (const outside of [false, true]) {
-            const point = { x: local.x + local.width / 2, y: local.y + local.height / 2 };
-            point[axis] =
-              local[axis] +
-              (end ? local[axis === "x" ? "width" : "height"] : 0) +
-              (outside ? 1 : -1) * (end ? 1 : -1);
-            NodeAssert.equal(
-              await selected.evaluate(
-                (element, point) =>
-                  element.ownerDocument.elementFromPoint(point.x, point.y) === element,
-                point,
-              ),
-              !outside,
-              `foreignObject ${scale}/${percent}: ${axis} ${end ? "end" : "start"} clip`,
-            );
+          },
+          { scale, percent, variant },
+        );
+        const selected = foreignPage.frameLocator("iframe").locator("#foreign-target");
+        await selected.waitFor();
+        const local = { x: 90 * scale, y: 70 * scale, width: 200 * scale, height: 100 * scale };
+        for (const axis of ["x", "y"]) {
+          for (const end of [false, true]) {
+            for (const outside of [false, true]) {
+              const point = { x: local.x + local.width / 2, y: local.y + local.height / 2 };
+              point[axis] =
+                local[axis] +
+                (end ? local[axis === "x" ? "width" : "height"] : 0) +
+                (outside ? 1 : -1) * (end ? 1 : -1);
+              NodeAssert.equal(
+                await selected.evaluate(
+                  (element, point) =>
+                    element.ownerDocument.elementFromPoint(point.x, point.y) === element,
+                  point,
+                ),
+                !outside,
+                `foreignObject ${scale}/${percent}/${variant}: ${axis} ${end ? "end" : "start"} clip`,
+              );
+            }
           }
         }
+        await install(foreignPage);
+        await foreignPage.mouse.click(
+          40 + local.x + local.width / 2,
+          40 + local.y + local.height / 2,
+        );
+        const rect = await attach(
+          foreignPage,
+          /Foreign target/,
+          `foreign-object-${scale}-${percent}-${variant}`,
+        );
+        NodeAssert.deepEqual(rect, { ...local, x: 40 + local.x, y: 40 + local.y });
+        await foreignPage.close();
       }
-      await install(foreignPage);
-      await foreignPage.mouse.click(
-        40 + local.x + local.width / 2,
-        40 + local.y + local.height / 2,
-      );
-      const rect = await attach(
-        foreignPage,
-        /Foreign target/,
-        `foreign-object-${scale}-${percent}`,
-      );
-      NodeAssert.deepEqual(rect, { ...local, x: 40 + local.x, y: 40 + local.y });
-      await foreignPage.close();
     }
   }
   console.log(
