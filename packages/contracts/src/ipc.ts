@@ -891,6 +891,8 @@ export interface PickedElementPayload {
   pageTitle: string | null;
   /** Lowercase tag name, e.g. `"button"`. */
   tagName: string;
+  /** Outer-to-inner iframe selectors, each scoped to its parent document URL. */
+  framePath?: ReadonlyArray<{ pageUrl: string; selector: string }>;
   /** CSS selector resolving back to the element on a re-render. */
   selector: string | null;
   /** Truncated outer-HTML preview (matches react-grab's `htmlPreview`). */
@@ -911,6 +913,9 @@ export const PickedElementPayloadSchema: Schema.Codec<PickedElementPayload> = Sc
   pageUrl: Schema.String,
   pageTitle: Schema.NullOr(Schema.String),
   tagName: Schema.String,
+  framePath: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ pageUrl: Schema.String, selector: Schema.String })),
+  ),
   selector: Schema.NullOr(Schema.String),
   htmlPreview: Schema.String,
   componentName: Schema.NullOr(Schema.String),
