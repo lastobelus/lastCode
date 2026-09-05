@@ -430,12 +430,13 @@ describe("Cursor skills", () => {
         yield* fileSystem.makeDirectory(root, { recursive: true });
         yield* fileSystem.symlink(path.join(library, "shared-review"), path.join(root, "review"));
 
+        const realRoot = yield* fileSystem.realPath(root);
         const skills = yield* discoverCursorSkills(workspace, { HOME: userHome });
         expect(skills).toEqual([
           {
             name: "review",
             description: "shared",
-            path: path.join(root, "review", "SKILL.md"),
+            path: path.join(realRoot, "review", "SKILL.md"),
             scope: "project",
             enabled: true,
           },
