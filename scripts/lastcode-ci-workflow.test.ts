@@ -28,6 +28,41 @@ const runnerValues = (value: unknown): ReadonlyArray<string> => {
 const usesBlacksmithRunner = (value: unknown): boolean =>
   stringValues(value).some((entry) => entry.includes("blacksmith-"));
 
+const matrixReferencePaths = (expression: string): ReadonlyArray<ReadonlyArray<string>> =>
+  Array.from(
+    expression.matchAll(
+      /\bmatrix(?<path>(?:\.[A-Za-z_][\w-]*|\[\s*'[^']+'\s*\]|\[\s*"[^"]+"\s*\])+)/gu,
+    ),
+    (reference) => {
+      const path = reference.groups?.path;
+      return path === undefined
+        ? []
+        : Array.from(
+            path.matchAll(
+              /\.(?<dotKey>[A-Za-z_][\w-]*)|\[\s*'(?<singleKey>[^']+)'\s*\]|\[\s*"(?<doubleKey>[^"]+)"\s*\]/gu,
+            ),
+            (segment) =>
+              segment.groups?.dotKey ??
+              segment.groups?.singleKey ??
+              segment.groups?.doubleKey ??
+              "",
+          ).filter((key) => key.length > 0);
+    },
+  );
+
+const propertyValues = (value: unknown, key: string): ReadonlyArray<unknown> =>
+  Array.isArray(value)
+    ? value.flatMap((entry) => propertyValues(entry, key))
+    : asRecord(value)?.[key] === undefined
+      ? []
+      : [asRecord(value)?.[key]];
+
+const resolvePath = (value: unknown, path: ReadonlyArray<string>): ReadonlyArray<unknown> =>
+  path.reduce<ReadonlyArray<unknown>>(
+    (values, key) => values.flatMap((entry) => propertyValues(entry, key)),
+    [value],
+  );
+
 const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
   const document: unknown = parse(source);
   const jobs = asRecord(asRecord(document)?.jobs);
@@ -42,18 +77,9 @@ const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
     const matrix = asRecord(asRecord(job.strategy)?.matrix);
     if (matrix === undefined) continue;
     for (const runner of runners) {
-      for (const match of runner.matchAll(
-        /\bmatrix(?:\.(?<dotKey>[A-Za-z_][\w-]*)|\[\s*'(?<singleKey>[^']+)'\s*\]|\[\s*"(?<doubleKey>[^"]+)"\s*\])/gu,
-      )) {
-        const key = match.groups?.dotKey ?? match.groups?.singleKey ?? match.groups?.doubleKey;
-        if (key === undefined) continue;
-        if (usesBlacksmithRunner(matrix[key])) return true;
-        if (
-          Array.isArray(matrix.include) &&
-          matrix.include.some((entry) => usesBlacksmithRunner(asRecord(entry)?.[key]))
-        ) {
-          return true;
-        }
+      for (const path of matrixReferencePaths(runner)) {
+        const roots = [matrix, ...(Array.isArray(matrix.include) ? matrix.include : [])];
+        if (roots.some((root) => resolvePath(root, path).some(usesBlacksmithRunner))) return true;
       }
     }
   }
@@ -133,6 +159,11 @@ describe("LastCode GitHub CI workflow", () => {
     expect(
       hasBlacksmithRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: '${{ matrix.runner }}' }\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.target.runner }}\n    strategy:\n      matrix:\n        target: [{ runner: blacksmith-8vcpu-ubuntu-2404 }]",
       ),
     ).toBe(true);
     expect(
