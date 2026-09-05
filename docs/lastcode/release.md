@@ -159,7 +159,40 @@ use the `lc-wait-for-checkpoint` trust entry. The command loads from
 updated observer after the primary checkout is refreshed. If the action is missing or
 disabled, report that setup problem rather than reverting to a sleep loop.
 
-### Validating a checkpoint
+### Resuming a repaired checkpoint
+
+When a retained nightly rebase is complete but validation required additional
+commits, do not delete the worktree and rely on rerere: Git only remembers
+conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
+any downstream merges made since that attempt before selecting its exact head:
+
+```bash
+pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>
+pnpm lastcode:checkpoint:service run-now
+```
+
+`--recovery-source` is the operator's assertion that the repaired tree includes
+that exact LastCode main revision. Inspect the replay and subsequent commits
+before making it; upstream ancestry alone cannot prove this after a rebase.
+Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
+bound to its head, nightly, and current source. The service skips only that
+nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
+immutable tag and promotes main together with an atomic push leased against the
+selected source commit. Open LastCode PRs prevent publication in the service's
+normal promotion mode. Selected recovery cannot disable validation or
+be automatically superseded. A changed head or source requires inspection and
+selection again. Failed validation retains the worktree and selection.
+
+Use **Wait for Checkpoint** immediately after requesting the service run, and
+end the turn. After publication, use **Build Local Package** on the exact new
+installable tag; selection and publication do not install or restart the app.
+Selected recovery processes only its selected nightly. Request another service
+run afterward to continue remaining nightlies from the repaired main branch.
+If publication succeeded but cleanup was interrupted, a retry recognizes the
+matching immutable tag represented on main and finishes cleanup without
+republishing.
+
+### Validating a checkpoint manually
 
 A release build uses a different full-CI context because rebasing intentionally
 rewrites ancestry. Check out the immutable checkpoint or revision and run:
