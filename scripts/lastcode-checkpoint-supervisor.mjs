@@ -597,8 +597,11 @@ function attemptDelivery(state, config, dependencies) {
   const recoveryThreadId = config.recoveryThreadId;
   let nextState = state;
   let pendingIncidents = [...durableIncidentList(state, "pendingIncidents")];
+  const rejectedBacklog = new Set();
   while (nextState.status === "failed") {
-    const pendingIncidentIndex = pendingIncidents.findIndex(retryableIncident);
+    const pendingIncidentIndex = pendingIncidents.findIndex(
+      (incident) => retryableIncident(incident) && !rejectedBacklog.has(incident.fingerprint),
+    );
     if (pendingIncidentIndex < 0) break;
     const incident = pendingIncidents[pendingIncidentIndex];
     const targetThreadId = deliveryThreadId(incident) ?? recoveryThreadId;
@@ -675,6 +678,12 @@ function attemptDelivery(state, config, dependencies) {
       console.error(
         `[lastcode:checkpoint-supervisor] Could not deliver a pending alert to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
       );
+      if (rejectedThreadSend(error, targetThreadId)) {
+        // Preserve old uncertainty without starving later incidents. Attempt
+        // each rejected backlog item only once during this supervisor run.
+        rejectedBacklog.add(updatedIncident.fingerprint);
+        continue;
+      }
       return nextState;
     }
   }

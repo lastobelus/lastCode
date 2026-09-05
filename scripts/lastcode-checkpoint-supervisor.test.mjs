@@ -819,6 +819,48 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recovered.messages[0].message).toContain("resolved alert");
   });
 
+  it("delivers a new blocker past an uncertain backlog with a rejected recipient", () => {
+    const first = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-old" }),
+        runPhase: () => {
+          throw new Error("old blocker");
+        },
+        sendThread: () => {
+          throw new Error("dispatch timed out");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("old blocker");
+    const sent = [];
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-new" }),
+        runPhase: () => {
+          throw new Error("new blocker");
+        },
+        sendThread: (threadId, message) => {
+          sent.push({ threadId, message });
+          if (threadId === "thread-old")
+            throw Object.assign(new Error("rejected"), {
+              phase: "alert-delivery",
+              diagnostic: "LastCode thread 'thread-old' was not found.",
+            });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("new blocker");
+    expect(sent.map((item) => item.threadId)).toEqual(["thread-old", "thread-new"]);
+    expect(second.state.incident.alertDelivery).toBe("sent");
+    expect(second.state.pendingIncidents).toEqual([
+      expect.objectContaining({
+        alertDelivery: "unknown",
+        deliveryThreadId: "thread-old",
+      }),
+    ]);
+  });
+
   it("retains an earlier uncertain recipient when a later retry is definitively rejected", () => {
     const runPhase = () => {
       throw new Error("fetch failed");
