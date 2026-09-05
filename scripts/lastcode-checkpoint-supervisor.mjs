@@ -439,6 +439,8 @@ export function checkpointFailureMessage(failure, fingerprint) {
     "Run lastcode-checkpoints --verbose, inspect the live daemon and retained recovery state, and address the concrete problem.",
     "The bounded service logs are ~/.lastcode/automation/nightly-checkpoint.stdout.log and nightly-checkpoint.stderr.log.",
     "Use this thread for the recovery; do not create a new maintenance thread and do not only report the alert.",
+    "For an already-started service run, use the resumable Wait for Checkpoint action as described in docs/lastcode/release.md instead of sleep/status loops. It only observes completion and does not start or repair the service.",
+    "If the authorized recovery includes a LastCode PR, read .agents/skills/lastcode-pr/SKILL.md. When CI or review is passive and no current finding needs judgement, call list_project_actions, launch the eligible Wait for PR action with run_project_action_and_resume (prefer lc-wait-for-pr), and end the turn immediately without polling. This reminder does not authorize creating or merging a PR.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -652,6 +654,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadConfig: () => readJson(paths.configPath, "checkpoint supervisor config"),
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
+    supervisorPid: process.pid,
     notify: (title, message) => notify(title, message, environment),
     reconcileProjectActions: (primaryWorktree, trustedProjectActionIds) =>
       reconcilePrimaryProjectActions(primaryWorktree, home, trustedProjectActionIds, environment),
@@ -798,6 +801,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     }
     let state = {
       schemaVersion: 1,
+      supervisorPid: dependencies.supervisorPid,
       status: "failed",
       phase: failure.phase,
       startedAt,
@@ -857,6 +861,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   }
   let state = {
     schemaVersion: 1,
+    supervisorPid: dependencies.supervisorPid,
     status: "success",
     phase: "complete",
     startedAt,
