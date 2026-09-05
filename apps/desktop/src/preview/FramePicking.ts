@@ -96,12 +96,53 @@ function intersect(rect: DOMRect, clip: { x: number; y: number; width: number; h
 const clipsOverflow = (value: string): boolean =>
   value === "auto" || value === "clip" || value === "hidden" || value === "scroll";
 
-/** Clips a rect to each ancestor's transformed client scrollport, one axis at a time. */
+function establishesPositioningBlock(style: CSSStyleDeclaration, position: string): boolean {
+  if (style.display === "contents" || style.display === "none") return false;
+  return (
+    (position === "absolute" && !!style.position && style.position !== "static") ||
+    [
+      style.transform,
+      style.translate,
+      style.rotate,
+      style.scale,
+      style.perspective,
+      style.filter,
+      style.backdropFilter,
+    ].some((value) => !!value && value !== "none") ||
+    /(?:^|\s)(layout|paint|strict|content)(?:\s|$)/.test(style.contain) ||
+    (style.willChange ?? "")
+      .split(",")
+      .some((value) =>
+        [
+          "transform",
+          "translate",
+          "rotate",
+          "scale",
+          "perspective",
+          "filter",
+          "backdrop-filter",
+          "contain",
+        ].includes(value.trim()),
+      ) ||
+    style.contentVisibility === "auto"
+  );
+}
+
+/** Overflow clips the containing-block chain, skipping ancestors escaped by positioned boxes. */
 function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect | null {
   const view = element.ownerDocument.defaultView;
   if (!view) return null;
+  let position = element.parentElement ? view.getComputedStyle(element).position : "static";
   for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
     const style = view.getComputedStyle(ancestor);
+    // This applies to positioned ancestors too: their ordinary descendants escape
+    // intermediate scrollports with them (CSS2 overflow / CSS Position 3 section 2.1).
+    if (
+      (position === "fixed" || position === "absolute") &&
+      !establishesPositioningBlock(style, position)
+    )
+      continue;
+    position = style.position;
     const clipX = clipsOverflow(style.overflowX);
     const clipY = clipsOverflow(style.overflowY);
     if (!clipX && !clipY) continue;

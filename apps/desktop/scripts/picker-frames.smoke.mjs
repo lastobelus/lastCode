@@ -304,6 +304,71 @@ try {
   await urls.evaluate(() => pickerEmit("preview:cancel-pick"));
   console.log("PASS: same-origin URL frames and opaque-origin exclusion");
 
+  // Positioned boxes (and their children) escape overflow before their containing
+  // block. Verify Chromium actually paints/hit-tests the pixels that we capture.
+  for (const scenario of [
+    { name: "viewport-fixed", position: "fixed", blockStyle: "", width: 100 },
+    {
+      name: "transformed-fixed",
+      position: "fixed",
+      blockStyle: "transform:translateX(0)",
+      width: 50,
+    },
+    { name: "outside-absolute", position: "absolute", blockStyle: "position:relative", width: 50 },
+  ]) {
+    for (const descendant of [false, true]) {
+      const positionedPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await positionedPage.setContent(
+        '<body style="margin:0"><iframe id="positioned-frame" style="position:absolute;left:80px;top:80px;width:400px;height:350px;border:0"></iframe>',
+      );
+      await positionedPage.locator("iframe").evaluate(
+        (frame, { scenario, descendant }) => {
+          frame.srcdoc = `<style>
+          body{margin:0}
+          #block{width:200px;height:200px;overflow:hidden;${scenario.blockStyle}}
+          #scroller{width:60px;height:60px;overflow:auto}
+          #positioned{position:${scenario.position};left:150px;top:100px;width:100px;height:50px;
+            padding:0;border:0;background:lime}
+          #target{display:block;width:100%;height:100%}
+          </style><div id="block"><div id="scroller">
+          <div id="positioned">${descendant ? '<span id="target">Positioned child</span>' : "Positioned target"}</div>
+          </div></div>`;
+        },
+        { scenario, descendant },
+      );
+      const selected = positionedPage
+        .frameLocator("iframe")
+        .locator(descendant ? "#target" : "#positioned");
+      await selected.waitFor();
+      NodeAssert.equal(
+        await selected.evaluate(
+          (element) => element.ownerDocument.elementFromPoint(175, 125) === element,
+        ),
+        true,
+        `${scenario.name}: pixels outside intermediate scroller remain visible`,
+      );
+      NodeAssert.equal(
+        await selected.evaluate(
+          (element) => element.ownerDocument.elementFromPoint(225, 125) === element,
+        ),
+        scenario.width === 100,
+        `${scenario.name}: real containing block determines visible right edge`,
+      );
+      await install(positionedPage);
+      await positionedPage.mouse.click(80 + 175, 80 + 125);
+      const positionedRect = await attach(
+        positionedPage,
+        /Positioned/,
+        `${scenario.name}${descendant ? "-descendant" : ""}`,
+      );
+      NodeAssert.deepEqual(positionedRect, { x: 230, y: 180, width: scenario.width, height: 50 });
+      await positionedPage.close();
+    }
+  }
+  console.log(
+    "PASS: viewport-fixed, transformed-fixed and absolute overflow escape, including ordinary descendants",
+  );
+
   if (liveUrl) {
     const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "picker-electron-"));
     const bundlePath = NodePath.join(scratch, "picker-bundle.js");

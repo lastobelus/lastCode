@@ -171,6 +171,50 @@ describe("frame picking coordinates", () => {
     expect(topViewportRect(element, top)).toEqual(new Rect(132, 102, 0, 20));
   });
 
+  it.each([
+    { position: "fixed", block: {}, clippedWidth: 60 },
+    { position: "fixed", block: { transform: "matrix(1, 0, 0, 1, 0, 0)" }, clippedWidth: 40 },
+    { position: "fixed", block: { translate: "0px" }, clippedWidth: 40 },
+    { position: "fixed", block: { contain: "layout" }, clippedWidth: 40 },
+    { position: "fixed", block: { willChange: "opacity,  transform " }, clippedWidth: 40 },
+    { position: "fixed", block: { willChange: "custom-transform" }, clippedWidth: 60 },
+    { position: "absolute", block: { position: "relative" }, clippedWidth: 40 },
+  ])("clips $position at its containing block: $block", ({ position, block, clippedWidth }) => {
+    for (const descendant of [false, true]) {
+      const { top, child, element } = fixture();
+      const containingBlock = {
+        parentElement: null,
+        offsetWidth: 30,
+        offsetHeight: 100,
+        clientWidth: 30,
+        clientHeight: 100,
+        clientLeft: 0,
+        clientTop: 0,
+        getBoundingClientRect: () => new Rect(0, 0, 30, 100),
+      } as unknown as Element;
+      const scroller = {
+        ...containingBlock,
+        parentElement: containingBlock,
+        getBoundingClientRect: () => new Rect(70, 70, 30, 100),
+      } as unknown as Element;
+      const positioned = descendant ? ({ parentElement: scroller } as unknown as Element) : element;
+      Object.defineProperty(element, "parentElement", {
+        value: descendant ? positioned : scroller,
+      });
+      child.defaultView!.getComputedStyle = (candidate) =>
+        ({
+          ...(candidate === containingBlock ? block : {}),
+          ...(candidate === scroller || candidate === containingBlock
+            ? { overflowX: "hidden", overflowY: "hidden" }
+            : {}),
+          ...(candidate === positioned ? { position } : {}),
+        }) as unknown as CSSStyleDeclaration;
+      // The intermediate scroller excludes the whole target, but has no
+      // containing block. The real block clips x; viewport-fixed boxes escape it.
+      expect(topViewportRect(element, top)).toEqual(new Rect(132, 102, clippedWidth, 80));
+    }
+  });
+
   it("drops detached, navigated, and now-inaccessible frame documents", () => {
     const { top, frame, child, element } = fixture();
     frame.isConnected = false;
