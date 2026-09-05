@@ -707,6 +707,42 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
+  it.each(["missing", "non-executable"])("retires alerts rejected by wrapper exec: %s", (kind) => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "thread-wrapper-test-"));
+    try {
+      const executable = NodePath.join(directory, "runtime");
+      if (kind === "non-executable")
+        NodeFS.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o600 });
+      const result = NodeChildProcess.spawnSync(
+        "/bin/sh",
+        ["-c", 'exec "$1"', "lastcode-thread", executable],
+        { encoding: "utf8" },
+      );
+      expect([126, 127]).toContain(result.status);
+      const failed = fixture({
+        dependencies: {
+          runPhase: () => {
+            throw new Error("fetch failed");
+          },
+          sendThread: () => {
+            throw Object.assign(new Error("wrapper exec failed"), {
+              phase: "alert-delivery",
+              status: result.status,
+              diagnostic: result.stderr,
+            });
+          },
+        },
+      });
+      expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+      expect(failed.state.incident.alertDelivery).toBe("rejected");
+      const recovered = fixture({ state: failed.state });
+      runCheckpointSupervisor({}, recovered.dependencies);
+      expect(recovered.messages).toEqual([]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(
     "distinguishes launch rejection from uncertain process failure: %s",
     (code) => {

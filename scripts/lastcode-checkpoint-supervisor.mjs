@@ -553,6 +553,15 @@ function rejectedThreadSend(error, target) {
   ) {
     return false;
   }
+  // The generated shell wrapper exits before the CLI starts when exec fails.
+  if (
+    [126, 127].includes(error.status) &&
+    /(?:^|\n)[^\n]*: exec:[^\n]*(?:not found|No such file or directory|Permission denied|cannot execute)[^\n]*$/imu.test(
+      error.diagnostic,
+    )
+  ) {
+    return true;
+  }
   // These diagnostics originate before runThreadSend calls dispatch. Keep
   // dispatch failures out: a timeout there does not prove non-delivery.
   if (
