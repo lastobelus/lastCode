@@ -258,10 +258,16 @@ delivery no longer needs protection.
 A standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
 execution; every run writes terminal state to
 `~/.lastcode/automation/checkpoint-service-state.json`. A failed alert remains
-pending until LastCode accepts it, and the same incident is not sent again after
-acknowledgement. When a later run succeeds, the supervisor sends one closure to
-the maintenance thread. The launch agent starts the pinned Node runtime without
-a login shell; the supervisor passes only a narrow allowlist to child processes,
+queued until delivery begins, unless the service recovers first; an alert that
+was never attempted is then marked unnecessary. Before attempting delivery, the
+supervisor records the chosen maintenance thread. If the send result is unclear,
+the supervisor keeps retrying while the checkpoint remains failed. A later
+success does not repeat the obsolete failure alert; it instead sends one closure
+to that original thread because the failure may have arrived. A maintenance
+thread rejected before dispatch is retried at the corrected configured thread;
+if the checkpoint recovers first, that alert is unnecessary. The launch
+agent starts the pinned Node runtime without a login shell; the supervisor passes
+only a narrow allowlist to child processes,
 including the launchd SSH agent socket needed for Git fetches. The macOS
 notification remains a secondary signal.
 
