@@ -22,7 +22,11 @@ const stripYamlComment = (line: string): string => {
       else quote = undefined;
       continue;
     }
-    if (quote === undefined && (character === "'" || character === '"')) {
+    if (
+      quote === undefined &&
+      (character === "'" || character === '"') &&
+      (index === 0 || /[\s:[{,]/u.test(line[index - 1]!))
+    ) {
       quote = character;
       continue;
     }
@@ -95,6 +99,11 @@ describe("LastCode GitHub CI workflow", () => {
     expect(hasBlacksmithRunnerConfiguration("# runs-on: blacksmith-8vcpu-ubuntu-2404")).toBe(false);
     expect(
       hasBlacksmithRunnerConfiguration("runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404"),
+    ).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404",
+      ),
     ).toBe(false);
     expect(
       hasBlacksmithRunnerConfiguration(
