@@ -15,73 +15,20 @@ const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined
     ? (value as Readonly<Record<string, unknown>>)
     : undefined;
 
-const stringValues = (value: unknown): ReadonlyArray<string> =>
-  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringValues) : [];
+const standardHostedRunners = new Set(["ubuntu-24.04", "macos-26"]);
 
-const runnerValues = (value: unknown): ReadonlyArray<string> => {
-  const mapping = asRecord(value);
-  return mapping === undefined
-    ? stringValues(value)
-    : [...stringValues(mapping.group), ...stringValues(mapping.labels)];
-};
-
-const usesBlacksmithRunner = (value: unknown): boolean =>
-  stringValues(value).some((entry) => entry.includes("blacksmith-"));
-
-const matrixReferencePaths = (expression: string): ReadonlyArray<ReadonlyArray<string>> =>
-  Array.from(
-    expression.matchAll(
-      /\bmatrix(?<path>(?:\.[A-Za-z_][\w-]*|\[\s*'[^']+'\s*\]|\[\s*"[^"]+"\s*\])+)/gu,
-    ),
-    (reference) => {
-      const path = reference.groups?.path;
-      return path === undefined
-        ? []
-        : Array.from(
-            path.matchAll(
-              /\.(?<dotKey>[A-Za-z_][\w-]*)|\[\s*'(?<singleKey>[^']+)'\s*\]|\[\s*"(?<doubleKey>[^"]+)"\s*\]/gu,
-            ),
-            (segment) =>
-              segment.groups?.dotKey ??
-              segment.groups?.singleKey ??
-              segment.groups?.doubleKey ??
-              "",
-          ).filter((key) => key.length > 0);
-    },
-  );
-
-const propertyValues = (value: unknown, key: string): ReadonlyArray<unknown> =>
-  Array.isArray(value)
-    ? value.flatMap((entry) => propertyValues(entry, key))
-    : asRecord(value)?.[key] === undefined
-      ? []
-      : [asRecord(value)?.[key]];
-
-const resolvePath = (value: unknown, path: ReadonlyArray<string>): ReadonlyArray<unknown> =>
-  path.reduce<ReadonlyArray<unknown>>(
-    (values, key) => values.flatMap((entry) => propertyValues(entry, key)),
-    [value],
-  );
-
-const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
+const hasNonstandardRunnerConfiguration = (source: string): boolean => {
   const document: unknown = parse(source);
   const jobs = asRecord(asRecord(document)?.jobs);
-  if (jobs === undefined) return false;
+  if (jobs === undefined) return true;
 
   for (const value of Object.values(jobs)) {
     const job = asRecord(value);
-    if (job === undefined) continue;
-    const runners = runnerValues(job["runs-on"]);
-    if (runners.some((runner) => runner.includes("blacksmith-"))) return true;
-
-    const matrix = asRecord(asRecord(job.strategy)?.matrix);
-    if (matrix === undefined) continue;
-    for (const runner of runners) {
-      for (const path of matrixReferencePaths(runner)) {
-        const roots = [matrix, ...(Array.isArray(matrix.include) ? matrix.include : [])];
-        if (roots.some((root) => resolvePath(root, path).some(usesBlacksmithRunner))) return true;
-      }
-    }
+    if (job === undefined) return true;
+    const runsOn = job["runs-on"];
+    const runners = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : [];
+    if (runners.length === 0 || runners.some((runner) => !standardHostedRunners.has(runner)))
+      return true;
   }
   return false;
 };
@@ -125,67 +72,72 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(workflow).toContain("fetch-depth: 2");
     expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
-    expect(hasBlacksmithRunnerConfiguration(workflow)).toBe(false);
+    expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
   });
 
-  it("rejects direct and matrix Blacksmith runners without matching comments or mirror files", () => {
+  it("rejects nonstandard and dynamic runners without matching comments or mirror files", () => {
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         'jobs:\n  test:\n    runs-on: "blacksmith-8vcpu-ubuntu-2404"',
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix['runner'] }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: blacksmith-8vcpu-ubuntu-2404 }",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: '${{ matrix.runner }}' }\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix.target.runner }}\n    strategy:\n      matrix:\n        target: [{ runner: blacksmith-8vcpu-ubuntu-2404 }]",
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404",
       ),
     ).toBe(false);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404\n    runs-on: ubuntu-24.04",
       ),
     ).toBe(false);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         'jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        include: [{ note: "keep\n          # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
       ),
     ).toBe(true);
     expect(
-      hasBlacksmithRunnerConfiguration(
+      hasNonstandardRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cat /etc/apt/blacksmith-cache.txt",
       ),
     ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}",
+      ),
+    ).toBe(true);
   });
 
   it("makes the stable gate depend on every validation job", () => {
