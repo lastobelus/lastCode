@@ -564,12 +564,21 @@ export function resolveRevisionPlan(input: {
 
   let replayBase: string | undefined;
   if (!input.isAncestor(latest.commit, input.sourceCommit)) {
-    if (!latest.sourceCommit || !input.isAncestor(latest.sourceCommit, input.sourceCommit)) {
+    const related = installables.findLast((installable) => {
+      if (input.isAncestor(installable.commit, input.sourceCommit)) return true;
+      return (
+        installable.sourceCommit !== undefined &&
+        input.isAncestor(installable.sourceCommit, input.sourceCommit)
+      );
+    });
+    if (!related) {
       throw new Error(
         `Latest installable ${latest.tag} cannot be related to LastCode main ${input.sourceCommit}.`,
       );
     }
-    replayBase = latest.sourceCommit;
+    replayBase = input.isAncestor(related.commit, input.sourceCommit)
+      ? related.commit
+      : related.sourceCommit;
   }
 
   const revision =
