@@ -8,10 +8,35 @@ const workflow = NodeFS.readFileSync(
   NodePath.resolve(import.meta.dirname, "../.github/workflows/ci.yml"),
   "utf8",
 );
+
+const stripYamlComment = (line: string): string => {
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"' && character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (character === quote) {
+      if (quote === "'" && line[index + 1] === "'") index += 1;
+      else quote = undefined;
+      continue;
+    }
+    if (quote === undefined && (character === "'" || character === '"')) {
+      quote = character;
+      continue;
+    }
+    if (quote === undefined && character === "#" && (index === 0 || /\s/u.test(line[index - 1]!))) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+};
+
 const hasBlacksmithRunnerConfiguration = (source: string): boolean =>
   source
     .split("\n")
-    .map((line) => line.replace(/^\s*#.*$|\s+#.*$/u, ""))
+    .map(stripYamlComment)
     .some((line) =>
       line.replaceAll("/etc/apt/blacksmith-ubuntu-mirrors.txt", "").includes("blacksmith-"),
     );
@@ -71,6 +96,11 @@ describe("LastCode GitHub CI workflow", () => {
     expect(
       hasBlacksmithRunnerConfiguration("runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404"),
     ).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        'runs-on: ${{ matrix.runner }}\ninclude: [{ note: "keep # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
+      ),
+    ).toBe(true);
     expect(
       hasBlacksmithRunnerConfiguration(
         "run: sudo sed -i s,http:,https:, /etc/apt/blacksmith-ubuntu-mirrors.txt",
