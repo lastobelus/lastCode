@@ -65,6 +65,7 @@ describe("LastCode checkpoint supervisor", () => {
 
     expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({
       status: "success",
+      supervisorPid: process.pid,
       phase: "complete",
     });
     expect(test.dependencies.runPhase.mock.calls.map(([phase]) => phase)).toEqual([
@@ -544,6 +545,7 @@ describe("LastCode checkpoint supervisor", () => {
     expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow("checkpoint failed");
     expect(test.states[0]).toMatchObject({
       status: "failed",
+      supervisorPid: process.pid,
       phase: "checkpoint",
       incident: { alertDelivery: "pending", deliveryAttempts: 0 },
     });
