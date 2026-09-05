@@ -4,6 +4,7 @@ import {
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { ChevronDownIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -30,6 +31,8 @@ import {
 } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ComposerBanner } from "../chat/ComposerBanner";
+import type { ComposerBannerStackItem } from "../chat/ComposerBannerStack";
 
 const pendingBodyChanges = new Set<string>();
 const pendingBodyChangeListeners = new Map<string, Set<() => void>>();
@@ -124,6 +127,7 @@ export function ThreadAnnotationEditorDialog(props: {
           <form id={formId} onSubmit={(event) => void submit(event)}>
             <Textarea
               ref={textareaRef}
+              defaultValue={props.annotation?.body ?? ""}
               aria-label="Thread annotation"
               autoFocus
               className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none [&_[data-slot=textarea]]:font-mono [&_[data-slot=textarea]]:text-sm"
@@ -158,7 +162,7 @@ export function ThreadAnnotationEditorDialog(props: {
   );
 }
 
-function AnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
+export function ThreadAnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
   return (
     <span className="text-[11px] text-warning-foreground">
@@ -173,6 +177,7 @@ export function ThreadAnnotationBody(props: {
   cwd?: string | undefined;
   className?: string;
   compact?: boolean;
+  showTimestamp?: boolean;
   onBodyChange?: ((body: string) => Promise<boolean>) | undefined;
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
@@ -196,9 +201,53 @@ export function ThreadAnnotationBody(props: {
         text={props.annotation.body}
         threadRef={props.threadRef}
       />
-      <AnnotationTimestamp annotation={props.annotation} />
+      {props.showTimestamp !== false ? (
+        <ThreadAnnotationTimestamp annotation={props.annotation} />
+      ) : null}
     </div>
   );
+}
+
+export function threadAnnotationBannerPresentation(props: {
+  annotation: ThreadAnnotationModel;
+  threadRef: ScopedThreadRef;
+  cwd?: string | undefined;
+  expanded: boolean;
+  onBodyChange: (body: string) => Promise<boolean>;
+}): Pick<ComposerBannerStackItem, "title" | "description" | "children"> {
+  const summary =
+    props.annotation.body
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean)
+      ?.replace(/^#{1,6}\s+/, "") ?? "Annotation";
+  return {
+    title: "NOTE:",
+    description: props.expanded ? (
+      <ThreadAnnotationTimestamp annotation={props.annotation} />
+    ) : (
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="min-w-0 truncate text-foreground/80">{summary}</span>
+        <ComposerBanner.Separator />
+        <span className="shrink-0">
+          <ThreadAnnotationTimestamp annotation={props.annotation} />
+        </span>
+      </span>
+    ),
+    children: props.expanded ? (
+      <ComposerBanner.Body className="pe-1 pb-1">
+        <ComposerBanner.Scroll className="max-h-48">
+          <ThreadAnnotationBody
+            annotation={props.annotation}
+            cwd={props.cwd}
+            onBodyChange={props.onBodyChange}
+            showTimestamp={false}
+            threadRef={props.threadRef}
+          />
+        </ComposerBanner.Scroll>
+      </ComposerBanner.Body>
+    ) : undefined,
+  };
 }
 
 export function ThreadAnnotationActions(props: {
@@ -207,6 +256,8 @@ export function ThreadAnnotationActions(props: {
   onResolve: () => void;
   onReopen: () => void;
   pending?: boolean | undefined;
+  expanded?: boolean | undefined;
+  onToggleExpanded?: (() => void) | undefined;
   trailing?: ReactNode;
 }) {
   return (
@@ -227,6 +278,20 @@ export function ThreadAnnotationActions(props: {
       >
         {props.annotation.resolvedAt ? "Reopen" : "Resolve"}
       </button>
+      {props.onToggleExpanded ? (
+        <Button
+          aria-expanded={props.expanded === true}
+          aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
+          className="text-warning-foreground"
+          disabled={props.pending}
+          size="icon-xs"
+          type="button"
+          variant="ghost"
+          onClick={props.onToggleExpanded}
+        >
+          <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
+        </Button>
+      ) : null}
       {props.trailing}
     </div>
   );
