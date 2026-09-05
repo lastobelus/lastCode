@@ -18,6 +18,13 @@ const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined
 const stringValues = (value: unknown): ReadonlyArray<string> =>
   typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringValues) : [];
 
+const runnerValues = (value: unknown): ReadonlyArray<string> => {
+  const mapping = asRecord(value);
+  return mapping === undefined
+    ? stringValues(value)
+    : [...stringValues(mapping.group), ...stringValues(mapping.labels)];
+};
+
 const usesBlacksmithRunner = (value: unknown): boolean =>
   stringValues(value).some((entry) => entry.includes("blacksmith-"));
 
@@ -29,7 +36,7 @@ const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
   for (const value of Object.values(jobs)) {
     const job = asRecord(value);
     if (job === undefined) continue;
-    const runners = stringValues(job["runs-on"]);
+    const runners = runnerValues(job["runs-on"]);
     if (runners.some((runner) => runner.includes("blacksmith-"))) return true;
 
     const matrix = asRecord(asRecord(job.strategy)?.matrix);
@@ -116,6 +123,16 @@ describe("LastCode GitHub CI workflow", () => {
     expect(
       hasBlacksmithRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix['runner'] }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: blacksmith-8vcpu-ubuntu-2404 }",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: '${{ matrix.runner }}' }\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
