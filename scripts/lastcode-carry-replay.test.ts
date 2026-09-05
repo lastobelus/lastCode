@@ -223,9 +223,11 @@ describe("carry replay core", () => {
     }
   });
 
-  it("replays the ordered group deltas onto a new upstream and retains a conflict for repair", () => {
+  it("keeps globally enabled rerere out of carry replay while retaining explicit conflict recovery", () => {
     const { repo, cleanup } = initRepo();
     try {
+      git(repo, ["config", "rerere.enabled", "true"]);
+      git(repo, ["config", "rerere.autoupdate", "true"]);
       const bootstrap = prepareBootstrap(repo);
       checkout(repo, "compile", bootstrap.historicalSource);
       const compact = compileCarrySetSameBase({
@@ -308,13 +310,29 @@ describe("carry replay core", () => {
       );
       assert.equal(readCarryReplayPlan(repo)?.phase, "replay");
       assert.equal(readCarryReplayPlan(repo)?.status, "running");
-      assert.equal(
-        NodeFS.existsSync(
-          NodePath.join(git(repo, ["rev-parse", "--absolute-git-dir"]), "rebase-merge"),
-        ),
-        true,
-      );
+      const gitDirectory = git(repo, ["rev-parse", "--absolute-git-dir"]);
+      assert.equal(NodeFS.existsSync(NodePath.join(gitDirectory, "rebase-merge")), true);
+      assert.equal(NodeFS.existsSync(NodePath.join(gitDirectory, "MERGE_RR")), false);
+      assert.equal(NodeFS.existsSync(NodePath.join(gitDirectory, "MERGE_RR.lock")), false);
       assert.throws(() => completeCarryReplay(repo), /unresolved rebase state/u);
+      write(
+        repo,
+        "shared.txt",
+        NodeFS.readFileSync(NodePath.join(repo, "shared.txt"), "utf8").replace(
+          /^actions=.*$/mu,
+          "actions=resumable",
+        ),
+      );
+      git(repo, ["add", "shared.txt"]);
+      git(repo, ["-c", "core.editor=true", "rebase", "--continue"]);
+      const recovered = completeCarryReplay(repo);
+      assert.equal(readCarryGroupChain(repo, recovered.head, conflictingUpstream).length, 6);
+      assert.match(
+        readCarryGroupChain(repo, recovered.head, conflictingUpstream).find(
+          ({ group }) => group === "resumable-actions",
+        )?.contributions[0]?.metadata["Carry-Observation"][0] ?? "",
+        /resolved action state/u,
+      );
     } finally {
       cleanup();
     }
