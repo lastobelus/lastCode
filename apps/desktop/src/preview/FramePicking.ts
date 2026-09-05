@@ -159,6 +159,8 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
   let position = element.parentElement ? view.getComputedStyle(element).position : "static";
   for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
     const style = view.getComputedStyle(ancestor);
+    // Boxless ancestors do not clip or change their descendants' positioning context.
+    if (style.display === "contents") continue;
     // This applies to positioned ancestors too: their ordinary descendants escape
     // intermediate scrollports with them (CSS2 overflow / CSS Position 3 section 2.1).
     if (

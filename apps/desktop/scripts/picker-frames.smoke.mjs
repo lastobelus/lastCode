@@ -374,6 +374,7 @@ try {
   for (const overflow of ["hidden", "auto", "clip"]) {
     for (const scenario of [
       { name: "body-propagated", rootStyle: "", bodyStyle: "", height: 50 },
+      { name: "boxless-ancestor", rootStyle: "", bodyStyle: "", height: 50 },
       { name: "root-overflow", rootStyle: "overflow:hidden", bodyStyle: "", height: 20 },
       { name: "root-contained", rootStyle: "contain:layout", bodyStyle: "", height: 20 },
       { name: "body-contained", rootStyle: "", bodyStyle: "contain:layout", height: 20 },
@@ -394,7 +395,7 @@ try {
           html{${scenario.rootStyle}}
           body{margin:0;height:120px;overflow:${overflow};${scenario.bodyStyle}}
           #target{position:relative;top:100px;left:100px;width:100px;height:50px;background:lime}
-          </style><div id="target">Overflow target</div>`;
+          </style><div style="${scenario.name === "boxless-ancestor" ? `display:contents;overflow:${overflow};position:fixed` : ""}"><div id="target">Overflow target</div></div>`;
         },
         { overflow, scenario },
       );
