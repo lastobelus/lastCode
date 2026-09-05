@@ -507,7 +507,9 @@ function durableIncidentList(state, key) {
 function retryableIncident(incident) {
   return (
     !incident.resolvedAt &&
-    (incident.alertDelivery === "pending" || incident.alertDelivery === "unknown")
+    (incident.alertDelivery === "pending" ||
+      incident.alertDelivery === "unknown" ||
+      incident.alertDelivery === "rejected")
   );
 }
 
@@ -522,9 +524,39 @@ function attemptedIncident(incident) {
 function potentiallyDeliveredIncident(incident) {
   return (
     attemptedIncident(incident) &&
-    typeof incident.deliveryThreadId === "string" &&
-    incident.deliveryThreadId.length > 0
+    typeof (incident.deliveryThreadId ?? incident.attemptedThreadId) === "string" &&
+    (incident.deliveryThreadId ?? incident.attemptedThreadId).length > 0
   );
+}
+
+function deliveryThreadId(incident) {
+  return incident.deliveryThreadId ?? incident.attemptedThreadId;
+}
+
+function rejectedThreadTarget(error, target) {
+  if (
+    !error ||
+    typeof error !== "object" ||
+    error.phase !== "alert-delivery" ||
+    typeof error.diagnostic !== "string"
+  ) {
+    return false;
+  }
+  const escapedTarget = target.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  // ThreadSendTargetError defines these messages before dispatch. The runtime
+  // formatter need not include the error class name.
+  return new RegExp(
+    `(?:^|[\\s:])(?:LastCode thread '${escapedTarget}' was not found\\.|LastCode thread prefix '${escapedTarget}' is ambiguous:)`,
+    "u",
+  ).test(error.diagnostic);
+}
+
+function recordRejectedAttempt(incident) {
+  const { attemptedThreadId: _attemptedThreadId, ...rest } = incident;
+  return {
+    ...rest,
+    alertDelivery: rest.deliveryThreadId ? "unknown" : "rejected",
+  };
 }
 
 function attemptDelivery(state, config, dependencies) {
@@ -536,12 +568,16 @@ function attemptDelivery(state, config, dependencies) {
     const pendingIncidentIndex = pendingIncidents.findIndex(retryableIncident);
     if (pendingIncidentIndex < 0) break;
     const incident = pendingIncidents[pendingIncidentIndex];
+    const targetThreadId = deliveryThreadId(incident) ?? recoveryThreadId;
     const updatedIncident = {
       ...incident,
       // A failed command may have reached LastCode after it wrote the message.
       // Keep that uncertainty and its recipient durable for recovery.
       alertDelivery: "unknown",
-      deliveryThreadId: incident.deliveryThreadId ?? recoveryThreadId,
+      ...((incident.deliveryThreadId ?? incident.attemptedThreadId)
+        ? { deliveryThreadId: incident.deliveryThreadId ?? incident.attemptedThreadId }
+        : {}),
+      attemptedThreadId: targetThreadId,
       deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
       lastDeliveryAttemptAt: dependencies.now(),
     };
@@ -552,7 +588,7 @@ function attemptDelivery(state, config, dependencies) {
     dependencies.writeState(nextState);
     try {
       dependencies.sendThread(
-        updatedIncident.deliveryThreadId,
+        targetThreadId,
         checkpointFailureMessage(updatedIncident.failure, updatedIncident.fingerprint),
       );
       pendingIncidents.splice(pendingIncidentIndex, 1);
@@ -560,6 +596,8 @@ function attemptDelivery(state, config, dependencies) {
       const deliveredIncident = {
         ...updatedIncident,
         alertDelivery: "sent",
+        deliveryThreadId: deliveryThreadId(updatedIncident),
+        attemptedThreadId: undefined,
       };
       const pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
       if (currentIncident?.fingerprint !== updatedIncident.fingerprint) {
@@ -588,6 +626,19 @@ function attemptDelivery(state, config, dependencies) {
       );
       dependencies.writeState(nextState);
     } catch (error) {
+      if (rejectedThreadTarget(error, targetThreadId)) {
+        pendingIncidents[pendingIncidentIndex] = recordRejectedAttempt(updatedIncident);
+        nextState = { ...nextState, pendingIncidents };
+        dependencies.writeState(nextState);
+      } else {
+        pendingIncidents[pendingIncidentIndex] = {
+          ...updatedIncident,
+          deliveryThreadId: deliveryThreadId(updatedIncident),
+          attemptedThreadId: undefined,
+        };
+        nextState = { ...nextState, pendingIncidents };
+        dependencies.writeState(nextState);
+      }
       console.error(
         `[lastcode:checkpoint-supervisor] Could not deliver a pending alert to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -612,7 +663,7 @@ function attemptDelivery(state, config, dependencies) {
       dependencies.writeState(nextState);
       try {
         dependencies.sendThread(
-          updatedIncident.deliveryThreadId,
+          deliveryThreadId(updatedIncident),
           checkpointResolvedMessage(updatedIncident),
         );
         pendingResolutions = remaining;
@@ -642,30 +693,49 @@ function attemptDelivery(state, config, dependencies) {
   const message = resolving
     ? checkpointResolvedMessage(incident)
     : checkpointFailureMessage(incident.failure, incident.fingerprint);
-  const deliveryThreadId = resolving
-    ? incident.deliveryThreadId
-    : (incident.deliveryThreadId ?? recoveryThreadId);
+  const targetThreadId = resolving
+    ? deliveryThreadId(incident)
+    : (deliveryThreadId(incident) ?? recoveryThreadId);
   const nextIncident = {
     ...incident,
     [key]: resolving ? "pending" : "unknown",
-    ...(!resolving ? { deliveryThreadId } : {}),
+    ...(!resolving && (incident.deliveryThreadId ?? incident.attemptedThreadId)
+      ? { deliveryThreadId: incident.deliveryThreadId ?? incident.attemptedThreadId }
+      : {}),
+    ...(!resolving ? { attemptedThreadId: targetThreadId } : {}),
     deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
     lastDeliveryAttemptAt: dependencies.now(),
   };
   nextState = { ...nextState, incident: nextIncident };
   dependencies.writeState(nextState);
   try {
-    dependencies.sendThread(deliveryThreadId, message);
+    dependencies.sendThread(targetThreadId, message);
     nextState = {
       ...nextState,
       incident: {
         ...nextIncident,
         [key]: "sent",
-        ...(!resolving ? { deliveryThreadId } : {}),
+        ...(!resolving
+          ? { deliveryThreadId: deliveryThreadId(nextIncident), attemptedThreadId: undefined }
+          : {}),
       },
     };
     dependencies.writeState(nextState);
   } catch (error) {
+    if (!resolving && rejectedThreadTarget(error, targetThreadId)) {
+      nextState = { ...nextState, incident: recordRejectedAttempt(nextIncident) };
+      dependencies.writeState(nextState);
+    } else if (!resolving) {
+      nextState = {
+        ...nextState,
+        incident: {
+          ...nextIncident,
+          deliveryThreadId: deliveryThreadId(nextIncident),
+          attemptedThreadId: undefined,
+        },
+      };
+      dependencies.writeState(nextState);
+    }
     console.error(
       `[lastcode:checkpoint-supervisor] Could not deliver ${resolving ? "resolution" : "alert"} to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -871,6 +941,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         incidents.findIndex(
           (candidate) => candidate.fingerprint === pendingIncident.fingerprint,
         ) === index &&
+        pendingIncident.alertDelivery !== "rejected" &&
         attemptedIncident(pendingIncident) &&
         !potentiallyDeliveredIncident(pendingIncident),
     )
@@ -901,7 +972,11 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       });
     }
   }
-  if (incident && !attemptedIncident(incident)) {
+  if (
+    incident &&
+    (!attemptedIncident(incident) ||
+      (incident.alertDelivery === "rejected" && !deliveryThreadId(incident)))
+  ) {
     incident = {
       ...incident,
       ...(previous?.status === "failed" ? { resolvedAt: finishedAt } : {}),
