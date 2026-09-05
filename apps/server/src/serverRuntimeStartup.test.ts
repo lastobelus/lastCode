@@ -293,6 +293,7 @@ it.effect(
           readEvents: () => Stream.empty,
           readThreadEvents: () => Stream.empty,
           getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+          getTurnRequestWaitState: () => Effect.die("unused turn request wait state"),
           dispatch: (command) =>
             Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
               Effect.as({ sequence: 1 }),
