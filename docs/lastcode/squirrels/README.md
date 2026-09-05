@@ -1,5 +1,3 @@
-# Squirrels
-
 > I chase squirrels.
 > Threads chase squirrels with me.
 > However, I need threads to keep track of all the squirrels, and of goals set at the beginning of the thread, or at points within it.
@@ -12,6 +10,8 @@
 > Things I'm willing to consider:
 > - lastcode features, including possibly accessing / persisting /editing / annotating thread-initiated task lists
 > - skills, like a "what's next?" skill and/or a "anything left for this thread?" skill, that potentially use agents to look through threads for unfinished/unstarted work
+
+# Squirrels
 
 ## Index
 
