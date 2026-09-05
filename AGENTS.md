@@ -1,5 +1,11 @@
 # T3 Code
 
+For work on the Squirrels project, read `docs/lastcode/squirrels/README.md` and
+`docs/lastcode/squirrels/AGENTS.md` before changing files. Research and
+documentation stack on the open Squirrels base PR; implementation PRs stack on
+that PR's head. The GitHub Project named **Squirrels** and the base PR body are
+the source of truth for the current branch and PR URLs.
+
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
