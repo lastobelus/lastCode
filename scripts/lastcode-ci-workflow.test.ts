@@ -35,8 +35,10 @@ const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
     const matrix = asRecord(asRecord(job.strategy)?.matrix);
     if (matrix === undefined) continue;
     for (const runner of runners) {
-      for (const match of runner.matchAll(/\bmatrix\.(?<key>[A-Za-z_][\w-]*)/gu)) {
-        const key = match.groups?.key;
+      for (const match of runner.matchAll(
+        /\bmatrix(?:\.(?<dotKey>[A-Za-z_][\w-]*)|\[\s*'(?<singleKey>[^']+)'\s*\]|\[\s*"(?<doubleKey>[^"]+)"\s*\])/gu,
+      )) {
+        const key = match.groups?.dotKey ?? match.groups?.singleKey ?? match.groups?.doubleKey;
         if (key === undefined) continue;
         if (usesBlacksmithRunner(matrix[key])) return true;
         if (
@@ -109,6 +111,11 @@ describe("LastCode GitHub CI workflow", () => {
     expect(
       hasBlacksmithRunnerConfiguration(
         "jobs:\n  test:\n    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix['runner'] }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
       ),
     ).toBe(true);
     expect(
