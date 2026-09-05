@@ -93,6 +93,38 @@ function intersect(rect: DOMRect, clip: { x: number; y: number; width: number; h
   );
 }
 
+const clipsOverflow = (value: string): boolean =>
+  value === "auto" || value === "clip" || value === "hidden" || value === "scroll";
+
+/** Clips a rect to each ancestor's transformed client scrollport, one axis at a time. */
+function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect | null {
+  const view = element.ownerDocument.defaultView;
+  if (!view) return null;
+  for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = view.getComputedStyle(ancestor);
+    const clipX = clipsOverflow(style.overflowX);
+    const clipY = clipsOverflow(style.overflowY);
+    if (!clipX && !clipY) continue;
+    if (!hasSupportedTransform(style)) return null;
+    const bounds = ancestor.getBoundingClientRect();
+    const scaleX = ancestor.offsetWidth ? bounds.width / ancestor.offsetWidth : 0;
+    const scaleY = ancestor.offsetHeight ? bounds.height / ancestor.offsetHeight : 0;
+    if ((clipX && !(scaleX > 0)) || (clipY && !(scaleY > 0))) return null;
+    const left = clipX
+      ? Math.max(rect.left, bounds.left + ancestor.clientLeft * scaleX)
+      : rect.left;
+    const top = clipY ? Math.max(rect.top, bounds.top + ancestor.clientTop * scaleY) : rect.top;
+    const right = clipX
+      ? Math.min(rect.right, bounds.left + (ancestor.clientLeft + ancestor.clientWidth) * scaleX)
+      : rect.right;
+    const bottom = clipY
+      ? Math.min(rect.bottom, bounds.top + (ancestor.clientTop + ancestor.clientHeight) * scaleY)
+      : rect.bottom;
+    rect = new DOMRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+  }
+  return rect;
+}
+
 /** Converts a child viewport rect through each frame's content box, clipping at every viewport. */
 export function topViewportRect(
   element: Element,
@@ -101,10 +133,15 @@ export function topViewportRect(
   if (!element.isConnected) return null;
   let owner = element.ownerDocument;
   let rect = element.getBoundingClientRect();
+  let carrier = element;
+  const framed = owner !== topDocument;
   while (owner !== topDocument) {
     const view = owner.defaultView;
     const frame = owningFrame(owner);
     if (!view || !frame) return null;
+    const clipped = clipThroughOverflowAncestors(rect, carrier);
+    if (!clipped) return null;
+    rect = clipped;
     rect = intersect(rect, { x: 0, y: 0, width: view.innerWidth, height: view.innerHeight });
     const geometry = frameGeometry(frame);
     if (!geometry) return null;
@@ -118,6 +155,12 @@ export function topViewportRect(
       geometry,
     );
     owner = frame.ownerDocument;
+    carrier = frame;
+  }
+  if (framed) {
+    const clipped = clipThroughOverflowAncestors(rect, carrier);
+    if (!clipped) return null;
+    rect = clipped;
   }
   const view = topDocument.defaultView;
   return view

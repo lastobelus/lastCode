@@ -123,6 +123,54 @@ describe("frame picking coordinates", () => {
     expect(topViewportRect(element, top)).toEqual(new Rect(154, 114, 40, 10));
   });
 
+  it("clips iframe selections to target and frame ancestor scrollports per axis", () => {
+    const { top, frame, child, element } = fixture();
+    const targetScroller = {
+      ownerDocument: child,
+      parentElement: null,
+      offsetWidth: 50,
+      offsetHeight: 50,
+      clientWidth: 30,
+      clientHeight: 25,
+      clientLeft: 5,
+      clientTop: 5,
+      getBoundingClientRect: () => new Rect(0, 0, 100, 100),
+    } as unknown as Element;
+    Object.defineProperty(element, "parentElement", { value: targetScroller });
+    element.getBoundingClientRect = () => new DOMRect(0, 20, 40, 40);
+
+    const stage = {
+      ownerDocument: top,
+      parentElement: null,
+      offsetWidth: 300,
+      offsetHeight: 200,
+      clientWidth: 280,
+      clientHeight: 50,
+      clientLeft: 4,
+      clientTop: 3,
+      getBoundingClientRect: () => new Rect(90, 80, 300, 200),
+    } as unknown as Element;
+    Object.defineProperty(frame, "parentElement", { value: stage });
+
+    const childStyle = child.defaultView!.getComputedStyle;
+    child.defaultView!.getComputedStyle = (candidate) =>
+      candidate === targetScroller
+        ? ({ overflowX: "hidden", overflowY: "visible" } as CSSStyleDeclaration)
+        : childStyle(candidate);
+    const topStyle = top.defaultView!.getComputedStyle;
+    top.defaultView!.getComputedStyle = (candidate) =>
+      candidate === stage
+        ? ({ overflowX: "visible", overflowY: "auto" } as CSSStyleDeclaration)
+        : topStyle(candidate);
+
+    // The target scroller's 2x transformed client box clips x to [10, 70].
+    // The stage clips y to its bordered client scrollport [83, 133].
+    expect(topViewportRect(element, top)).toEqual(new Rect(132, 102, 60, 31));
+
+    element.getBoundingClientRect = () => new DOMRect(-20, 20, 5, 10);
+    expect(topViewportRect(element, top)).toEqual(new Rect(132, 102, 0, 20));
+  });
+
   it("drops detached, navigated, and now-inaccessible frame documents", () => {
     const { top, frame, child, element } = fixture();
     frame.isConnected = false;

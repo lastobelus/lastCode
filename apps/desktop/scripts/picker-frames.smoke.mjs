@@ -1,11 +1,14 @@
 // Run explicitly with Chromium installed: node apps/desktop/scripts/picker-frames.smoke.mjs
 // Optional arguments: live editor URL, evidence directory. Never launches the installed app.
 import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { build } from "vite-plus";
 import { chromium } from "playwright-core";
+import { ensureElectronRuntime } from "./ensure-electron-runtime.mjs";
 
 const entry = NodeURL.fileURLToPath(new URL("../src/preview/PickPreload.ts", import.meta.url));
 const result = await build({
@@ -22,13 +25,29 @@ const result = await build({
         if (id !== "\0picker-ipc") return;
         return `const listeners = new Map();
         globalThis.pickerMessages = [];
+        globalThis.pickerWaiters = new Map();
         globalThis.pickerEmit = (channel, ...args) => {
           for (const fn of [...(listeners.get(channel) ?? [])]) fn({}, ...args);
+        };
+        globalThis.pickerWaitFor = (channel) => {
+          const found = globalThis.pickerMessages.find((message) => message.channel === channel);
+          if (found) return Promise.resolve(found);
+          return new Promise((resolve) => {
+            globalThis.pickerWaiters.set(channel, [
+              ...(globalThis.pickerWaiters.get(channel) ?? []),
+              resolve,
+            ]);
+          });
         };
         export const ipcRenderer = {
           on(channel, fn) { listeners.set(channel, [...(listeners.get(channel) ?? []), fn]); return this; },
           off(channel, fn) { listeners.set(channel, (listeners.get(channel) ?? []).filter(x => x !== fn)); return this; },
-          send(channel, ...args) { globalThis.pickerMessages.push({channel, args}); }
+          send(channel, ...args) {
+            const message = { channel, args };
+            globalThis.pickerMessages.push(message);
+            for (const resolve of globalThis.pickerWaiters.get(channel) ?? []) resolve(message);
+            globalThis.pickerWaiters.delete(channel);
+          }
         };`;
       },
     },
@@ -38,6 +57,21 @@ const result = await build({
 const bundle = (Array.isArray(result) ? result[0] : result).output.find(
   (x) => x.type === "chunk",
 ).code;
+const screenshotEntry = NodeURL.fileURLToPath(
+  new URL("../src/preview/AnnotationScreenshot.ts", import.meta.url),
+);
+const screenshotResult = await build({
+  configFile: false,
+  logLevel: "error",
+  build: {
+    write: false,
+    minify: false,
+    lib: { entry: screenshotEntry, formats: ["es"] },
+  },
+});
+const screenshotBundle = (
+  Array.isArray(screenshotResult) ? screenshotResult[0] : screenshotResult
+).output.find((output) => output.type === "chunk").code;
 const browser = await chromium.launch({ headless: true });
 const [liveUrl, evidenceDir, liveTarget = ".document-title"] = process.argv.slice(2);
 if (evidenceDir) await NodeFSP.mkdir(evidenceDir, { recursive: true });
@@ -271,20 +305,43 @@ try {
   console.log("PASS: same-origin URL frames and opaque-origin exclusion");
 
   if (liveUrl) {
-    const live = await browser.newPage({ viewport: { width: 1600, height: 1100 } });
-    await live.goto(liveUrl);
-    await live.locator(".template-editor-workspace").waitFor();
-    await live.locator(".template-editor-switch input").uncheck();
-    const facsimile = live.frameLocator('iframe[title$="editable English Facsimile"]');
-    const element = facsimile.locator(liveTarget);
-    await element.waitFor();
-    await element.scrollIntoViewIfNeeded();
-    if (evidenceDir)
-      await live.screenshot({ path: NodePath.join(evidenceDir, "facsimile-before.png") });
-    await install(live);
-    await element.click();
-    await attach(live, /data-binding-id/, "facsimile-after");
-    console.log("PASS: populated live Facsimile selection, screenshot crop and annotation payload");
+    const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "picker-electron-"));
+    const bundlePath = NodePath.join(scratch, "picker-bundle.js");
+    const screenshotBundlePath = NodePath.join(scratch, "annotation-screenshot.mjs");
+    const userDataPath = NodePath.join(scratch, "user-data");
+    await NodeFSP.writeFile(bundlePath, bundle);
+    await NodeFSP.writeFile(screenshotBundlePath, screenshotBundle);
+    await NodeFSP.mkdir(userDataPath);
+    try {
+      const childPath = NodeURL.fileURLToPath(
+        new URL("./picker-electron-capture.smoke.mjs", import.meta.url),
+      );
+      const environment = { ...process.env };
+      delete environment.ELECTRON_RUN_AS_NODE;
+      const child = NodeChildProcess.spawnSync(
+        ensureElectronRuntime(),
+        [
+          childPath,
+          bundlePath,
+          screenshotBundlePath,
+          userDataPath,
+          liveUrl,
+          evidenceDir ?? "",
+          liveTarget,
+        ],
+        { encoding: "utf8", env: environment, timeout: 30_000 },
+      );
+      if (child.stdout) process.stdout.write(child.stdout);
+      if (child.stderr) process.stderr.write(child.stderr);
+      NodeAssert.equal(child.error, undefined, child.error?.message);
+      NodeAssert.equal(
+        child.status,
+        0,
+        `Electron capture exited ${child.status ?? "without status"}`,
+      );
+    } finally {
+      await NodeFSP.rm(scratch, { force: true, recursive: true });
+    }
   }
 } finally {
   await browser.close();
