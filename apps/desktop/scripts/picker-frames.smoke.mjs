@@ -304,6 +304,132 @@ try {
   await urls.evaluate(() => pickerEmit("preview:cancel-pick"));
   console.log("PASS: same-origin URL frames and opaque-origin exclusion");
 
+  // SVG graphics bounds can extend beyond their viewport, especially with a
+  // viewBox. Verify the browser's clip and the captured rect in child documents.
+  for (const { nested, percent } of [
+    { nested: false, percent: false },
+    { nested: true, percent: false },
+    { nested: false, percent: true },
+    { nested: true, percent: true },
+  ]) {
+    for (const fit of ["none", "xMidYMid meet", "xMaxYMin slice"]) {
+      for (const scale of [1, 1.5]) {
+        const svgPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+        await svgPage.setContent(
+          '<body style="margin:0"><iframe style="position:absolute;left:40px;top:40px;width:600px;height:500px;border:0"></iframe>',
+        );
+        await svgPage.locator("iframe").evaluate(
+          (frame, { nested, percent, fit, scale }) => {
+            const content = `<svg id="viewport" ${nested ? 'x="50" y="40"' : ""}
+            width="200" height="100" viewBox="10 20 80 80" preserveAspectRatio="${fit}"
+            style="overflow:hidden;${percent ? "width:50%;height:50%" : ""}"><g style="overflow:hidden"><rect id="svg-target"
+            x="-500" y="-500" width="1000" height="1000" fill="lime"><title>SVG target</title></rect></g></svg>`;
+            frame.srcdoc = `<body style="margin:0"><div style="padding:50px;width:400px;height:200px;transform:scale(${scale});transform-origin:0 0">
+            ${nested ? `<svg width="400" height="200" viewBox="0 0 400 200">${content}</svg>` : content}</div>`;
+          },
+          { nested, percent, fit, scale },
+        );
+        const selected = svgPage.frameLocator("iframe").locator("#svg-target");
+        await selected.waitFor();
+        const local = {
+          x: (50 + (nested ? 50 : 0)) * scale,
+          y: (50 + (nested ? 40 : 0)) * scale,
+          width: 200 * scale,
+          height: 100 * scale,
+        };
+        for (const axis of ["x", "y"]) {
+          for (const end of [false, true]) {
+            for (const outside of [false, true]) {
+              const point = { x: local.x + local.width / 2, y: local.y + local.height / 2 };
+              point[axis] =
+                local[axis] +
+                (end ? local[axis === "x" ? "width" : "height"] : 0) +
+                (outside ? 1 : -1) * (end ? 1 : -1);
+              NodeAssert.equal(
+                await selected.evaluate(
+                  (element, point) =>
+                    element.ownerDocument.elementFromPoint(point.x, point.y) === element,
+                  point,
+                ),
+                !outside,
+                `SVG ${nested}/${fit}/${scale}: ${axis} ${end ? "end" : "start"} clip`,
+              );
+            }
+          }
+        }
+        await install(svgPage);
+        await svgPage.mouse.click(40 + local.x + local.width / 2, 40 + local.y + local.height / 2);
+        const svgRect = await attach(
+          svgPage,
+          /svg-target/,
+          `svg-${nested}-${percent}-${fit.replaceAll(" ", "-")}-${scale}`,
+        );
+        NodeAssert.deepEqual(svgRect, { ...local, x: 40 + local.x, y: 40 + local.y });
+        await svgPage.close();
+      }
+    }
+  }
+  console.log(
+    "PASS: outer and nested SVG viewport clipping, viewBox fits, graphics groups and positive scale",
+  );
+
+  for (const scale of [1, 1.5]) {
+    for (const percent of [false, true]) {
+      const foreignPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await foreignPage.setContent(
+        '<body style="margin:0"><iframe style="position:absolute;left:40px;top:40px;width:700px;height:500px;border:0"></iframe>',
+      );
+      await foreignPage.locator("iframe").evaluate(
+        (frame, { scale, percent }) => {
+          frame.srcdoc = `<body style="margin:0"><div style="padding:50px;transform:scale(${scale});transform-origin:0 0">
+          <svg width="400" height="200" viewBox="0 0 200 100"><foreignObject x="20" y="10" width="100" height="50"
+          style="overflow:hidden;${percent ? "x:10%;y:10%;width:50%;height:50%" : ""}">
+          <div xmlns="http://www.w3.org/1999/xhtml" id="foreign-target" style="position:relative;left:-20px;top:-20px;width:300px;height:200px;background:lime">Foreign target</div>
+          </foreignObject></svg></div>`;
+        },
+        { scale, percent },
+      );
+      const selected = foreignPage.frameLocator("iframe").locator("#foreign-target");
+      await selected.waitFor();
+      const local = { x: 90 * scale, y: 70 * scale, width: 200 * scale, height: 100 * scale };
+      for (const axis of ["x", "y"]) {
+        for (const end of [false, true]) {
+          for (const outside of [false, true]) {
+            const point = { x: local.x + local.width / 2, y: local.y + local.height / 2 };
+            point[axis] =
+              local[axis] +
+              (end ? local[axis === "x" ? "width" : "height"] : 0) +
+              (outside ? 1 : -1) * (end ? 1 : -1);
+            NodeAssert.equal(
+              await selected.evaluate(
+                (element, point) =>
+                  element.ownerDocument.elementFromPoint(point.x, point.y) === element,
+                point,
+              ),
+              !outside,
+              `foreignObject ${scale}/${percent}: ${axis} ${end ? "end" : "start"} clip`,
+            );
+          }
+        }
+      }
+      await install(foreignPage);
+      await foreignPage.mouse.click(
+        40 + local.x + local.width / 2,
+        40 + local.y + local.height / 2,
+      );
+      const rect = await attach(
+        foreignPage,
+        /Foreign target/,
+        `foreign-object-${scale}-${percent}`,
+      );
+      NodeAssert.deepEqual(rect, { ...local, x: 40 + local.x, y: 40 + local.y });
+      await foreignPage.close();
+    }
+  }
+  console.log(
+    "PASS: foreignObject HTML clipping, viewBox, positive scaling and CSS percentage geometry",
+  );
+
   // Positioned boxes (and their children) escape overflow before their containing
   // block. Verify Chromium actually paints/hit-tests the pixels that we capture.
   for (const scenario of [

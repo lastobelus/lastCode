@@ -152,6 +152,91 @@ function establishesPositioningBlock(style: CSSStyleDeclaration, position: strin
   );
 }
 
+function svgViewportLength(
+  svg: SVGSVGElement | SVGForeignObjectElement,
+  axis: "width" | "height" | "x" | "y",
+): number {
+  const value = svg.ownerDocument.defaultView!.getComputedStyle(svg).getPropertyValue(axis);
+  const length = Number.parseFloat(value);
+  if (!value.endsWith("%")) return length;
+  const parent = svg.viewportElement;
+  if (!parent || parent.localName !== "svg") return Number.NaN;
+  const viewport = parent as SVGSVGElement;
+  const dimension = axis === "x" ? "width" : axis === "y" ? "height" : axis;
+  const reference = viewport.viewBox.animVal[dimension] || svgViewportLength(viewport, dimension);
+  return (length * reference) / 100;
+}
+
+/** Remove the viewBox fit from the screen transform to recover the actual SVG viewport. */
+function svgViewportRect(
+  svg: SVGSVGElement | SVGForeignObjectElement,
+  style: CSSStyleDeclaration,
+): DOMRect | null {
+  const matrix = svg.getScreenCTM();
+  if (
+    !matrix ||
+    ![matrix.a, matrix.d, matrix.e, matrix.f].every(Number.isFinite) ||
+    matrix.b !== 0 ||
+    matrix.c !== 0 ||
+    !(matrix.a > 0) ||
+    !(matrix.d > 0)
+  )
+    return null;
+  let width = svgViewportLength(svg, "width");
+  let height = svgViewportLength(svg, "height");
+  if (style.boxSizing === "border-box") {
+    width -= [
+      style.paddingLeft,
+      style.paddingRight,
+      style.borderLeftWidth,
+      style.borderRightWidth,
+    ].reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+    height -= [
+      style.paddingTop,
+      style.paddingBottom,
+      style.borderTopWidth,
+      style.borderBottomWidth,
+    ].reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+  }
+  if (!Number.isFinite(width) || !Number.isFinite(height) || !(width > 0) || !(height > 0))
+    return null;
+  if (!("viewBox" in svg)) {
+    const x = svgViewportLength(svg, "x");
+    const y = svgViewportLength(svg, "y");
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return new DOMRect(
+      matrix.e + x * matrix.a,
+      matrix.f + y * matrix.d,
+      width * matrix.a,
+      height * matrix.d,
+    );
+  }
+  const box = svg.viewBox.animVal;
+  let scaleX = 1;
+  let scaleY = 1;
+  let translateX = 0;
+  let translateY = 0;
+  if (box.width > 0 && box.height > 0) {
+    scaleX = width / box.width;
+    scaleY = height / box.height;
+    const { align, meetOrSlice } = svg.preserveAspectRatio.animVal;
+    if (align !== 1) {
+      scaleX = scaleY = meetOrSlice === 2 ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+      // SVG alignment constants run xMin/xMid/xMax within yMin/yMid/yMax.
+      translateX = (((align - 2) % 3) * (width - box.width * scaleX)) / 2;
+      translateY = (Math.floor((align - 2) / 3) * (height - box.height * scaleY)) / 2;
+    }
+    translateX -= box.x * scaleX;
+    translateY -= box.y * scaleY;
+  }
+  return new DOMRect(
+    matrix.e - (translateX * matrix.a) / scaleX,
+    matrix.f - (translateY * matrix.d) / scaleY,
+    (width * matrix.a) / scaleX,
+    (height * matrix.d) / scaleY,
+  );
+}
+
 /** Overflow clips the containing-block chain, skipping ancestors escaped by positioned boxes. */
 function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect | null {
   const view = element.ownerDocument.defaultView;
@@ -178,6 +263,22 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
     if (!clipX && !clipY) continue;
     if (propagatesOverflowToViewport(ancestor, style)) continue;
     if (!hasSupportedTransform(style)) return null;
+    if (ancestor.namespaceURI === "http://www.w3.org/2000/svg") {
+      // Graphics groups do not establish overflow clips; svg and foreignObject do.
+      if (ancestor.localName !== "svg" && ancestor.localName !== "foreignObject") continue;
+      const viewport = svgViewportRect(
+        ancestor as unknown as SVGSVGElement | SVGForeignObjectElement,
+        style,
+      );
+      if (!viewport) return null;
+      rect = intersect(rect, {
+        x: clipX ? viewport.x : rect.x,
+        y: clipY ? viewport.y : rect.y,
+        width: clipX ? viewport.width : rect.width,
+        height: clipY ? viewport.height : rect.height,
+      });
+      continue;
+    }
     const bounds = ancestor.getBoundingClientRect();
     const scaleX = ancestor.offsetWidth ? bounds.width / ancestor.offsetWidth : 0;
     const scaleY = ancestor.offsetHeight ? bounds.height / ancestor.offsetHeight : 0;
