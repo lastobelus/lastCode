@@ -1000,7 +1000,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
           resolutionDelivery: "pending",
         }))
     : [];
-  for (const pendingIncident of pendingIncidents) {
+  for (const pendingIncident of deliveryConfigured ? pendingIncidents : []) {
     if (
       potentiallyDeliveredIncident(pendingIncident) &&
       !pendingResolutions.some(

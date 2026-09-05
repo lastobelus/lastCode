@@ -1180,6 +1180,31 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
   });
 
+  it("does not queue backlog closures when recovery occurs with delivery disabled", () => {
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        pendingIncidents: [
+          {
+            fingerprint: "old-blocker",
+            alertDelivery: "unknown",
+            deliveryThreadId: "thread-old",
+            deliveryAttempts: 1,
+            failure: { phase: "fetch", error: "old blocker" },
+          },
+        ],
+      },
+      dependencies: { loadConfig: () => null },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingResolutions ?? []).toEqual([]);
+    const enabled = fixture({ state: recovered.state });
+    runCheckpointSupervisor({}, enabled.dependencies);
+    expect(enabled.messages).toEqual([]);
+  });
+
   it("preserves a delivered alert when its recovery destination is removed", () => {
     const failed = fixture({
       dependencies: {
