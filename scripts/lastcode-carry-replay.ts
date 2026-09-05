@@ -404,12 +404,17 @@ export function expandCarrySource(input: {
       );
     }
     const currentSource = resolveCommit(input.repo, input.source);
-    if (!isAncestor(input.repo, preparedSource, currentSource)) {
-      throw new Error("Current source does not descend from the prepared bootstrap source.");
+    const representedSource = input.representedSource
+      ? resolveCommit(input.repo, input.representedSource)
+      : preparedSource;
+    if (!isAncestor(input.repo, representedSource, currentSource)) {
+      throw new Error(
+        "Current source does not descend from the prepared bootstrap source or its proven represented source.",
+      );
     }
     for (const entry of partition) add(entry.commit, entry.metadata);
-    const tail = firstParentCommits(input.repo, preparedSource, currentSource);
-    assertLinearRange(input.repo, preparedSource, tail);
+    const tail = firstParentCommits(input.repo, representedSource, currentSource);
+    assertLinearRange(input.repo, representedSource, tail);
     for (const squashCommit of tail) {
       for (const entry of expandSquashCommit(input.repo, squashCommit))
         add(entry.commit, entry.metadata);
@@ -520,7 +525,6 @@ function rebaseInProgress(worktree: string): boolean {
 
 function runInteractiveReplay(input: {
   readonly worktree: string;
-  readonly currentHead: string;
   readonly upstream: string;
   readonly onto: string;
   readonly todo: ReadonlyArray<string>;
@@ -549,7 +553,6 @@ function runInteractiveReplay(input: {
         "--onto",
         input.onto,
         input.upstream,
-        input.currentHead,
         "--keep-empty",
         "--empty=keep",
         "--reapply-cherry-picks",
@@ -635,8 +638,15 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
   const representedSource = input.representedSource
     ? resolveCommit(input.repo, input.representedSource)
     : undefined;
+  const preparedSource = input.preparedPartition
+    ? resolveCommit(input.repo, input.preparedPartition.source)
+    : undefined;
+  const crossBasePreparedPartition =
+    preparedSource !== undefined &&
+    representedSource !== undefined &&
+    preparedSource !== representedSource;
   const sameBaseCompilation =
-    input.preparedPartition !== undefined ||
+    (input.preparedPartition !== undefined && !crossBasePreparedPartition) ||
     (previousCompactHead !== undefined && isAncestor(input.repo, previousCompactHead, source));
   startPlan(input.worktree, {
     phase: "compile",
@@ -647,7 +657,6 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
   });
   runInteractiveReplay({
     worktree: input.worktree,
-    currentHead: replayHead,
     upstream: input.preparedPartition ? base : (representedSource ?? base),
     onto: base,
     todo,
@@ -669,7 +678,6 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
   });
   runInteractiveReplay({
     worktree: input.worktree,
-    currentHead: compactHead,
     upstream: sourceBase,
     onto,
     todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
@@ -716,7 +724,6 @@ export function replayUngroupedOnto(input: ReplayUngroupedInput): CarryReplayRes
     : sourceBase;
   runInteractiveReplay({
     worktree: input.worktree,
-    currentHead: currentSource,
     upstream,
     onto,
     todo,

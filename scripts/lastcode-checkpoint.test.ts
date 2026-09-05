@@ -34,6 +34,7 @@ import {
   supersededRecoveryNightly,
   unpublishedCheckpointTags,
   upstreamMainMirrorPushArgs,
+  validateHistoricalBootstrapSource,
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
@@ -628,6 +629,76 @@ it("reads the source commit from checkpoint metadata", () => {
     "abc123",
   );
   assert.equal(checkpointSourceCommit("LastCode checkpoint without source metadata"), undefined);
+});
+
+it("accepts cross-base bootstrap provenance only from the exact annotated installable", () => {
+  const directory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-bootstrap-provenance-"),
+  );
+  const git = (args: ReadonlyArray<string>): string =>
+    NodeChildProcess.execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+  try {
+    git(["init", "--quiet", "--initial-branch=main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "base\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "upstream base"]);
+    const base = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "represented source\n");
+    git(["commit", "--quiet", "--all", "--message", "represented source"]);
+    const representedSource = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "resolution.txt"), "historical resolution\n");
+    git(["add", "resolution.txt"]);
+    git(["commit", "--quiet", "--message", "historical checkpoint"]);
+    const source = git(["rev-parse", "HEAD"]);
+    const nightlyTag = "v9.9.9-nightly.20990102.2";
+    const sourceTag = `lastcode/checkpoint/${nightlyTag}`;
+    git([
+      "tag",
+      "--annotate",
+      sourceTag,
+      source,
+      "--message",
+      `Upstream-Commit: ${base}\nSource-Commit: ${representedSource}`,
+    ]);
+    const installables = [
+      {
+        tag: sourceTag,
+        commit: source,
+        nightly: nightly(nightlyTag),
+        revision: 0,
+        sourceCommit: representedSource,
+      },
+    ];
+    const bootstrap = {
+      base,
+      source,
+      head: source,
+      representedSource,
+      sourceTag,
+    };
+
+    expect(
+      validateHistoricalBootstrapSource({ bootstrap, installables, repoRoot: directory }),
+    ).toBe(representedSource);
+    expect(() =>
+      validateHistoricalBootstrapSource({
+        bootstrap: { ...bootstrap, base: "f".repeat(40) },
+        installables,
+        repoRoot: directory,
+      }),
+    ).toThrow("records Upstream-Commit");
+    expect(() =>
+      validateHistoricalBootstrapSource({
+        bootstrap: { ...bootstrap, source: "e".repeat(40) },
+        installables,
+        repoRoot: directory,
+      }),
+    ).toThrow("resolves to");
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 it("records source and upstream provenance in revision tags", () => {

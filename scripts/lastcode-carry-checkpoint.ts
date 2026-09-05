@@ -8,11 +8,14 @@ export interface CarryBootstrap {
   readonly source: string;
   readonly head: string;
   readonly ref?: string;
+  readonly representedSource?: string;
+  readonly sourceTag?: string;
 }
 
-export type ManifestReplayConfiguration =
-  | { readonly mode: "historical" }
-  | { readonly mode: "carry"; readonly bootstrap: CarryBootstrap };
+export type ManifestReplayConfiguration = {
+  readonly mode: "carry";
+  readonly bootstrap: CarryBootstrap;
+};
 
 export interface EffectiveReplayConfiguration {
   readonly mode: CheckpointReplayMode;
@@ -22,8 +25,10 @@ export interface EffectiveReplayConfiguration {
 }
 
 function requiredCommit(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`Carry replay manifest requires replay.bootstrap.${field}.`);
+  if (typeof value !== "string" || !/^[0-9a-f]{40}$/u.test(value)) {
+    throw new Error(
+      `Carry replay manifest requires replay.bootstrap.${field} to be an exact 40-character commit.`,
+    );
   }
   return value;
 }
@@ -40,9 +45,8 @@ export function parseManifestReplayConfiguration(
     throw new Error("Invalid carry replay configuration.");
   }
   const record = replay as Record<string, unknown>;
-  if (record.mode === "historical") return { mode: "historical" };
   if (record.mode !== "carry") {
-    throw new Error("Carry replay mode must be 'carry' or 'historical'.");
+    throw new Error("Carry replay manifest mode must be 'carry'.");
   }
   const bootstrap = record.bootstrap;
   if (bootstrap === null || typeof bootstrap !== "object" || Array.isArray(bootstrap)) {
@@ -53,6 +57,22 @@ export function parseManifestReplayConfiguration(
   if (ref !== undefined && (typeof ref !== "string" || ref.trim() === "")) {
     throw new Error("Carry replay manifest replay.bootstrap.ref must be nonempty.");
   }
+  const representedSource = fields.representedSource;
+  const sourceTag = fields.sourceTag;
+  if ((representedSource === undefined) !== (sourceTag === undefined)) {
+    throw new Error(
+      "Carry replay manifest replay.bootstrap.representedSource and sourceTag must be configured together.",
+    );
+  }
+  if (
+    sourceTag !== undefined &&
+    (typeof sourceTag !== "string" ||
+      !/^lastcode\/(?:checkpoint|revision)\/v\S+-nightly\.\S+$/u.test(sourceTag))
+  ) {
+    throw new Error(
+      "Carry replay manifest replay.bootstrap.sourceTag must name an immutable LastCode installable tag.",
+    );
+  }
   return {
     mode: "carry",
     bootstrap: {
@@ -60,6 +80,10 @@ export function parseManifestReplayConfiguration(
       source: requiredCommit(fields.source, "source"),
       head: requiredCommit(fields.head, "head"),
       ...(typeof ref === "string" ? { ref } : {}),
+      ...(representedSource === undefined
+        ? {}
+        : { representedSource: requiredCommit(representedSource, "representedSource") }),
+      ...(typeof sourceTag === "string" ? { sourceTag } : {}),
     },
   };
 }
@@ -78,6 +102,9 @@ export function resolveCheckpointReplay(input: {
   const configuredMode = input.configured?.mode ?? "legacy";
   const mode = input.requestedMode ?? input.configured?.mode ?? "historical";
   const rollbackReason = input.rollbackReason?.trim();
+  if (mode === "carry" && configuredMode !== "carry") {
+    throw new Error("--replay-mode carry requires an activated carry replay manifest.");
+  }
   if (configuredMode === "carry" && mode === "historical" && !rollbackReason) {
     throw new Error(
       "--replay-mode historical requires a nonempty --rollback-reason while carry replay is configured.",

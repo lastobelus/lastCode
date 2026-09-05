@@ -185,6 +185,7 @@ describe("carry replay core", () => {
         },
       });
 
+      assert.equal(git(repo, ["branch", "--show-current"]), "compile-bootstrap");
       assert.equal(result.groups?.length, CARRY_REPLAY_GROUPS.length);
       assert.equal(
         git(repo, ["rev-parse", `${result.head}^{tree}`]),

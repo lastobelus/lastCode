@@ -15,6 +15,7 @@ import {
   readManifestReplayConfiguration,
   resolveCheckpointReplay,
   sourceObjectRef,
+  type CarryBootstrap,
   type CheckpointReplayMode,
   type EffectiveReplayConfiguration,
 } from "./lastcode-carry-checkpoint.ts";
@@ -652,6 +653,48 @@ function listInstallableRefs(repoRoot: string): ReadonlyArray<InstallableRef> {
       ];
     })
     .toSorted(compareLastCodeInstallableTags);
+}
+
+export function validateHistoricalBootstrapSource(input: {
+  readonly bootstrap: CarryBootstrap;
+  readonly installables: ReadonlyArray<InstallableRef>;
+  readonly repoRoot: string;
+}): string | undefined {
+  const { representedSource, sourceTag } = input.bootstrap;
+  if (!representedSource || !sourceTag) return undefined;
+  const installable = input.installables.find(({ tag }) => tag === sourceTag);
+  if (!installable) {
+    throw new Error(`Carry bootstrap source tag ${sourceTag} is not an available installable.`);
+  }
+  if (
+    git(input.repoRoot, ["cat-file", "-t", `refs/tags/${sourceTag}`], { allowFailure: true }) !==
+    "tag"
+  ) {
+    throw new Error(`Carry bootstrap source tag ${sourceTag} must be annotated.`);
+  }
+  if (installable.commit !== input.bootstrap.source) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} resolves to ${installable.commit}, expected ${input.bootstrap.source}.`,
+    );
+  }
+  const message = git(input.repoRoot, [
+    "for-each-ref",
+    `refs/tags/${sourceTag}`,
+    "--format=%(contents)",
+  ]);
+  const recordedSource = checkpointTrailer(message, "Source-Commit");
+  if (recordedSource !== representedSource) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} records Source-Commit ${recordedSource ?? "missing"}, expected ${representedSource}.`,
+    );
+  }
+  const recordedUpstream = checkpointTrailer(message, "Upstream-Commit");
+  if (recordedUpstream !== input.bootstrap.base) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} records Upstream-Commit ${recordedUpstream ?? "missing"}, expected ${input.bootstrap.base}.`,
+    );
+  }
+  return representedSource;
 }
 
 export function resolveRevisionPlan(input: {
@@ -1646,6 +1689,42 @@ export function carryCompilationNeeded(input: {
   );
 }
 
+export function unexpectedHistoricalCheckpointChanges(input: {
+  readonly repoRoot: string;
+  readonly historicalCommit: string;
+  readonly candidateCommit: string;
+  readonly representedSource: string;
+  readonly currentSource: string;
+}): ReadonlyArray<string> {
+  if (!isAncestor(input.repoRoot, input.representedSource, input.currentSource)) {
+    throw new Error(
+      "Historical checkpoint source is not an ancestor of current LastCode main; its preserved resolution paths cannot be verified.",
+    );
+  }
+  const sourcePaths = new Set(
+    splitNul(
+      git(input.repoRoot, [
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        input.representedSource,
+        input.currentSource,
+      ]),
+    ),
+  );
+  return splitNul(
+    git(input.repoRoot, [
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      input.historicalCommit,
+      input.candidateCommit,
+    ]),
+  ).filter((path) => !sourcePaths.has(path));
+}
+
 export function recoveryPublicationArgs(
   remote: string,
   tag: string,
@@ -2143,6 +2222,14 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     ...(selection ? { selection } : {}),
     sourceCommit,
   });
+  const bootstrapRepresentedSource =
+    carryNeedsCompilation && !previousCompact && replay.mode === "carry" && replay.bootstrap
+      ? validateHistoricalBootstrapSource({
+          bootstrap: replay.bootstrap,
+          installables,
+          repoRoot,
+        })
+      : undefined;
   if (carryNeedsCompilation) {
     const worktree = resolveAutomationWorktree(repoRoot);
     if (NodeFS.existsSync(worktree) && !selection) {
@@ -2184,6 +2271,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
               source: replay.bootstrap?.source ?? "",
               head: replay.bootstrap?.head ?? "",
             },
+            ...(bootstrapRepresentedSource
+              ? { representedSource: bootstrapRepresentedSource }
+              : {}),
           });
       candidateRef = result.head;
       candidateCommit = result.head;
@@ -2502,6 +2592,31 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         rebaseOnto(worktree, nightly.tag, baseTag);
       }
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+      const historicalInstallable = !previousCompact
+        ? installables.findLast(
+            (installable) =>
+              installable.nightly.tag === nightly.tag && installable.replayMode !== "carry",
+          )
+        : undefined;
+      if (replay.mode === "carry" && historicalInstallable) {
+        if (!historicalInstallable.sourceCommit) {
+          throw new Error(
+            `Historical installable ${historicalInstallable.tag} has no Source-Commit; refusing to replace its unverified integration resolutions.`,
+          );
+        }
+        const unexpected = unexpectedHistoricalCheckpointChanges({
+          repoRoot,
+          historicalCommit: historicalInstallable.commit,
+          candidateCommit,
+          representedSource: historicalInstallable.sourceCommit,
+          currentSource: sourceCommit,
+        });
+        if (unexpected.length > 0) {
+          throw new Error(
+            `Carry replay would drop historical integration resolutions outside current source changes: ${unexpected.join(", ")}. Fold them into their owning carry groups before publication.`,
+          );
+        }
+      }
       failurePhase = "smoke";
       if (options.smoke) runSmokeGate(repoRoot, worktree);
       if (
