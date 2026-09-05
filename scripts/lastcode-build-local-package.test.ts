@@ -5,7 +5,6 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeNet from "node:net";
-import * as NodeEvents from "node:events";
 import {
   parseBuildResult,
   consumeSelection,
@@ -239,11 +238,11 @@ describe("local build package action", () => {
   it("cancels its owned child when aborted after a readiness receipt", async () => {
     const server = NodeNet.createServer();
     server.listen(0, "127.0.0.1");
-    await NodeEvents.once(server, "listening");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing fixture port");
     const controller = new AbortController();
-    const connected = NodeEvents.once(server, "connection");
+    const connected = new Promise<NodeNet.Socket>((resolve) => server.once("connection", resolve));
     const running = executeBuild(
       process.execPath,
       ["-e", `require('node:net').connect(${address.port}, '127.0.0.1');`],
@@ -252,15 +251,15 @@ describe("local build package action", () => {
     );
     const rejection = expect(running).rejects.toThrow("fixture cancelled");
     try {
-      const [socket] = await connected;
-      const closed = NodeEvents.once(socket, "close");
+      const socket = await connected;
+      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
       controller.abort(new Error("fixture cancelled"));
       await rejection;
       await closed;
     } finally {
       controller.abort(new Error("fixture cancelled"));
       server.close();
-      await NodeEvents.once(server, "close");
+      await new Promise<void>((resolve) => server.once("close", resolve));
     }
   });
 });
