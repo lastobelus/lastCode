@@ -8,7 +8,13 @@ const workflow = NodeFS.readFileSync(
   NodePath.resolve(import.meta.dirname, "../.github/workflows/ci.yml"),
   "utf8",
 );
-const blacksmithRunnerDeclaration = /^\s*runs-on:\s*["']?blacksmith-/mu;
+const hasBlacksmithRunnerConfiguration = (source: string): boolean =>
+  source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .some((line) =>
+      line.replaceAll("/etc/apt/blacksmith-ubuntu-mirrors.txt", "").includes("blacksmith-"),
+    );
 
 const gateBlock = /^  ci_gate:\n(?<body>[\s\S]*)$/mu.exec(workflow)?.groups?.body;
 if (!gateBlock) throw new Error("CI workflow is missing the ci_gate job.");
@@ -49,15 +55,24 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(workflow).toContain("fetch-depth: 2");
     expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
-    expect(workflow).not.toMatch(blacksmithRunnerDeclaration);
+    expect(hasBlacksmithRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
   });
 
-  it("rejects quoted and unquoted Blacksmith runner declarations without matching comments", () => {
-    expect('runs-on: "blacksmith-8vcpu-ubuntu-2404"').toMatch(blacksmithRunnerDeclaration);
-    expect("runs-on: blacksmith-8vcpu-ubuntu-2404").toMatch(blacksmithRunnerDeclaration);
-    expect("# runs-on: blacksmith-8vcpu-ubuntu-2404").not.toMatch(blacksmithRunnerDeclaration);
+  it("rejects direct and matrix Blacksmith runners without matching comments or mirror files", () => {
+    expect(hasBlacksmithRunnerConfiguration('runs-on: "blacksmith-8vcpu-ubuntu-2404"')).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "runs-on: ${{ matrix.runner }}\nstrategy:\n  matrix:\n    runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(hasBlacksmithRunnerConfiguration("# runs-on: blacksmith-8vcpu-ubuntu-2404")).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "run: sudo sed -i s,http:,https:, /etc/apt/blacksmith-ubuntu-mirrors.txt",
+      ),
+    ).toBe(false);
   });
 
   it("makes the stable gate depend on every validation job", () => {
