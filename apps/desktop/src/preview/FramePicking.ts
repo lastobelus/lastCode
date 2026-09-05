@@ -169,6 +169,10 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
     )
       continue;
     position = style.position;
+    // Non-replaced HTML inline boxes do not establish overflow clips. Their
+    // positioning still matters for absolutely positioned descendants.
+    if (style.display === "inline" && ancestor.namespaceURI === "http://www.w3.org/1999/xhtml")
+      continue;
     const clipX = clipsOverflow(style.overflowX);
     const clipY = clipsOverflow(style.overflowY);
     if (!clipX && !clipY) continue;

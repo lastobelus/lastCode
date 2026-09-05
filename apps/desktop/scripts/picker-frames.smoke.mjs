@@ -375,6 +375,13 @@ try {
     for (const scenario of [
       { name: "body-propagated", rootStyle: "", bodyStyle: "", height: 50 },
       { name: "boxless-ancestor", rootStyle: "", bodyStyle: "", height: 50 },
+      ...["inline", "inline-block", "inline-flex", "inline-grid"].map((display) => ({
+        name: `${display}-ancestor`,
+        rootStyle: "",
+        bodyStyle: "",
+        display,
+        height: display === "inline" ? 50 : 20,
+      })),
       { name: "root-overflow", rootStyle: "overflow:hidden", bodyStyle: "", height: 20 },
       { name: "root-contained", rootStyle: "contain:layout", bodyStyle: "", height: 20 },
       { name: "body-contained", rootStyle: "", bodyStyle: "contain:layout", height: 20 },
@@ -395,7 +402,7 @@ try {
           html{${scenario.rootStyle}}
           body{margin:0;height:120px;overflow:${overflow};${scenario.bodyStyle}}
           #target{position:relative;top:100px;left:100px;width:100px;height:50px;background:lime}
-          </style><div style="${scenario.name === "boxless-ancestor" ? `display:contents;overflow:${overflow};position:fixed` : ""}"><div id="target">Overflow target</div></div>`;
+          </style><div style="${scenario.display ? `display:${scenario.display};overflow:${overflow};width:300px;height:120px` : scenario.name === "boxless-ancestor" ? `display:contents;overflow:${overflow};position:fixed` : ""}"><div id="target">Overflow target</div></div>`;
         },
         { overflow, scenario },
       );
