@@ -127,6 +127,7 @@ export function ThreadAnnotationEditorDialog(props: {
           <form id={formId} onSubmit={(event) => void submit(event)}>
             <Textarea
               ref={textareaRef}
+              defaultValue={props.annotation?.body ?? ""}
               aria-label="Thread annotation"
               autoFocus
               className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none [&_[data-slot=textarea]]:font-mono [&_[data-slot=textarea]]:text-sm"
