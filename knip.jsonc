@@ -29,10 +29,22 @@
         "src/preview-pick-preload.ts!",
         "src/preview-pip-preload.ts!",
         "src/preview/Annotation.css!",
+        "scripts/picker-frames.smoke.mjs",
+        "scripts/picker-electron-capture.smoke.mjs",
       ],
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.
       "ignoreDependencies": ["playwright-core", "electron-builder"],
+    },
+    "scripts": {
+      // Spawned by filename, or declarations paired with JavaScript tooling.
+      "entry": [
+        "fixtures/lastcode-docs-install.mjs",
+        "fixtures/lastcode-docs-local-update.mjs",
+        "lastcode-packaged-server-supervisor.mjs!",
+        "lastcode-local-update.d.mts",
+        "lastcode-lock.d.mts",
+      ],
     },
     "apps/web": {
       // Worktree setup invokes this directly from t3.json.
