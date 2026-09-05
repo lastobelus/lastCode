@@ -654,6 +654,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadConfig: () => readJson(paths.configPath, "checkpoint supervisor config"),
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
+    supervisorPid: process.pid,
     notify: (title, message) => notify(title, message, environment),
     reconcileProjectActions: (primaryWorktree, trustedProjectActionIds) =>
       reconcilePrimaryProjectActions(primaryWorktree, home, trustedProjectActionIds, environment),
@@ -800,6 +801,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     }
     let state = {
       schemaVersion: 1,
+      supervisorPid: dependencies.supervisorPid,
       status: "failed",
       phase: failure.phase,
       startedAt,
@@ -859,6 +861,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   }
   let state = {
     schemaVersion: 1,
+    supervisorPid: dependencies.supervisorPid,
     status: "success",
     phase: "complete",
     startedAt,

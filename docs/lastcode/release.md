@@ -142,8 +142,11 @@ List Actions, launch the eligible returned ID with
 
 The action observes the active local macOS checkpoint service. It does not start
 a checkpoint, rebuild, recover, install, or restart anything. It captures the
-active run, waits for it to finish, and reports a fresh terminal supervisor
-result. A missing active run, unavailable service, replaced run, missing fresh
+active process and launch count, waits for it to finish, and reports the terminal
+state whose recorded supervisor PID matches that process. A result written while
+the supervisor is still delivering notifications is accepted after exit. The
+installed supervisor must include this PID field. A missing active run,
+unavailable service, replaced run, missing matching
 result, or one-hour timeout requires attention; an old success is not proof of
 the requested checkpoint. Cancelling the action leaves the service running.
 After resume, inspect the result and use `lastcode-checkpoints --verbose` once

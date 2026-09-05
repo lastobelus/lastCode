@@ -14,6 +14,7 @@ export const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 
 export type SupervisorState = {
   readonly schemaVersion: 1;
+  readonly supervisorPid: number;
   readonly status: "failed" | "success";
   readonly phase: string;
   readonly startedAt: string;
@@ -55,6 +56,9 @@ function validState(value: unknown): value is SupervisorState {
   const finished = typeof state.finishedAt === "string" ? Date.parse(state.finishedAt) : Number.NaN;
   return (
     state.schemaVersion === 1 &&
+    typeof state.supervisorPid === "number" &&
+    Number.isSafeInteger(state.supervisorPid) &&
+    state.supervisorPid > 0 &&
     (state.status === "success" || state.status === "failed") &&
     typeof state.phase === "string" &&
     Number.isFinite(started) &&
@@ -104,17 +108,10 @@ function daemonStatus(): DaemonStatus {
   return parseDaemonStatus(result.stdout ?? "", result.status ?? 1, Boolean(result.error));
 }
 
-function terminalChanged(previous: SupervisorState | null, current: SupervisorState): boolean {
-  if (!previous) return true;
-  return current.finishedAt !== previous.finishedAt || current.startedAt !== previous.startedAt;
-}
-
 export async function waitForCheckpoint(
   deps: WaitDependencies,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<SupervisorState> {
-  const baseline = deps.readState();
-  const observedAt = deps.now();
   const initialDaemon = deps.daemonStatus();
   if (initialDaemon.state === "unavailable") {
     throw new CheckpointWaitError(
@@ -155,16 +152,10 @@ export async function waitForCheckpoint(
     }
     const daemonExited = currentDaemon.state === "idle";
     if (daemonExited) {
-      if (!validState(currentState) || !terminalChanged(baseline, currentState)) {
+      if (!validState(currentState) || currentState.supervisorPid !== pid) {
         throw new CheckpointWaitError(
           "no-state",
-          `Checkpoint supervisor run ${pid} exited without a new terminal state.`,
-        );
-      }
-      if (Date.parse(currentState.finishedAt) < observedAt) {
-        throw new CheckpointWaitError(
-          "no-state",
-          `Checkpoint supervisor run ${pid} exposed only a preexisting terminal state.`,
+          `Checkpoint supervisor run ${pid} exited without a matching terminal state.`,
         );
       }
       return currentState;
@@ -248,10 +239,11 @@ if (import.meta.main) {
   } catch (error) {
     if (error instanceof CheckpointWaitError) {
       lastCodeAction.result({ outcome: "attention", reason: error.reason, summary: error.message });
+    } else {
+      console.error(
+        `[wait-for-checkpoint] ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
     }
-    console.error(
-      `[wait-for-checkpoint] ${error instanceof Error ? error.message : String(error)}`,
-    );
-    process.exitCode = 1;
   }
 }

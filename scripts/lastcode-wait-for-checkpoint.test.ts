@@ -2,8 +2,11 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
 
 import { describe, expect, it, onTestFinished } from "vite-plus/test";
+import { createActionProtocolDecoder } from "@t3tools/shared/actionResumeProtocol";
 import {
   parseDaemonStatus,
   parseOptions,
@@ -22,6 +25,7 @@ const success = (finished = finishedAt): SupervisorState => ({
   phase: "complete",
   startedAt,
   finishedAt: finished,
+  supervisorPid: 42,
 });
 
 function harness(
@@ -77,6 +81,8 @@ describe("wait for checkpoint", () => {
       { ...success(), startedAt: "bad-date" },
       { ...success(), phase: "checkpoint" },
       { ...success(), startedAt: newerFinishedAt, finishedAt },
+      { ...success(), supervisorPid: undefined },
+      { ...success(), supervisorPid: "42" },
     ])
       expect(readSupervisorState(stateFixture(value))).toBeNull();
   });
@@ -93,8 +99,14 @@ describe("wait for checkpoint", () => {
         30_000,
       ),
     ).resolves.toMatchObject({ finishedAt: newerFinishedAt });
+    await expect(
+      waitForCheckpoint(
+        harness([success(), success()], [{ state: "running", pid: 42 }, { state: "idle" }]).deps,
+        30_000,
+      ),
+    ).resolves.toMatchObject({ finishedAt });
   });
-  it("does not attribute old state while running or unchanged state after idle", async () => {
+  it("does not attribute old state while running or a different supervisor run", async () => {
     await expect(
       waitForCheckpoint(
         harness(
@@ -106,12 +118,15 @@ describe("wait for checkpoint", () => {
     ).resolves.toMatchObject({ finishedAt: newerFinishedAt });
     await expect(
       waitForCheckpoint(
-        harness([success(), success()], [{ state: "running", pid: 42 }, { state: "idle" }]).deps,
+        harness(
+          [success(), { ...success(newerFinishedAt), supervisorPid: 41 }],
+          [{ state: "running", pid: 42 }, { state: "idle" }],
+        ).deps,
         30_000,
       ),
-    ).rejects.toThrow("without a new");
+    ).rejects.toThrow("matching terminal state");
   });
-  it("rejects idle, missing-pid, timeout, missing state, and pre-observation terminal state", async () => {
+  it("rejects idle, missing-pid, timeout, missing state, and mismatched terminal state", async () => {
     await expect(
       waitForCheckpoint(harness([success()], [{ state: "idle" }]).deps, 1),
     ).rejects.toThrow("No active");
@@ -127,22 +142,15 @@ describe("wait for checkpoint", () => {
         30_000,
       ),
     ).rejects.toThrow("without");
-    const old = harness(
-      [success(), success("1970-01-01T00:00:00.500Z")],
-      [{ state: "running", pid: 42 }, { state: "idle" }],
-    );
     await expect(
       waitForCheckpoint(
-        {
-          ...old.deps,
-          now: (() => {
-            let first = true;
-            return () => (first ? ((first = false), 1_000) : 1_000);
-          })(),
-        },
+        harness(
+          [success(), { ...success(), supervisorPid: 41 }],
+          [{ state: "running", pid: 42 }, { state: "idle" }],
+        ).deps,
         30_000,
       ),
-    ).rejects.toThrow("preexisting");
+    ).rejects.toThrow("matching terminal state");
   });
   it("rejects initial and mid-run probe failure, replacement pid, and superseding run count", async () => {
     await expect(
@@ -185,6 +193,7 @@ describe("wait for checkpoint", () => {
       ...success(newerFinishedAt),
       status: "failed",
       phase: "checkpoint",
+      supervisorPid: 42,
     };
     await expect(
       waitForCheckpoint(
@@ -201,5 +210,41 @@ describe("wait for checkpoint", () => {
   it("requires values for CLI options", () => {
     expect(() => parseOptions(["--home"])).toThrow("requires a path");
     expect(() => parseOptions(["--timeout-ms"])).toThrow("requires a value");
+  });
+
+  it("emits one attention result and exits successfully when no run is active", async () => {
+    const home = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-wait-checkpoint-cli-"),
+    );
+    const bin = NodePath.join(home, "bin");
+    NodeFS.mkdirSync(bin, { recursive: true });
+    const launchctl = NodePath.join(bin, "launchctl");
+    NodeFS.writeFileSync(launchctl, "#!/bin/sh\nprintf 'state = not running\\n'\n");
+    NodeFS.chmodSync(launchctl, 0o755);
+    onTestFinished(() => NodeFS.rmSync(home, { recursive: true, force: true }));
+
+    const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+    const runId = "checkpoint-cli-test-run";
+    const token = "checkpoint-cli-test-token";
+    const result = await execFile(
+      process.execPath,
+      [NodePath.join(import.meta.dirname, "lastcode-wait-for-checkpoint.ts")],
+      {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          T3CODE_ACTION_RUN_ID: runId,
+          T3CODE_ACTION_EVENT_TOKEN: token,
+        },
+      },
+    );
+    const decoder = createActionProtocolDecoder({ runId, token });
+    const decoded = decoder.push(result.stdout);
+    expect(decoded.events).toHaveLength(1);
+    expect(decoded.events[0]).toMatchObject({
+      kind: "result",
+      report: { outcome: "attention", reason: "not-running" },
+    });
+    expect(decoder.finish()).toBe("");
   });
 });
