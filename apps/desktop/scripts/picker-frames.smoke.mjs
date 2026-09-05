@@ -369,6 +369,64 @@ try {
     "PASS: viewport-fixed, transformed-fixed and absolute overflow escape, including ordinary descendants",
   );
 
+  // HTML body overflow can belong to the viewport even when its box is short.
+  // Root overflow and containment disable body propagation and retain its clip.
+  for (const overflow of ["hidden", "auto", "clip"]) {
+    for (const scenario of [
+      { name: "body-propagated", rootStyle: "", bodyStyle: "", height: 50 },
+      { name: "root-overflow", rootStyle: "overflow:hidden", bodyStyle: "", height: 20 },
+      { name: "root-contained", rootStyle: "contain:layout", bodyStyle: "", height: 20 },
+      { name: "body-contained", rootStyle: "", bodyStyle: "contain:layout", height: 20 },
+      {
+        name: "root-propagated",
+        rootStyle: `height:60px;overflow:${overflow}`,
+        bodyStyle: "overflow:visible",
+        height: 50,
+      },
+    ]) {
+      const overflowPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await overflowPage.setContent(
+        '<body style="margin:0"><iframe style="position:absolute;left:80px;top:80px;width:400px;height:350px;border:0"></iframe>',
+      );
+      await overflowPage.locator("iframe").evaluate(
+        (frame, { overflow, scenario }) => {
+          frame.srcdoc = `<!doctype html><style>
+          html{${scenario.rootStyle}}
+          body{margin:0;height:120px;overflow:${overflow};${scenario.bodyStyle}}
+          #target{position:relative;top:100px;left:100px;width:100px;height:50px;background:lime}
+          </style><div id="target">Overflow target</div>`;
+        },
+        { overflow, scenario },
+      );
+      const selected = overflowPage.frameLocator("iframe").locator("#target");
+      await selected.waitFor();
+      NodeAssert.equal(
+        await selected.evaluate(
+          (element) => element.ownerDocument.elementFromPoint(150, 110) === element,
+        ),
+        true,
+        `${scenario.name}-${overflow}: target starts within the visible area`,
+      );
+      NodeAssert.equal(
+        await selected.evaluate(
+          (element) => element.ownerDocument.elementFromPoint(150, 140) === element,
+        ),
+        scenario.height === 50,
+        `${scenario.name}-${overflow}: browser hit testing confirms the clip boundary`,
+      );
+      await install(overflowPage);
+      await overflowPage.mouse.click(80 + 150, 80 + 110);
+      const overflowRect = await attach(
+        overflowPage,
+        /Overflow target/,
+        `${scenario.name}-${overflow}`,
+      );
+      NodeAssert.deepEqual(overflowRect, { x: 180, y: 180, width: 100, height: scenario.height });
+      await overflowPage.close();
+    }
+  }
+  console.log("PASS: viewport overflow propagation and root/body containment clipping");
+
   if (liveUrl) {
     const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "picker-electron-"));
     const bundlePath = NodePath.join(scratch, "picker-bundle.js");

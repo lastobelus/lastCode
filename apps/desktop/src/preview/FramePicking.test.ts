@@ -183,6 +183,7 @@ describe("frame picking coordinates", () => {
     for (const descendant of [false, true]) {
       const { top, child, element } = fixture();
       const containingBlock = {
+        ownerDocument: child,
         parentElement: null,
         offsetWidth: 30,
         offsetHeight: 100,

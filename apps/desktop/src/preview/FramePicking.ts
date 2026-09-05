@@ -96,6 +96,30 @@ function intersect(rect: DOMRect, clip: { x: number; y: number; width: number; h
 const clipsOverflow = (value: string): boolean =>
   value === "auto" || value === "clip" || value === "hidden" || value === "scroll";
 
+/** Propagated overflow clips at the viewport, not the root/body border box. */
+function propagatesOverflowToViewport(element: Element, style: CSSStyleDeclaration): boolean {
+  const owner = element.ownerDocument;
+  const root = owner.documentElement;
+  if (element === root) return style.display !== "none";
+  if (
+    element !== owner.body ||
+    element.parentElement !== root ||
+    root?.localName !== "html" ||
+    root.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
+    style.display === "none" ||
+    (style.contain && style.contain !== "none")
+  )
+    return false;
+  const rootStyle = owner.defaultView?.getComputedStyle(root);
+  return (
+    !!rootStyle &&
+    rootStyle.display !== "none" &&
+    rootStyle.overflowX === "visible" &&
+    rootStyle.overflowY === "visible" &&
+    (!rootStyle.contain || rootStyle.contain === "none")
+  );
+}
+
 function establishesPositioningBlock(style: CSSStyleDeclaration, position: string): boolean {
   if (style.display === "contents" || style.display === "none") return false;
   return (
@@ -146,6 +170,7 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
     const clipX = clipsOverflow(style.overflowX);
     const clipY = clipsOverflow(style.overflowY);
     if (!clipX && !clipY) continue;
+    if (propagatesOverflowToViewport(ancestor, style)) continue;
     if (!hasSupportedTransform(style)) return null;
     const bounds = ancestor.getBoundingClientRect();
     const scaleX = ancestor.offsetWidth ? bounds.width / ancestor.offsetWidth : 0;
