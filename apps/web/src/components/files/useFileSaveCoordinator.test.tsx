@@ -12,7 +12,7 @@ vi.mock("~/state/projects", () => ({ projectEnvironment: { writeFile: {} } }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => writeFile }));
 vi.mock("./projectFilesQueryState", () => ({ confirmProjectFileQueryData: confirmFile }));
 
-import { setMarkdownTaskChecked } from "./filePreviewMode";
+import { setMarkdownTaskChecked } from "~/markdownTaskList";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 
 const environmentId = EnvironmentId.make("save-lifecycle-audit");
