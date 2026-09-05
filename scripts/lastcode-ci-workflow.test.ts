@@ -3,11 +3,35 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
+import { parse } from "yaml";
 
 const workflow = NodeFS.readFileSync(
   NodePath.resolve(import.meta.dirname, "../.github/workflows/ci.yml"),
   "utf8",
 );
+
+const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+
+const standardHostedRunners = new Set(["ubuntu-24.04", "macos-26"]);
+
+const hasNonstandardRunnerConfiguration = (source: string): boolean => {
+  const document: unknown = parse(source);
+  const jobs = asRecord(asRecord(document)?.jobs);
+  if (jobs === undefined) return true;
+
+  for (const value of Object.values(jobs)) {
+    const job = asRecord(value);
+    if (job === undefined) return true;
+    const runsOn = job["runs-on"];
+    const runners = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : [];
+    if (runners.length === 0 || runners.some((runner) => !standardHostedRunners.has(runner)))
+      return true;
+  }
+  return false;
+};
 
 const gateBlock = /^  ci_gate:\n(?<body>[\s\S]*)$/mu.exec(workflow)?.groups?.body;
 if (!gateBlock) throw new Error("CI workflow is missing the ci_gate job.");
@@ -48,9 +72,72 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(workflow).toContain("fetch-depth: 2");
     expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
-    expect(workflow).not.toContain("blacksmith-");
+    expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
+  });
+
+  it("rejects nonstandard and dynamic runners without matching comments or mirror files", () => {
+    expect(
+      hasNonstandardRunnerConfiguration(
+        'jobs:\n  test:\n    runs-on: "blacksmith-8vcpu-ubuntu-2404"',
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix['runner'] }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: blacksmith-8vcpu-ubuntu-2404 }",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: '${{ matrix.runner }}' }\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.target.runner }}\n    strategy:\n      matrix:\n        target: [{ runner: blacksmith-8vcpu-ubuntu-2404 }]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404\n    runs-on: ubuntu-24.04",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        'jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        include: [{ note: "keep\n          # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cat /etc/apt/blacksmith-cache.txt",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}",
+      ),
+    ).toBe(true);
   });
 
   it("makes the stable gate depend on every validation job", () => {
