@@ -556,7 +556,7 @@ function rejectedThreadSend(error, target) {
   // The generated shell wrapper exits before the CLI starts when exec fails.
   if (
     [126, 127].includes(error.status) &&
-    /(?:^|\n)[^\n]*: exec:[^\n]*(?:not found|No such file or directory|Permission denied|cannot execute)[^\n]*$/imu.test(
+    /(?:^|\n)[^\n]*: (?:exec:|line \d+:)[^\n]*(?:not found|No such file or directory|Permission denied|cannot execute)[^\n]*$/imu.test(
       error.diagnostic,
     )
   ) {

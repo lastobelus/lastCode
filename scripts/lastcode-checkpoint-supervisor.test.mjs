@@ -713,11 +713,15 @@ describe("LastCode checkpoint supervisor", () => {
       const executable = NodePath.join(directory, "runtime");
       if (kind === "non-executable")
         NodeFS.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o600 });
-      const result = NodeChildProcess.spawnSync(
-        "/bin/sh",
-        ["-c", 'exec "$1"', "lastcode-thread", executable],
-        { encoding: "utf8" },
+      const wrapper = NodePath.join(directory, "lastcode-thread");
+      NodeFS.writeFileSync(
+        wrapper,
+        '#!/bin/sh\ncase "$1" in\n  send) command="$1"; shift; exec "$1" thread "$command" ;;\nesac\n',
+        { mode: 0o700 },
       );
+      const result = NodeChildProcess.spawnSync("/bin/bash", [wrapper, "send", executable], {
+        encoding: "utf8",
+      });
       expect([126, 127]).toContain(result.status);
       const failed = fixture({
         dependencies: {
@@ -741,6 +745,31 @@ describe("LastCode checkpoint supervisor", () => {
     } finally {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    [127, "lastcode-thread: line 3: /example/runtime: No such file or directory"],
+    [126, "lastcode-thread: line 3: /example/runtime: Permission denied"],
+  ])("rejects a Bash wrapper failure without a second exec line: %s", (status, diagnostic) => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw Object.assign(new Error("exec failed"), {
+            phase: "alert-delivery",
+            status,
+            diagnostic,
+          });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+    expect(failed.state.incident.alertDelivery).toBe("rejected");
+    const recovered = fixture({ state: failed.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([]);
   });
 
   it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(
