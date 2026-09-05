@@ -830,32 +830,43 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   const deliveryConfigured = Boolean(config?.recoveryThreadId);
   let incident = durableIncident(previous?.incident);
   const pendingIncidents = deliveryConfigured
-    ? [...durableIncidentList(previous, "pendingIncidents")]
+    ? durableIncidentList(previous, "pendingIncidents")
     : [];
   const pendingResolutions = deliveryConfigured
-    ? durableIncidentList(previous, "pendingResolutions").map((pendingIncident) => ({
+    ? durableIncidentList(previous, "pendingResolutions")
+        .filter((pendingIncident) => pendingIncident.alertDelivery === "sent")
+        .map((pendingIncident) => ({
+          ...pendingIncident,
+          resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
+          resolutionDelivery: "pending",
+        }))
+    : [];
+  for (const pendingIncident of pendingIncidents) {
+    if (
+      pendingIncident.alertDelivery === "sent" &&
+      !pendingResolutions.some(
+        (pendingResolution) => pendingResolution.fingerprint === pendingIncident.fingerprint,
+      )
+    ) {
+      pendingResolutions.push({
         ...pendingIncident,
         resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
         resolutionDelivery: "pending",
-      }))
-    : [];
-  if (previous?.status === "failed" && incident) {
-    if (
-      deliveryConfigured &&
-      incident.alertDelivery !== "sent" &&
-      !pendingIncidents.some(
-        (pendingIncident) => pendingIncident.fingerprint === incident.fingerprint,
-      )
-    ) {
-      pendingIncidents.push(incident);
+      });
     }
+  }
+  if (incident && incident.alertDelivery !== "sent") {
+    incident = {
+      ...incident,
+      ...(previous?.status === "failed" ? { resolvedAt: finishedAt } : {}),
+      alertDelivery: "not-needed",
+      resolutionDelivery: "not-needed",
+    };
+  } else if (previous?.status === "failed" && incident) {
     incident = {
       ...incident,
       resolvedAt: finishedAt,
       resolutionDelivery: deliveryConfigured ? "pending" : "not-needed",
-      ...(!deliveryConfigured && incident.alertDelivery !== "sent"
-        ? { alertDelivery: "not-needed" }
-        : {}),
     };
   } else if (!deliveryConfigured && incident) {
     incident = { ...incident, resolutionDelivery: "not-needed" };
@@ -868,7 +879,6 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     startedAt,
     finishedAt,
     lastSuccessAt: finishedAt,
-    ...(pendingIncidents.length > 0 ? { pendingIncidents } : {}),
     ...(pendingResolutions.length > 0 ? { pendingResolutions } : {}),
     ...(incident ? { incident } : {}),
   };
