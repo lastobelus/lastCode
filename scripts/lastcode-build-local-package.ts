@@ -202,6 +202,11 @@ export function withRequestLock<T>(path: string, operation: () => T): T {
 }
 export function writeSelection(path: string, request: LocalBuildRequest): void {
   withRequestLock(path, () => {
+    if (NodeFS.existsSync(path)) {
+      throw new Error(
+        `A local build selection is already pending at ${path}. Complete or explicitly discard that selection before selecting another tag.`,
+      );
+    }
     const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
     try {
       NodeFS.writeFileSync(temporary, `${JSON.stringify(validateRequest(request), null, 2)}\n`, {

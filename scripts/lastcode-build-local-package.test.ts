@@ -76,6 +76,9 @@ describe("local build package action", () => {
     onTestFinished(() => NodeFS.rmSync(root, { recursive: true, force: true }));
     const path = NodePath.join(root, "git", "lastcode-actions", "build.json");
     writeSelection(path, request());
+    expect(() =>
+      writeSelection(path, request({ tag: "lastcode/revision/v1.2.3-nightly.20260904.7.2" })),
+    ).toThrow("already pending");
     expect(consumeSelection(path)).toEqual(request());
     expect(() => consumeSelection(path)).toThrow("each selection permits one attempt");
     writeSelection(path, request({ requestToken: "local-aaaaaaaa-1234-1234-1234-123456789abc" }));
