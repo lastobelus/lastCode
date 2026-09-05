@@ -23,7 +23,7 @@
     {
       "id": "lc-wait-for-checkpoint",
       "name": "Wait for Checkpoint",
-      "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-checkpoint.ts",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/lastcode-wait-for-checkpoint.ts\"",
       "icon": "test"
     },
     {

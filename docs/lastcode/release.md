@@ -151,7 +151,9 @@ for the concrete next recovery or verification step.
 
 The importable declaration is in `t3.json`. As with the PR action, the owning
 environment must import it and grant resume permission. Managed installations
-use the `lc-wait-for-checkpoint` trust entry. If the action is missing or
+use the `lc-wait-for-checkpoint` trust entry. The command loads from
+`T3CODE_PROJECT_ROOT`, so an older maintenance-thread worktree can use the
+updated observer after the primary checkout is refreshed. If the action is missing or
 disabled, report that setup problem rather than reverting to a sleep loop.
 
 ### Validating a checkpoint
