@@ -105,6 +105,14 @@ one stable aggregate `CI Gate`. Head or base drift invalidates the result and
 requires the agent to decide whether to rebase, republish, and request review
 again.
 
+This applies to authorized repair PRs opened during checkpoint or build recovery,
+without a separate request to babysit. After handling existing findings, call
+`list_project_actions`, select the eligible **Wait for PR** action (prefer
+`lc-wait-for-pr`), call `run_project_action_and_resume`, and end the turn.
+Executing `scripts/lastcode-wait-for-pr.ts` directly in a shell keeps the agent
+turn open and defeats the quota-saving handoff. On resume, inspect the result
+and recheck the current revision before continuing.
+
 Merge the current ready PR with:
 
 ```bash
@@ -123,6 +131,35 @@ the already-completed GitHub merge; the managed checkpoint service remains the
 repair path. The request never terminates a daemon run already in progress.
 
 ## Checkpoint CI
+
+### Waiting for the checkpoint service
+
+After an authorized service run has started, use the independent **Wait for
+Checkpoint** Project Action (`lc-wait-for-checkpoint`) to observe its completion.
+List Actions, launch the eligible returned ID with
+`run_project_action_and_resume`, and end the turn immediately. Do not poll
+`launchctl`, processes, dashboard output, or log tails while it runs.
+
+The action observes the active local macOS checkpoint service. It does not start
+a checkpoint, rebuild, recover, install, or restart anything. It captures the
+active process and launch count, waits for it to finish, and reports the terminal
+state whose recorded supervisor PID matches that process. A result written while
+the supervisor is still delivering notifications is accepted after exit. The
+installed supervisor must include this PID field. A missing active run,
+unavailable service, replaced run, missing matching
+result, or one-hour timeout requires attention; an old success is not proof of
+the requested checkpoint. Cancelling the action leaves the service running.
+After resume, inspect the result and use `lastcode-checkpoints --verbose` once
+for the concrete next recovery or verification step.
+
+The importable declaration is in `t3.json`. As with the PR action, the owning
+environment must import it and grant resume permission. Managed installations
+use the `lc-wait-for-checkpoint` trust entry. The command loads from
+`T3CODE_PROJECT_ROOT`, so an older maintenance-thread worktree can use the
+updated observer after the primary checkout is refreshed. If the action is missing or
+disabled, report that setup problem rather than reverting to a sleep loop.
+
+### Validating a checkpoint
 
 A release build uses a different full-CI context because rebasing intentionally
 rewrites ancestry. Check out the immutable checkpoint or revision and run:

@@ -110,9 +110,15 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - The server is event-sourced and its async flows emit typed receipts. Wait on receipts and worker drains, never on sleeps or polling. A test that needs a timeout to pass is wrong.
 - Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
 
+For an already-started LastCode checkpoint service run, use the resumable
+**Wait for Checkpoint** action instead of agent-side sleep/status loops. Follow
+the action handoff and result rules in `docs/lastcode/release.md`; this action
+does not start or repair the service.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
+- For LastCode PRs targeting `lastcode/main`, including authorized checkpoint or build repair PRs, follow `.agents/skills/lastcode-pr/SKILL.md`. When CI or review is passive and no current finding needs judgement, list Project Actions, launch the eligible **Wait for PR** action by its returned ID (prefer `lc-wait-for-pr`), and end the turn immediately. Use the action again after a fixing push when another wait is needed; do not spend agent turns polling GitHub or the running action. This applies without a separate “babysit” request and does not authorize creating or merging a PR.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
 - UI changes need before/after images. Motion or timing needs a short video.
