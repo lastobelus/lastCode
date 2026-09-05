@@ -533,7 +533,7 @@ function deliveryThreadId(incident) {
   return incident.deliveryThreadId ?? incident.attemptedThreadId;
 }
 
-function rejectedThreadTarget(error, target) {
+function rejectedThreadSend(error, target) {
   if (
     !error ||
     typeof error !== "object" ||
@@ -541,6 +541,18 @@ function rejectedThreadTarget(error, target) {
     typeof error.diagnostic !== "string"
   ) {
     return false;
+  }
+  // These diagnostics originate before runThreadSend calls dispatch. Keep
+  // dispatch failures out: a timeout there does not prove non-delivery.
+  if (
+    /(?:^|[\s:])The owning LastCode server is not available; thread send has no offline fallback\./u.test(
+      error.diagnostic,
+    ) ||
+    /(?:^|[\s:])LastCode thread (?:live send target lookup|send command id generation|send message id generation) failed\./u.test(
+      error.diagnostic,
+    )
+  ) {
+    return true;
   }
   const escapedTarget = target.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   // ThreadSendTargetError defines these messages before dispatch. The runtime
@@ -626,7 +638,7 @@ function attemptDelivery(state, config, dependencies) {
       );
       dependencies.writeState(nextState);
     } catch (error) {
-      if (rejectedThreadTarget(error, targetThreadId)) {
+      if (rejectedThreadSend(error, targetThreadId)) {
         pendingIncidents[pendingIncidentIndex] = recordRejectedAttempt(updatedIncident);
         nextState = { ...nextState, pendingIncidents };
         dependencies.writeState(nextState);
@@ -722,7 +734,7 @@ function attemptDelivery(state, config, dependencies) {
     };
     dependencies.writeState(nextState);
   } catch (error) {
-    if (!resolving && rejectedThreadTarget(error, targetThreadId)) {
+    if (!resolving && rejectedThreadSend(error, targetThreadId)) {
       nextState = { ...nextState, incident: recordRejectedAttempt(nextIncident) };
       dependencies.writeState(nextState);
     } else if (!resolving) {

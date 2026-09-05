@@ -672,10 +672,16 @@ describe("LastCode checkpoint supervisor", () => {
     expect(repaired.state.incident).toMatchObject({ alertDelivery: "sent", deliveryAttempts: 2 });
   });
 
-  it("drops a definitively rejected alert when the checkpoint recovers", () => {
+  it.each([
+    "ThreadSendTargetError: LastCode thread 'thread-stale' was not found.",
+    "The owning LastCode server is not available; thread send has no offline fallback.",
+    "LastCode thread live send target lookup failed.",
+    "LastCode thread send command id generation failed.",
+    "LastCode thread send message id generation failed.",
+  ])("drops a pre-dispatch rejected alert after recovery: %s", (diagnostic) => {
     const targetRejected = () =>
       Object.assign(new Error("target rejected"), {
-        diagnostic: "ThreadSendTargetError: LastCode thread 'thread-stale' was not found.",
+        diagnostic,
         phase: "alert-delivery",
       });
     const failed = fixture({
@@ -698,6 +704,28 @@ describe("LastCode checkpoint supervisor", () => {
       alertDelivery: "not-needed",
       resolutionDelivery: "not-needed",
     });
+  });
+
+  it("keeps an explicit dispatch failure uncertain after recovery", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw Object.assign(new Error("dispatch timed out"), {
+            phase: "alert-delivery",
+            diagnostic: "LastCode thread live send dispatch failed.",
+          });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+    expect(failed.state.incident.alertDelivery).toBe("unknown");
+    const recovered = fixture({ state: failed.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0].message).toContain("resolved alert");
   });
 
   it("retains an earlier uncertain recipient when a later retry is definitively rejected", () => {
