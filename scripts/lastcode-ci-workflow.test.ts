@@ -11,7 +11,7 @@ const workflow = NodeFS.readFileSync(
 const hasBlacksmithRunnerConfiguration = (source: string): boolean =>
   source
     .split("\n")
-    .filter((line) => !line.trimStart().startsWith("#"))
+    .map((line) => line.replace(/^\s*#.*$|\s+#.*$/u, ""))
     .some((line) =>
       line.replaceAll("/etc/apt/blacksmith-ubuntu-mirrors.txt", "").includes("blacksmith-"),
     );
@@ -68,6 +68,9 @@ describe("LastCode GitHub CI workflow", () => {
       ),
     ).toBe(true);
     expect(hasBlacksmithRunnerConfiguration("# runs-on: blacksmith-8vcpu-ubuntu-2404")).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration("runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404"),
+    ).toBe(false);
     expect(
       hasBlacksmithRunnerConfiguration(
         "run: sudo sed -i s,http:,https:, /etc/apt/blacksmith-ubuntu-mirrors.txt",
