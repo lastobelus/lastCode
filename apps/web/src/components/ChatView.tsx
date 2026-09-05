@@ -356,8 +356,8 @@ import {
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
 import {
   runThreadAnnotationBodySave,
+  threadAnnotationBannerPresentation,
   ThreadAnnotationActions,
-  ThreadAnnotationBody,
   ThreadAnnotationEditorDialog,
   useThreadAnnotationBodyPending,
 } from "./thread-annotation/ThreadAnnotation";
@@ -1500,6 +1500,10 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [routeKind, routeThreadRef, routeThreadState]);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
+  const threadAnnotationExpanded = useUiStateStore(
+    (store) => store.threadAnnotationExpandedById[routeThreadKey] === true,
+  );
+  const setThreadAnnotationExpanded = useUiStateStore((store) => store.setThreadAnnotationExpanded);
   const settings = useEnvironmentSettings(environmentId);
   // New-thread defaults live in the primary environment's settings.json (the
   // settings UI never writes to remote environments), so read them from the
@@ -5872,22 +5876,23 @@ export default function ChatView(props: ChatViewProps) {
       id: `thread-annotation:${annotationVersionKey}`,
       variant: "warning",
       icon: <StickyNoteIcon aria-hidden className="size-3.5" />,
-      title: "Thread annotation",
-      description: (
-        <ThreadAnnotationBody
-          annotation={threadAnnotation}
-          className="max-h-48 overflow-y-auto"
-          cwd={gitCwd ?? undefined}
-          onBodyChange={saveThreadAnnotation}
-          threadRef={routeThreadRef}
-        />
-      ),
+      ...threadAnnotationBannerPresentation({
+        annotation: threadAnnotation,
+        cwd: gitCwd ?? undefined,
+        expanded: threadAnnotationExpanded,
+        onBodyChange: saveThreadAnnotation,
+        threadRef: routeThreadRef,
+      }),
       actions: (
         <ThreadAnnotationActions
           annotation={threadAnnotation}
           onEdit={() => setAnnotationEditorOpen(true)}
           onReopen={() => undefined}
           onResolve={() => void changeThreadAnnotationResolution("resolve")}
+          expanded={threadAnnotationExpanded}
+          onToggleExpanded={() =>
+            setThreadAnnotationExpanded(routeThreadKey, !threadAnnotationExpanded)
+          }
           pending={annotationMutationPending || annotationBodyChangePending}
         />
       ),
@@ -5903,7 +5908,9 @@ export default function ChatView(props: ChatViewProps) {
     gitCwd,
     routeThreadRef,
     saveThreadAnnotation,
+    setThreadAnnotationExpanded,
     threadAnnotation,
+    threadAnnotationExpanded,
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
