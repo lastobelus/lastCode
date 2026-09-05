@@ -128,7 +128,9 @@ it.layer(testLayer)("CodexDriver", (it) => {
     it.effect.skipIf(windowsHost)(fixture.name, () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-installer-" });
+        const tempDir = yield* fs
+          .makeTempDirectoryScoped({ prefix: "t3-codex-installer-" })
+          .pipe(Effect.flatMap((path) => fs.realPath(path)));
         const installPath = NodePath.join(tempDir, ...fixture.installSegments);
         const realBinaryPath = NodePath.join(
           installPath,
