@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Disposable host-side supervisor state fixtures.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalTimers:off -- Host-side supervisor observation.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalTimers:off globalDate:off -- Host-side supervisor observation.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
