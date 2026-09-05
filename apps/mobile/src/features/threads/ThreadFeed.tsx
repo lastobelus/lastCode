@@ -37,7 +37,7 @@ import {
   type ActionResultPresentationOutcome,
   parseActionResumeFollowUp,
 } from "@t3tools/shared/actionResume";
-import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
+import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -1904,7 +1904,9 @@ const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly st
     return () => clearInterval(intervalId);
   }, [props.startedAt]);
 
-  const durationLabel = formatElapsed(props.startedAt, new Date(nowMs).toISOString()) ?? "0s";
+  const elapsedMs = nowMs - Date.parse(props.startedAt);
+  const durationLabel =
+    Number.isFinite(elapsedMs) && elapsedMs >= 0 ? formatDuration(elapsedMs) : "0s";
 
   return (
     <View className="mb-4 flex-row items-center gap-2 px-1.5 py-1">
