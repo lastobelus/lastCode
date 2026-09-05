@@ -3,47 +3,53 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
+import { parse } from "yaml";
 
 const workflow = NodeFS.readFileSync(
   NodePath.resolve(import.meta.dirname, "../.github/workflows/ci.yml"),
   "utf8",
 );
 
-const stripYamlComment = (line: string): string => {
-  let quote: "'" | '"' | undefined;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (quote === '"' && character === "\\") {
-      index += 1;
-      continue;
-    }
-    if (character === quote) {
-      if (quote === "'" && line[index + 1] === "'") index += 1;
-      else quote = undefined;
-      continue;
-    }
-    if (
-      quote === undefined &&
-      (character === "'" || character === '"') &&
-      (index === 0 || /[\s:[{,]/u.test(line[index - 1]!))
-    ) {
-      quote = character;
-      continue;
-    }
-    if (quote === undefined && character === "#" && (index === 0 || /\s/u.test(line[index - 1]!))) {
-      return line.slice(0, index);
+const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+
+const stringValues = (value: unknown): ReadonlyArray<string> =>
+  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringValues) : [];
+
+const usesBlacksmithRunner = (value: unknown): boolean =>
+  stringValues(value).some((entry) => entry.includes("blacksmith-"));
+
+const hasBlacksmithRunnerConfiguration = (source: string): boolean => {
+  const document: unknown = parse(source);
+  const jobs = asRecord(asRecord(document)?.jobs);
+  if (jobs === undefined) return false;
+
+  for (const value of Object.values(jobs)) {
+    const job = asRecord(value);
+    if (job === undefined) continue;
+    const runners = stringValues(job["runs-on"]);
+    if (runners.some((runner) => runner.includes("blacksmith-"))) return true;
+
+    const matrix = asRecord(asRecord(job.strategy)?.matrix);
+    if (matrix === undefined) continue;
+    for (const runner of runners) {
+      for (const match of runner.matchAll(/\$\{\{\s*matrix\.(?<key>[A-Za-z_][\w-]*)\s*\}\}/gu)) {
+        const key = match.groups?.key;
+        if (key === undefined) continue;
+        if (usesBlacksmithRunner(matrix[key])) return true;
+        if (
+          Array.isArray(matrix.include) &&
+          matrix.include.some((entry) => usesBlacksmithRunner(asRecord(entry)?.[key]))
+        ) {
+          return true;
+        }
+      }
     }
   }
-  return line;
+  return false;
 };
-
-const hasBlacksmithRunnerConfiguration = (source: string): boolean =>
-  source
-    .split("\n")
-    .map(stripYamlComment)
-    .some((line) =>
-      line.replaceAll("/etc/apt/blacksmith-ubuntu-mirrors.txt", "").includes("blacksmith-"),
-    );
 
 const gateBlock = /^  ci_gate:\n(?<body>[\s\S]*)$/mu.exec(workflow)?.groups?.body;
 if (!gateBlock) throw new Error("CI workflow is missing the ci_gate job.");
@@ -90,29 +96,34 @@ describe("LastCode GitHub CI workflow", () => {
   });
 
   it("rejects direct and matrix Blacksmith runners without matching comments or mirror files", () => {
-    expect(hasBlacksmithRunnerConfiguration('runs-on: "blacksmith-8vcpu-ubuntu-2404"')).toBe(true);
     expect(
       hasBlacksmithRunnerConfiguration(
-        "runs-on: ${{ matrix.runner }}\nstrategy:\n  matrix:\n    runner: [blacksmith-8vcpu-ubuntu-2404]",
-      ),
-    ).toBe(true);
-    expect(hasBlacksmithRunnerConfiguration("# runs-on: blacksmith-8vcpu-ubuntu-2404")).toBe(false);
-    expect(
-      hasBlacksmithRunnerConfiguration("runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404"),
-    ).toBe(false);
-    expect(
-      hasBlacksmithRunnerConfiguration(
-        "name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404",
-      ),
-    ).toBe(false);
-    expect(
-      hasBlacksmithRunnerConfiguration(
-        'runs-on: ${{ matrix.runner }}\ninclude: [{ note: "keep # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
+        'jobs:\n  test:\n    runs-on: "blacksmith-8vcpu-ubuntu-2404"',
       ),
     ).toBe(true);
     expect(
       hasBlacksmithRunnerConfiguration(
-        "run: sudo sed -i s,http:,https:, /etc/apt/blacksmith-ubuntu-mirrors.txt",
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404",
+      ),
+    ).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404\n    runs-on: ubuntu-24.04",
+      ),
+    ).toBe(false);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        'jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        include: [{ note: "keep\n          # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
+      ),
+    ).toBe(true);
+    expect(
+      hasBlacksmithRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cat /etc/apt/blacksmith-cache.txt",
       ),
     ).toBe(false);
   });
