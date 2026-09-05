@@ -22,3 +22,5 @@
 This project is maintained as a stack on the base documentation PR recorded in the GitHub Project and in the PR body. Subsequent implementation PRs should branch from that base PR's head. Research and documentation changes belong on the base PR; implementation PRs should contain implementation changes and link back to the relevant research. Keep the base PR open until the project explicitly decides how to integrate the work.
 
 Fresh threads should locate the current project, base branch, and base PR through the GitHub Project named **Squirrels** and the repository's Squirrels routing guidance.
+
+Current base: [PR #209](https://github.com/lastobelus/lastCode/pull/209), branch `lastcode/squirrels-base`.
