@@ -4,6 +4,7 @@ import {
   frameDocument,
   hasInlineStyle,
   isElement,
+  observeFrameDocuments,
   pickInDocument,
   topViewportPoint,
   topViewportRect,
@@ -196,5 +197,139 @@ describe("frame picking coordinates", () => {
     expect(hasInlineStyle(element)).toBe(true);
     expect(isElement(null)).toBe(false);
     expect(isElement({ nodeType: 3 })).toBe(false);
+  });
+});
+
+function observerFixture() {
+  const callbacks = new Map<Document, MutationCallback>();
+  class Observer {
+    callback: MutationCallback;
+    constructor(callback: MutationCallback) {
+      this.callback = callback;
+    }
+    observe(owner: Document) {
+      callbacks.set(owner, this.callback);
+    }
+    disconnect() {}
+  }
+  vi.stubGlobal("MutationObserver", Observer);
+  const frameList: HTMLIFrameElement[] = [];
+  const queryFrames = vi.fn(() => frameList);
+  const top = { querySelectorAll: queryFrames } as unknown as Document;
+  const child = { querySelectorAll: vi.fn(() => []) } as unknown as Document;
+  const frame = Object.assign(new EventTarget(), {
+    nodeType: 1,
+    localName: "iframe",
+    contentDocument: child,
+  }) as unknown as HTMLIFrameElement;
+  const unrelated = {
+    nodeType: 1,
+    localName: "div",
+    querySelector: vi.fn(() => null),
+  } as unknown as Element;
+  const lifecycle: string[] = [];
+  const attach = vi.fn((owner: Document) => {
+    lifecycle.push(owner === top ? "attach top" : "attach child");
+    return () => lifecycle.push(owner === top ? "remove top" : "remove child");
+  });
+  const changed = vi.fn();
+  const watch = observeFrameDocuments(top, attach, changed, () => false);
+  const mutate = (record: Partial<MutationRecord>) =>
+    callbacks.get(top)!(
+      [
+        {
+          target: unrelated,
+          addedNodes: [],
+          removedNodes: [],
+          ...record,
+        } as unknown as MutationRecord,
+      ],
+      {} as MutationObserver,
+    );
+  return {
+    frameList,
+    queryFrames,
+    top,
+    child,
+    frame,
+    unrelated,
+    lifecycle,
+    attach,
+    changed,
+    watch,
+    mutate,
+  };
+}
+
+describe("frame document observation", () => {
+  it("does not rescan documents for animated attributes or unrelated text changes", async () => {
+    const fixture = observerFixture();
+    for (let index = 0; index < 60; index += 1) {
+      fixture.mutate({ type: "attributes", attributeName: "style" });
+      fixture.mutate({ type: "attributes", attributeName: "class" });
+      fixture.mutate({ type: "childList", addedNodes: [{ nodeType: 3 }] as unknown as NodeList });
+      await Promise.resolve();
+    }
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(1);
+    expect(fixture.attach).toHaveBeenCalledTimes(1);
+    expect(fixture.changed).toHaveBeenCalledTimes(60);
+    expect(fixture.unrelated.querySelector).not.toHaveBeenCalled();
+    fixture.watch.dispose();
+  });
+
+  it("batches frame-containing subtree insertion and removes old document listeners", async () => {
+    const fixture = observerFixture();
+    fixture.frameList.push(fixture.frame);
+    const subtree = {
+      nodeType: 1,
+      localName: "section",
+      querySelector: () => fixture.frame,
+    } as unknown as Node;
+    fixture.mutate({ type: "childList", addedNodes: [subtree] as unknown as NodeList });
+    fixture.mutate({ type: "childList", addedNodes: [fixture.frame] as unknown as NodeList });
+    await Promise.resolve();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(2);
+    expect(fixture.watch.documents()).toEqual([fixture.top, fixture.child]);
+    expect(fixture.changed).toHaveBeenCalledTimes(1);
+    fixture.frameList.length = 0;
+    fixture.mutate({ type: "childList", removedNodes: [subtree] as unknown as NodeList });
+    await Promise.resolve();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(3);
+    expect(fixture.watch.documents()).toEqual([fixture.top]);
+    expect(fixture.lifecycle).toEqual(["attach top", "attach child", "remove child"]);
+    fixture.watch.dispose();
+  });
+
+  it("cleans the replaced document before attaching its successor on frame load", async () => {
+    const fixture = observerFixture();
+    fixture.frameList.push(fixture.frame);
+    fixture.mutate({ type: "childList", addedNodes: [fixture.frame] as unknown as NodeList });
+    await Promise.resolve();
+    const successor = { querySelectorAll: () => [] } as unknown as Document;
+    Object.assign(fixture.frame, { contentDocument: successor });
+    fixture.frame.dispatchEvent(new Event("load"));
+    fixture.frame.dispatchEvent(new Event("load"));
+    await Promise.resolve();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(3);
+    expect(fixture.watch.documents()).toEqual([fixture.top, successor]);
+    expect(fixture.lifecycle).toEqual([
+      "attach top",
+      "attach child",
+      "remove child",
+      "attach child",
+    ]);
+    fixture.watch.dispose();
+    fixture.frame.dispatchEvent(new Event("load"));
+    await Promise.resolve();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(3);
+  });
+
+  it("discards queued work after the annotation session is disposed", async () => {
+    const fixture = observerFixture();
+    fixture.mutate({ type: "childList", addedNodes: [fixture.frame] as unknown as NodeList });
+    fixture.watch.dispose();
+    await Promise.resolve();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(1);
+    expect(fixture.changed).not.toHaveBeenCalled();
   });
 });

@@ -10,6 +10,9 @@ previews and nested frames. Highlights follow scrolling within the frame and the
 surrounding page. Screenshot crops use the element's visible position in the
 browser. If a frame navigates or is removed, its old selections are discarded;
 select the replacement content to annotate it.
+The packaged element context includes the embedded document's URL and the path
+through its containing frames, so selectors can be resolved inside the correct
+preview, including nested `srcdoc` frames.
 
 Style adjustments inside frames remain temporary and are restored when the
 annotation ends. Escape cancels the picker from either the page or a same-origin

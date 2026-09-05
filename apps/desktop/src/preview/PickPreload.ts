@@ -305,6 +305,28 @@ function withCaptureTimeout<A>(promise: Promise<A>, millis: number): Promise<A |
 /** Truncation for the DOM-only preview used when React context is unavailable. */
 const HTML_PREVIEW_MAX_CHARS = 500;
 
+/** Locates each iframe within its parent document, including nested srcdoc documents. */
+function captureFramePath(element: Element): NonNullable<PickedElementPayload["framePath"]> {
+  const path: { pageUrl: string; selector: string }[] = [];
+  let owner = element.ownerDocument;
+  while (owner !== document) {
+    const frame = owner.defaultView?.frameElement;
+    if (!frame) break;
+    const selectors: string[] = [];
+    for (let node: Element | null = frame; node; node = node.parentElement) {
+      const parent = node.parentElement;
+      selectors.unshift(
+        parent
+          ? `${node.localName}:nth-child(${Array.from(parent.children).indexOf(node) + 1})`
+          : ":root",
+      );
+    }
+    owner = frame.ownerDocument;
+    path.unshift({ pageUrl: owner.URL, selector: selectors.join(" > ") });
+  }
+  return path;
+}
+
 /**
  * Describes a picked element. The React context lookup can stall or throw on
  * some pages, so the element is never dropped: without context it still
@@ -312,9 +334,12 @@ const HTML_PREVIEW_MAX_CHARS = 500;
  * pick instead of falling back to the whole viewport.
  */
 async function captureElement(element: Element): Promise<PickedElementPayload> {
+  const owner = element.ownerDocument;
+  const framePath = captureFramePath(element);
   const base = {
-    pageUrl: location.href,
-    pageTitle: document.title?.trim() || null,
+    pageUrl: owner.URL,
+    pageTitle: owner.title?.trim() || null,
+    ...(framePath.length > 0 ? { framePath } : {}),
     tagName: element.tagName.toLowerCase(),
     pickedAt: new Date().toISOString(),
   };

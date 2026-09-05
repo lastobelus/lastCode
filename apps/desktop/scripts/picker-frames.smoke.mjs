@@ -81,6 +81,23 @@ async function attach(page, expected, name) {
   NodeAssert.equal(annotation.elements.length, 1);
   NodeAssert.match(annotation.elements[0].element.htmlPreview, expected);
   NodeAssert.equal(annotation.pageUrl, page.url());
+  NodeAssert.equal(
+    await page.evaluate((picked) => {
+      let owner = document;
+      for (const frame of picked.framePath ?? []) {
+        if (owner.URL !== frame.pageUrl) return false;
+        owner = owner.querySelector(frame.selector)?.contentDocument;
+        if (!owner) return false;
+      }
+      return (
+        owner.URL === picked.pageUrl &&
+        (owner.title.trim() || null) === picked.pageTitle &&
+        (!picked.selector || owner.querySelector(picked.selector)?.localName === picked.tagName)
+      );
+    }, annotation.elements[0].element),
+    true,
+    "frame path and selector resolve in the captured document",
+  );
   const rect = annotation.elements[0].rect;
   NodeAssert.ok(crop.x <= rect.x && crop.y <= rect.y);
   NodeAssert.ok(crop.x + crop.width >= rect.x + rect.width - 1);
@@ -239,8 +256,8 @@ try {
     route.fulfill({
       contentType: "text/html",
       body: route.request().url().endsWith("/child")
-        ? '<button id="url-target">Same-origin URL target</button>'
-        : `<iframe id="same" src="/child"></iframe><iframe id="opaque" sandbox="allow-scripts" srcdoc='<button id="outside" onclick="this.textContent=123">Opaque frame</button>'></iframe>`,
+        ? '<title>Embedded preview</title><button id="url-target">Same-origin URL target</button>'
+        : `<title>Editor shell</title><iframe id="same" src="/child"></iframe><iframe id="opaque" sandbox="allow-scripts" srcdoc='<button id="outside" onclick="this.textContent=123">Opaque frame</button>'></iframe>`,
     }),
   );
   await urls.goto("http://picker.example/");

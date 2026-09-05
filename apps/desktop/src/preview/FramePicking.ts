@@ -186,6 +186,23 @@ export function observeFrameDocuments(
   const documents = new Map<Document, () => void>();
   const frames = new Map<HTMLIFrameElement, () => void>();
   let disposed = false;
+  let updateQueued = false;
+  let discoveryNeeded = false;
+  const queueUpdate = (discover: boolean) => {
+    discoveryNeeded ||= discover;
+    if (updateQueued || disposed) return;
+    updateQueued = true;
+    queueMicrotask(() => {
+      updateQueued = false;
+      if (disposed) return;
+      const discoverFrames = discoveryNeeded;
+      discoveryNeeded = false;
+      if (discoverFrames) refresh();
+      else changed();
+    });
+  };
+  const containsFrame = (node: Node) =>
+    isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
   const refresh = (notify = true) => {
     if (disposed) return;
     const foundDocuments = new Set<Document>();
@@ -217,8 +234,18 @@ export function observeFrameDocuments(
       if (!documents.has(owner)) {
         const cleanup = attach(owner);
         const observer = new MutationObserver((records) => {
-          if (records.some((record) => !isElement(record.target) || !ignore(record.target)))
-            refresh();
+          const pageChanges = records.filter(
+            (record) => !isElement(record.target) || !ignore(record.target),
+          );
+          if (pageChanges.length === 0) return;
+          // Style animation and text updates can move a selection, but cannot
+          // introduce frame documents. Search only added/removed subtrees here.
+          const discover = pageChanges.some(
+            (record) =>
+              record.type === "childList" &&
+              [...record.addedNodes, ...record.removedNodes].some(containsFrame),
+          );
+          queueUpdate(discover);
         });
         observer.observe(owner, {
           childList: true,
@@ -234,7 +261,7 @@ export function observeFrameDocuments(
     }
     for (const frame of foundFrames) {
       if (!frames.has(frame)) {
-        const loaded = () => refresh();
+        const loaded = () => queueUpdate(true);
         frame.addEventListener("load", loaded);
         frames.set(frame, () => frame.removeEventListener("load", loaded));
       }
