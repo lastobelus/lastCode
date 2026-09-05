@@ -574,7 +574,41 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.state.incident.deliveryAttempts).toBe(1);
   });
 
-  it("keeps failed delivery pending and retries it on the next run", () => {
+  it("closes an ambiguously delivered alert at its original recipient after immediate recovery", () => {
+    const first = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
+    expect(first.state.incident).toMatchObject({
+      alertDelivery: "unknown",
+      deliveryAttempts: 1,
+      deliveryThreadId: "thread-maintenance",
+    });
+
+    const recovered = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
+
+    const stillHealthy = fixture({ state: recovered.state });
+    runCheckpointSupervisor({}, stillHealthy.dependencies);
+    expect(stillHealthy.messages).toEqual([]);
+  });
+
+  it("retries an ambiguous alert when the checkpoint remains failed", () => {
     const runPhase = () => {
       throw new Error("fetch failed");
     };
@@ -587,13 +621,12 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
     expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
-    expect(first.state.incident.alertDelivery).toBe("pending");
 
     const second = fixture({ state: first.state, dependencies: { runPhase } });
     expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("fetch failed");
     expect(second.messages).toHaveLength(1);
-    expect(second.state.incident.alertDelivery).toBe("sent");
-    expect(second.state.incident.deliveryAttempts).toBe(2);
+    expect(second.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(second.state.incident).toMatchObject({ alertDelivery: "sent", deliveryAttempts: 2 });
   });
 
   it("delivers every distinct blocker after thread delivery recovers", () => {
@@ -770,7 +803,7 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recurring.state.incident).toMatchObject({ alertDelivery: "pending" });
   });
 
-  it("does not queue a closure for an alert that never reached its destination", () => {
+  it("closes an ambiguous alert at its original recipient after another failure", () => {
     const failed = fixture({
       dependencies: {
         runPhase: () => {
@@ -803,7 +836,7 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
     expect(() => runCheckpointSupervisor({}, failedAgain.dependencies)).toThrow("blocker B");
-    expect(failedAgain.state.pendingResolutions).toBeUndefined();
+    expect(failedAgain.state.pendingResolutions).toHaveLength(1);
 
     const finallyRecovered = fixture({
       state: failedAgain.state,
@@ -812,9 +845,12 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
     runCheckpointSupervisor({}, finallyRecovered.dependencies);
-    expect(finallyRecovered.messages).toHaveLength(1);
-    expect(finallyRecovered.messages[0]?.threadId).toBe("thread-delivery");
-    expect(finallyRecovered.messages[0]?.message).toContain("maintenance resolved alert");
+    expect(finallyRecovered.messages).toHaveLength(2);
+    expect(finallyRecovered.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(finallyRecovered.messages[1]).toMatchObject({ threadId: "thread-delivery" });
+    expect(
+      finallyRecovered.messages.every(({ message }) => message.includes("resolved alert")),
+    ).toBe(true);
   });
 
   it("sends one closure after a failed incident recovers", () => {
@@ -917,7 +953,73 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
-  it("does not deliver an obsolete alert when recovery precedes the alert retry", () => {
+  it("does not replay or close a legacy attempted alert without its original recipient", () => {
+    const incident = {
+      alertDelivery: "pending",
+      deliveryAttempts: 1,
+      failure: { phase: "fetch", error: "fetch failed" },
+      fingerprint: "legacy-attempted-incident",
+      resolutionDelivery: "pending",
+    };
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "success",
+        incident,
+        pendingIncidents: [incident],
+      },
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingIncidents).toEqual([expect.objectContaining(incident)]);
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "unknown",
+      resolutionDelivery: "not-needed",
+    });
+    const failedLater = fixture({
+      state: recovered.state,
+      dependencies: {
+        runPhase: () => {
+          throw new Error("different later failure");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failedLater.dependencies)).toThrow(
+      "different later failure",
+    );
+    expect(failedLater.messages).toHaveLength(1);
+    expect(failedLater.messages[0]?.message).not.toContain("legacy-attempted-incident");
+  });
+
+  it("closes legacy pending attempts when the original recipient is recorded", () => {
+    const test = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        incident: {
+          alertDelivery: "pending",
+          deliveryAttempts: 1,
+          deliveryThreadId: "original-thread",
+          fingerprint: "legacy-known-recipient",
+          failure: { phase: "fetch", error: "fetch failed" },
+        },
+      },
+    });
+    runCheckpointSupervisor({}, test.dependencies);
+    expect(test.messages).toHaveLength(1);
+    expect(test.messages[0]?.threadId).toBe("original-thread");
+    expect(test.messages[0]?.message).toContain("maintenance resolved alert");
+    expect(test.state.incident.alertDelivery).toBe("pending");
+    expect(test.state.incident.resolutionDelivery).toBe("sent");
+  });
+
+  it("closes an ambiguous alert instead of replaying it when recovery follows", () => {
     const previous = fixture({
       dependencies: {
         runPhase: () => {
@@ -933,22 +1035,21 @@ describe("LastCode checkpoint supervisor", () => {
     const recovered = fixture({ state: previous.state });
     expect(runCheckpointSupervisor({}, recovered.dependencies)).toMatchObject({
       status: "success",
-      incident: { alertDelivery: "not-needed", resolutionDelivery: "not-needed" },
+      incident: { alertDelivery: "unknown", resolutionDelivery: "sent" },
     });
-    expect(recovered.messages).toEqual([]);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
     expect(recovered.state.pendingIncidents).toBeUndefined();
   });
 
-  it("drops every never-sent alert when distinct blockers recover together", () => {
+  it("drops every never-attempted queued alert when distinct blockers recover together", () => {
     const failWith = (message) => () => {
       throw new Error(message);
     };
     const first = fixture({
       dependencies: {
+        loadConfig: () => null,
         runPhase: failWith("blocker A"),
-        sendThread: () => {
-          throw new Error("server unavailable");
-        },
       },
     });
     expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("blocker A");
@@ -956,10 +1057,8 @@ describe("LastCode checkpoint supervisor", () => {
     const second = fixture({
       state: first.state,
       dependencies: {
+        loadConfig: () => null,
         runPhase: failWith("blocker B"),
-        sendThread: () => {
-          throw new Error("server unavailable");
-        },
       },
     });
     expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("blocker B");

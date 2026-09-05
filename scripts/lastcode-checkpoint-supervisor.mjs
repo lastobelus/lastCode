@@ -504,35 +504,62 @@ function durableIncidentList(state, key) {
   return Array.isArray(state?.[key]) ? state[key].filter(isDurableIncident) : [];
 }
 
+function retryableIncident(incident) {
+  return (
+    !incident.resolvedAt &&
+    (incident.alertDelivery === "pending" || incident.alertDelivery === "unknown")
+  );
+}
+
+function attemptedIncident(incident) {
+  return (
+    incident.alertDelivery === "sent" ||
+    incident.alertDelivery === "unknown" ||
+    (incident.deliveryAttempts ?? 0) > 0
+  );
+}
+
+function potentiallyDeliveredIncident(incident) {
+  return (
+    attemptedIncident(incident) &&
+    typeof incident.deliveryThreadId === "string" &&
+    incident.deliveryThreadId.length > 0
+  );
+}
+
 function attemptDelivery(state, config, dependencies) {
   if (!config?.recoveryThreadId) return state;
   const recoveryThreadId = config.recoveryThreadId;
   let nextState = state;
   let pendingIncidents = [...durableIncidentList(state, "pendingIncidents")];
-  while (pendingIncidents.length > 0) {
-    const [incident, ...remaining] = pendingIncidents;
-    if (!incident) break;
+  while (nextState.status === "failed") {
+    const pendingIncidentIndex = pendingIncidents.findIndex(retryableIncident);
+    if (pendingIncidentIndex < 0) break;
+    const incident = pendingIncidents[pendingIncidentIndex];
     const updatedIncident = {
       ...incident,
-      alertDelivery: "pending",
+      // A failed command may have reached LastCode after it wrote the message.
+      // Keep that uncertainty and its recipient durable for recovery.
+      alertDelivery: "unknown",
+      deliveryThreadId: incident.deliveryThreadId ?? recoveryThreadId,
       deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
       lastDeliveryAttemptAt: dependencies.now(),
     };
+    pendingIncidents[pendingIncidentIndex] = updatedIncident;
     nextState = Object.assign({}, nextState, {
-      pendingIncidents: [updatedIncident, ...remaining],
+      pendingIncidents,
     });
     dependencies.writeState(nextState);
     try {
       dependencies.sendThread(
-        recoveryThreadId,
+        updatedIncident.deliveryThreadId,
         checkpointFailureMessage(updatedIncident.failure, updatedIncident.fingerprint),
       );
-      pendingIncidents = remaining;
+      pendingIncidents.splice(pendingIncidentIndex, 1);
       const currentIncident = nextState.incident;
       const deliveredIncident = {
         ...updatedIncident,
         alertDelivery: "sent",
-        deliveryThreadId: recoveryThreadId,
       };
       const pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
       if (currentIncident?.fingerprint !== updatedIncident.fingerprint) {
@@ -585,7 +612,7 @@ function attemptDelivery(state, config, dependencies) {
       dependencies.writeState(nextState);
       try {
         dependencies.sendThread(
-          updatedIncident.deliveryThreadId ?? recoveryThreadId,
+          updatedIncident.deliveryThreadId,
           checkpointResolvedMessage(updatedIncident),
         );
         pendingResolutions = remaining;
@@ -610,16 +637,18 @@ function attemptDelivery(state, config, dependencies) {
   if (!incident) return nextState;
   const resolving = nextState.status === "success";
   const key = resolving ? "resolutionDelivery" : "alertDelivery";
+  if (!resolving && !retryableIncident(incident)) return nextState;
   if (incident[key] === "sent" || incident[key] === "not-needed") return nextState;
   const message = resolving
     ? checkpointResolvedMessage(incident)
     : checkpointFailureMessage(incident.failure, incident.fingerprint);
   const deliveryThreadId = resolving
-    ? (incident.deliveryThreadId ?? recoveryThreadId)
-    : recoveryThreadId;
+    ? incident.deliveryThreadId
+    : (incident.deliveryThreadId ?? recoveryThreadId);
   const nextIncident = {
     ...incident,
-    [key]: "pending",
+    [key]: resolving ? "pending" : "unknown",
+    ...(!resolving ? { deliveryThreadId } : {}),
     deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
     lastDeliveryAttemptAt: dependencies.now(),
   };
@@ -782,13 +811,16 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         : null) ??
       (pendingIncidentIndex >= 0 ? pendingIncidents.splice(pendingIncidentIndex, 1)[0] : null);
     const knownIncident = sameOpenIncident || Boolean(restoredIncident);
-    const incident = (sameOpenIncident ? previousIncident : restoredIncident) ?? {
-      alertDelivery: "pending",
-      deliveryAttempts: 0,
-      failure,
-      fingerprint,
-      openedAt: finishedAt,
+    const incident = {
+      ...((sameOpenIncident ? previousIncident : restoredIncident) ?? {
+        alertDelivery: "pending",
+        deliveryAttempts: 0,
+        failure,
+        fingerprint,
+        openedAt: finishedAt,
+      }),
     };
+    delete incident.resolvedAt;
     if (!sameOpenIncident && previous?.status === "failed" && previousIncident) {
       const destination =
         previousIncident.alertDelivery === "sent" ? pendingResolutions : pendingIncidents;
@@ -829,12 +861,26 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   const finishedAt = dependencies.now();
   const deliveryConfigured = Boolean(config?.recoveryThreadId);
   let incident = durableIncident(previous?.incident);
-  const pendingIncidents = deliveryConfigured
-    ? durableIncidentList(previous, "pendingIncidents")
-    : [];
+  const pendingIncidents = durableIncidentList(previous, "pendingIncidents");
+  const unresolvedIncidents = [
+    ...pendingIncidents,
+    ...durableIncidentList(previous, "pendingResolutions"),
+  ]
+    .filter(
+      (pendingIncident, index, incidents) =>
+        incidents.findIndex(
+          (candidate) => candidate.fingerprint === pendingIncident.fingerprint,
+        ) === index &&
+        attemptedIncident(pendingIncident) &&
+        !potentiallyDeliveredIncident(pendingIncident),
+    )
+    .map((pendingIncident) => ({
+      ...pendingIncident,
+      resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
+    }));
   const pendingResolutions = deliveryConfigured
     ? durableIncidentList(previous, "pendingResolutions")
-        .filter((pendingIncident) => pendingIncident.alertDelivery === "sent")
+        .filter(potentiallyDeliveredIncident)
         .map((pendingIncident) => ({
           ...pendingIncident,
           resolvedAt: pendingIncident.resolvedAt ?? finishedAt,
@@ -843,7 +889,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     : [];
   for (const pendingIncident of pendingIncidents) {
     if (
-      pendingIncident.alertDelivery === "sent" &&
+      potentiallyDeliveredIncident(pendingIncident) &&
       !pendingResolutions.some(
         (pendingResolution) => pendingResolution.fingerprint === pendingIncident.fingerprint,
       )
@@ -855,18 +901,25 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       });
     }
   }
-  if (incident && incident.alertDelivery !== "sent") {
+  if (incident && !attemptedIncident(incident)) {
     incident = {
       ...incident,
       ...(previous?.status === "failed" ? { resolvedAt: finishedAt } : {}),
       alertDelivery: "not-needed",
       resolutionDelivery: "not-needed",
     };
-  } else if (previous?.status === "failed" && incident) {
+  } else if (previous?.status === "failed" && incident && potentiallyDeliveredIncident(incident)) {
     incident = {
       ...incident,
       resolvedAt: finishedAt,
       resolutionDelivery: deliveryConfigured ? "pending" : "not-needed",
+    };
+  } else if (incident && !potentiallyDeliveredIncident(incident)) {
+    incident = {
+      ...incident,
+      resolvedAt: incident.resolvedAt ?? finishedAt,
+      alertDelivery: "unknown",
+      resolutionDelivery: "not-needed",
     };
   } else if (!deliveryConfigured && incident) {
     incident = { ...incident, resolutionDelivery: "not-needed" };
@@ -880,6 +933,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     finishedAt,
     lastSuccessAt: finishedAt,
     ...(pendingResolutions.length > 0 ? { pendingResolutions } : {}),
+    ...(unresolvedIncidents.length > 0 ? { pendingIncidents: unresolvedIncidents } : {}),
     ...(incident ? { incident } : {}),
   };
   dependencies.writeState(state);
