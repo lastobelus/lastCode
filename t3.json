@@ -21,6 +21,12 @@
       "icon": "test"
     },
     {
+      "id": "lc-wait-for-checkpoint",
+      "name": "Wait for Checkpoint",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-checkpoint.ts",
+      "icon": "test"
+    },
+    {
       "id": "lc-local-ci",
       "name": "Run Quick CI",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
