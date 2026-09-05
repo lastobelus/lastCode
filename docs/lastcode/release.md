@@ -174,6 +174,41 @@ checkpoint stamp cannot authorize a PR merge.
 
 ## Apple Silicon DMG builder
 
+### Resumable local builds
+
+For an authorized local Apple Silicon build, first select one exact installable
+checkpoint or revision in the requesting thread's worktree:
+
+```bash
+mise exec node@24.13.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
+  --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
+```
+
+`T3CODE_PROJECT_ROOT` must identify the primary repository checkout; when invoking
+this outside a Project Action, substitute that checkout's absolute path if the
+variable is unset. Selection records the tag and full commit for this worktree.
+Then list Project Actions, launch the eligible **Build Local Package** action
+(`lc-build-local-package`) with `run_project_action_and_resume`, and end the turn
+immediately. Do not run the helper directly, tail logs, or poll the action.
+
+The action runs the existing local-update build helper, including its build lock,
+checkpoint validation, full CI, and packaging. It returns the selected tag and
+commit plus the resulting artifact location, or a concrete failure requiring
+attention. It does not install or restart the application. It starts its own
+build operation and cannot attach to a build previously launched in a terminal.
+Each selection permits one attempt. Inspect a failed or interrupted result before
+selecting the tag again for a deliberate retry.
+
+The `t3.json` declaration loads from the primary checkout so maintenance threads
+with older worktrees can use it. Import the action and grant resume permission in
+the owning environment; managed installations use the `lc-build-local-package`
+trust entry. If a previous Action is running or awaiting continuation delivery,
+preserve the next step and end the turn so its result can arrive. After delivery,
+list Actions again. For other disabled reasons, report the specific blocker;
+do not substitute a synchronous build or a polling loop.
+
+### Direct builder
+
 An Apple Silicon DMG builder builds the selected checkpoint or revision:
 
 ```bash

@@ -440,6 +440,7 @@ export function checkpointFailureMessage(failure, fingerprint) {
     "The bounded service logs are ~/.lastcode/automation/nightly-checkpoint.stdout.log and nightly-checkpoint.stderr.log.",
     "Use this thread for the recovery; do not create a new maintenance thread and do not only report the alert.",
     "For an already-started service run, use the resumable Wait for Checkpoint action as described in docs/lastcode/release.md instead of sleep/status loops. It only observes completion and does not start or repair the service.",
+    "If an authorized recovery requires a local Apple Silicon build, follow the Resumable local builds section in docs/lastcode/release.md and use Build Local Package (lc-build-local-package), then end the turn instead of polling build logs. A pending prior Action continuation must be delivered before starting another Action.",
     "If the authorized recovery includes a LastCode PR, read .agents/skills/lastcode-pr/SKILL.md. When CI or review is passive and no current finding needs judgement, call list_project_actions, launch the eligible Wait for PR action with run_project_action_and_resume (prefer lc-wait-for-pr), and end the turn immediately without polling. This reminder does not authorize creating or merging a PR.",
   ]
     .filter(Boolean)

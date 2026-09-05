@@ -76,6 +76,7 @@ export function localBuildFailureMessage(failure, fingerprint) {
     `Retained build worktree: ${failure.worktreePath}`,
     "Inspect the retained worktree and build log, address the concrete failure, and leave a working up-to-date LastCode build.",
     "Use this persistent maintenance thread for the recovery; do not create a new thread and do not only report the alert.",
+    "For an authorized replacement build, read the Resumable local builds section in docs/lastcode/release.md, select the exact installable tag, and launch the eligible Build Local Package action (lc-build-local-package) with run_project_action_and_resume. End the turn immediately instead of running the helper directly or polling logs. If a prior Action continuation is pending, end the turn for its delivery before launching another Action.",
   ].join("\n");
 }
 
