@@ -226,11 +226,13 @@ export function threadAnnotationBannerPresentation(props: {
     description: props.expanded ? (
       <ThreadAnnotationTimestamp annotation={props.annotation} />
     ) : (
-      <>
+      <span className="flex min-w-0 items-center gap-1">
         <span className="min-w-0 truncate text-foreground/80">{summary}</span>
         <ComposerBanner.Separator />
-        <ThreadAnnotationTimestamp annotation={props.annotation} />
-      </>
+        <span className="shrink-0">
+          <ThreadAnnotationTimestamp annotation={props.annotation} />
+        </span>
+      </span>
     ),
     children: props.expanded ? (
       <ComposerBanner.Body className="pe-1 pb-1">
