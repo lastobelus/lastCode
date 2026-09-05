@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import { acquirePortableLock } from "./lastcode-lock.mjs";
 
 import {
   appendCheckpointRun,
@@ -51,6 +52,8 @@ interface CheckpointOptions {
   readonly supersedeFailedRecovery: boolean;
   readonly upstreamRemote: string;
   readonly pushRemote: string;
+  readonly selectRecovery?: string;
+  readonly recoverySource?: string;
 }
 
 interface CheckpointRef {
@@ -767,8 +770,9 @@ export function checkpointFailureDisposition(
   pendingCheckpointTag: string | undefined,
   recoveryBranch: string,
   tagDeleted = true,
+  preserveRecovery = false,
 ): { readonly cleanup: boolean; readonly recoveryBranch?: string } {
-  return pendingCheckpointTag && tagDeleted
+  return pendingCheckpointTag && tagDeleted && !preserveRecovery
     ? { cleanup: true }
     : { cleanup: false, recoveryBranch };
 }
@@ -805,6 +809,8 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let supersedeFailedRecovery = false;
   let upstreamRemote = DEFAULT_UPSTREAM_REMOTE;
   let pushRemote = DEFAULT_PUSH_REMOTE;
+  let selectRecovery: string | undefined;
+  let recoverySource: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -817,18 +823,29 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     else if (arg === "--supersede-failed-recovery") supersedeFailedRecovery = true;
     else if (arg === "--promote") promotion = "always";
     else if (arg === "--promote-if-no-open-prs") promotion = "if-no-open-prs";
-    else if (arg === "--source-ref" || arg === "--upstream-remote" || arg === "--push-remote") {
+    else if (
+      arg === "--source-ref" ||
+      arg === "--upstream-remote" ||
+      arg === "--push-remote" ||
+      arg === "--select-recovery" ||
+      arg === "--recovery-source"
+    ) {
       const value = argv[index + 1];
       if (!value) throw new Error(`Missing value for ${arg}.`);
       if (arg === "--source-ref") sourceRef = value;
       else if (arg === "--upstream-remote") upstreamRemote = value;
-      else pushRemote = value;
+      else if (arg === "--push-remote") pushRemote = value;
+      else if (arg === "--select-recovery") selectRecovery = value;
+      else recoverySource = value;
       index += 1;
     } else {
       throw new Error(`Unknown argument '${arg}'.`);
     }
   }
 
+  if (Boolean(selectRecovery) !== Boolean(recoverySource)) {
+    throw new Error("--select-recovery and --recovery-source must be supplied together.");
+  }
   return {
     dryRun,
     fetch,
@@ -840,6 +857,8 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     supersedeFailedRecovery,
     upstreamRemote,
     pushRemote,
+    ...(selectRecovery ? { selectRecovery } : {}),
+    ...(recoverySource ? { recoverySource } : {}),
   };
 }
 
@@ -1295,10 +1314,144 @@ export function runCarrySetShadowAfterPublication(
   }
 }
 
+export interface RecoverySelection {
+  readonly head: string;
+  readonly sourceCommit: string;
+  readonly nightlyTag: string;
+}
+
+export function recoveryPublicationArgs(
+  remote: string,
+  tag: string,
+  selection: RecoverySelection,
+): ReadonlyArray<string> {
+  return [
+    "push",
+    "--no-verify",
+    "--atomic",
+    `--force-with-lease=refs/heads/lastcode/main:${selection.sourceCommit}`,
+    remote,
+    tag,
+    `${selection.head}:refs/heads/lastcode/main`,
+  ];
+}
+
+function releasePublishedRecovery(
+  repoRoot: string,
+  worktree: string,
+  selectionPath: string,
+  selection: RecoverySelection,
+): void {
+  if (NodeFS.existsSync(worktree)) {
+    assertRecoverySelection(worktree, selection, selection.sourceCommit);
+    run(repoRoot, "git", ["worktree", "remove", worktree]);
+  }
+  const branchRef = `refs/heads/sync/nightly/${selection.nightlyTag}`;
+  const branchHead = git(repoRoot, ["rev-parse", "--verify", branchRef], { allowFailure: true });
+  if (branchHead) git(repoRoot, ["update-ref", "-d", branchRef, selection.head]);
+  NodeFS.unlinkSync(selectionPath);
+}
+
+export function parseRecoverySelection(value: unknown): RecoverySelection {
+  if (value === null || typeof value !== "object") throw new Error("Invalid recovery selection.");
+  const input = value as Record<string, unknown>;
+  if (
+    typeof input.head !== "string" ||
+    !/^[a-f0-9]{40}$/.test(input.head) ||
+    typeof input.sourceCommit !== "string" ||
+    !/^[a-f0-9]{40}$/.test(input.sourceCommit) ||
+    typeof input.nightlyTag !== "string" ||
+    !parseNightlyTag(input.nightlyTag)
+  ) {
+    throw new Error("Recovery selection requires full commits and an exact nightly tag.");
+  }
+  return { head: input.head, sourceCommit: input.sourceCommit, nightlyTag: input.nightlyTag };
+}
+
+export function assertRecoverySelection(
+  worktree: string,
+  selection: RecoverySelection,
+  sourceCommit: string,
+): void {
+  if (selection.sourceCommit !== sourceCommit)
+    throw new Error("Recovery source changed; incorporate new main commits and select again.");
+  if (
+    git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
+    git(worktree, ["branch", "--show-current"]) !== `sync/nightly/${selection.nightlyTag}`
+  ) {
+    throw new Error("Retained recovery head or branch changed; select again.");
+  }
+  if (
+    rebaseInProgress(worktree) ||
+    git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+  ) {
+    throw new Error("Recovery must be clean with its rebase completed and repairs committed.");
+  }
+  if (!isAncestor(worktree, selection.nightlyTag, selection.head)) {
+    throw new Error("Recovery does not contain the selected upstream nightly.");
+  }
+}
+
 function main(argv: ReadonlyArray<string>): void {
   const options = parseArgs(argv);
-  const hostPlatform = Effect.runSync(HostProcessPlatform);
   const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+  const commonDirectory = git(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  const release = acquirePortableLock(
+    commonDirectory,
+    "lastcode-checkpoint",
+    "checkpoint operation",
+  );
+  try {
+    runCheckpoint(
+      repoRoot,
+      options,
+      NodePath.join(commonDirectory, "lastcode-recovery-selection.json"),
+    );
+  } finally {
+    release();
+  }
+}
+
+function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPath: string): void {
+  const hostPlatform = Effect.runSync(HostProcessPlatform);
+  if (options.selectRecovery && options.recoverySource) {
+    const worktree = resolveAutomationWorktree(repoRoot);
+    const branch = git(worktree, ["branch", "--show-current"]);
+    const selection = parseRecoverySelection({
+      head: options.selectRecovery,
+      sourceCommit: options.recoverySource,
+      nightlyTag: branch.replace(/^sync\/nightly\//, ""),
+    });
+    // Selection is an explicit assertion that the repaired tree includes this source.
+    run(repoRoot, "git", ["fetch", options.pushRemote, "lastcode/main"]);
+    assertRecoverySelection(
+      worktree,
+      selection,
+      git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]),
+    );
+    if (!options.dryRun) {
+      const temporaryPath = `${selectionPath}.${process.pid}.tmp`;
+      NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(selection)}\n`, {
+        mode: 0o600,
+        flush: true,
+      });
+      NodeFS.renameSync(temporaryPath, selectionPath);
+    }
+    console.log(
+      `[lastcode:checkpoint] ${options.dryRun ? "Would select" : "Selected"} repaired ${selection.nightlyTag} at ${selection.head}. Request a service run, then use Wait for Checkpoint.`,
+    );
+    return;
+  }
+  const selection = NodeFS.existsSync(selectionPath)
+    ? parseRecoverySelection(JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")))
+    : undefined;
+  if (selection && (!options.smoke || !options.pushTags || options.promotion === "never")) {
+    throw new Error("Selected recovery requires smoke validation, --push-tags, and promotion.");
+  }
   git(repoRoot, ["config", "rerere.enabled", "true"]);
   git(repoRoot, ["config", "rerere.autoupdate", "true"]);
 
@@ -1342,6 +1495,35 @@ function main(argv: ReadonlyArray<string>): void {
 
   const sourceCommit = git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]);
   const checkpoints = listCheckpointRefs(repoRoot);
+  // A crash after pushing but before clearing the selection must not republish or
+  // rebase the repaired commit. The published immutable tag now preserves it.
+  if (
+    selection &&
+    checkpoints.some(
+      (checkpoint) =>
+        checkpoint.checkpointTag === checkpointTagFromNightlyTag(selection.nightlyTag) &&
+        checkpoint.commit === selection.head &&
+        checkpoint.sourceCommit === selection.sourceCommit,
+    )
+  ) {
+    if (!isAncestor(repoRoot, selection.head, sourceCommit))
+      throw new Error(
+        "Published recovery is not represented on main; inspect before releasing it.",
+      );
+    if (!options.dryRun)
+      releasePublishedRecovery(
+        repoRoot,
+        resolveAutomationWorktree(repoRoot),
+        selectionPath,
+        selection,
+      );
+    console.log(
+      "[lastcode:checkpoint] Selected recovery was already published; released its retained worktree. Run the service again to continue.",
+    );
+    return;
+  }
+  if (selection)
+    assertRecoverySelection(resolveAutomationWorktree(repoRoot), selection, sourceCommit);
   const installables = listInstallableRefs(repoRoot);
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, options.sourceRef);
   const sourceNightlyTags = splitLines(
@@ -1353,7 +1535,7 @@ function main(argv: ReadonlyArray<string>): void {
     nightlyTags,
     recoverySupersessionMode({
       dryRun: options.dryRun,
-      enabled: options.supersedeFailedRecovery,
+      enabled: options.supersedeFailedRecovery && !selection,
     }),
   );
   const plan = resolveCheckpointPlan({
@@ -1365,6 +1547,14 @@ function main(argv: ReadonlyArray<string>): void {
     sourceRef: options.sourceRef,
     ...(supersededNightly ? { supersedeThroughNightlyTag: supersededNightly.tag } : {}),
   });
+  if (
+    selection &&
+    (plan.bootstrapCheckpoint || plan.missingNightlies[0]?.tag !== selection.nightlyTag)
+  ) {
+    throw new Error(
+      "Selected recovery is not the next unpublished checkpoint; inspect before selecting again.",
+    );
+  }
 
   console.log(`[lastcode:checkpoint] Source: ${plan.candidateRef}`);
   console.log(`[lastcode:checkpoint] Upstream base: ${plan.baseNightly.tag}`);
@@ -1489,7 +1679,7 @@ function main(argv: ReadonlyArray<string>): void {
   }
 
   const worktree = resolveAutomationWorktree(repoRoot);
-  if (NodeFS.existsSync(worktree)) {
+  if (NodeFS.existsSync(worktree) && !selection) {
     throw new Error(
       `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
     );
@@ -1498,11 +1688,14 @@ function main(argv: ReadonlyArray<string>): void {
   const firstNightly = plan.missingNightlies[0];
   if (!firstNightly) throw new Error("Missing first nightly checkpoint.");
   let branch = `sync/nightly/${firstNightly.tag}`;
-  if (git(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`], { allowFailure: true })) {
+  if (
+    !selection &&
+    git(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`], { allowFailure: true })
+  ) {
     throw new Error(`Recovery branch ${branch} already exists.`);
   }
 
-  run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
+  if (!selection) run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
   let completed = false;
   let pendingCheckpointTag: string | undefined;
   let attempt:
@@ -1515,7 +1708,7 @@ function main(argv: ReadonlyArray<string>): void {
   let failurePhase: "publication" | "rebase" | "smoke" | undefined;
   try {
     let baseTag = plan.baseNightly.tag;
-    for (const nightly of plan.missingNightlies) {
+    for (const nightly of selection ? plan.missingNightlies.slice(0, 1) : plan.missingNightlies) {
       const recoveryBranch = `sync/nightly/${nightly.tag}`;
       if (branch !== recoveryBranch) {
         run(worktree, "git", ["branch", "--move", recoveryBranch]);
@@ -1530,10 +1723,21 @@ function main(argv: ReadonlyArray<string>): void {
       };
       console.log(`[lastcode:checkpoint] Rebasing LastCode from ${baseTag} onto ${nightly.tag}...`);
       failurePhase = "rebase";
-      rebaseOnto(worktree, nightly.tag, baseTag);
+      if (selection && nightly.tag === selection.nightlyTag) {
+        assertRecoverySelection(worktree, selection, sourceCommit);
+        console.log(`[lastcode:checkpoint] Validating selected repaired head ${selection.head}.`);
+      } else {
+        rebaseOnto(worktree, nightly.tag, baseTag);
+      }
       candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
       failurePhase = "smoke";
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      if (
+        git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
+        git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+      ) {
+        throw new Error("Checkpoint changed during validation; retain and inspect the worktree.");
+      }
       failurePhase = "publication";
       const finishedAtMs = Date.now();
       const timing = {
@@ -1552,21 +1756,34 @@ function main(argv: ReadonlyArray<string>): void {
       );
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
-        run(
-          repoRoot,
-          "git",
-          checkpointTagPushArgs(
-            options.pushRemote,
-            checkpointTag,
-            options.smoke
-              ? { kind: "smoke" }
-              : {
-                  kind: "pre-push",
-                  candidateCommit,
-                  checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]),
-                },
-          ),
-        );
+        if (selection) {
+          if (options.promotion === "if-no-open-prs" && openPullRequestCount(repoRoot) > 0) {
+            throw new Error(
+              "Open LastCode PRs prevent repaired checkpoint publication; retained for retry.",
+            );
+          }
+          run(
+            repoRoot,
+            "git",
+            recoveryPublicationArgs(options.pushRemote, checkpointTag, selection),
+          );
+        } else {
+          run(
+            repoRoot,
+            "git",
+            checkpointTagPushArgs(
+              options.pushRemote,
+              checkpointTag,
+              options.smoke
+                ? { kind: "smoke" }
+                : {
+                    kind: "pre-push",
+                    candidateCommit,
+                    checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]),
+                  },
+            ),
+          );
+        }
       }
       pendingCheckpointTag = undefined;
       appendCheckpointRun({
@@ -1589,7 +1806,12 @@ function main(argv: ReadonlyArray<string>): void {
     const tagDeleted = pendingCheckpointTag
       ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
       : true;
-    const disposition = checkpointFailureDisposition(pendingCheckpointTag, branch, tagDeleted);
+    const disposition = checkpointFailureDisposition(
+      pendingCheckpointTag,
+      branch,
+      tagDeleted,
+      selection !== undefined,
+    );
     completed = disposition.cleanup;
     if (attempt) {
       const finishedAtMs = Date.now();
@@ -1638,9 +1860,21 @@ function main(argv: ReadonlyArray<string>): void {
     throw error;
   } finally {
     if (completed) {
-      run(repoRoot, "git", ["worktree", "remove", worktree]);
-      git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`]);
+      if (selection) {
+        releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
+      } else {
+        run(repoRoot, "git", ["worktree", "remove", worktree]);
+        git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`]);
+      }
     }
+  }
+
+  if (selection) {
+    runCarrySetShadowAfterPublication(repoRoot, newestProducedInstallableTag);
+    console.log(
+      "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
+    );
+    return;
   }
 
   runPromotionThenShadow(
