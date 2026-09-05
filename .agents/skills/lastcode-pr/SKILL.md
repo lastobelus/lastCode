@@ -42,7 +42,10 @@ promotes the newest one after the PR queue is empty.
 
 ## Babysit and Merge
 
-When the user asks to babysit or merge:
+Use this workflow whenever the authorized task includes waiting for a LastCode
+PR's checks or review, including PRs created while repairing checkpoint or build
+failures. The user does not need to say “babysit.” Creating a PR alone does not
+authorize merging it; preserve the requested stopping point.
 
 Read `.agents/skills/_references/external-review-mechanics.md` for the repository's
 current GitHub thread and review-query mechanics.
@@ -57,9 +60,18 @@ current GitHub thread and review-query mechanics.
    `../_references/external-review-mechanics.md`. Do not merge until Codex gives
    an explicit clean result or every finding for the exact current head has a
    durable handled state, and no review thread remains unresolved.
-4. Use the independent **Wait for PR** Project Action while exact-head GitHub CI
-   or Codex review is passive. It resumes only for an actionable result. Rebase,
-   fix, retry, or request another review only after inspecting that result.
+4. While exact-head GitHub CI or Codex review is passive and no current finding
+   needs judgement, call `list_project_actions`. Select the eligible **Wait for
+   PR** action by its returned stable ID, preferring repository-managed
+   `lc-wait-for-pr` over the older saved `wait-for-pr` if both exist. Call
+   `run_project_action_and_resume` and end the turn immediately. Do not follow
+   the launch with GitHub queries, sleeps, process checks, or output polling.
+   Do not execute `scripts/lastcode-wait-for-pr.ts` through a shell tool: running
+   the wait script directly keeps the agent turn open and loses the resume handoff.
+   After resume, inspect the wake reason and verify the current head/base before
+   deciding whether to fix, rebase, retry, or request another review. If the
+   action is missing or disabled, report the setup blocker; do not substitute a
+   manual polling loop.
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, a clean current PR, and an unchanged fetched
@@ -72,9 +84,10 @@ current GitHub thread and review-query mechanics.
    npm --silent run markover -- done <pr-url> --pr-status merged
    ```
 
-Follow the repository's bounded CI polling rule. Stay quiet when no new review
-or check result exists, and stop only when the latest commit is clean or a real
-external blocker requires the user.
+One immediate status snapshot can establish that a wait is needed. For this
+LastCode workflow, the resumable action owns subsequent passive checks; the
+general repository CI polling rule does not require agent-side sleeps or
+repeated queries. Stop at the requested ready/merged state or a real blocker.
 
 ## Handoff
 
