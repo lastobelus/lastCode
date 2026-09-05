@@ -2,12 +2,12 @@
 
 You should be able to hand a concern to a thread without becoming responsible for reminding it forever. **My recommendation is a durable thread commitment list, backed by a whole-thread audit skill.** Keep the existing checklist for immediate work, but stop relying on it to remember everything.
 
-Two subagents investigated current guidance and LastCode’s implementation. Code findings describe this checkout; I did not inspect the running app or change product code.
+Two subagents investigated current guidance and LastCode’s implementation. Code findings describe this checkout at `3a50a104f4`; I did not inspect the running app or change product code.
 
 **1. The checklist you see is real—but it is not a complete thread task manager.**
 
 - Providers emit checklist updates, which LastCode saves in thread activity history.
-- LastCode can find an older checklist, but the composer only displays tasks belonging to the current, unfinished turn. An unfinished list can therefore disappear when the turn ends or another turn starts. See [the display condition](../../../../apps/web/src/components/ChatView.tsx:5009) and [older-list selection](../../../../apps/web/src/session-logic.ts:656).
+- LastCode can find an older checklist, but the composer only displays tasks belonging to the current, unfinished turn. An unfinished list can therefore disappear when the turn ends or another turn starts. See [the display condition](../../../../apps/web/src/components/ChatView.tsx#L5009) and [older-list selection](../../../../apps/web/src/session-logic.ts#L656).
 - The drawer is display-only: you cannot currently edit or annotate its items there.
 - We found no LastCode mechanism that reintroduces the saved checklist into subsequent provider requests. Its survival in storage does not guarantee the agent remembers it after steering or compaction.
 
@@ -42,7 +42,7 @@ LastCode should supply outstanding commitments to the agent at turn start and af
 
 For long threads, subagents can inspect separate history segments and return candidate obligations with message references. The primary agent must reconcile them chronologically: a later message may complete, change, or cancel an earlier request. Chunk summaries alone are not enough.
 
-There is a concrete access limitation to address first: the current thread-reading command defaults to five recent turns, allows at most twenty, and bounds output to 64,000 characters. It also omits detailed activity payloads. A skill using only that command could miss the original goals. The server already supports older-history pagination, so a complete-history reader is feasible. See [reader limits](../../../../apps/server/src/cli/thread.ts:52) and [pagination contract](../../../../packages/contracts/src/orchestration.ts:1002).
+There is a concrete access limitation to address first: the current thread-reading command defaults to five recent turns, allows at most twenty, and bounds output to 64,000 characters. It also omits detailed activity payloads. A skill using only that command could miss the original goals. The server already supports older-history pagination, so a complete-history reader is feasible. See [reader limits](../../../../apps/server/src/cli/thread.ts#L52) and [pagination contract](../../../../packages/contracts/src/orchestration.ts#L1002).
 
 The audit must report its coverage. If history is missing or truncated, it should say “I could not verify the whole thread,” never “nothing left.” A quick audit should become a full audit whenever its saved coverage is missing or uncertain.
 
