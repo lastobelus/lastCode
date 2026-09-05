@@ -1205,6 +1205,44 @@ describe("LastCode checkpoint supervisor", () => {
     expect(enabled.messages).toEqual([]);
   });
 
+  it("continues closures past a rejected old recipient while retaining its evidence", () => {
+    const sent = [];
+    const makeIncident = (fingerprint, deliveryThreadId) => ({
+      fingerprint,
+      deliveryThreadId,
+      alertDelivery: "sent",
+      resolutionDelivery: "pending",
+      failure: { phase: "fetch", error: "blocker" },
+    });
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        incident: makeIncident("current", "thread-current"),
+        pendingResolutions: [
+          makeIncident("old", "thread-old"),
+          makeIncident("later", "thread-later"),
+        ],
+      },
+      dependencies: {
+        sendThread: (threadId) => {
+          sent.push(threadId);
+          if (threadId === "thread-old")
+            throw Object.assign(new Error("rejected"), {
+              phase: "alert-delivery",
+              diagnostic: "LastCode thread 'thread-old' was not found.",
+            });
+        },
+      },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(sent).toEqual(["thread-old", "thread-later", "thread-current"]);
+    expect(recovered.state.pendingResolutions).toEqual([
+      expect.objectContaining({ fingerprint: "old" }),
+    ]);
+    expect(recovered.state.incident.resolutionDelivery).toBe("sent");
+  });
+
   it("preserves a delivered alert when its recovery destination is removed", () => {
     const failed = fixture({
       dependencies: {

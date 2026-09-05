@@ -690,18 +690,22 @@ function attemptDelivery(state, config, dependencies) {
 
   if (nextState.status === "success") {
     let pendingResolutions = [...durableIncidentList(nextState, "pendingResolutions")];
+    const rejectedResolutions = new Set();
     while (pendingResolutions.length > 0) {
-      const [incident, ...remaining] = pendingResolutions;
-      if (!incident) break;
+      const index = pendingResolutions.findIndex(
+        (item) => !rejectedResolutions.has(item.fingerprint),
+      );
+      if (index < 0) break;
+      const incident = pendingResolutions[index];
+      const remaining = pendingResolutions.filter((_, itemIndex) => itemIndex !== index);
       const updatedIncident = {
         ...incident,
         resolutionDelivery: "pending",
         deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
         lastDeliveryAttemptAt: dependencies.now(),
       };
-      nextState = Object.assign({}, nextState, {
-        pendingResolutions: [updatedIncident, ...remaining],
-      });
+      pendingResolutions[index] = updatedIncident;
+      nextState = Object.assign({}, nextState, { pendingResolutions });
       dependencies.writeState(nextState);
       try {
         dependencies.sendThread(
@@ -721,6 +725,10 @@ function attemptDelivery(state, config, dependencies) {
         console.error(
           `[lastcode:checkpoint-supervisor] Could not deliver a pending resolution to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
         );
+        if (rejectedThreadSend(error, deliveryThreadId(updatedIncident))) {
+          rejectedResolutions.add(updatedIncident.fingerprint);
+          continue;
+        }
         return nextState;
       }
     }
