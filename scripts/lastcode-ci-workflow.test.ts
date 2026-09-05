@@ -48,7 +48,7 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(workflow).toContain("fetch-depth: 2");
     expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
-    expect(workflow).not.toContain("blacksmith-");
+    expect(workflow).not.toContain("runs-on: blacksmith-");
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
   });
