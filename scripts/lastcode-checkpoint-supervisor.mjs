@@ -534,6 +534,17 @@ function deliveryThreadId(incident) {
 }
 
 function rejectedThreadSend(error, target) {
+  // spawnSync reports these only when the child could not be launched. Other
+  // spawn errors (notably timeout/buffer limits) may follow a successful send.
+  if (
+    error &&
+    typeof error === "object" &&
+    ["ENOENT", "EACCES", "ENOTDIR", "E2BIG"].includes(error.code) &&
+    typeof error.syscall === "string" &&
+    error.syscall.startsWith("spawnSync ")
+  ) {
+    return true;
+  }
   if (
     !error ||
     typeof error !== "object" ||

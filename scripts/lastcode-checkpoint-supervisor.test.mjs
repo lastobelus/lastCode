@@ -707,6 +707,31 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
+  it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(
+    "distinguishes launch rejection from uncertain process failure: %s",
+    (code) => {
+      const failed = fixture({
+        dependencies: {
+          runPhase: () => {
+            throw new Error("fetch failed");
+          },
+          sendThread: () => {
+            throw Object.assign(new Error("wrapper failed"), {
+              code,
+              syscall: "spawnSync /example/bin/lastcode-thread",
+            });
+          },
+        },
+      });
+      expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+      const uncertain = code === "ETIMEDOUT" || code === "ENOBUFS";
+      expect(failed.state.incident.alertDelivery).toBe(uncertain ? "unknown" : "rejected");
+      const recovered = fixture({ state: failed.state });
+      runCheckpointSupervisor({}, recovered.dependencies);
+      expect(recovered.messages).toHaveLength(uncertain ? 1 : 0);
+    },
+  );
+
   it("keeps an explicit dispatch failure uncertain after recovery", () => {
     const failed = fixture({
       dependencies: {
