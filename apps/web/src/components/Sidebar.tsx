@@ -3178,9 +3178,10 @@ export default function Sidebar() {
       // thread deletion elsewhere) and the menu labels must count only what
       // the actions will touch.
       const selectedThreadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
-      const threadKeys = selectedThreadKeys.filter((threadKey) =>
-        threadByKeyRef.current.has(threadKey) &&
-        threadByKeyRef.current.get(threadKey)?.worktreeCleanup == null,
+      const threadKeys = selectedThreadKeys.filter(
+        (threadKey) =>
+          threadByKeyRef.current.has(threadKey) &&
+          threadByKeyRef.current.get(threadKey)?.worktreeCleanup == null,
       );
       if (threadKeys.length === 0) return;
       const count = threadKeys.length;
