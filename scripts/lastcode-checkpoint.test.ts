@@ -675,6 +675,40 @@ it("creates the next revision by replaying main changes onto the latest checkpoi
   });
 });
 
+it("uses older revision provenance when the latest checkpoint was chained from a checkpoint", () => {
+  const old = nightly("v0.0.34-nightly.20260815.1104");
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const plan = resolveRevisionPlan({
+    installableRefs: [
+      {
+        tag: `lastcode/revision/${old.tag}.3`,
+        commit: "old-rebased-revision",
+        nightly: old,
+        revision: 3,
+        sourceCommit: "last-represented-main",
+      },
+      {
+        tag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "latest-checkpoint",
+        nightly: latest,
+        revision: 0,
+        sourceCommit: "previous-checkpoint",
+      },
+    ],
+    sourceCommit: "main-with-feature",
+    isAncestor: (ancestor, descendant) =>
+      ancestor === "last-represented-main" && descendant === "main-with-feature",
+  });
+  assert.deepStrictEqual(plan, {
+    kind: "create",
+    installableTag: `lastcode/revision/${latest.tag}.1`,
+    nightly: latest,
+    ontoRef: `lastcode/checkpoint/${latest.tag}`,
+    replayBase: "last-represented-main",
+    revision: 1,
+  });
+});
+
 it("increments revisions already based on the latest installable", () => {
   const latest = nightly("v0.0.34-nightly.20260816.1105");
   const plan = resolveRevisionPlan({
