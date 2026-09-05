@@ -182,16 +182,34 @@ function clipThroughOverflowAncestors(rect: DOMRect, element: Element): DOMRect 
     const scaleX = ancestor.offsetWidth ? bounds.width / ancestor.offsetWidth : 0;
     const scaleY = ancestor.offsetHeight ? bounds.height / ancestor.offsetHeight : 0;
     if ((clipX && !(scaleX > 0)) || (clipY && !(scaleY > 0))) return null;
-    const left = clipX
-      ? Math.max(rect.left, bounds.left + ancestor.clientLeft * scaleX)
-      : rect.left;
-    const top = clipY ? Math.max(rect.top, bounds.top + ancestor.clientTop * scaleY) : rect.top;
-    const right = clipX
-      ? Math.min(rect.right, bounds.left + (ancestor.clientLeft + ancestor.clientWidth) * scaleX)
-      : rect.right;
-    const bottom = clipY
-      ? Math.min(rect.bottom, bounds.top + (ancestor.clientTop + ancestor.clientHeight) * scaleY)
-      : rect.bottom;
+    let clipLeft = ancestor.clientLeft;
+    let clipTop = ancestor.clientTop;
+    let clipRight = clipLeft + ancestor.clientWidth;
+    let clipBottom = clipTop + ancestor.clientHeight;
+    // Chromium applies the clip margin only when both axes use overflow: clip.
+    // Resolve its reference box before scaling the margin into viewport pixels.
+    if (style.overflowX === "clip" && style.overflowY === "clip") {
+      const margin = (style.overflowClipMargin ?? "0px").split(/\s+/);
+      const distance = Number.parseFloat(margin.find((part) => part.endsWith("px")) ?? "0");
+      if (margin.includes("border-box")) {
+        clipLeft = clipTop = 0;
+        clipRight = ancestor.offsetWidth;
+        clipBottom = ancestor.offsetHeight;
+      } else if (margin.includes("content-box")) {
+        clipLeft += Number.parseFloat(style.paddingLeft) || 0;
+        clipTop += Number.parseFloat(style.paddingTop) || 0;
+        clipRight -= Number.parseFloat(style.paddingRight) || 0;
+        clipBottom -= Number.parseFloat(style.paddingBottom) || 0;
+      }
+      clipLeft -= distance;
+      clipTop -= distance;
+      clipRight += distance;
+      clipBottom += distance;
+    }
+    const left = clipX ? Math.max(rect.left, bounds.left + clipLeft * scaleX) : rect.left;
+    const top = clipY ? Math.max(rect.top, bounds.top + clipTop * scaleY) : rect.top;
+    const right = clipX ? Math.min(rect.right, bounds.left + clipRight * scaleX) : rect.right;
+    const bottom = clipY ? Math.min(rect.bottom, bounds.top + clipBottom * scaleY) : rect.bottom;
     rect = new DOMRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
   }
   return rect;

@@ -383,8 +383,22 @@ try {
         height: display === "inline" ? 50 : 20,
       })),
       { name: "root-overflow", rootStyle: "overflow:hidden", bodyStyle: "", height: 20 },
-      { name: "root-contained", rootStyle: "contain:layout", bodyStyle: "", height: 20 },
-      { name: "body-contained", rootStyle: "", bodyStyle: "contain:layout", height: 20 },
+      ...["style", "size", "inline-size", "layout", "paint", "content", "strict"].flatMap(
+        (contain) => [
+          {
+            name: `root-contain-${contain}`,
+            rootStyle: `height:350px;contain:${contain}`,
+            bodyStyle: "",
+            height: 20,
+          },
+          {
+            name: `body-contain-${contain}`,
+            rootStyle: "",
+            bodyStyle: `contain:${contain}`,
+            height: 20,
+          },
+        ],
+      ),
       {
         name: "root-propagated",
         rootStyle: `height:60px;overflow:${overflow}`,
@@ -434,6 +448,82 @@ try {
     }
   }
   console.log("PASS: viewport overflow propagation and root/body containment clipping");
+
+  // Compare captured bounds with Chromium hit testing, including reference boxes,
+  // positive scaling and cases where Chromium ignores overflow-clip-margin.
+  for (const scenario of [
+    { overflow: "clip", margin: "20px", start: 85, end: 245 },
+    { overflow: "clip", margin: "padding-box 20px", start: 85, end: 245 },
+    { overflow: "clip", margin: "content-box 20px", start: 95, end: 235 },
+    { overflow: "clip", margin: "border-box 20px", start: 80, end: 250 },
+    { overflow: "hidden", margin: "20px", start: 105, end: 225 },
+    { overflow: "clip visible", margin: "20px", start: 105, end: 225, yStart: 75, yEnd: 275 },
+    { overflow: "visible clip", margin: "20px", start: 75, end: 275, yStart: 105, yEnd: 225 },
+  ]) {
+    for (const scale of [1, 1.5]) {
+      const clipPage = await browser.newPage({ viewport: { width: 800, height: 700 } });
+      await clipPage.setContent(
+        '<body style="margin:0"><iframe style="width:600px;height:600px;border:0"></iframe>',
+      );
+      await clipPage.locator("iframe").evaluate(
+        (frame, { scenario, scale }) => {
+          frame.srcdoc = `<!doctype html><style>
+          body{margin:0}
+          #scaled{transform:scale(${scale});transform-origin:0 0;padding:100px}
+          #box{width:100px;height:100px;padding:10px;border:5px solid;
+            overflow:${scenario.overflow};overflow-clip-margin:${scenario.margin}}
+          #target{position:relative;left:-40px;top:-40px;width:200px;height:200px;background:lime}
+          </style><div id="scaled"><div id="box"><div id="target">Clip margin target</div></div></div>`;
+        },
+        { scenario, scale },
+      );
+      const selected = clipPage.frameLocator("iframe").locator("#target");
+      await selected.waitFor();
+      // The target extends beyond every reference box on all four sides.
+      const expected = {
+        x: Math.max(75, scenario.start) * scale,
+        y: Math.max(75, scenario.yStart ?? scenario.start) * scale,
+        width: (scenario.end - Math.max(75, scenario.start)) * scale,
+        height:
+          ((scenario.yEnd ?? scenario.end) - Math.max(75, scenario.yStart ?? scenario.start)) *
+          scale,
+      };
+      for (const axis of ["x", "y"]) {
+        for (const edge of ["start", "end"]) {
+          for (const outside of [false, true]) {
+            const boundary =
+              expected[axis] + (edge === "end" ? expected[axis === "x" ? "width" : "height"] : 0);
+            const offset = (outside ? 1 : -1) * (edge === "end" ? 1 : -1);
+            const point =
+              axis === "x"
+                ? { x: boundary + offset, y: 150 * scale }
+                : { x: 150 * scale, y: boundary + offset };
+            NodeAssert.equal(
+              await selected.evaluate(
+                (element, point) =>
+                  element.ownerDocument.elementFromPoint(point.x, point.y) === element,
+                point,
+              ),
+              !outside,
+              `${scenario.overflow}/${scenario.margin}/${scale}: ${axis} ${edge} clip edge`,
+            );
+          }
+        }
+      }
+      await install(clipPage);
+      await clipPage.mouse.click(150 * scale, 150 * scale);
+      const clipRect = await attach(
+        clipPage,
+        /Clip margin target/,
+        `clip-margin-${scenario.overflow.replaceAll(" ", "-")}-${scenario.margin.replaceAll(" ", "-")}-${scale}`,
+      );
+      NodeAssert.deepEqual(clipRect, expected);
+      await clipPage.close();
+    }
+  }
+  console.log(
+    "PASS: overflow clip margins, reference boxes, positive scale and ignored-margin controls",
+  );
 
   if (liveUrl) {
     const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "picker-electron-"));
