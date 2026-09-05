@@ -545,6 +545,7 @@ function rejectedThreadSend(error, target) {
   // These diagnostics originate before runThreadSend calls dispatch. Keep
   // dispatch failures out: a timeout there does not prove non-delivery.
   if (
+    /(?:^|[\s:])Failed to issue session token\./u.test(error.diagnostic) ||
     /(?:^|[\s:])The owning LastCode server is not available; thread send has no offline fallback\./u.test(
       error.diagnostic,
     ) ||

@@ -673,6 +673,7 @@ describe("LastCode checkpoint supervisor", () => {
   });
 
   it.each([
+    "Failed to issue session token.",
     "ThreadSendTargetError: LastCode thread 'thread-stale' was not found.",
     "The owning LastCode server is not available; thread send has no offline fallback.",
     "LastCode thread live send target lookup failed.",
