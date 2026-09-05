@@ -8,7 +8,8 @@ selected content and a screenshot of the marked area.
 Elements inside same-origin iframes are selectable, including embedded `srcdoc`
 previews and nested frames. Highlights follow scrolling within the frame and the
 surrounding page. Screenshot crops use the element's visible position in the
-browser. If a frame navigates or is removed, its old selections are discarded;
+browser, including responsive previews scaled to fit the panel. Crops are clipped
+to the visible browser area. If a frame navigates or is removed, its old selections are discarded;
 select the replacement content to annotate it.
 The packaged element context includes the embedded document's URL and the path
 through its containing frames, so selectors can be resolved inside the correct
