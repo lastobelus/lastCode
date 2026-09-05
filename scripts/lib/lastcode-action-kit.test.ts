@@ -41,7 +41,10 @@ describe("LastCode Action kit", () => {
 
     expect(actions.length).toBeGreaterThan(0);
     for (const action of actions) {
-      const scriptPath = /\bnode (scripts\/[^\s]+\.(?:ts|mjs))\b/u.exec(action.command)?.[1];
+      const scriptPath =
+        /\bnode (?:"\$T3CODE_PROJECT_ROOT\/)?(scripts\/[^\s"]+\.(?:ts|mjs))\b/u.exec(
+          action.command,
+        )?.[1];
       expect(scriptPath, `${action.name} must run a repository-owned script`).toBeDefined();
 
       const source = NodeFS.readFileSync(NodePath.join(repoRoot, scriptPath!), "utf8");
