@@ -574,7 +574,41 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.state.incident.deliveryAttempts).toBe(1);
   });
 
-  it("keeps failed delivery pending and retries it on the next run", () => {
+  it("closes an ambiguously delivered alert at its original recipient after immediate recovery", () => {
+    const first = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw new Error("server unavailable");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
+    expect(first.state.incident).toMatchObject({
+      alertDelivery: "unknown",
+      deliveryAttempts: 1,
+      deliveryThreadId: "thread-maintenance",
+    });
+
+    const recovered = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
+
+    const stillHealthy = fixture({ state: recovered.state });
+    runCheckpointSupervisor({}, stillHealthy.dependencies);
+    expect(stillHealthy.messages).toEqual([]);
+  });
+
+  it("retries an ambiguous alert when the checkpoint remains failed", () => {
     const runPhase = () => {
       throw new Error("fetch failed");
     };
@@ -587,13 +621,288 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
     expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
-    expect(first.state.incident.alertDelivery).toBe("pending");
 
-    const second = fixture({ state: first.state, dependencies: { runPhase } });
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        runPhase,
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "replacement-thread" }),
+      },
+    });
     expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("fetch failed");
     expect(second.messages).toHaveLength(1);
+    expect(second.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(second.state.incident).toMatchObject({ alertDelivery: "sent", deliveryAttempts: 2 });
+  });
+
+  it("reroutes a definitively rejected target when the checkpoint remains failed", () => {
+    const runPhase = () => {
+      throw new Error("fetch failed");
+    };
+    const targetRejected = () =>
+      Object.assign(new Error("target rejected"), {
+        diagnostic: "LastCode thread 'thread-stale' was not found.",
+        phase: "alert-delivery",
+      });
+    const first = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-stale" }),
+        runPhase,
+        sendThread: () => {
+          throw targetRejected();
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
+    expect(first.state.incident).toMatchObject({
+      alertDelivery: "rejected",
+      deliveryAttempts: 1,
+    });
+    expect(first.state.incident.deliveryThreadId).toBeUndefined();
+
+    const repaired = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-repaired" }),
+        runPhase,
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, repaired.dependencies)).toThrow("fetch failed");
+    expect(repaired.messages).toEqual([expect.objectContaining({ threadId: "thread-repaired" })]);
+    expect(repaired.state.incident).toMatchObject({ alertDelivery: "sent", deliveryAttempts: 2 });
+  });
+
+  it.each([
+    "Failed to issue session token.",
+    "ThreadSendTargetError: LastCode thread 'thread-stale' was not found.",
+    "The owning LastCode server is not available; thread send has no offline fallback.",
+    "LastCode thread live send target lookup failed.",
+    "LastCode thread send command id generation failed.",
+    "LastCode thread send message id generation failed.",
+  ])("drops a pre-dispatch rejected alert after recovery: %s", (diagnostic) => {
+    const targetRejected = () =>
+      Object.assign(new Error("target rejected"), {
+        diagnostic,
+        phase: "alert-delivery",
+      });
+    const failed = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-stale" }),
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw targetRejected();
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+
+    const recovered = fixture({ state: failed.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "not-needed",
+      resolutionDelivery: "not-needed",
+    });
+  });
+
+  it.each(["missing", "non-executable"])("retires alerts rejected by wrapper exec: %s", (kind) => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "thread-wrapper-test-"));
+    try {
+      const executable = NodePath.join(directory, "runtime");
+      if (kind === "non-executable")
+        NodeFS.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o600 });
+      const wrapper = NodePath.join(directory, "lastcode-thread");
+      NodeFS.writeFileSync(
+        wrapper,
+        '#!/bin/sh\ncase "$1" in\n  send) command="$1"; shift; exec "$1" thread "$command" ;;\nesac\n',
+        { mode: 0o700 },
+      );
+      const result = NodeChildProcess.spawnSync("/bin/bash", [wrapper, "send", executable], {
+        encoding: "utf8",
+      });
+      expect([126, 127]).toContain(result.status);
+      const failed = fixture({
+        dependencies: {
+          runPhase: () => {
+            throw new Error("fetch failed");
+          },
+          sendThread: () => {
+            throw Object.assign(new Error("wrapper exec failed"), {
+              phase: "alert-delivery",
+              status: result.status,
+              diagnostic: result.stderr,
+            });
+          },
+        },
+      });
+      expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+      expect(failed.state.incident.alertDelivery).toBe("rejected");
+      const recovered = fixture({ state: failed.state });
+      runCheckpointSupervisor({}, recovered.dependencies);
+      expect(recovered.messages).toEqual([]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [127, "lastcode-thread: line 3: /example/runtime: No such file or directory"],
+    [126, "lastcode-thread: line 3: /example/runtime: Permission denied"],
+  ])("rejects a Bash wrapper failure without a second exec line: %s", (status, diagnostic) => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw Object.assign(new Error("exec failed"), {
+            phase: "alert-delivery",
+            status,
+            diagnostic,
+          });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+    expect(failed.state.incident.alertDelivery).toBe("rejected");
+    const recovered = fixture({ state: failed.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([]);
+  });
+
+  it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(
+    "distinguishes launch rejection from uncertain process failure: %s",
+    (code) => {
+      const failed = fixture({
+        dependencies: {
+          runPhase: () => {
+            throw new Error("fetch failed");
+          },
+          sendThread: () => {
+            throw Object.assign(new Error("wrapper failed"), {
+              code,
+              syscall: "spawnSync /example/bin/lastcode-thread",
+            });
+          },
+        },
+      });
+      expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+      const uncertain = code === "ETIMEDOUT" || code === "ENOBUFS";
+      expect(failed.state.incident.alertDelivery).toBe(uncertain ? "unknown" : "rejected");
+      const recovered = fixture({ state: failed.state });
+      runCheckpointSupervisor({}, recovered.dependencies);
+      expect(recovered.messages).toHaveLength(uncertain ? 1 : 0);
+    },
+  );
+
+  it("keeps an explicit dispatch failure uncertain after recovery", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+        sendThread: () => {
+          throw Object.assign(new Error("dispatch timed out"), {
+            phase: "alert-delivery",
+            diagnostic: "LastCode thread live send dispatch failed.",
+          });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+    expect(failed.state.incident.alertDelivery).toBe("unknown");
+    const recovered = fixture({ state: failed.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0].message).toContain("resolved alert");
+  });
+
+  it("delivers a new blocker past an uncertain backlog with a rejected recipient", () => {
+    const first = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-old" }),
+        runPhase: () => {
+          throw new Error("old blocker");
+        },
+        sendThread: () => {
+          throw new Error("dispatch timed out");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("old blocker");
+    const sent = [];
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-new" }),
+        runPhase: () => {
+          throw new Error("new blocker");
+        },
+        sendThread: (threadId, message) => {
+          sent.push({ threadId, message });
+          if (threadId === "thread-old")
+            throw Object.assign(new Error("rejected"), {
+              phase: "alert-delivery",
+              diagnostic: "LastCode thread 'thread-old' was not found.",
+            });
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("new blocker");
+    expect(sent.map((item) => item.threadId)).toEqual(["thread-old", "thread-new"]);
     expect(second.state.incident.alertDelivery).toBe("sent");
-    expect(second.state.incident.deliveryAttempts).toBe(2);
+    expect(second.state.pendingIncidents).toEqual([
+      expect.objectContaining({
+        alertDelivery: "unknown",
+        deliveryThreadId: "thread-old",
+      }),
+    ]);
+  });
+
+  it("retains an earlier uncertain recipient when a later retry is definitively rejected", () => {
+    const runPhase = () => {
+      throw new Error("fetch failed");
+    };
+    const targetRejected = () =>
+      Object.assign(new Error("target rejected"), {
+        diagnostic: "ThreadSendTargetError: LastCode thread 'thread-original' was not found.",
+        phase: "alert-delivery",
+      });
+    const first = fixture({
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-original" }),
+        runPhase,
+        sendThread: () => {
+          throw new Error("request timed out");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("fetch failed");
+
+    const rejected = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-stale" }),
+        runPhase,
+        sendThread: (threadId) => {
+          expect(threadId).toBe("thread-original");
+          throw targetRejected();
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, rejected.dependencies)).toThrow("fetch failed");
+    expect(rejected.state.incident).toMatchObject({
+      alertDelivery: "unknown",
+      deliveryThreadId: "thread-original",
+    });
+    expect(rejected.state.incident.attemptedThreadId).toBeUndefined();
+
+    const recovered = fixture({ state: rejected.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([expect.objectContaining({ threadId: "thread-original" })]);
+    expect(recovered.messages[0]?.message).toContain("resolved alert");
   });
 
   it("delivers every distinct blocker after thread delivery recovers", () => {
@@ -770,7 +1079,7 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recurring.state.incident).toMatchObject({ alertDelivery: "pending" });
   });
 
-  it("updates a queued closure with the delayed alert destination", () => {
+  it("closes an ambiguous alert at its original recipient after another failure", () => {
     const failed = fixture({
       dependencies: {
         runPhase: () => {
@@ -804,9 +1113,6 @@ describe("LastCode checkpoint supervisor", () => {
     });
     expect(() => runCheckpointSupervisor({}, failedAgain.dependencies)).toThrow("blocker B");
     expect(failedAgain.state.pendingResolutions).toHaveLength(1);
-    expect(failedAgain.state.pendingResolutions[0]).toMatchObject({
-      deliveryThreadId: "thread-delivery",
-    });
 
     const finallyRecovered = fixture({
       state: failedAgain.state,
@@ -816,9 +1122,11 @@ describe("LastCode checkpoint supervisor", () => {
     });
     runCheckpointSupervisor({}, finallyRecovered.dependencies);
     expect(finallyRecovered.messages).toHaveLength(2);
-    expect(finallyRecovered.messages.every(({ threadId }) => threadId === "thread-delivery")).toBe(
-      true,
-    );
+    expect(finallyRecovered.messages[0]).toMatchObject({ threadId: "thread-maintenance" });
+    expect(finallyRecovered.messages[1]).toMatchObject({ threadId: "thread-delivery" });
+    expect(
+      finallyRecovered.messages.every(({ message }) => message.includes("resolved alert")),
+    ).toBe(true);
   });
 
   it("sends one closure after a failed incident recovers", () => {
@@ -872,7 +1180,185 @@ describe("LastCode checkpoint supervisor", () => {
     expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
   });
 
-  it("delivers the alert and closure when recovery precedes the alert retry", () => {
+  it("does not queue backlog closures when recovery occurs with delivery disabled", () => {
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        pendingIncidents: [
+          {
+            fingerprint: "old-blocker",
+            alertDelivery: "unknown",
+            deliveryThreadId: "thread-old",
+            deliveryAttempts: 1,
+            failure: { phase: "fetch", error: "old blocker" },
+          },
+        ],
+      },
+      dependencies: { loadConfig: () => null },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingResolutions ?? []).toEqual([]);
+    const enabled = fixture({ state: recovered.state });
+    runCheckpointSupervisor({}, enabled.dependencies);
+    expect(enabled.messages).toEqual([]);
+  });
+
+  it("continues closures past a rejected old recipient while retaining its evidence", () => {
+    const sent = [];
+    const makeIncident = (fingerprint, deliveryThreadId) => ({
+      fingerprint,
+      deliveryThreadId,
+      alertDelivery: "sent",
+      resolutionDelivery: "pending",
+      failure: { phase: "fetch", error: "blocker" },
+    });
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        incident: makeIncident("current", "thread-current"),
+        pendingResolutions: [
+          makeIncident("old", "thread-old"),
+          makeIncident("later", "thread-later"),
+        ],
+      },
+      dependencies: {
+        sendThread: (threadId) => {
+          sent.push(threadId);
+          if (threadId === "thread-old")
+            throw Object.assign(new Error("rejected"), {
+              phase: "alert-delivery",
+              diagnostic: "LastCode thread 'thread-old' was not found.",
+            });
+        },
+      },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+    expect(sent).toEqual(["thread-old", "thread-later", "thread-current"]);
+    expect(recovered.state.pendingResolutions).toEqual([
+      expect.objectContaining({ fingerprint: "old" }),
+    ]);
+    expect(recovered.state.incident.resolutionDelivery).toBe("sent");
+  });
+
+  it("preserves a delivered alert when its recovery destination is removed", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("fetch failed");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
+
+    const recovered = fixture({
+      state: failed.state,
+      dependencies: { loadConfig: () => null },
+    });
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "sent",
+      resolutionDelivery: "not-needed",
+    });
+  });
+
+  it("does not send a closure for an undelivered incident from prior durable state", () => {
+    const incident = {
+      alertDelivery: "pending",
+      failure: { phase: "fetch", error: "fetch failed" },
+      fingerprint: "undelivered-incident",
+      resolutionDelivery: "pending",
+    };
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "success",
+        incident,
+        pendingResolutions: [incident],
+      },
+    });
+
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "not-needed",
+      resolutionDelivery: "not-needed",
+    });
+  });
+
+  it("does not replay or close a legacy attempted alert without its original recipient", () => {
+    const incident = {
+      alertDelivery: "pending",
+      deliveryAttempts: 1,
+      failure: { phase: "fetch", error: "fetch failed" },
+      fingerprint: "legacy-attempted-incident",
+      resolutionDelivery: "pending",
+    };
+    const recovered = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "success",
+        incident,
+        pendingIncidents: [incident],
+      },
+      dependencies: {
+        loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-replacement" }),
+      },
+    });
+
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingIncidents).toEqual([expect.objectContaining(incident)]);
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "unknown",
+      resolutionDelivery: "not-needed",
+    });
+    const failedLater = fixture({
+      state: recovered.state,
+      dependencies: {
+        runPhase: () => {
+          throw new Error("different later failure");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failedLater.dependencies)).toThrow(
+      "different later failure",
+    );
+    expect(failedLater.messages).toHaveLength(1);
+    expect(failedLater.messages[0]?.message).not.toContain("legacy-attempted-incident");
+  });
+
+  it("closes legacy pending attempts when the original recipient is recorded", () => {
+    const test = fixture({
+      state: {
+        schemaVersion: 1,
+        status: "failed",
+        incident: {
+          alertDelivery: "pending",
+          deliveryAttempts: 1,
+          deliveryThreadId: "original-thread",
+          fingerprint: "legacy-known-recipient",
+          failure: { phase: "fetch", error: "fetch failed" },
+        },
+      },
+    });
+    runCheckpointSupervisor({}, test.dependencies);
+    expect(test.messages).toHaveLength(1);
+    expect(test.messages[0]?.threadId).toBe("original-thread");
+    expect(test.messages[0]?.message).toContain("maintenance resolved alert");
+    expect(test.state.incident.alertDelivery).toBe("pending");
+    expect(test.state.incident.resolutionDelivery).toBe("sent");
+  });
+
+  it("closes an ambiguous alert instead of replaying it when recovery follows", () => {
     const previous = fixture({
       dependencies: {
         runPhase: () => {
@@ -888,12 +1374,44 @@ describe("LastCode checkpoint supervisor", () => {
     const recovered = fixture({ state: previous.state });
     expect(runCheckpointSupervisor({}, recovered.dependencies)).toMatchObject({
       status: "success",
-      incident: { resolutionDelivery: "sent" },
+      incident: { alertDelivery: "unknown", resolutionDelivery: "sent" },
     });
-    expect(recovered.messages).toHaveLength(2);
-    expect(recovered.messages[0]?.message).toContain("maintenance alert");
-    expect(recovered.messages[1]?.message).toContain("maintenance resolved alert");
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0]?.message).toContain("maintenance resolved alert");
     expect(recovered.state.pendingIncidents).toBeUndefined();
+  });
+
+  it("drops every never-attempted queued alert when distinct blockers recover together", () => {
+    const failWith = (message) => () => {
+      throw new Error(message);
+    };
+    const first = fixture({
+      dependencies: {
+        loadConfig: () => null,
+        runPhase: failWith("blocker A"),
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, first.dependencies)).toThrow("blocker A");
+
+    const second = fixture({
+      state: first.state,
+      dependencies: {
+        loadConfig: () => null,
+        runPhase: failWith("blocker B"),
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, second.dependencies)).toThrow("blocker B");
+
+    const recovered = fixture({ state: second.state });
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.messages).toEqual([]);
+    expect(recovered.state.pendingIncidents).toBeUndefined();
+    expect(recovered.state.pendingResolutions).toBeUndefined();
+    expect(recovered.state.incident).toMatchObject({
+      alertDelivery: "not-needed",
+      resolutionDelivery: "not-needed",
+    });
   });
 
   it("ignores a malformed durable incident backlog", () => {
