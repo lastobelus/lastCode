@@ -401,6 +401,7 @@ describe("checkpoint carry lifecycle", () => {
       git(repo, ["tag", NIGHTLY_E, upstreamE]);
       git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_E]);
       git(repo, ["push", "--quiet", "origin", `${baseA}:refs/lastcode/sources/${NIGHTLY_E}`]);
+      checkout(repo, "lastcode-source", mainWithPr);
 
       const collision = checkpoint(fixture, ["--push-tags"]);
       assert.notEqual(collision.status, 0);
