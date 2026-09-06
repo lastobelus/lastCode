@@ -143,6 +143,7 @@ export function resolveCarryCheckpointPlan(input: {
   readonly installableRefs: ReadonlyArray<InstallableRef>;
   readonly nightlyTags: ReadonlyArray<string>;
   readonly bootstrapBase: string;
+  readonly selectedNightlyTag?: string;
   readonly resolveCommit: (ref: string) => string;
 }): CheckpointPlan & { readonly previousCompact?: InstallableRef } {
   const previousCompact = input.installableRefs.findLast(
@@ -172,9 +173,12 @@ export function resolveCarryCheckpointPlan(input: {
       .filter((nightly): nightly is NightlyTag => nightly !== undefined)
       .filter(
         (nightly) =>
-          compareNightlyTags(nightly, baseNightly) > 0 && !compactNightlies.has(nightly.tag),
+          compareNightlyTags(nightly, baseNightly) > 0 &&
+          !compactNightlies.has(nightly.tag) &&
+          (!input.selectedNightlyTag || nightly.tag === input.selectedNightlyTag),
       )
-      .toSorted(compareNightlyTags),
+      .toSorted(compareNightlyTags)
+      .slice(-1),
     ...(previousCompact ? { previousCompact } : {}),
   };
 }
@@ -833,6 +837,7 @@ export function resolveCheckpointPlan(input: {
   readonly sourceNightlyTags: ReadonlyArray<string>;
   readonly sourceRef: string;
   readonly supersedeThroughNightlyTag?: string;
+  readonly selectedNightlyTag?: string;
 }): CheckpointPlan {
   const latestCheckpoint = input.checkpointRefs.at(-1);
   const sourceCheckpoint = input.checkpointRefs.find(
@@ -855,7 +860,11 @@ export function resolveCheckpointPlan(input: {
   const supersedeThrough = input.supersedeThroughNightlyTag
     ? parseNightlyTag(input.supersedeThroughNightlyTag)
     : undefined;
-  const missingNightlies = resolveUncheckpointedNightlies(input.nightlyTags, checkpointTags).filter(
+  const targetNightly = input.selectedNightlyTag ?? resolveLatestNightlyTag(input.nightlyTags)?.tag;
+  const missingNightlies = resolveUncheckpointedNightlies(
+    targetNightly ? [targetNightly] : [],
+    checkpointTags,
+  ).filter(
     (nightly) =>
       compareNightlyTags(nightly, candidateBase) > 0 &&
       (!supersedeThrough || compareNightlyTags(nightly, supersedeThrough) > 0),
@@ -2107,6 +2116,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             checkpointRefs: checkpoints,
             installableRefs: installables,
             nightlyTags,
+            ...(selection ? { selectedNightlyTag: selection.nightlyTag } : {}),
             bootstrapBase: replay.bootstrap?.base ?? "",
             resolveCommit: (ref) => git(repoRoot, ["rev-parse", `${ref}^{commit}`]),
           }),
@@ -2118,6 +2128,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           sourceCommit,
           ...(sourceAncestor ? { sourceCheckpointTag: sourceAncestor.checkpointTag } : {}),
           sourceNightlyTags,
+          ...(selection ? { selectedNightlyTag: selection.nightlyTag } : {}),
           sourceRef: options.sourceRef,
           ...(supersededNightly ? { supersedeThroughNightlyTag: supersededNightly.tag } : {}),
         });

@@ -2,12 +2,12 @@
 
 ## Objectives
 
-The workflow has four independent requirements:
+The workflow has five independent requirements:
 
 1. Track upstream T3 Code nightly tags.
 2. Rebase the complete LastCode [downstream carry set](glossary.md#downstream-carry-set) rather than merge upstream history.
-3. Preserve an immutable LastCode checkpoint for every upstream nightly,
-   including nightlies that are never packaged.
+3. Preserve an immutable LastCode checkpoint for each selected upstream target;
+   intermediate upstream nightlies need not be checkpointed.
 4. Publish an ordered installable revision when `lastcode/main` changes between
    upstream nightlies.
 5. Build only when a checkpoint or revision is intentionally selected and has
@@ -65,15 +65,20 @@ pnpm run lastcode:checkpoint -- \
 The command:
 
 1. fetches upstream tags and the fork's existing checkpoint tags;
-2. identifies every missing nightly newer than the current downstream base;
+2. selects the newest available nightly newer than the current downstream base;
 3. creates an initial checkpoint for the current base when bootstrapping;
-4. processes missing nightlies oldest-first in a dedicated Git worktree;
+4. pins that target for the run and replays directly onto it in a dedicated Git worktree;
 5. rebases with Git `rerere` enabled so recurring resolutions can be reused;
 6. installs dependencies and runs the checkpoint smoke gate;
-7. creates and optionally pushes one annotated checkpoint tag per nightly; and
+7. creates and optionally pushes one annotated checkpoint tag for that target;
 8. publishes a revision when `lastcode/main` has new commits but upstream has no
    uncheckpointed nightly; and
 9. optionally promotes the newest checkpoint or revision to `lastcode/main`.
+
+Intermediate tags remain available upstream for diagnosis but are not backfilled.
+An explicitly selected repaired recovery keeps its original target, even when newer
+nightlies exist; the next run can advance from that repair to the newest target.
+Unselected, manually modified recoveries remain protected from automatic retirement.
 
 The smoke gate checks fork identity invariants, `git diff --check`, focused
 LastCode tests, desktop protocol tests, and every workspace typecheck. It is
@@ -81,7 +86,7 @@ intentionally smaller than the full build gate.
 
 Checkpoint-tag publication uses `git push --no-verify` after that dedicated
 smoke gate passes. This avoids rerunning the generic repository-wide pre-push
-gate for every immutable tag while catching up across multiple nightlies.
+gate after the checkpoint smoke validation.
 Ordinary human branch pushes still run the pre-push quick gate. Automation-controlled
 tag publication, `lastcode/main` promotion, and the exact upstream `main` mirror
 push with `--no-verify`: the checkpoint or revision candidate has already passed
@@ -317,12 +322,37 @@ semantic conflict resolution.
 
 ## Local Scheduling
 
-Install the per-user launch agent:
+Save the deployment-owned schedule outside the checkout, then install the
+per-user launch agent from that setting:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+pnpm lastcode:checkpoint:service install
 ```
+
+`--daily-at` is a 24-hour `HH:MM` wall clock and `--time-zone` is an IANA time
+zone. The scheduler resolves that zone itself instead of depending on the Mac's
+current time zone or launchd calendar behavior. It runs once on repeated
+fall-back hours; if spring-forward skips the configured time, it runs at the
+first available minute afterward. Sleeping through the configured time also
+runs the job on the next wake that same local day.
+
+Existing interval deployments remain supported:
+
+```bash
+pnpm lastcode:checkpoint:service configure-schedule \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service install
+```
+
+`configure-schedule` only updates
+`~/.lastcode/automation/checkpoint-schedule.json`; it does not start, stop, or
+reload the service. Run `install` when the saved schedule should take effect.
+Daily installation waits for the configured wall clock instead of starting an
+immediate checkpoint. Interval installation retains its existing immediate
+first run.
 
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
 maintenance. Open that thread's context menu (right-click on desktop/web or
@@ -331,7 +361,6 @@ thread ID once:
 
 ```bash
 pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
   --recovery-thread <thread-id>
 ```
 
@@ -364,12 +393,12 @@ clears the saved destination):
 
 ```bash
 pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
   --no-recovery-thread
 ```
 
-The job runs through the managed checkpoint service. Missed invocations do not
-matter: every run discovers all uncheckpointed tags and catches up oldest-first.
+The job runs through the managed checkpoint service. Each run selects the newest
+available nightly as one fixed target; older gaps do not force it through a
+backlog first, and a newer nightly appearing mid-run waits for the next run.
 When the latest checkpoint is already promoted, the job exits without running
 the local push gate or pushing an unchanged branch.
 The supervisor executes the equivalent of:
@@ -393,9 +422,14 @@ Operational commands:
 
 ```bash
 pnpm lastcode:checkpoint:service status
+# Bypass the cadence once. At or after today's daily time, this satisfies that slot.
 pnpm lastcode:checkpoint:service run-now
 pnpm lastcode:checkpoint:service uninstall
 ```
+
+The guarded merge hook's automatic `run-now --if-installed` request is deferred
+when a daily schedule is installed, so frequent merges do not bypass the chosen
+cadence. A manual `run-now` remains immediate.
 
 ### Checkpoint dashboard
 
@@ -403,8 +437,7 @@ Install the launch agent first so its dedicated automation worktree exists, then
 install the checkpoint dashboard as a user command:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 ```
 
