@@ -50,6 +50,7 @@ export interface CarryPathTouch {
 
 export interface CarrySetShadowTarget {
   readonly checkpointTag: string;
+  readonly replayMode?: "carry" | "historical";
   readonly baseCommit: string;
   readonly sourceCommit: string;
 }
@@ -267,7 +268,16 @@ export function carrySetShadowTarget(
       `${checkpointTag} metadata names ${sourceCommit}, but the tag resolves to ${taggedCommit}.`,
     );
   }
-  return { checkpointTag, baseCommit, sourceCommit };
+  const replayMode = trailers.get("Replay-Mode");
+  if (replayMode !== undefined && replayMode !== "carry" && replayMode !== "historical") {
+    throw new Error(`${checkpointTag} has an invalid Replay-Mode.`);
+  }
+  return {
+    checkpointTag,
+    baseCommit,
+    sourceCommit,
+    ...(replayMode ? { replayMode } : {}),
+  };
 }
 
 function readCommits(repoRoot: string, base: string, source: string): ReadonlyArray<CarryCommit> {
@@ -370,7 +380,7 @@ export function runCarrySetShadowCheck(
     git(repoRoot, ["rev-list", "-n", "1", checkpointTag]),
   );
   const manifest = readManifest(manifestPath);
-  if (parseManifestReplayConfiguration(manifest)?.mode === "carry") {
+  if (target.replayMode === "carry") {
     const groups = readCarryGroupChain(repoRoot, target.sourceCommit, target.baseCommit);
     return {
       ...target,

@@ -184,7 +184,13 @@ it("inspects the published compact chain without running reconstruction hooks", 
     }
     const head = git(repo, ["rev-parse", "HEAD"]);
     const tag = "lastcode/checkpoint/test-compact";
-    git(repo, ["tag", "-a", tag, "-m", `Upstream-Commit: ${base}\nLastCode-Commit: ${head}`]);
+    git(repo, [
+      "tag",
+      "-a",
+      tag,
+      "-m",
+      `Upstream-Commit: ${base}\nLastCode-Commit: ${head}\nReplay-Mode: carry`,
+    ]);
     const manifestPath = NodePath.join(repo, "manifest.json");
     NodeFS.writeFileSync(
       manifestPath,
@@ -215,12 +221,32 @@ it("inspects the published compact chain without running reconstruction hooks", 
       "lastcode/checkpoint/test-uncompacted",
       base,
       "-m",
-      `Upstream-Commit: ${base}\nLastCode-Commit: ${base}`,
+      `Upstream-Commit: ${base}\nLastCode-Commit: ${base}\nReplay-Mode: carry`,
     ]);
     assert.throws(
       () => runCarrySetShadowCheck(repo, "lastcode/checkpoint/test-uncompacted", manifestPath),
       /exactly 6 commits/,
     );
+
+    git(repo, ["config", "core.hooksPath", "/dev/null"]);
+    NodeFS.writeFileSync(NodePath.join(repo, "tail.txt"), "historical source tail\n");
+    git(repo, ["add", "tail.txt"]);
+    git(repo, ["commit", "--quiet", "-m", "ungrouped source tail"]);
+    const historicalHead = git(repo, ["rev-parse", "HEAD"]);
+    const historicalTag = "lastcode/checkpoint/test-historical";
+    git(repo, [
+      "tag",
+      "-a",
+      historicalTag,
+      "-m",
+      `Upstream-Commit: ${base}\nLastCode-Commit: ${historicalHead}\nReplay-Mode: historical\nRollback-Reason: verify historical replay`,
+    ]);
+    const historical = runCarrySetShadowCheck(repo, historicalTag, manifestPath);
+    assert.equal(historical.tree, git(repo, ["rev-parse", `${historicalHead}^{tree}`]));
+    assert.equal(git(repo, ["rev-parse", "HEAD"]), historicalHead);
+
+    NodeFS.writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.equal(runCarrySetShadowCheck(repo, tag, manifestPath).tree, result.tree);
   } finally {
     NodeFS.rmSync(repo, { recursive: true, force: true });
   }
