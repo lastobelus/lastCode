@@ -10,7 +10,7 @@ it.layer(NodeSqliteClient.layerMemory())("049_ProjectionThreadsActiveOrderKey", 
   it.effect("migrates old threads without changing their timestamps or assigning an order", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 48 });
+      yield* runMigrations({ toMigrationInclusive: 58 });
       const now = "2026-01-01T00:00:00.000Z";
       yield* sql`
         INSERT INTO projection_threads (
@@ -21,7 +21,7 @@ it.layer(NodeSqliteClient.layerMemory())("049_ProjectionThreadsActiveOrderKey", 
           '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', ${now}, ${now}
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 49 });
+      yield* runMigrations({ toMigrationInclusive: 59 });
       const migrated = yield* sql<{ readonly activeOrderKey: string | null }>`
         SELECT active_order_key AS "activeOrderKey" FROM projection_threads WHERE thread_id = 'thread-1'
       `;
@@ -39,6 +39,35 @@ it.layer(NodeSqliteClient.layerMemory())("049_ProjectionThreadsActiveOrderKey", 
         FROM projection_threads WHERE thread_id = 'thread-1'
       `;
       assert.deepEqual(rows, [{ activeOrderKey: "gm", createdAt: now, updatedAt: now }]);
+    }),
+  );
+});
+
+const upgradeLayer = it.layer(NodeSqliteClient.layerMemory());
+
+upgradeLayer("049_ProjectionThreadsActiveOrderKey LastCode upgrade", (it) => {
+  it.effect("upgrades a LastCode database whose migration ledger ends at 57", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 57 });
+
+      const before = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_threads)
+      `;
+      assert.isFalse(before.some((column) => column.name === "branch_pull_request_json"));
+      assert.isFalse(before.some((column) => column.name === "active_order_key"));
+
+      const executed = yield* runMigrations({ toMigrationInclusive: 59 });
+      assert.deepEqual(executed, [
+        [58, "ProjectionThreadBranchPullRequest"],
+        [59, "ProjectionThreadsActiveOrderKey"],
+      ]);
+
+      const after = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_threads)
+      `;
+      assert.equal(after.filter((column) => column.name === "branch_pull_request_json").length, 1);
+      assert.equal(after.filter((column) => column.name === "active_order_key").length, 1);
     }),
   );
 });

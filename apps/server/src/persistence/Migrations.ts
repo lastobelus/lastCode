@@ -66,6 +66,9 @@ import Migration0051 from "./Migrations/051_ProjectionTurnRequestCorrelations.ts
 import Migration0052 from "./Migrations/052_ProjectionThreadWorktreeCleanup.ts";
 import Migration0053 from "./Migrations/053_ProjectionThreadLinkedPullRequest.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsUnsettledAt.ts";
+import Migration0055 from "./Migrations/055_ProjectionThreadMessageSource.ts";
+import Migration0056 from "./Migrations/056_ProjectionThreadsPersistent.ts";
+import Migration0057 from "./Migrations/057_ProjectionThreadAttention.ts";
 import Migration0058 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
 import Migration0059 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 
@@ -134,6 +137,9 @@ export const migrationEntries = [
   [52, "ProjectionThreadWorktreeCleanup", Migration0052],
   [53, "ProjectionThreadLinkedPullRequest", Migration0053],
   [54, "ProjectionThreadsUnsettledAt", Migration0054],
+  [55, "ProjectionThreadMessageSource", Migration0055],
+  [56, "ProjectionThreadsPersistent", Migration0056],
+  [57, "ProjectionThreadAttention", Migration0057],
   [58, "ProjectionThreadBranchPullRequest", Migration0058],
   [59, "ProjectionThreadsActiveOrderKey", Migration0059],
 ] as const;

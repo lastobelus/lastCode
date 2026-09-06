@@ -18,9 +18,11 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRequestCorrelationRepositoryLive } from "../persistence/Layers/ProjectionTurnRequestCorrelations.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
 import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
+import { ProjectionTurnRequestCorrelationRepository } from "../persistence/Services/ProjectionTurnRequestCorrelations.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { layer as updateDrainLayer } from "./UpdateDrain.ts";
@@ -108,6 +110,7 @@ const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* 
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
   const dependencies = Layer.mergeAll(
     durableLayer,
+    ProjectionTurnRequestCorrelationRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
     ProjectionTurnRepositoryLive.pipe(Layer.provide(SqlitePersistenceMemory)),
     Layer.mock(ProjectionSnapshotQuery)({ getShellSnapshot: () => Ref.get(shell) }),
     Layer.mock(TerminalManager)({
@@ -171,13 +174,16 @@ it.effect("ignores pending starts left behind by a previous server lifetime", ()
 
     yield* Effect.gen(function* () {
       const projectionTurns = yield* ProjectionTurnRepository;
+      const correlations = yield* ProjectionTurnRequestCorrelationRepository;
+      const messageId = MessageId.make("message-stale-pending-turn");
       yield* projectionTurns.replacePendingTurnStart({
         threadId,
-        messageId: MessageId.make("message-stale-pending-turn"),
+        messageId,
         sourceProposedPlanThreadId: null,
         sourceProposedPlanId: null,
         requestedAt: now,
       });
+      yield* correlations.insertPending({ threadId, messageId, requestedAt: now });
       const admission = yield* makeUpdateDrainAdmission();
       yield* admission.dispatch({
         type: "update-drain.start",
@@ -192,6 +198,11 @@ it.effect("ignores pending starts left behind by a previous server lifetime", ()
         (yield* admission.claimActivation({ requestId })).commandType,
         "update-drain.claim",
       );
+      const correlation = yield* correlations.get({ threadId, messageId });
+      assert.equal(correlation._tag, "Some");
+      if (correlation._tag === "Some") {
+        assert.equal(correlation.value.state, "interrupted");
+      }
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );

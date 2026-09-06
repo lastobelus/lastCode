@@ -285,7 +285,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       number: 42,
       mergedAt: NOW,
     }),
-    layer: ThreadSettlementReactor.layer.pipe(Layer.provide(dependencies)),
+    layer: ThreadSettlementReactor.layer.pipe(Layer.provideMerge(dependencies)),
   };
 });
 
