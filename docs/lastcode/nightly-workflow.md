@@ -129,41 +129,79 @@ checkpoint service repairs a missed request where it is installed.
 
 Use `--promote` only when intentionally overriding the open-PR safeguard.
 
-### Carry-set inventory and reconstruction proof
+### Carry replay ownership
 
-The downstream carry-set tool inventories one checkpoint without changing refs, tags, or
-`lastcode/main`:
+The carry manifest selects the replay mode. With `replay.mode: "carry"`, checkpoints
+apply six ordered groups: Upstream bugfixes, Tooling, Build & CI, Resumable Actions,
+Legacy Sidebar, and Incubator. Only the complete ordered set requires validation.
+Checkpoint/recovery orchestration belongs to Tooling; dependency setup, CI,
+packaging, and build verification belong to Build & CI. Feature-specific tests
+stay with their feature. Essential Action Resume behavior belongs to Resumable
+Actions; optional sidebar visibility belongs to Legacy Sidebar.
+
+Before reviewing a new LastCode PR, give each source commit exactly one
+`Carry-Group` trailer using the manifest's group IDs. Split changes within shared
+files by behavior when necessary. One PR may contain several source commits and
+several groups. Use Incubator for genuinely inseparable changes and record why.
+Prepare this partition before review: changing source commits afterward invalidates
+review and validation of the old head.
+
+Attach brief descriptive context to the relevant source commits. `Carry-Fix`
+identifies the owning issue or PR; `Carry-Upstream` links an actual upstream PR and
+its pinned head where applicable. `Carry-Observation` records current rationale
+or what a prior resolution established; `Carry-Evidence` links detailed GitHub
+history or validation evidence; `Carry-Applies-To` identifies the relevant source
+or upstream version; `Carry-Supersedes` identifies replaced evidence or fixes.
+These are observations for future repair agents, not instructions to follow
+regardless of changed circumstances. Avoid private infrastructure or raw logs.
+
+The guarded merge retains the exact reviewed source range in an immutable ref
+before squashing and supplies `Carry-Source-Ref`, `Carry-Source-Base`, and
+`Carry-Source-Head`. Do not write those reserved trailers into the PR body. The
+next checkpoint verifies the retained range against the squash and folds its
+changes into the owning groups. Generated group commits retain per-contribution
+provenance and notes across generations.
+
+When upstream adopts a fix exactly, replay can reconcile its now-empty delta.
+A repair agent may adapt a different upstream implementation after checking the
+intended behavior and focused validation. A change to deliberately chosen behavior
+requires the user's decision. If equivalence remains uncertain but the carried
+fix still applies and validates, retain it and record that uncertainty. A conflict
+or missing proof of required behavior blocks publication.
+
+### Carry replay inspection and rollout
+
+Inspect an immutable compact checkpoint using its recorded upstream base:
 
 ```bash
 pnpm lastcode:carry-set -- \
   --base <upstream-nightly-tag> \
-  --source <lastcode-checkpoint-or-commit> \
-  --reconstruct
+  --source <lastcode-checkpoint-tag> --json
 ```
 
-[`scripts/lastcode-carry-set.json`](../../scripts/lastcode-carry-set.json) declares the fixed order
-and maps stable LastCode PR numbers to `Upstream bugfixes`, `Tooling`, `Resumable Actions`, and
-`Legacy Sidebar`. Exact subjects identify the few commits that predate the PR workflow. Anything not
-assigned goes to `Incubator`; upstream bugfix entries must also name their upstream PRs.
+The initial manifest pins a reviewed source partition with the same tree as its
+historical source. `--reconstruct` compiles that partition and subsequent annotated
+source contributions using Git deltas. A successful same-base compilation must
+reproduce the source tree; it does not prove compatibility with newer upstream.
+Compilation conflicts retain their worktree and phase record for repair. The
+checkpoint service applies the resulting group commits onto the new upstream,
+validates the integrated result, and preserves immutable publication, source
+provenance, and concurrent-main protections. After publication, the carry check
+inspects the actual group chain rather than constructing full-file snapshots.
 
-The proof creates five temporary local commits. A path touched by only one group belongs to that
-group's generated commit. A path touched by multiple groups, or one the inventory cannot attribute,
-belongs to Incubator for now. After applying the commits in their declared order, the command
-requires the reconstructed Git tree to exactly match the source tree and then removes its temporary
-worktree.
+During rollout, `--replay-mode historical --rollback-reason '<reason>'` explicitly
+selects historical replay for a carry-machinery incident. The reason and mode
+remain in publication and run history. Historical replay uses the latest
+represented result plus new source contributions; it must not discard newer
+integration resolutions. There is no silent fallback. A rollback leaves the carry
+transition unfinished and cannot bypass a genuine feature conflict.
 
-After a scheduled checkpoint run successfully publishes a new immutable checkpoint or revision and
-makes its promotion decision, it runs this reconstruction once for the newest immutable produced by
-that service run. The upstream base and LastCode source come from the immutable tag's
-`Upstream-Commit` and `LastCode-Commit` metadata. The result is appended to
-`checkpoint-runs.jsonl`, printed in the service log, and shown by `lastcode-checkpoints` (successful
-proofs appear with `--verbose`; failures are always shown). A failed proof is observable but does
-not fail, roll back, or republish the successfully produced checkpoint.
-
-This remains a shadow losslessness gate, not the active checkpoint implementation. It does not
-claim that intermediate groups build independently, run product validation against them, publish
-the generated commits, create refs or tags for them, alter promotion, or change what the desktop
-updater or operator installs. Those are later rollout gates.
+Retire historical replay only after production demonstrates a newer upstream
+checkpoint, a newly merged LastCode PR folded in, a successful package, and another
+newer upstream checkpoint using compact replay, with no unresolved carry-machinery
+defect. Existing immutable working installables remain available. Before carry
+activation, the historical inventory and non-blocking reconstruction check remain
+available; that shadow result alone is not production acceptance.
 
 ### Local updater inspection protocol
 

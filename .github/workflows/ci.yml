@@ -25,9 +25,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # The pull-request merge checkout plus both parents are enough to
-          # compare the exact event head and base without fetching full history.
-          fetch-depth: 2
+          # Carry validation inspects every commit in the exact PR range.
+          fetch-depth: 0
           sparse-checkout: |
             /*
             !/.repos/
@@ -51,6 +50,14 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
+
+      - name: Validate carry group assignments
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/lastcode-carry-ci.ts
 
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron

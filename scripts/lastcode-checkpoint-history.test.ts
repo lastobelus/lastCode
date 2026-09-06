@@ -33,6 +33,8 @@ describe("checkpoint run history", () => {
           finishedAt: "2026-08-12T00:00:01.000Z",
           durationMs: 1_000,
           commitsRebased: 1,
+          replayMode: "carry",
+          sourceObjectRef: "refs/lastcode/sources/v1",
         },
         directory,
         (message) => warnings.push(message),
@@ -53,6 +55,8 @@ describe("checkpoint run history", () => {
           localTagRetained: true,
           startedAtMs: 1_000,
           upstreamTag: "v0.0.1-nightly.20260812.1",
+          replayMode: "historical",
+          rollbackReason: "compiler regression",
         },
         4_000,
       ),
@@ -67,6 +71,8 @@ describe("checkpoint run history", () => {
       error: "push failed",
       failurePhase: "publication",
       localTagRetained: true,
+      replayMode: "historical",
+      rollbackReason: "compiler regression",
     });
   });
 
@@ -103,6 +109,25 @@ describe("checkpoint run history", () => {
     NodeFS.writeFileSync(
       historyPath,
       `${JSON.stringify(record)}\n${JSON.stringify({ ...record, recoveryBranch: 42 })}\n`,
+    );
+
+    expect(readLatestCheckpointRun(historyPath)).toEqual(record);
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("skips contradictory rollback metadata", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-history-"));
+    const historyPath = NodePath.join(directory, "checkpoint-runs.jsonl");
+    const record = checkpointFailureRecord({
+      commitsRebased: 0,
+      error: new Error("carry replay failed"),
+      replayMode: "carry",
+      startedAtMs: 1_000,
+      upstreamTag: "v0.0.1-nightly.20260812.1",
+    });
+    NodeFS.writeFileSync(
+      historyPath,
+      `${JSON.stringify(record)}\n${JSON.stringify({ ...record, rollbackReason: "compiler regression" })}\n`,
     );
 
     expect(readLatestCheckpointRun(historyPath)).toEqual(record);

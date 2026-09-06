@@ -9,6 +9,11 @@ Adopt one existing T3 Code PR as an independently owned LastCode change. Treat
 the upstream PR as a pinned candidate and evidence source, never as a substitute
 for LastCode review, validation, or merge authority.
 
+When carry replay is enabled, prepare the LastCode source commits according
+to `docs/lastcode/nightly-workflow.md#carry-replay-ownership`, including the
+actual upstream PR and pinned head, before review. Leave the upstream source
+history unchanged.
+
 ## Establish the Boundary
 
 1. Read the repository `AGENTS.md` and `docs/lastcode/fork-conventions.md`.

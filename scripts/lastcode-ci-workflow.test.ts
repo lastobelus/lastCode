@@ -36,6 +36,9 @@ const hasNonstandardRunnerConfiguration = (source: string): boolean => {
 const gateBlock = /^  ci_gate:\n(?<body>[\s\S]*)$/mu.exec(workflow)?.groups?.body;
 if (!gateBlock) throw new Error("CI workflow is missing the ci_gate job.");
 
+const checkBlock = /^  check:\n(?<body>[\s\S]*?)(?=^  \S)/mu.exec(workflow)?.groups?.body;
+if (!checkBlock) throw new Error("CI workflow is missing the check job.");
+
 const gateScriptBody = /        run: \|\n(?<body>(?:          .*\n?)*)$/u.exec(gateBlock)?.groups
   ?.body;
 if (!gateScriptBody) throw new Error("CI workflow is missing the CI Gate decision script.");
@@ -70,8 +73,15 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("pull_request:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("permissions:\n  contents: read");
-    expect(workflow).toContain("fetch-depth: 2");
+    expect(checkBlock).toContain(
+      "# Carry validation inspects every commit in the exact PR range.\n          fetch-depth: 0",
+    );
     expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
+    expect(checkBlock).toContain("- name: Validate carry group assignments");
+    expect(checkBlock).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(checkBlock).toContain("HEAD_SHA: ${{ github.event.pull_request.head.sha }}");
+    expect(checkBlock).toContain("PR_NUMBER: ${{ github.event.pull_request.number }}");
+    expect(checkBlock).toContain("run: node scripts/lastcode-carry-ci.ts");
     expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");

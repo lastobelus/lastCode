@@ -8,11 +8,14 @@ import { describe, expect, it, onTestFinished } from "vite-plus/test";
 
 import {
   assertRecoverySelection,
+  carryRecoveryBranch,
   checkpointFailureDisposition,
   parseRecoverySelection,
+  publishedRecoveryInstallable,
   recoveryPublicationArgs,
   type RecoverySelection,
 } from "./lastcode-checkpoint.ts";
+import { parseNightlyTag } from "./lastcode-nightly.ts";
 
 const NIGHTLY_TAG = "v0.0.39-nightly.20260905.1286";
 const SOURCE_COMMIT = "b".repeat(40);
@@ -100,6 +103,9 @@ describe("checkpoint recovery selection", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(git(remote, ["rev-parse", "refs/heads/lastcode/main"])).toBe(selection.head);
     expect(git(remote, ["rev-parse", `${tag}^{commit}`])).toBe(selection.head);
+    expect(git(remote, ["rev-parse", `refs/lastcode/sources/${NIGHTLY_TAG}^{commit}`])).toBe(
+      selection.sourceCommit,
+    );
   });
 
   it("publishes neither ref when main advanced beyond the selected source", () => {
@@ -121,11 +127,39 @@ describe("checkpoint recovery selection", () => {
       ["--git-dir", remote, "rev-parse", "--verify", `refs/tags/${tag}`],
       { encoding: "utf8" },
     );
+    const remoteSource = NodeChildProcess.spawnSync(
+      "git",
+      ["--git-dir", remote, "rev-parse", "--verify", `refs/lastcode/sources/${NIGHTLY_TAG}`],
+      { encoding: "utf8" },
+    );
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("stale info");
     expect(git(remote, ["rev-parse", "refs/heads/lastcode/main"])).toBe(advanced);
     expect(remoteTag.status).not.toBe(0);
+    expect(remoteSource.status).not.toBe(0);
+  });
+
+  it("reconciles a published recovery revision after an interrupted service run", () => {
+    const selection: RecoverySelection = {
+      head: "a".repeat(40),
+      sourceCommit: SOURCE_COMMIT,
+      nightlyTag: NIGHTLY_TAG,
+    };
+    expect(
+      publishedRecoveryInstallable(
+        [
+          {
+            tag: `lastcode/revision/${NIGHTLY_TAG}.1`,
+            commit: selection.head,
+            nightly: parseNightlyTag(NIGHTLY_TAG)!,
+            revision: 1,
+            sourceCommit: selection.sourceCommit,
+          },
+        ],
+        selection,
+      )?.tag,
+    ).toBe(`lastcode/revision/${NIGHTLY_TAG}.1`);
   });
 
   it("retains committed repairs when publication fails after deleting its local tag", () => {
@@ -141,6 +175,43 @@ describe("checkpoint recovery selection", () => {
       nightlyTag: NIGHTLY_TAG,
     };
     expect(parseRecoverySelection(selection)).toEqual(selection);
+  });
+
+  it("retains an explicit historical rollback across the service continuation", () => {
+    const selection = {
+      head: "a".repeat(40),
+      sourceCommit: SOURCE_COMMIT,
+      nightlyTag: NIGHTLY_TAG,
+      replayMode: "historical" as const,
+      rollbackReason: "carry compiler regression",
+    };
+    expect(parseRecoverySelection(selection)).toEqual(selection);
+  });
+
+  it("uses a selectable nightly branch for same-nightly carry compilation", () => {
+    expect(carryRecoveryBranch(NIGHTLY_TAG)).toBe(`sync/nightly/${NIGHTLY_TAG}`);
+    expect(() => carryRecoveryBranch("nightly-latest")).toThrow("exact nightly tag");
+  });
+
+  it("rejects empty or non-historical rollback metadata", () => {
+    expect(() =>
+      parseRecoverySelection({
+        head: "a".repeat(40),
+        sourceCommit: SOURCE_COMMIT,
+        nightlyTag: NIGHTLY_TAG,
+        replayMode: "historical",
+        rollbackReason: "   ",
+      }),
+    ).toThrow("invalid rollback reason");
+    expect(() =>
+      parseRecoverySelection({
+        head: "a".repeat(40),
+        sourceCommit: SOURCE_COMMIT,
+        nightlyTag: NIGHTLY_TAG,
+        replayMode: "carry",
+        rollbackReason: "compiler regression",
+      }),
+    ).toThrow("requires historical replay mode");
   });
 
   it("rejects malformed selections and abbreviated commits", () => {

@@ -2,12 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   postMergeCheckpointArguments,
+  squashMergeArguments,
   validateGithubCiForMerge,
   validatePullRequestForMerge,
 } from "./lastcode-merge.ts";
 
 const mergeablePullRequest = {
   number: 12,
+  body: "Fixes the problem.\n\nBuilt with Codex.",
   url: "https://github.com/lastobelus/lastCode/pull/12",
   state: "OPEN",
   isDraft: false,
@@ -24,6 +26,22 @@ describe("lastcode-merge", () => {
       "scripts/lastcode-nightly-service.ts",
       "run-now",
       "--if-installed",
+    ]);
+  });
+
+  it("uses an exact temporary body file with the existing squash guards", () => {
+    expect(squashMergeArguments(12, "head-sha", "/tmp/merge-body.md")).toEqual([
+      "pr",
+      "merge",
+      "12",
+      "--repo",
+      "lastobelus/lastCode",
+      "--squash",
+      "--delete-branch",
+      "--match-head-commit",
+      "head-sha",
+      "--body-file",
+      "/tmp/merge-body.md",
     ]);
   });
 

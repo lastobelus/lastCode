@@ -8,14 +8,14 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import { cleanGitEnvironment } from "./lastcode-nightly.ts";
+import {
+  CARRY_REPLAY_GROUPS,
+  compileCarrySetSameBase,
+  readCarryGroupChain,
+} from "./lastcode-carry-replay.ts";
+import { parseManifestReplayConfiguration } from "./lastcode-carry-checkpoint.ts";
 
-export const CARRY_GROUPS = [
-  "upstream-bugfixes",
-  "tooling",
-  "resumable-actions",
-  "legacy-sidebar",
-  "incubator",
-] as const;
+export const CARRY_GROUPS = CARRY_REPLAY_GROUPS;
 
 export type CarryGroup = (typeof CARRY_GROUPS)[number];
 
@@ -50,6 +50,7 @@ export interface CarryPathTouch {
 
 export interface CarrySetShadowTarget {
   readonly checkpointTag: string;
+  readonly replayMode?: "carry" | "historical";
   readonly baseCommit: string;
   readonly sourceCommit: string;
 }
@@ -212,6 +213,7 @@ export function attributeCarryPaths(
   return {
     "upstream-bugfixes": grouped.get("upstream-bugfixes") ?? [],
     tooling: grouped.get("tooling") ?? [],
+    "build-ci": grouped.get("build-ci") ?? [],
     "resumable-actions": grouped.get("resumable-actions") ?? [],
     "legacy-sidebar": grouped.get("legacy-sidebar") ?? [],
     incubator: grouped.get("incubator") ?? [],
@@ -266,7 +268,16 @@ export function carrySetShadowTarget(
       `${checkpointTag} metadata names ${sourceCommit}, but the tag resolves to ${taggedCommit}.`,
     );
   }
-  return { checkpointTag, baseCommit, sourceCommit };
+  const replayMode = trailers.get("Replay-Mode");
+  if (replayMode !== undefined && replayMode !== "carry" && replayMode !== "historical") {
+    throw new Error(`${checkpointTag} has an invalid Replay-Mode.`);
+  }
+  return {
+    checkpointTag,
+    baseCommit,
+    sourceCommit,
+    ...(replayMode ? { replayMode } : {}),
+  };
 }
 
 function readCommits(repoRoot: string, base: string, source: string): ReadonlyArray<CarryCommit> {
@@ -329,6 +340,8 @@ function reconstruct(
       }
       run(worktree, "git", [
         "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
         "user.name=LastCode carry-set proof",
         "-c",
         "user.email=carry-set@localhost",
@@ -366,9 +379,24 @@ export function runCarrySetShadowCheck(
     git(repoRoot, ["for-each-ref", "--format=%(contents)", `refs/tags/${checkpointTag}`]),
     git(repoRoot, ["rev-list", "-n", "1", checkpointTag]),
   );
+  const manifest = readManifest(manifestPath);
+  if (target.replayMode === "carry") {
+    const groups = readCarryGroupChain(repoRoot, target.sourceCommit, target.baseCommit);
+    return {
+      ...target,
+      groups: groups.map(({ group, contributions }) => ({
+        id: group,
+        commits: contributions.map(({ sourceCommit, subject }) => ({
+          commit: sourceCommit,
+          subject,
+        })),
+      })),
+      tree: git(repoRoot, ["rev-parse", `${target.sourceCommit}^{tree}`]),
+    };
+  }
   const plan = planCarrySet(
     readCommits(repoRoot, target.baseCommit, target.sourceCommit),
-    readManifest(manifestPath),
+    manifest,
   );
   const proof = reconstruct(repoRoot, target.baseCommit, target.sourceCommit, plan);
   return { ...target, groups: plan, tree: proof.tree };
@@ -380,6 +408,37 @@ function main(): void {
   const base = git(repoRoot, ["rev-parse", `${options.base}^{commit}`]);
   const source = git(repoRoot, ["rev-parse", `${options.source}^{commit}`]);
   const manifest = readManifest(options.manifestPath);
+  const replay = parseManifestReplayConfiguration(manifest);
+  if (replay?.mode === "carry") {
+    if (!options.reconstruct) {
+      const groups = readCarryGroupChain(repoRoot, source, base);
+      console.log(JSON.stringify({ base, source, groups }, undefined, 2));
+      return;
+    }
+    const temporaryRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-carry-compile-"),
+    );
+    const worktree = NodePath.join(temporaryRoot, "worktree");
+    run(repoRoot, "git", ["worktree", "add", "--detach", worktree, source]);
+    try {
+      const result = compileCarrySetSameBase({
+        repo: repoRoot,
+        worktree,
+        base,
+        source,
+        preparedPartition: replay.bootstrap,
+      });
+      console.log(JSON.stringify(result, undefined, 2));
+    } catch (error) {
+      throw new Error(
+        `Carry compilation retained at ${worktree}. Resolve and continue its recorded phase.`,
+        { cause: error },
+      );
+    }
+    run(repoRoot, "git", ["worktree", "remove", worktree]);
+    NodeFS.rmSync(temporaryRoot, { recursive: true });
+    return;
+  }
   const plan = planCarrySet(readCommits(repoRoot, base, source), manifest);
   const proof = options.reconstruct ? reconstruct(repoRoot, base, source, plan) : undefined;
   const result = { base, source, groups: plan, ...(proof ? { proof } : {}) };

@@ -18,6 +18,10 @@ export interface CheckpointRunRecord {
   readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
   readonly recoveryFingerprint?: string;
+  readonly replayMode?: "carry" | "historical";
+  readonly rollbackReason?: string;
+  readonly sourceObjectRef?: string;
+  readonly sourceCommit?: string;
 }
 
 export interface CarrySetShadowRecord {
@@ -44,6 +48,15 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
 }
 
+function hasValidRollbackMetadata(candidate: Record<string, unknown>): boolean {
+  return (
+    candidate.rollbackReason === undefined ||
+    (candidate.replayMode === "historical" &&
+      typeof candidate.rollbackReason === "string" &&
+      candidate.rollbackReason.trim() !== "")
+  );
+}
+
 function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
   const candidate = record as Record<string, unknown>;
@@ -64,7 +77,13 @@ function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
       candidate.failurePhase === "smoke") &&
     isOptionalBoolean(candidate.localTagRetained) &&
     isOptionalString(candidate.recoveryBranch) &&
-    isOptionalString(candidate.recoveryFingerprint)
+    isOptionalString(candidate.recoveryFingerprint) &&
+    (candidate.replayMode === undefined ||
+      candidate.replayMode === "carry" ||
+      candidate.replayMode === "historical") &&
+    hasValidRollbackMetadata(candidate) &&
+    isOptionalString(candidate.sourceObjectRef) &&
+    isOptionalString(candidate.sourceCommit)
   );
 }
 
@@ -76,6 +95,10 @@ export function checkpointFailureRecord(
     readonly localTagRetained?: boolean;
     readonly recoveryBranch?: string;
     readonly recoveryFingerprint?: string;
+    readonly replayMode?: "carry" | "historical";
+    readonly rollbackReason?: string;
+    readonly sourceObjectRef?: string;
+    readonly sourceCommit?: string;
     readonly startedAtMs: number;
     readonly upstreamTag: string;
   },
@@ -94,6 +117,10 @@ export function checkpointFailureRecord(
     ...(input.localTagRetained ? { localTagRetained: true } : {}),
     ...(input.recoveryBranch ? { recoveryBranch: input.recoveryBranch } : {}),
     ...(input.recoveryFingerprint ? { recoveryFingerprint: input.recoveryFingerprint } : {}),
+    ...(input.replayMode ? { replayMode: input.replayMode } : {}),
+    ...(input.rollbackReason ? { rollbackReason: input.rollbackReason } : {}),
+    ...(input.sourceObjectRef ? { sourceObjectRef: input.sourceObjectRef } : {}),
+    ...(input.sourceCommit ? { sourceCommit: input.sourceCommit } : {}),
   };
 }
 

@@ -17,6 +17,8 @@ import {
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
+  carryBootstrapFailureDisposition,
+  carryCompilationNeeded,
   openPullRequestListArgs,
   promotionNeeded,
   rerereRebaseMadeProgress,
@@ -24,6 +26,7 @@ import {
   runCarrySetShadowAfterPublication,
   runPromotionThenShadow,
   resolveCheckpointPlan,
+  resolveCarryCheckpointPlan,
   resolveRevisionPlan,
   resolveUpstreamMainMirror,
   revisionMessage,
@@ -31,7 +34,9 @@ import {
   recoverySupersessionMode,
   supersededRecoveryNightly,
   unpublishedCheckpointTags,
+  unexpectedHistoricalCheckpointChanges,
   upstreamMainMirrorPushArgs,
+  validateHistoricalBootstrapSource,
   worktreeAddArgs,
   worktreeVp,
 } from "./lastcode-checkpoint.ts";
@@ -604,6 +609,8 @@ it("records dashboard metadata in annotated checkpoint tags", () => {
     commit: "lastcode-sha",
     sourceRef: "origin/lastcode/main",
     sourceCommit: "source-sha",
+    sourceObjectRef: "refs/lastcode/sources/v1",
+    replay: { mode: "carry", configuredMode: "carry" },
     timing: {
       commitsRebased: 8,
       startedAt: "2026-08-12T18:00:00.000Z",
@@ -626,6 +633,177 @@ it("reads the source commit from checkpoint metadata", () => {
   assert.equal(checkpointSourceCommit("LastCode checkpoint without source metadata"), undefined);
 });
 
+it("accepts cross-base bootstrap provenance only from the exact annotated installable", () => {
+  const directory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-bootstrap-provenance-"),
+  );
+  const git = (args: ReadonlyArray<string>): string =>
+    NodeChildProcess.execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+  try {
+    git(["init", "--quiet", "--initial-branch=main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "base\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "--quiet", "--message", "upstream base"]);
+    const base = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "tracked.txt"), "represented source\n");
+    git(["commit", "--quiet", "--all", "--message", "represented source"]);
+    const representedSource = git(["rev-parse", "HEAD"]);
+    NodeFS.writeFileSync(NodePath.join(directory, "resolution.txt"), "historical resolution\n");
+    git(["add", "resolution.txt"]);
+    git(["commit", "--quiet", "--message", "historical checkpoint"]);
+    const source = git(["rev-parse", "HEAD"]);
+    const nightlyTag = "v9.9.9-nightly.20990102.2";
+    const sourceTag = `lastcode/checkpoint/${nightlyTag}`;
+    git([
+      "tag",
+      "--annotate",
+      sourceTag,
+      source,
+      "--message",
+      `Upstream-Commit: ${base}\nSource-Commit: ${representedSource}`,
+    ]);
+    const installables = [
+      {
+        tag: sourceTag,
+        commit: source,
+        nightly: nightly(nightlyTag),
+        revision: 0,
+        sourceCommit: representedSource,
+      },
+    ];
+    const bootstrap = {
+      base,
+      source,
+      head: source,
+      representedSource,
+      sourceTag,
+    };
+
+    expect(
+      validateHistoricalBootstrapSource({ bootstrap, installables, repoRoot: directory }),
+    ).toBe(representedSource);
+    expect(() =>
+      validateHistoricalBootstrapSource({
+        bootstrap: { ...bootstrap, base: "f".repeat(40) },
+        installables,
+        repoRoot: directory,
+      }),
+    ).toThrow("records Upstream-Commit");
+    expect(() =>
+      validateHistoricalBootstrapSource({
+        bootstrap: { ...bootstrap, source: "e".repeat(40) },
+        installables,
+        repoRoot: directory,
+      }),
+    ).toThrow("resolves to");
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps a historical repair in a separate hunk of a source-touched file", () => {
+  const directory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-historical-hunks-"),
+  );
+  const git = (args: ReadonlyArray<string>, input?: string): string =>
+    NodeChildProcess.execFileSync("git", args, {
+      cwd: directory,
+      encoding: "utf8",
+      ...(input === undefined ? {} : { input }),
+    }).trim();
+  const commit = (message: string): string => {
+    git(["add", "--all"]);
+    git(["commit", "--quiet", "--message", message]);
+    return git(["rev-parse", "HEAD"]);
+  };
+  try {
+    git(["init", "--quiet", "--initial-branch=main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    const sharedPath = NodePath.join(directory, "shared.txt");
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=base\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    commit("base");
+
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    const representedSource = commit("represented source");
+
+    git(["checkout", "--quiet", "-B", "historical", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=historical\n",
+    );
+    const historicalCommit = commit("historical repair");
+
+    git(["checkout", "--quiet", "-B", "current", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=current\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    const currentSource = commit("current source change");
+    const expectedTree = git([
+      "merge-tree",
+      "--write-tree",
+      "--no-messages",
+      `--merge-base=${representedSource}`,
+      historicalCommit,
+      currentSource,
+    ]);
+    const candidateCommit = git(
+      ["commit-tree", expectedTree, "-p", currentSource, "-F", "-"],
+      "candidate preserving both hunks\n",
+    );
+
+    assert.deepStrictEqual(
+      unexpectedHistoricalCheckpointChanges({
+        repoRoot: directory,
+        historicalCommit,
+        candidateCommit,
+        representedSource,
+        currentSource,
+      }),
+      [],
+    );
+    assert.deepStrictEqual(
+      unexpectedHistoricalCheckpointChanges({
+        repoRoot: directory,
+        historicalCommit,
+        candidateCommit: currentSource,
+        representedSource,
+        currentSource,
+      }),
+      ["shared.txt"],
+    );
+
+    git(["checkout", "--quiet", "-B", "conflicting-source", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=current\n",
+    );
+    const conflictingSource = commit("conflicting source change");
+    assert.throws(
+      () =>
+        unexpectedHistoricalCheckpointChanges({
+          repoRoot: directory,
+          historicalCommit,
+          candidateCommit: conflictingSource,
+          representedSource,
+          currentSource: conflictingSource,
+        }),
+      /merge-tree/u,
+    );
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 it("records source and upstream provenance in revision tags", () => {
   const message = revisionMessage({
     commit: "revision-sha",
@@ -633,11 +811,19 @@ it("records source and upstream provenance in revision tags", () => {
     revision: 2,
     sourceCommit: "main-sha",
     sourceRef: "origin/lastcode/main",
+    sourceObjectRef: "refs/lastcode/sources/v1.2",
+    replay: {
+      mode: "historical",
+      configuredMode: "carry",
+      rollbackReason: "compiler regression",
+    },
     upstreamCommit: "upstream-sha",
     upstreamTag: "v0.0.34-nightly.20260816.1105",
   });
   expect(message).toContain("LastCode revision 2");
   expect(message).toContain("Source-Commit: main-sha");
+  expect(message).toContain("Replay-Mode: historical");
+  expect(message).toContain("Rollback-Reason: compiler regression");
   expect(message).toContain("Revision: 2");
 });
 
@@ -782,6 +968,36 @@ it("reuses an existing revision that already represents main", () => {
   );
 });
 
+it("creates a historical replacement when a carry installable represents main", () => {
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const installable = {
+    tag: `lastcode/revision/${latest.tag}.1`,
+    commit: "compact-revision",
+    nightly: latest,
+    revision: 1,
+    replayMode: "carry" as const,
+    sourceCommit: "represented-main",
+  };
+  for (const sourceCommit of [installable.commit, installable.sourceCommit]) {
+    assert.deepStrictEqual(
+      resolveRevisionPlan({
+        installableRefs: [installable],
+        sourceCommit,
+        isAncestor: () => false,
+        replayMode: "historical",
+      }),
+      {
+        kind: "create",
+        installableTag: `lastcode/revision/${latest.tag}.2`,
+        nightly: latest,
+        ontoRef: installable.tag,
+        replayBase: installable.sourceCommit,
+        revision: 2,
+      },
+    );
+  }
+});
+
 it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("same", "same"), false);
   assert.equal(promotionNeeded("main", "checkpoint"), true);
@@ -856,6 +1072,33 @@ it("cleans up publication failures but retains recovery state for earlier failur
     checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1", false),
     { cleanup: false, recoveryBranch: "sync/nightly/v1" },
   );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "smoke",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: true,
+    }),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "publication",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: true,
+    }),
+    { cleanup: true },
+  );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "publication",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: false,
+    }),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
 });
 
 it("retries checkpoint tags that are local but not published", () => {
@@ -887,6 +1130,58 @@ it("bootstraps at the source nightly and checkpoints every later nightly", () =>
     plan.missingNightlies.map(({ tag }) => tag),
     ["v0.0.1-nightly.20260102.2", "v0.0.2-nightly.20260103.3"],
   );
+});
+
+it("starts carry replay from the latest compact installable even when promotion was held", () => {
+  const older = nightly("v0.0.1-nightly.20260101.1");
+  const latest = nightly("v0.0.1-nightly.20260102.2");
+  const next = nightly("v0.0.1-nightly.20260103.3");
+  const plan = resolveCarryCheckpointPlan({
+    checkpointRefs: [
+      {
+        checkpointTag: `lastcode/checkpoint/${older.tag}`,
+        commit: "old-checkpoint",
+        nightly: older,
+      },
+      {
+        checkpointTag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "compact-b",
+        nightly: latest,
+      },
+    ],
+    installableRefs: [
+      {
+        tag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "compact-b",
+        nightly: latest,
+        revision: 0,
+        replayMode: "carry",
+        sourceCommit: "represented-a",
+        sourceObjectRef: `refs/lastcode/sources/${latest.tag}`,
+      },
+    ],
+    nightlyTags: [older.tag, latest.tag, next.tag],
+    bootstrapBase: older.tag,
+    resolveCommit: (ref) => ref,
+  });
+  expect(plan.baseNightly).toEqual(latest);
+  expect(plan.candidateRef).toBe(`lastcode/checkpoint/${latest.tag}`);
+  expect(plan.missingNightlies).toEqual([next]);
+  expect(plan.previousCompact?.sourceCommit).toBe("represented-a");
+  expect(
+    carryCompilationNeeded({
+      mode: "carry",
+      previousCompact: plan.previousCompact!,
+      sourceCommit: "represented-a",
+    }),
+  ).toBe(false);
+  expect(
+    carryCompilationNeeded({
+      mode: "carry",
+      previousCompact: plan.previousCompact!,
+      sourceCommit: "newer-main-b",
+    }),
+  ).toBe(true);
 });
 
 it("skips only the failed nightly when a newer upstream nightly supersedes it", () => {

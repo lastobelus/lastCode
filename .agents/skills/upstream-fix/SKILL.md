@@ -44,6 +44,10 @@ Do not open a PR unless the user explicitly asks.
 2. Cherry-pick the upstream change when clean; otherwise reimplement the same
    behavior against LastCode without dragging in unrelated upstream history.
 3. Preserve any LastCode-specific adaptation only on this branch.
+   When carry replay is enabled, assign the LastCode source commits and record
+   upstream provenance using
+   `docs/lastcode/nightly-workflow.md#carry-replay-ownership` before validation
+   and review. These trailers belong only on the LastCode delivery.
 4. Run focused validation. A push invokes quick local CI.
 5. When asked to open a PR, target `lastobelus/lastCode:lastcode/main` and link
    the upstream PR in both descriptions.

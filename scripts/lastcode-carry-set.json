@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
-  "order": ["upstream-bugfixes", "tooling", "resumable-actions", "legacy-sidebar", "incubator"],
+  "order": [
+    "upstream-bugfixes",
+    "tooling",
+    "build-ci",
+    "resumable-actions",
+    "legacy-sidebar",
+    "incubator"
+  ],
   "groups": {
     "upstream-bugfixes": {
       "pullRequests": [18, 24, 31, 45, 48, 56, 69, 74, 82, 102, 112],
@@ -41,6 +48,7 @@
         "fix(lastcode): deduplicate reconciled contract import"
       ]
     },
+    "build-ci": {},
     "resumable-actions": {
       "pullRequests": [28, 29, 34, 36, 71, 88, 92, 97, 98, 104, 106, 110, 111, 117, 143]
     },
@@ -49,6 +57,17 @@
     },
     "incubator": {
       "default": true
+    }
+  },
+  "replay": {
+    "mode": "carry",
+    "bootstrap": {
+      "base": "f8b4c464b4760d73e0ece7e68011c738803d8b69",
+      "source": "42e0e48674ed661ddf49adebc0769d90d458ee66",
+      "head": "b01aa7120bb1028e2758e4622850db38e93a9a79",
+      "ref": "refs/lastcode/carry-compiled/bootstrap/1290.1-v27",
+      "representedSource": "46b6e2f03b85e8c315688510a75eb203e7795633",
+      "sourceTag": "lastcode/revision/v0.0.39-nightly.20260905.1290.1"
     }
   }
 }
