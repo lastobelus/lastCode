@@ -15,9 +15,16 @@ const [
   liveUrl,
   evidenceDir,
   liveTarget = ".document-title",
+  attachmentBundlePath,
+  policyBundlePath,
 ] = process.argv.slice(2);
 NodeAssert.ok(
-  bundlePath && screenshotBundlePath && userDataPath && liveUrl,
+  bundlePath &&
+    screenshotBundlePath &&
+    userDataPath &&
+    liveUrl &&
+    attachmentBundlePath &&
+    policyBundlePath,
   "smoke arguments required",
 );
 app.setPath("userData", userDataPath);
@@ -36,6 +43,16 @@ async function main() {
   app.dock?.hide();
   const bundle = await NodeFSP.readFile(bundlePath, "utf8");
   const { captureAnnotationImage } = await import(NodeURL.pathToFileURL(screenshotBundlePath).href);
+  const attachmentBundle = await NodeFSP.readFile(attachmentBundlePath, "utf8");
+  const { makeDesktopContentSecurityPolicy } = await import(
+    NodeURL.pathToFileURL(policyBundlePath).href
+  );
+  const policy = makeDesktopContentSecurityPolicy({
+    scheme: "lastcode",
+    targetOrigin: new URL("http://fixture.example"),
+    backendOrigin: new URL("http://fixture.example"),
+    clerkFrontendApiHostname: undefined,
+  });
   if (evidenceDir) await NodeFSP.mkdir(evidenceDir, { recursive: true });
   const guestCreated = new Promise((resolve) => {
     app.on("web-contents-created", (_event, contents) => {
@@ -49,8 +66,26 @@ async function main() {
     height: 500,
     webPreferences: { backgroundThrottling: false, offscreen: true, webviewTag: true },
   });
+  const attachmentHost = new BrowserWindow({ show: false });
   let fixtureServer;
   try {
+    await attachmentHost.loadURL(
+      `data:text/html,${encodeURIComponent(`<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><title>Annotation attachment CSP test</title>`)}`,
+    );
+    await attachmentHost.webContents.executeJavaScript(attachmentBundle);
+    await attachmentHost.webContents.executeJavaScript(
+      `globalThis.attachmentViolations = []; document.addEventListener("securitypolicyviolation", event => attachmentViolations.push({ directive: event.effectiveDirective, blockedURI: event.blockedURI }));`,
+    );
+    const blockedDataFetch = await attachmentHost.webContents.executeJavaScript(`(async () => {
+      const violation = new Promise(resolve => document.addEventListener("securitypolicyviolation", event => resolve(event.effectiveDirective), { once: true }));
+      try { await fetch("data:text/plain,csp-control"); return "allowed"; } catch { return await violation; }
+    })()`);
+    NodeAssert.equal(
+      blockedDataFetch,
+      "connect-src",
+      "production CSP rejects the previous data URL fetch",
+    );
+    await attachmentHost.webContents.executeJavaScript("attachmentViolations.length = 0");
     await host.loadURL(
       `data:text/html,${encodeURIComponent(`<!doctype html><style>
       html,body{margin:0;overflow:hidden}webview{display:flex;width:1280px;height:800px;transform:scale(.49);transform-origin:top left}
@@ -100,7 +135,7 @@ async function main() {
         const target = frame.contentDocument.querySelector(c.targetSelector);
         const stage = frame.closest(".transcript-document-workspace__stage");
         if (c.scroll === "iframe") {
-          frame.contentDocument.body.style.minHeight = "1600px";
+          frame.contentDocument.body.style.minHeight = (frame.contentWindow.innerHeight + 1600) + "px";
           frame.contentWindow.scrollTo(0, target.getBoundingClientRect().top + 5);
         } else if (c.scroll === "panel") {
           stage.scrollTop += frame.getBoundingClientRect().top + target.getBoundingClientRect().top - stage.getBoundingClientRect().top + target.getBoundingClientRect().height / 2;
@@ -159,6 +194,20 @@ async function main() {
         directResult = { error: cause instanceof Error ? cause.message : String(cause) };
       }
       const screenshot = await captureAnnotationImage(guest, crop);
+      const attachment = await attachmentHost.webContents.executeJavaScript(`(async () => {
+        const result = await PreviewAnnotationAttachment.capturePreviewAnnotationScreenshot(${JSON.stringify({ ...annotation, screenshot })});
+        if (result.status !== "captured") return { status: result.status, violations: attachmentViolations };
+        return { status: result.status, name: result.file.name, type: result.file.type, bytes: Array.from(new Uint8Array(await result.file.arrayBuffer())), violations: attachmentViolations };
+      })()`);
+      NodeAssert.equal(attachment.status, "captured", `${name}: renderer attachment`);
+      NodeAssert.equal(attachment.name, `preview-annotation-${annotation.id}.png`);
+      NodeAssert.equal(attachment.type, "image/png");
+      NodeAssert.deepEqual(attachment.violations, [], `${name}: production CSP`);
+      NodeAssert.deepEqual(
+        Buffer.from(attachment.bytes),
+        Buffer.from(screenshot.dataUrl.split(",")[1], "base64"),
+        `${name}: PNG bytes survive renderer delivery`,
+      );
       const image = nativeImage.createFromDataURL(screenshot.dataUrl);
       NodeAssert.equal(image.isEmpty(), false);
       NodeAssert.deepEqual(image.getSize(), { width: screenshot.width, height: screenshot.height });
@@ -191,6 +240,13 @@ async function main() {
         crop,
         fullSize,
         screenshot: metadata,
+        attachment: {
+          status: attachment.status,
+          name: attachment.name,
+          type: attachment.type,
+          byteLength: attachment.bytes.length,
+          violations: attachment.violations,
+        },
         directResult,
       };
       results.push(result);
@@ -261,6 +317,7 @@ async function main() {
       );
   } finally {
     fixtureServer?.close();
+    attachmentHost.destroy();
     host.destroy();
   }
 }

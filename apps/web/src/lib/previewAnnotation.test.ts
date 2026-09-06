@@ -93,29 +93,64 @@ describe("preview annotation capture", () => {
     vi.unstubAllGlobals();
   });
 
-  it("returns the crop when the fetch resolves", async () => {
-    vi.stubGlobal("fetch", async () => new Response(new Blob(["png"], { type: "image/png" })));
-    const capture = await capturePreviewAnnotationScreenshot(annotation);
+  it("preserves native PNG bytes without fetching under the desktop security policy", async () => {
+    const fetch = vi.fn(() => {
+      throw new TypeError("Failed to fetch");
+    });
+    vi.stubGlobal("fetch", fetch);
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 127, 128, 255]);
+    const capture = await capturePreviewAnnotationScreenshot({
+      ...annotation,
+      screenshot: {
+        ...annotation.screenshot!,
+        dataUrl: `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`,
+      },
+    });
     expect(capture.status).toBe("captured");
+    if (capture.status !== "captured") throw new Error("Expected screenshot attachment");
+    expect(capture.file.name).toBe("preview-annotation-annotation_1.png");
+    expect(capture.file.type).toBe("image/png");
+    expect(new Uint8Array(await capture.file.arrayBuffer())).toEqual(bytes);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("yields while decoding large crops and preserves bytes across chunk boundaries", async () => {
+    vi.useFakeTimers();
+    const encoded = "AP+A".repeat(150_000);
+    let settled = false;
+    const pending = capturePreviewAnnotationScreenshot({
+      ...annotation,
+      screenshot: { ...annotation.screenshot!, dataUrl: `data:image/png;base64,${encoded}` },
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result.status).toBe("captured");
+    if (result.status !== "captured") throw new Error("Expected screenshot attachment");
+    const bytes = new Uint8Array(await result.file.arrayBuffer());
+    expect(bytes.length).toBe(450_000);
+    expect(bytes.every((byte, index) => byte === [0, 255, 128][index % 3])).toBe(true);
   });
 
   it("reports none when the annotation carries no crop", async () => {
-    const capture = await capturePreviewAnnotationScreenshot({ ...annotation, screenshot: null });
-    expect(capture).toEqual({ status: "none" });
-  });
-
-  it("fails instead of hanging when the crop never arrives", async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal("fetch", () => new Promise<Response>(() => {}));
-    const capturePromise = capturePreviewAnnotationScreenshot(annotation, 1_000);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(await capturePromise).toEqual({ status: "failed" });
-  });
-
-  it("fails when the crop fetch throws", async () => {
-    vi.stubGlobal("fetch", async () => {
-      throw new Error("data url unreadable");
+    expect(await capturePreviewAnnotationScreenshot({ ...annotation, screenshot: null })).toEqual({
+      status: "none",
     });
-    expect(await capturePreviewAnnotationScreenshot(annotation)).toEqual({ status: "failed" });
   });
+
+  it.each(["data:image/png;base64,!!!", "data:image/png;base64,", "https://example.com/image.png"])(
+    "keeps the annotation sendable when its screenshot is invalid: %s",
+    async (dataUrl) => {
+      expect(
+        await capturePreviewAnnotationScreenshot({
+          ...annotation,
+          screenshot: { ...annotation.screenshot!, dataUrl },
+        }),
+      ).toEqual({ status: "failed" });
+    },
+  );
 });

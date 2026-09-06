@@ -72,6 +72,51 @@ const screenshotResult = await build({
 const screenshotBundle = (
   Array.isArray(screenshotResult) ? screenshotResult[0] : screenshotResult
 ).output.find((output) => output.type === "chunk").code;
+const attachmentResult = await build({
+  configFile: false,
+  logLevel: "error",
+  build: {
+    write: false,
+    minify: false,
+    lib: {
+      entry: NodeURL.fileURLToPath(
+        new URL("../../web/src/lib/previewAnnotation.ts", import.meta.url),
+      ),
+      formats: ["iife"],
+      name: "PreviewAnnotationAttachment",
+    },
+  },
+});
+const attachmentBundle = (
+  Array.isArray(attachmentResult) ? attachmentResult[0] : attachmentResult
+).output.find((output) => output.type === "chunk").code;
+const policyResult = await build({
+  configFile: false,
+  logLevel: "error",
+  plugins: [
+    {
+      name: "policy-electron-stub",
+      enforce: "pre",
+      resolveId(id) {
+        if (id === "electron") return "\0policy-electron";
+      },
+      load(id) {
+        if (id === "\0policy-electron") return "export const protocol = {};";
+      },
+    },
+  ],
+  build: {
+    write: false,
+    minify: false,
+    lib: {
+      entry: NodeURL.fileURLToPath(new URL("../src/electron/ElectronProtocol.ts", import.meta.url)),
+      formats: ["es"],
+    },
+  },
+});
+const policyBundle = (Array.isArray(policyResult) ? policyResult[0] : policyResult).output.find(
+  (output) => output.type === "chunk",
+).code;
 const browser = await chromium.launch({ headless: true });
 const [liveUrl, evidenceDir, liveTarget = ".document-title"] = process.argv.slice(2);
 if (evidenceDir) await NodeFSP.mkdir(evidenceDir, { recursive: true });
@@ -658,8 +703,12 @@ try {
     const bundlePath = NodePath.join(scratch, "picker-bundle.js");
     const screenshotBundlePath = NodePath.join(scratch, "annotation-screenshot.mjs");
     const userDataPath = NodePath.join(scratch, "user-data");
+    const attachmentBundlePath = NodePath.join(scratch, "attachment.mjs");
+    const policyBundlePath = NodePath.join(scratch, "policy.mjs");
     await NodeFSP.writeFile(bundlePath, bundle);
     await NodeFSP.writeFile(screenshotBundlePath, screenshotBundle);
+    await NodeFSP.writeFile(attachmentBundlePath, attachmentBundle);
+    await NodeFSP.writeFile(policyBundlePath, policyBundle);
     await NodeFSP.mkdir(userDataPath);
     try {
       const childPath = NodeURL.fileURLToPath(
@@ -677,6 +726,8 @@ try {
           liveUrl,
           evidenceDir ?? "",
           liveTarget,
+          attachmentBundlePath,
+          policyBundlePath,
         ],
         { encoding: "utf8", env: environment, timeout: 30_000 },
       );
