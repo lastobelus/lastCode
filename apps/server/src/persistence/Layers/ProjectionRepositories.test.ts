@@ -88,7 +88,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
-        worktreePath: null,
+        worktreePath: "/tmp/thread-null-options-worktree",
         latestTurnId: null,
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
@@ -134,6 +134,67 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       });
+      );
+      assert.deepStrictEqual(
+        (yield* threads.listActiveWorktreeOwners()).map((thread) => thread.threadId),
+        [ThreadId.make("thread-null-options")],
+    }),
+  );
+
+  it.effect("stores SQL NULL for thread fields omitted by pre-annotation events", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* threads.upsert({
+        threadId: ThreadId.make("thread-before-annotations"),
+        projectId: ProjectId.make("project-1"),
+        title: "Pre-annotation thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurnId: null,
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        ...({ unsettledAt: null } as Record<"unsettledAt", null>),
+        snoozedUntil: null,
+        snoozedAt: null,
+        pinnedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      });
+
+      const rows = yield* sql<{
+        readonly annotation: string | null;
+        readonly latestUserMessageId: string | null;
+      }>`
+        SELECT
+          annotation_json AS annotation,
+          latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-before-annotations'
+      `;
+      assert.deepStrictEqual(rows[0], {
+        annotation: null,
+        latestUserMessageId: null,
+      });
+
+      const persisted = yield* threads.getById({
+        threadId: ThreadId.make("thread-before-annotations"),
+      });
+      assert.strictEqual(Option.getOrNull(persisted)?.annotation, null);
+      assert.strictEqual(Option.getOrNull(persisted)?.latestUserMessageId, null);
     }),
   );
 
