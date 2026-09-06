@@ -1943,22 +1943,28 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       nightlyTag: branch.replace(/^sync\/nightly\//, ""),
     });
     // Selection is an explicit assertion that the repaired tree includes this source.
-    run(repoRoot, "git", ["fetch", options.pushRemote, "lastcode/main"]);
+    if (!options.dryRun) run(repoRoot, "git", ["fetch", options.pushRemote, "lastcode/main"]);
     assertRecoverySelection(
       worktree,
       selected,
       git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]),
       replay.mode !== "carry",
     );
-    const selectedHead =
-      replay.mode === "carry" && readCarryReplayPlan(worktree)
-        ? continueCarryRecovery({
-            repoRoot,
-            worktree,
-            selectedHead: selected.head,
-            nightlyTag: selected.nightlyTag,
-          })
-        : selected.head;
+    const carryPlan = replay.mode === "carry" ? readCarryReplayPlan(worktree) : undefined;
+    if (options.dryRun && carryPlan) {
+      console.log(
+        `[lastcode:checkpoint] Would select repaired ${selected.nightlyTag} at ${selected.head}; retained carry replay will continue when the selection is recorded.`,
+      );
+      return;
+    }
+    const selectedHead = carryPlan
+      ? continueCarryRecovery({
+          repoRoot,
+          worktree,
+          selectedHead: selected.head,
+          nightlyTag: selected.nightlyTag,
+        })
+      : selected.head;
     const selection = {
       ...selected,
       head: selectedHead,

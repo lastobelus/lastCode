@@ -382,6 +382,118 @@ describe("checkpoint carry lifecycle", () => {
         git(repo, ["rev-parse", `${historicalRevision}^{commit}`]),
       );
 
+      checkout(repo, "source-pr-preview", mainWithPr);
+      write(repo, "checkpoint-only-resolution.txt", "source replacement during compilation\n");
+      const previewSourceHead = commit(
+        repo,
+        "replace checkpoint-only behavior",
+        [
+          "Carry-Group: tooling",
+          "Carry-Fix: fixture#preview-retained-compilation",
+          "Carry-Observation: dry-run selection must leave retained compilation untouched",
+          "Carry-Evidence: fixture://preview-retained-compilation",
+          `Carry-Applies-To: ${NIGHTLY_C}`,
+        ].join("\n"),
+      );
+      const previewSourceRef = `refs/lastcode/carry-sources/pr-3/${previewSourceHead}`;
+      const previewMain = commitTree(
+        repo,
+        git(repo, ["rev-parse", `${previewSourceHead}^{tree}`]),
+        mainWithPr,
+        [
+          "replace checkpoint-only behavior (#3)",
+          "",
+          `Carry-Source-Ref: ${previewSourceRef}`,
+          `Carry-Source-Base: ${mainWithPr}`,
+          `Carry-Source-Head: ${previewSourceHead}`,
+        ].join("\n"),
+      );
+      git(repo, [
+        "push",
+        "--quiet",
+        "origin",
+        `${previewSourceHead}:${previewSourceRef}`,
+        `${previewMain}:refs/heads/lastcode/main`,
+      ]);
+      checkout(repo, "lastcode-source", previewMain);
+
+      const compilationConflict = checkpoint(fixture, ["--push-tags"]);
+      assert.notEqual(compilationConflict.status, 0);
+      const compilationWorktree = recoveryWorktree(repo);
+      assert.match(
+        git(compilationWorktree, ["status", "--porcelain"]),
+        /checkpoint-only-resolution\.txt/u,
+      );
+      write(
+        compilationWorktree,
+        "checkpoint-only-resolution.txt",
+        "manual integration resolution on B\nsource replacement during compilation\n",
+      );
+      git(compilationWorktree, ["add", "checkpoint-only-resolution.txt"]);
+      NodeChildProcess.execFileSync("git", ["rebase", "--continue"], {
+        cwd: compilationWorktree,
+        env: { ...process.env, GIT_EDITOR: "true" },
+      });
+      const compilationHead = git(compilationWorktree, ["rev-parse", "HEAD"]);
+      const planPath = NodePath.join(
+        git(compilationWorktree, ["rev-parse", "--absolute-git-dir"]),
+        "lastcode-carry-replay-plan.json",
+      );
+      const retainedPlan = JSON.parse(NodeFS.readFileSync(planPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(retainedPlan.phase, "compile");
+      assert.equal(retainedPlan.status, "running");
+      const beforePreview = {
+        head: compilationHead,
+        plan: NodeFS.readFileSync(planPath, "utf8"),
+        refs: git(repo, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+        status: git(compilationWorktree, [
+          "status",
+          "--porcelain=v2",
+          "--branch",
+          "--untracked-files=all",
+        ]),
+      };
+      const preview = checkpoint(fixture, [
+        "--dry-run",
+        "--select-recovery",
+        compilationHead,
+        "--recovery-source",
+        previewMain,
+      ]);
+      assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+      assert.match(preview.stdout, /retained carry replay will continue/u);
+      assert.deepStrictEqual(
+        {
+          head: git(compilationWorktree, ["rev-parse", "HEAD"]),
+          plan: NodeFS.readFileSync(planPath, "utf8"),
+          refs: git(repo, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+          status: git(compilationWorktree, [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=all",
+          ]),
+        },
+        beforePreview,
+      );
+      assert.equal(
+        NodeFS.existsSync(
+          NodePath.join(
+            git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+            "lastcode-recovery-selection.json",
+          ),
+        ),
+        false,
+      );
+
+      git(repo, ["worktree", "remove", "--force", compilationWorktree]);
+      git(repo, ["update-ref", "-d", `refs/heads/sync/nightly/${NIGHTLY_C}`]);
+      git(repo, ["push", "--quiet", "--force", "origin", `${mainWithPr}:refs/heads/lastcode/main`]);
+      checkout(repo, "lastcode-source", mainWithPr);
+
       checkout(repo, "upstream-main", upstreamC);
       write(repo, "lifecycle-conflict.txt", "upstream build behavior\n");
       const upstreamD = commit(repo, "upstream D conflicts with downstream build behavior");
