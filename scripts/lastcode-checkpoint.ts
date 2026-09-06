@@ -56,6 +56,7 @@ const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "la
 const CHECKPOINT_TAG_GLOB = "lastcode/checkpoint/v*-nightly.*";
 const REVISION_TAG_GLOB = "lastcode/revision/v*-nightly.*";
 const CARRY_MANIFEST_PATH = "scripts/lastcode-carry-set.json";
+const FINGERPRINT_DIFF_MAX_BUFFER = 64 * 1024 * 1024;
 
 export type PromotionMode = "never" | "always" | "if-no-open-prs";
 
@@ -186,12 +187,14 @@ function run(
     readonly capture?: boolean;
     readonly allowFailure?: boolean;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly maxBuffer?: number;
   } = {},
 ): string {
   const result = NodeChildProcess.spawnSync(command, args, {
     cwd,
     encoding: "utf8",
     ...(options.environment ? { env: options.environment } : {}),
+    ...(options.maxBuffer ? { maxBuffer: options.maxBuffer } : {}),
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -226,11 +229,16 @@ export function checkpointSmokeFormatAndLintCommand(): ReadonlyArray<string> {
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
-  options: { readonly allowFailure?: boolean; readonly cwd?: string } = {},
+  options: {
+    readonly allowFailure?: boolean;
+    readonly cwd?: string;
+    readonly maxBuffer?: number;
+  } = {},
 ): string {
   return run(options.cwd ?? repoRoot, "git", args, {
     capture: true,
     ...(options.allowFailure ? { allowFailure: true } : {}),
+    ...(options.maxBuffer ? { maxBuffer: options.maxBuffer } : {}),
   });
 }
 
@@ -462,12 +470,16 @@ export function checkpointRecoveryFingerprint(worktree: string, recoveryBranch: 
   );
   add(
     "worktree-diff",
-    git(worktree, ["diff", "--binary", "--full-index", "--no-ext-diff"], { cwd: worktree }),
+    git(worktree, ["diff", "--binary", "--full-index", "--no-ext-diff"], {
+      cwd: worktree,
+      maxBuffer: FINGERPRINT_DIFF_MAX_BUFFER,
+    }),
   );
   add(
     "index-diff",
     git(worktree, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"], {
       cwd: worktree,
+      maxBuffer: FINGERPRINT_DIFF_MAX_BUFFER,
     }),
   );
   const trackedPaths = trackedRecoveryPaths(worktree);
