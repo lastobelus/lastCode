@@ -86,7 +86,11 @@ current GitHub thread and review-query mechanics.
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, a clean current PR, and an unchanged fetched
-   base immediately before its exact-head squash merge.
+   base under the shared remote main-write lock immediately before its exact-head
+   squash merge. Checkpoint promotion uses the same lock; open PRs and CI waits
+   never hold it. Use the updated guarded command rather than the GitHub UI or
+   old worktree scripts, which do not participate in this coordination. Preserve
+   an uncertain remote lock until its owner and operation outcome are verified.
 6. Verify the PR is merged and `origin/lastcode/main` contains the merge result.
 7. If the work is tracked by Markover, confirm the GitHub terminal state and
    run the service-free command from the Markover checkout:

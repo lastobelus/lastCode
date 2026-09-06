@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import {
   immutableSourceFetchRefspec,
   installablePublicationArgs,
@@ -1563,33 +1564,39 @@ function promoteCheckpoint(
   validated: boolean,
 ): void {
   if (options.promotion === "never") return;
-  git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
-  const expected = git(repoRoot, ["rev-parse", `refs/remotes/${options.pushRemote}/lastcode/main`]);
-  if (!promotionNeeded(expected, commit)) {
-    console.log(
-      `[lastcode:checkpoint] ${options.pushRemote}/lastcode/main is already at ${commit}.`,
-    );
-    return;
-  }
-  if (expected !== sourceCommit) {
-    throw new Error(
-      `LastCode main changed from candidate source ${sourceCommit} to ${expected}; refusing stale promotion. Retry to incorporate the current main.`,
-    );
-  }
+  const lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
+  try {
+    git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
+    const expected = git(repoRoot, [
+      "rev-parse",
+      `refs/remotes/${options.pushRemote}/lastcode/main`,
+    ]);
+    if (!promotionNeeded(expected, commit)) {
+      console.log(
+        `[lastcode:checkpoint] ${options.pushRemote}/lastcode/main is already at ${commit}.`,
+      );
+      return;
+    }
+    if (expected !== sourceCommit) {
+      throw new Error(
+        `LastCode main changed from candidate source ${sourceCommit} to ${expected}; refusing stale promotion. Retry to incorporate the current main.`,
+      );
+    }
 
-  run(
-    repoRoot,
-    "git",
-    checkpointPromotionPushArgs(
-      options.pushRemote,
-      expected,
-      commit,
-      validated
-        ? { kind: "validated" }
-        : { kind: "pre-push", checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]) },
-    ),
-  );
-  console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
+    lock.push(
+      checkpointPromotionPushArgs(
+        options.pushRemote,
+        expected,
+        commit,
+        validated
+          ? { kind: "validated" }
+          : { kind: "pre-push", checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]) },
+      ),
+    );
+    console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
+  } finally {
+    lock.release();
+  }
 }
 
 function mirrorUpstreamMain(repoRoot: string, options: CheckpointOptions): void {
@@ -1773,6 +1780,27 @@ export function recoveryPublicationArgs(
     `${selection.sourceCommit}:${sourceObjectRef(tag)}`,
     `${selection.head}:refs/heads/lastcode/main`,
   ];
+}
+
+function publishRepairedCheckpoint(
+  repoRoot: string,
+  remote: string,
+  tag: string,
+  selection: RecoverySelection,
+): void {
+  const lock = acquireMainWriteLock(repoRoot, remote, selection.sourceCommit, "checkpoint");
+  try {
+    lock.push(
+      recoveryPublicationArgs(
+        remote,
+        tag,
+        selection,
+        immutableRemoteSourceCommit(repoRoot, remote, tag, selection.sourceCommit),
+      ),
+    );
+  } finally {
+    lock.release();
+  }
 }
 
 function releasePublishedRecovery(
@@ -2181,21 +2209,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             replay,
             timing,
           );
-      run(
-        repoRoot,
-        "git",
-        recoveryPublicationArgs(
-          options.pushRemote,
-          pendingTag,
-          selection,
-          immutableRemoteSourceCommit(
-            repoRoot,
-            options.pushRemote,
-            pendingTag,
-            selection.sourceCommit,
-          ),
-        ),
-      );
+      publishRepairedCheckpoint(repoRoot, options.pushRemote, pendingTag, selection);
       const publishedTag = pendingTag;
       pendingTag = undefined;
       appendCheckpointRun({
@@ -2758,21 +2772,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
         if (selection) {
-          run(
-            repoRoot,
-            "git",
-            recoveryPublicationArgs(
-              options.pushRemote,
-              checkpointTag,
-              selection,
-              immutableRemoteSourceCommit(
-                repoRoot,
-                options.pushRemote,
-                checkpointTag,
-                sourceCommit,
-              ),
-            ),
-          );
+          publishRepairedCheckpoint(repoRoot, options.pushRemote, checkpointTag, selection);
         } else {
           run(
             repoRoot,

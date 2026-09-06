@@ -118,6 +118,31 @@ After a checkpoint changes `lastcode/main`, refresh the PR branch as needed and
 rerun validation; results for the previous base do not authorize a merge. Use
 the guarded merge command, which checks the exact head and current base.
 
+The guarded merge command and checkpoint publisher use
+`refs/lastcode/main-write-lock` to serialize their final updates across machines.
+They acquire it only after preparation and validation, then verify the current
+source/base before writing main. An open PR never owns this lock; an actively
+executing merge owns it only through the final checks and merge request. A busy
+lock fails promptly so a later invocation can retry. Existing GitHub account and
+checkpoint push permissions remain unchanged.
+
+Use the updated `pnpm lastcode:merge` command for all PR merges after deploying
+this change, and refresh the coordinator before resuming checkpoint runs.
+Direct GitHub UI merges, plain `gh pr merge`, old scripts, and manual pushes do
+not participate in this coordination. The checkpoint source lease still protects
+commits written outside it, but those writes can invalidate PR validation during
+a merge request. GitHub's merge API only conditions on the PR head, so the guarded
+command is required for the final base-validation guarantee.
+
+If a network failure leaves a main update's outcome uncertain, retain the remote
+lock rather than allow a competing write while GitHub may still finish it.
+Inspect the lock's owner commit, the PR's terminal state, remote main, and the
+originating process before releasing it. Never infer abandonment from age or
+steal a live lock. After confirming the operation cannot still write main, remove
+only the exact observed owner with
+`git push --no-verify --force-with-lease=refs/lastcode/main-write-lock:<owner-sha> origin :refs/lastcode/main-write-lock`.
+Then rerun the ordinary command to recheck the current source and validation.
+
 That source snapshot is stored as `Source-Commit` in every annotated checkpoint
 and revision tag. Besides making publication idempotent, it lets the packaged
 desktop updater distinguish new LastCode commits from patches replayed with new
@@ -604,11 +629,10 @@ Configure the fork so that:
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
 - GitHub Actions are enabled for the manually dispatched
   [LastCode Intel artifact workflow](release.md#intel-build-publication) and the
-  pull-request CI workflow; and
-- PR merge identities cannot bypass strict required `CI Gate` checks, so a base
-  change requires fresh validation even during the final merge request.
+  pull-request CI workflow.
 
 Branch protection must permit the intentional force-with-lease promotion model.
-Keep checkpoint force-push permission separate from PR merge validation. The
-checkpoint command binds its lease to the incorporated source; PR merges require
-strict checks without an applicable bypass.
+Keep the existing checkpoint force-push permissions. The checkpoint command
+binds its lease to the incorporated source; the guarded merge command checks
+exact head/base CI. Their shared remote lock serializes the final main updates
+without requiring another account or a new ruleset.

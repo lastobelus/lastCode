@@ -126,17 +126,10 @@ pnpm lastcode:merge
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 stale bases, draft or non-clean PRs, and PRs that do not target
-`lastcode/main`. It also requires an active branch ruleset with a strict required
-`CI Gate` check ("Require branches to be up to date before merging"). Merge
-identities must not bypass that rule: GitHub's enforcement closes the race
-between the final base check and the merge request. Repositories with absent or
-non-strict rules must configure this protection before using the merge wrapper;
-the wrapper does not change remote rules. It checks the authenticated GitHub
-user and the strict ruleset's bypass entries, rejecting the current user and
-uncertain team, role, or application bypasses. Keep checkpoint force-push
-permissions separate from a non-bypassable CI ruleset, or use a non-bypassing
-identity for PR merges. It fetches and checks the base again
-after reading CI, then squash-merges with an exact-head guard and requests an immediate
+`lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
+Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
+head, base, and CI result again, then squash-merges with the exact-head guard.
+The lock is released before requesting an immediate
 checkpoint-daemon run when that service is installed on the current host. Hosts
 without the optional service skip the request silently. The daemon publishes a
 new installable LastCode revision when no new upstream
