@@ -15,6 +15,18 @@
       "runOnWorktreeCreate": true
     },
     {
+      "id": "lc-wait-for-pr",
+      "name": "Wait for PR",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
+      "icon": "test"
+    },
+    {
+      "id": "lc-wait-for-checkpoint",
+      "name": "Wait for Checkpoint",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/lastcode-wait-for-checkpoint.ts\"",
+      "icon": "test"
+    },
+    {
       "id": "lc-local-ci",
       "name": "Run Quick CI",
       "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
