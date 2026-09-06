@@ -43,7 +43,7 @@ describe("projectScriptKeybindings", () => {
     expect(() =>
       decodeProjectScriptKeybindingRule({
         keybinding: "mod+k",
-        command: "script.BAD.run" as KeybindingCommand,
+        command: "script..run" as KeybindingCommand,
       }),
     ).toThrowError(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
   });
