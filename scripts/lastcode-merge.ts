@@ -242,7 +242,9 @@ function main(argv: ReadonlyArray<string>): void {
     assertMergeBaseUnchanged(repoRoot, baseCommit, "while preserving the carry source");
   }
   const squashBody = writeSquashBody(
-    carrySource ? carrySquashBody(confirmedPullRequest.body, carrySource) : confirmedPullRequest.body,
+    carrySource
+      ? carrySquashBody(confirmedPullRequest.body, carrySource)
+      : confirmedPullRequest.body,
   );
   try {
     runCommand(repoRoot, "gh", squashMergeArguments(pullRequest.number, commit, squashBody.path));
