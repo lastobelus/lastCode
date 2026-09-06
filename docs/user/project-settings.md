@@ -45,7 +45,6 @@ output line.
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
 
-
 ## Keep the default branch current
 
 Enable **Automatically pull** to keep the default-branch checkout up to date with its configured

@@ -23,6 +23,8 @@ export interface ElementContextSelection {
   tagName: string;
   /** CSS selector — may be null when react-grab can't compute one. */
   selector: string | null;
+  /** Outer-to-inner iframe selectors for elements in embedded documents. */
+  framePath?: PickedElementPayload["framePath"];
   /** Truncated outer-HTML preview. */
   htmlPreview: string;
   /** Nearest React component display name, or null. */
@@ -80,6 +82,14 @@ export function normalizeElementContextSelection(
     pageTitle: raw.pageTitle?.trim() ?? null,
     tagName,
     selector: raw.selector?.trim() || null,
+    ...(raw.framePath?.length
+      ? {
+          framePath: raw.framePath.slice(0, 32).map((frame) => ({
+            pageUrl: truncateString(frame.pageUrl.trim(), 2000),
+            selector: truncateString(frame.selector.trim(), 2000),
+          })),
+        }
+      : {}),
     htmlPreview: truncateString(normalizeText(raw.htmlPreview), ELEMENT_CONTEXT_HTML_PREVIEW_LIMIT),
     componentName: raw.componentName?.trim() || null,
     source: stackFrame
@@ -99,7 +109,13 @@ export function normalizeElementContextSelection(
  * the same key, so we don't end up with a runaway chip row from spam-clicks.
  */
 export function elementContextDedupKey(context: ElementContextSelection): string {
-  return [context.pageUrl, context.selector ?? "", context.tagName, context.componentName ?? ""]
+  return [
+    context.pageUrl,
+    context.selector ?? "",
+    context.tagName,
+    context.componentName ?? "",
+    ...(context.framePath?.map((frame) => JSON.stringify(frame)) ?? []),
+  ]
     .join("|")
     .toLowerCase();
 }
@@ -149,6 +165,14 @@ function buildSingleContextLines(context: ElementContextSelection): string[] {
   }
   if (context.selector) {
     lines.push(`  selector: ${context.selector}`);
+  }
+  if (context.framePath?.length) {
+    lines.push(
+      "  frame path (outer to inner; enter each iframe's document before resolving the next selector):",
+    );
+    for (const frame of context.framePath) {
+      lines.push(`    ${JSON.stringify(frame)}`);
+    }
   }
   if (context.source?.fileName) {
     const { fileName, lineNumber, columnNumber } = context.source;

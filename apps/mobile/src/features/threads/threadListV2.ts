@@ -28,8 +28,24 @@ export { snoozeWakeLabel };
  * (approval), "in motion" (working), and "broken" (failed). Ready is the
  * unlabeled resting state.
  */
-export type ThreadListV2Status = "approval" | "input" | "working" | "waiting" | "failed" | "ready";
+export type ThreadListV2Status =
+  | "approval"
+  | "input"
+  | "question"
+  | "working"
+  | "waiting"
+  | "failed"
+  | "ready";
 export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooze" | "unsnooze";
+
+export type ThreadListV2CleanupAction = "retry-worktree-cleanup" | "keep-worktree";
+
+/** Failed cleanup tombstones stay reachable on mobile through recovery actions. */
+export function resolveThreadListV2CleanupActions(
+  cleanup: EnvironmentThreadShell["worktreeCleanup"],
+): readonly ThreadListV2CleanupAction[] {
+  return cleanup?.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [];
+}
 
 export function resolveThreadListV2SnoozeMenuSelection(input: {
   readonly event: string;
@@ -129,7 +145,7 @@ export function resolveThreadListV2Enabled(input: {
 export function resolveThreadListV2Status(
   thread: Pick<
     EnvironmentThreadShell,
-    "hasPendingApprovals" | "hasPendingUserInput" | "session" | "actionResume"
+    "actionResume" | "attention" | "hasPendingApprovals" | "hasPendingUserInput" | "session"
   >,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
@@ -137,6 +153,9 @@ export function resolveThreadListV2Status(
   }
   if (thread.hasPendingUserInput) {
     return "input";
+  }
+  if (thread.attention?.kind === "question") {
+    return "question";
   }
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
@@ -368,6 +387,13 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
+    // Cleanup tombstones are deleted-thread recovery state, not lifecycle
+    // state. Keep them in the immediately visible active block regardless of
+    // stale snooze, settle, or pin metadata retained on the thread.
+    if (thread.worktreeCleanup != null) {
+      active.push(thread);
+      continue;
+    }
     // Snooze outranks settlement and pinning until the thread wakes.
     if (supportsSnooze && effectiveSnoozed(thread, { now })) {
       snoozed.push(thread);

@@ -37,6 +37,7 @@ const baseThread: OrchestrationThread = {
   archivedAt: null,
   settledOverride: null,
   settledAt: null,
+  annotation: null,
   deletedAt: null,
   messages: [],
   proposedPlans: [],
@@ -352,6 +353,35 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("thread annotation events", () => {
+    it("replaces annotation state without changing thread recency", () => {
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.annotation-resolved",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          annotation: {
+            body: "- [x] Done",
+            anchorMessageId: MessageId.make("msg-1"),
+            createdAt: "2026-04-01T05:00:00.000Z",
+            updatedAt: "2026-04-01T06:00:00.000Z",
+            resolvedAt: "2026-04-01T06:00:00.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.annotation?.resolvedAt).toBe("2026-04-01T06:00:00.000Z");
+        expect(result.thread.updatedAt).toBe(baseThread.updatedAt);
+      }
+    });
+  });
+
   describe("thread.message-sent", () => {
     it("appends a new message", () => {
       const result = applyThreadDetailEvent(baseThread, {
@@ -366,6 +396,7 @@ describe("applyThreadDetailEvent", () => {
           messageId: MessageId.make("msg-1"),
           role: "user",
           text: "Hello, world!",
+          sourceThreadId: ThreadId.make("thread-source"),
           turnId: null,
           streaming: false,
           createdAt: "2026-04-01T06:00:00.000Z",
@@ -377,6 +408,7 @@ describe("applyThreadDetailEvent", () => {
       if (result.kind === "updated") {
         expect(result.thread.messages).toHaveLength(1);
         expect(result.thread.messages[0]?.text).toBe("Hello, world!");
+        expect(result.thread.messages[0]?.sourceThreadId).toBe("thread-source");
       }
     });
 

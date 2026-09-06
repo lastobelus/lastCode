@@ -30,6 +30,7 @@ import {
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
+import { makeTurnRequestWaitQuery } from "./TurnRequestWaitQuery.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
@@ -90,6 +91,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const crypto = yield* Crypto.Crypto;
+  const turnRequestWaitQuery = makeTurnRequestWaitQuery(sql);
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
@@ -408,6 +410,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     });
 
   return {
+    getTurnRequestWaitState: turnRequestWaitQuery.getState,
     readEvents,
     readThreadEvents,
     getThreadReplayStats,

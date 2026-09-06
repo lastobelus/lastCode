@@ -1,12 +1,22 @@
-import { type DesktopLastCodeSettingsState, ThreadId } from "@t3tools/contracts";
+import {
+  DesktopLastCodeSettingsState,
+  LastCodeSettingsImportPreview,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   DEFAULT_LEGACY_SIDEBAR_SCALE,
+  DEFAULT_SCROLLBAR_MARGIN,
+  DEFAULT_SCROLLBAR_WIDTH,
   LEGACY_SIDEBAR_SCALE_REFERENCE,
   MAX_LEGACY_SIDEBAR_SCALE,
+  MAX_SCROLLBAR_MARGIN,
+  MAX_SCROLLBAR_WIDTH,
   MIN_LEGACY_SIDEBAR_SCALE,
+  MIN_SCROLLBAR_MARGIN,
+  MIN_SCROLLBAR_WIDTH,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
-import { MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
+import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -15,6 +25,7 @@ import { EnvironmentIcon, updateEnvironmentIconColors } from "../../environmentI
 import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
+import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
@@ -41,6 +52,56 @@ const WORKTREE_INDICATOR_PREVIEW_THREAD = {
   worktreePath: "/example/worktrees/example",
 };
 
+function PixelSlider({
+  id,
+  label,
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const ratio = (value - min) / (max - min);
+  const sliderStyle = {
+    "--settings-slider-progress": `${ratio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - ratio}rem`,
+  } as CSSProperties;
+
+  return (
+    <div className="flex w-full items-center gap-3 sm:w-64">
+      <output
+        className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+        htmlFor={id}
+      >
+        {value}px
+      </output>
+      <input
+        aria-label={label}
+        className="settings-slider block min-w-0 flex-1"
+        id={id}
+        max={max}
+        min={min}
+        onChange={(event) => {
+          const nextValue = Number(event.currentTarget.value);
+          if (Number.isInteger(nextValue) && nextValue >= min && nextValue <= max) {
+            onChange(nextValue);
+          }
+        }}
+        step={1}
+        style={sliderStyle}
+        type="range"
+        value={value}
+      />
+    </div>
+  );
+}
+
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
   const clientSettings = usePrimarySettings();
@@ -48,7 +109,9 @@ export function LastCodeSettingsPanel() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
+  const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
     const bridge = window.desktopBridge;
@@ -62,6 +125,23 @@ export function LastCodeSettingsPanel() {
             type: "error",
             title: "Could not load LastCode settings",
             description: error instanceof Error ? error.message : "Desktop settings read failed.",
+          }),
+        );
+      });
+  }, []);
+
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;
+    void bridge
+      .previewT3SettingsImport()
+      .then(setImportPreview)
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not inspect T3 Code settings",
+            description: error instanceof Error ? error.message : "Settings preview failed.",
           }),
         );
       });
@@ -83,6 +163,31 @@ export function LastCodeSettingsPanel() {
       );
     } finally {
       setIsSaving(false);
+    }
+  }, []);
+
+  const importSettings = useCallback(async () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.importT3Settings !== "function") return;
+    setIsImporting(true);
+    try {
+      const result = await bridge.importT3Settings();
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "T3 Code settings imported",
+          description: `Backed up the previous LastCode settings to ${result.backupDirectory}. Restarting LastCode…`,
+        }),
+      );
+    } catch (error) {
+      setIsImporting(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not import T3 Code settings",
+          description: error instanceof Error ? error.message : "Settings import failed.",
+        }),
+      );
     }
   }, []);
 
@@ -133,6 +238,72 @@ export function LastCodeSettingsPanel() {
         />
       </SettingsSection>
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("larger-scrollbars")}
+          description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
+          status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
+          control={
+            <Switch
+              checked={clientSettings.largerScrollbarsEnabled}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ largerScrollbarsEnabled: Boolean(checked) })
+              }
+              aria-label="Larger scrollbars"
+            />
+          }
+        />
+        {clientSettings.largerScrollbarsEnabled ? (
+          <>
+            <SettingsRow
+              title="Scrollbar width"
+              description="Set the visible scrollbar thumb width in one-pixel increments."
+              resetAction={
+                clientSettings.scrollbarWidth !== DEFAULT_SCROLLBAR_WIDTH ? (
+                  <SettingResetButton
+                    label="scrollbar width"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarWidth: DEFAULT_SCROLLBAR_WIDTH })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <PixelSlider
+                  id="scrollbar-width"
+                  label="Scrollbar width"
+                  min={MIN_SCROLLBAR_WIDTH}
+                  max={MAX_SCROLLBAR_WIDTH}
+                  value={clientSettings.scrollbarWidth}
+                  onChange={(scrollbarWidth) => updateClientSettings({ scrollbarWidth })}
+                />
+              }
+            />
+            <SettingsRow
+              title="Scrollbar margin"
+              description="Set the clear space between a scrollbar thumb and the pane edge."
+              resetAction={
+                clientSettings.scrollbarMargin !== DEFAULT_SCROLLBAR_MARGIN ? (
+                  <SettingResetButton
+                    label="scrollbar margin"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarMargin: DEFAULT_SCROLLBAR_MARGIN })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <PixelSlider
+                  id="scrollbar-margin"
+                  label="Scrollbar margin"
+                  min={MIN_SCROLLBAR_MARGIN}
+                  max={MAX_SCROLLBAR_MARGIN}
+                  value={clientSettings.scrollbarMargin}
+                  onChange={(scrollbarMargin) => updateClientSettings({ scrollbarMargin })}
+                />
+              }
+            />
+          </>
+        ) : null}
         <SettingsRow
           {...searchableSetting("scale-legacy-sidebar")}
           description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
@@ -308,6 +479,46 @@ export function LastCodeSettingsPanel() {
             </SettingsRow>
           );
         })}
+      </SettingsSection>
+      <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("import-t3-settings")}
+          description="Copy selected preferences into LastCode once, back up the current LastCode files, then restart. The two apps remain independent after the import."
+          status={
+            !isElectron ? (
+              "Open this page in the LastCode desktop app to import settings."
+            ) : importPreview ? (
+              <div className="space-y-1.5">
+                <p>Source: {importPreview.sourceDirectory}</p>
+                {importPreview.message ? <p>{importPreview.message}</p> : null}
+                <ul className="space-y-0.5">
+                  {importPreview.categories.map((category) => (
+                    <li key={category.id}>
+                      <span className="text-foreground/80">{category.label}</span>{" "}
+                      <span>
+                        ({category.sourceFile}) — {category.status}
+                      </span>
+                      {category.status === "ready" ? <span>: {category.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <p>Not imported: {importPreview.excluded.join("; ")}.</p>
+              </div>
+            ) : (
+              "Inspecting ~/.t3/userdata…"
+            )
+          }
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!importPreview?.canImport || isImporting}
+              onClick={() => void importSettings()}
+            >
+              {isImporting ? "Importing…" : "Import and restart"}
+            </Button>
+          }
+        />
       </SettingsSection>
     </SettingsPageContainer>
   );

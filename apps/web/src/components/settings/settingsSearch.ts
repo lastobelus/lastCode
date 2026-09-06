@@ -513,6 +513,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
     id: "scale-legacy-sidebar",
     title: "Scale legacy sidebar",
     to: "/settings/lastcode",
@@ -535,6 +541,11 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "environment-icons",
     title: "Environment icons",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "import-t3-settings",
+    title: "Import settings from T3 Code",
     to: "/settings/lastcode",
   },
   {

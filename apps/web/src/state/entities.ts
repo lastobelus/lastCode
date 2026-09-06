@@ -211,6 +211,13 @@ export function readEnvironmentSupportsPinning(environmentId: EnvironmentId): bo
   );
 }
 
+export function readEnvironmentSupportsPersistence(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadPersistence === true
+  );
+}
+
 /** Whether the environment's server understands thread title regeneration.
     Same version-skew contract as settlement. */
 export function readEnvironmentSupportsTitleRegeneration(environmentId: EnvironmentId): boolean {
@@ -226,6 +233,15 @@ export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId):
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
       .threadPinReorder === true
+  );
+}
+
+/** Whether the environment supports persistent thread annotations. Missing is
+    unsupported so clients do not send annotation commands to older servers. */
+export function readEnvironmentSupportsThreadAnnotations(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadAnnotations === true
   );
 }
 

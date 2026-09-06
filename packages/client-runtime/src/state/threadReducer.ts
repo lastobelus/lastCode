@@ -106,6 +106,8 @@ export function applyThreadDetailEvent(
           unsettledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
+          persistent: false,
+          annotation: null,
           deletedAt: null,
           messages: [],
           proposedPlans: [],
@@ -220,6 +222,17 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          annotation: event.payload.annotation,
+        },
+      };
+
     // ── Thread metadata ─────────────────────────────────────────────
     case "thread.meta-updated":
       return {
@@ -310,6 +323,9 @@ export function applyThreadDetailEvent(
         text: event.payload.text,
         ...(event.payload.attachments !== undefined
           ? { attachments: event.payload.attachments }
+          : {}),
+        ...(event.payload.sourceThreadId !== undefined
+          ? { sourceThreadId: event.payload.sourceThreadId }
           : {}),
         turnId: event.payload.turnId,
         streaming: event.payload.streaming,
