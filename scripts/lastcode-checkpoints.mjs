@@ -319,7 +319,25 @@ export function failureDetailLines(rows, verbose) {
     .filter((row) => row.status === "failed")
     .map((failure) => {
       const recovery = failure.recoveryBranch ? ` · Recovery: ${failure.recoveryBranch}` : "";
-      return `Failure ${failure.upstreamTag}: ${failure.error ?? "unknown error"}${recovery}`;
+      const rollback = failure.rollbackReason ? ` · Rollback: ${failure.rollbackReason}` : "";
+      return `Failure ${failure.upstreamTag}: ${failure.error ?? "unknown error"}${recovery}${rollback}`;
+    });
+}
+
+export function rollbackDetailLines(rows) {
+  return rows
+    .filter((row) => row.replayMode === "historical" && row.rollbackReason)
+    .map((row) => `Historical rollback ${row.upstreamTag}: ${row.rollbackReason}`);
+}
+
+export function provenanceDetailLines(rows, verbose) {
+  if (!verbose) return [];
+  return rows
+    .filter((row) => row.sourceCommit || row.sourceObjectRef)
+    .map((row) => {
+      const source = row.sourceCommit ? `source ${row.sourceCommit}` : "source unknown";
+      const object = row.sourceObjectRef ? ` · immutable ref ${row.sourceObjectRef}` : "";
+      return `Provenance ${row.upstreamTag}: ${source}${object}`;
     });
 }
 
@@ -609,15 +627,41 @@ export function recoveryActionLines({
   failedDuringRebase,
   hasFailureRecord = true,
   isDaemonRunning = false,
+  carryPhase,
+  recoverySource,
+  replayMode,
+  rollbackReason,
 }) {
   const lines = [];
   if (isRebaseInProgress) {
     lines.push(
       `Resolve and stage conflicts, then repeat until the rebase finishes: git -C ${shellQuote(worktree)} rebase --continue`,
     );
+    if (carryPhase && automationWorktree && recoverySource) {
+      lines.push(
+        carryRecoverySelectionLine({
+          automationWorktree,
+          worktree,
+          recoverySource,
+          replayMode,
+          rollbackReason,
+        }),
+      );
+      return lines;
+    }
   } else if (isDaemonRunning) {
     return [
       "Automation is still working or has not recorded the failure yet; wait for it to finish before changing the retained attempt.",
+    ];
+  } else if (carryPhase && automationWorktree && recoverySource) {
+    return [
+      carryRecoverySelectionLine({
+        automationWorktree,
+        worktree,
+        recoverySource,
+        replayMode,
+        rollbackReason,
+      }),
     ];
   } else if (failedDuringRebase) {
     lines.push(
@@ -650,6 +694,31 @@ export function recoveryActionLines({
     );
   }
   return lines;
+}
+
+function carryRecoverySelectionLine({
+  automationWorktree,
+  worktree,
+  recoverySource,
+  replayMode,
+  rollbackReason,
+}) {
+  const mode = replayMode ?? "carry";
+  if (mode === "historical" && !rollbackReason) {
+    return "Cannot continue the retained historical replay: its rollback reason is missing from checkpoint history.";
+  }
+  const rollback = rollbackReason ? ` --rollback-reason ${shellQuote(rollbackReason)}` : "";
+  return `Continue the retained ${mode} replay: pnpm --dir ${shellQuote(automationWorktree)} lastcode:checkpoint -- --select-recovery "$(git -C ${shellQuote(worktree)} rev-parse HEAD)" --recovery-source ${shellQuote(recoverySource)} --replay-mode ${mode}${rollback}`;
+}
+
+function readCarryReplayPlan(worktree) {
+  try {
+    const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"]);
+    const path = NodePath.join(gitDirectory, "lastcode-carry-replay-plan.json");
+    return NodeFS.existsSync(path) ? JSON.parse(NodeFS.readFileSync(path, "utf8")) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function renderLauncher(modulePath) {
@@ -774,10 +843,21 @@ function checkpointRows(repoRoot, home, count, remoteState) {
       checkpoint: commit.slice(0, 9),
       main: commit === remoteState.remoteMain ? "yes" : "—",
       build: build === undefined ? "—" : `#${build}`,
+      replay:
+        trailers["Replay-Mode"] === "historical" && trailers["Rollback-Reason"]
+          ? "historical*"
+          : (trailers["Replay-Mode"] ?? "legacy"),
+      replayMode: trailers["Replay-Mode"],
+      rollbackReason: trailers["Rollback-Reason"],
+      sourceCommit: trailers["Source-Commit"],
+      sourceObjectRef: trailers["Source-Object-Ref"],
     };
     const revisionBuildRows = selectRevisionBuilds(checkpointTag, buildTags).map(
       ({ build: revisionBuild, buildTag, revisionTag, version }) => {
         const revisionCommit = git(repoRoot, ["rev-list", "-n", "1", revisionTag]);
+        const revisionTrailers = parseTrailers(
+          git(repoRoot, ["for-each-ref", "--format=%(contents)", `refs/tags/${revisionTag}`]),
+        );
         return {
           status: "build",
           upstreamTag: `  ${version}`,
@@ -791,6 +871,14 @@ function checkpointRows(repoRoot, home, count, remoteState) {
           checkpoint: revisionCommit.slice(0, 9),
           main: revisionCommit === remoteState.remoteMain ? "yes" : "—",
           build: `#${revisionBuild}`,
+          replay:
+            revisionTrailers["Replay-Mode"] === "historical" && revisionTrailers["Rollback-Reason"]
+              ? "historical*"
+              : (revisionTrailers["Replay-Mode"] ?? "revision"),
+          replayMode: revisionTrailers["Replay-Mode"],
+          rollbackReason: revisionTrailers["Rollback-Reason"],
+          sourceCommit: revisionTrailers["Source-Commit"],
+          sourceObjectRef: revisionTrailers["Source-Object-Ref"],
         };
       },
     );
@@ -812,6 +900,14 @@ function checkpointRows(repoRoot, home, count, remoteState) {
           error: record.error,
           failurePhase: record.failurePhase,
           recoveryBranch: record.recoveryBranch,
+          replay:
+            record.replayMode === "historical" && record.rollbackReason
+              ? "historical*"
+              : (record.replayMode ?? "legacy"),
+          replayMode: record.replayMode,
+          rollbackReason: record.rollbackReason,
+          sourceCommit: record.sourceCommit,
+          sourceObjectRef: record.sourceObjectRef,
         },
       ],
     }),
@@ -862,6 +958,7 @@ function printDashboard(repoRoot, home, count, verbose) {
     { key: "checkpoint", label: "CHECKPOINT", value: (row) => row.checkpoint },
     { key: "main", label: "MAIN", value: (row) => row.main },
     { key: "build", label: "BUILD", value: (row) => row.build },
+    { key: "replay", label: "REPLAY", value: (row) => row.replay },
   ].map((column) => ({
     ...column,
     width: Math.max(column.label.length, ...rows.map((row) => column.value(row).length)),
@@ -901,6 +998,12 @@ function printDashboard(repoRoot, home, count, verbose) {
   for (const detail of failureDetailLines(rows, verbose)) {
     console.log(style(ansi.error, detail));
   }
+  for (const detail of rollbackDetailLines(rows)) {
+    console.log(style(ansi.yellow, detail));
+  }
+  for (const detail of provenanceDetailLines(rows, verbose)) {
+    console.log(style(ansi.lavender, detail));
+  }
 
   const recoveryWorktree = findNightlySyncWorktree(repoRoot);
   if (recoveryWorktree) {
@@ -909,6 +1012,7 @@ function printDashboard(repoRoot, home, count, verbose) {
       recoveryFailure?.recoveryBranch ??
       git(recoveryWorktree, ["branch", "--show-current"], { allowFailure: true });
     const nightly = recoveryFailure ? ` for ${recoveryFailure.upstreamTag}` : "";
+    const carryPlan = readCarryReplayPlan(recoveryWorktree);
     console.log("");
     console.log(
       style(
@@ -930,6 +1034,10 @@ function printDashboard(repoRoot, home, count, verbose) {
       failedDuringRebase: failureWasDuringRebase(recoveryFailure),
       hasFailureRecord: recoveryFailure !== undefined,
       isDaemonRunning: daemon.running,
+      carryPhase: carryPlan?.phase,
+      recoverySource: recoveryFailure?.sourceCommit,
+      replayMode: recoveryFailure?.replayMode,
+      rollbackReason: recoveryFailure?.rollbackReason,
     })) {
       console.log(style(ansi.lavender, line));
     }
@@ -967,6 +1075,17 @@ function printDashboard(repoRoot, home, count, verbose) {
         allowFailure: true,
       }) || remoteState.publishedTagCommits[latestInstallableTag.tag]
     : undefined;
+  const latestInstallableTrailers = latestInstallableTag
+    ? parseTrailers(
+        git(
+          repoRoot,
+          ["for-each-ref", "--format=%(contents)", `refs/tags/${latestInstallableTag.tag}`],
+          { allowFailure: true },
+        ),
+      )
+    : {};
+  const latestReplay = latestInstallableTrailers["Replay-Mode"];
+  const latestRollback = latestInstallableTrailers["Rollback-Reason"];
   const latestInstallableBuild = latestInstallableTag
     ? latestBuildNumbers(splitLines(git(repoRoot, ["tag", "--list", `${BUILD_PREFIX}*`]))).get(
         latestInstallableTag.version,
@@ -1023,7 +1142,7 @@ function printDashboard(repoRoot, home, count, verbose) {
   console.log(
     style(
       ansi.lavender,
-      `Latest installable: ${latestInstallableTag?.version ?? "—"}${latestInstallableCommit === remoteState.remoteMain ? " · on main" : ""}${latestInstallableBuild ? ` · build #${latestInstallableBuild}` : ""}`,
+      `Latest installable: ${latestInstallableTag?.version ?? "—"}${latestInstallableCommit === remoteState.remoteMain ? " · on main" : ""}${latestInstallableBuild ? ` · build #${latestInstallableBuild}` : ""}${latestReplay ? ` · replay ${latestReplay}` : ""}${latestRollback ? ` · rollback: ${latestRollback}` : ""}`,
     ),
   );
 }

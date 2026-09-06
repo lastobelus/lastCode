@@ -20,6 +20,8 @@ import {
   parseRemoteUpstreamTags,
   parseTrailers,
   recoveryActionLines,
+  provenanceDetailLines,
+  rollbackDetailLines,
   serviceFailureDetailLines,
   renderLauncher,
   selectAutomationWorktree,
@@ -205,6 +207,59 @@ describe("LastCode checkpoint dashboard", () => {
     ]);
   });
 
+  it("uses the bounded checkpoint continuation for retained carry replay", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: true,
+        failedDuringRebase: true,
+        carryPhase: "compile",
+        recoverySource: "abc123",
+        replayMode: "carry",
+      }),
+    ).toEqual([
+      "Resolve and stage conflicts, then repeat until the rebase finishes: git -C '/tmp/recovery' rebase --continue",
+      "Continue the retained carry replay: pnpm --dir '/tmp/automation' lastcode:checkpoint -- --select-recovery \"$(git -C '/tmp/recovery' rev-parse HEAD)\" --recovery-source 'abc123' --replay-mode carry",
+    ]);
+  });
+
+  it("retains the explicit historical rollback reason in carry recovery commands", () => {
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: false,
+        failedDuringRebase: true,
+        carryPhase: "replay",
+        recoverySource: "abc123",
+        replayMode: "historical",
+        rollbackReason: "carry compiler regression",
+      }),
+    ).toEqual([
+      "Continue the retained historical replay: pnpm --dir '/tmp/automation' lastcode:checkpoint -- --select-recovery \"$(git -C '/tmp/recovery' rev-parse HEAD)\" --recovery-source 'abc123' --replay-mode historical --rollback-reason 'carry compiler regression'",
+    ]);
+    expect(
+      recoveryActionLines({
+        repoRoot: "/tmp/repo",
+        worktree: "/tmp/recovery",
+        automationWorktree: "/tmp/automation",
+        recoveryBranch: "sync/nightly/v1",
+        isRebaseInProgress: false,
+        failedDuringRebase: true,
+        carryPhase: "replay",
+        recoverySource: "abc123",
+        replayMode: "historical",
+      }),
+    ).toEqual([
+      "Cannot continue the retained historical replay: its rollback reason is missing from checkpoint history.",
+    ]);
+  });
+
   it("distinguishes smoke-gate recovery from an interrupted rebase", () => {
     expect(
       recoveryActionLines({
@@ -343,6 +398,26 @@ describe("LastCode checkpoint dashboard", () => {
     expect(failureDetailLines(rows, false)).toEqual([]);
     expect(failureDetailLines(rows, true)).toEqual([
       "Failure v0.0.1-nightly.20260812.2: rebase failed · Recovery: sync/nightly/v0.0.1-nightly.20260812.2",
+    ]);
+  });
+
+  it("shows rollback reasons and source provenance without changing failure text", () => {
+    const rows = [
+      {
+        status: "success",
+        upstreamTag: "v0.0.1-nightly.20260812.2",
+        replayMode: "historical",
+        rollbackReason: "carry compiler regression",
+        sourceCommit: "abc123",
+        sourceObjectRef: "refs/lastcode/sources/v1",
+      },
+    ];
+    expect(rollbackDetailLines(rows)).toEqual([
+      "Historical rollback v0.0.1-nightly.20260812.2: carry compiler regression",
+    ]);
+    expect(provenanceDetailLines(rows, false)).toEqual([]);
+    expect(provenanceDetailLines(rows, true)).toEqual([
+      "Provenance v0.0.1-nightly.20260812.2: source abc123 · immutable ref refs/lastcode/sources/v1",
     ]);
   });
 

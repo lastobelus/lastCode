@@ -17,6 +17,7 @@ import {
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
+  carryCompilationNeeded,
   openPullRequestListArgs,
   promotionNeeded,
   rerereRebaseMadeProgress,
@@ -24,6 +25,7 @@ import {
   runCarrySetShadowAfterPublication,
   runPromotionThenShadow,
   resolveCheckpointPlan,
+  resolveCarryCheckpointPlan,
   resolveRevisionPlan,
   resolveUpstreamMainMirror,
   revisionMessage,
@@ -604,6 +606,8 @@ it("records dashboard metadata in annotated checkpoint tags", () => {
     commit: "lastcode-sha",
     sourceRef: "origin/lastcode/main",
     sourceCommit: "source-sha",
+    sourceObjectRef: "refs/lastcode/sources/v1",
+    replay: { mode: "carry", configuredMode: "carry" },
     timing: {
       commitsRebased: 8,
       startedAt: "2026-08-12T18:00:00.000Z",
@@ -633,11 +637,19 @@ it("records source and upstream provenance in revision tags", () => {
     revision: 2,
     sourceCommit: "main-sha",
     sourceRef: "origin/lastcode/main",
+    sourceObjectRef: "refs/lastcode/sources/v1.2",
+    replay: {
+      mode: "historical",
+      configuredMode: "carry",
+      rollbackReason: "compiler regression",
+    },
     upstreamCommit: "upstream-sha",
     upstreamTag: "v0.0.34-nightly.20260816.1105",
   });
   expect(message).toContain("LastCode revision 2");
   expect(message).toContain("Source-Commit: main-sha");
+  expect(message).toContain("Replay-Mode: historical");
+  expect(message).toContain("Rollback-Reason: compiler regression");
   expect(message).toContain("Revision: 2");
 });
 
@@ -887,6 +899,58 @@ it("bootstraps at the source nightly and checkpoints every later nightly", () =>
     plan.missingNightlies.map(({ tag }) => tag),
     ["v0.0.1-nightly.20260102.2", "v0.0.2-nightly.20260103.3"],
   );
+});
+
+it("starts carry replay from the latest compact installable even when promotion was held", () => {
+  const older = nightly("v0.0.1-nightly.20260101.1");
+  const latest = nightly("v0.0.1-nightly.20260102.2");
+  const next = nightly("v0.0.1-nightly.20260103.3");
+  const plan = resolveCarryCheckpointPlan({
+    checkpointRefs: [
+      {
+        checkpointTag: `lastcode/checkpoint/${older.tag}`,
+        commit: "old-checkpoint",
+        nightly: older,
+      },
+      {
+        checkpointTag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "compact-b",
+        nightly: latest,
+      },
+    ],
+    installableRefs: [
+      {
+        tag: `lastcode/checkpoint/${latest.tag}`,
+        commit: "compact-b",
+        nightly: latest,
+        revision: 0,
+        replayMode: "carry",
+        sourceCommit: "represented-a",
+        sourceObjectRef: `refs/lastcode/sources/${latest.tag}`,
+      },
+    ],
+    nightlyTags: [older.tag, latest.tag, next.tag],
+    bootstrapBase: older.tag,
+    resolveCommit: (ref) => ref,
+  });
+  expect(plan.baseNightly).toEqual(latest);
+  expect(plan.candidateRef).toBe(`lastcode/checkpoint/${latest.tag}`);
+  expect(plan.missingNightlies).toEqual([next]);
+  expect(plan.previousCompact?.sourceCommit).toBe("represented-a");
+  expect(
+    carryCompilationNeeded({
+      mode: "carry",
+      previousCompact: plan.previousCompact!,
+      sourceCommit: "represented-a",
+    }),
+  ).toBe(false);
+  expect(
+    carryCompilationNeeded({
+      mode: "carry",
+      previousCompact: plan.previousCompact!,
+      sourceCommit: "newer-main-b",
+    }),
+  ).toBe(true);
 });
 
 it("skips only the failed nightly when a newer upstream nightly supersedes it", () => {

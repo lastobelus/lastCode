@@ -29,6 +29,7 @@ const manifest: CarrySetManifest = {
       upstreamPullRequests: { "10": ["https://github.com/upstream/repo/pull/20"] },
     },
     tooling: { subjects: ["bootstrap tooling"] },
+    "build-ci": { pullRequests: [50] },
     "resumable-actions": { pullRequests: [30] },
     "legacy-sidebar": { pullRequests: [40] },
     incubator: { default: true },
@@ -89,6 +90,7 @@ it("groups known PRs and subjects in fixed order and sends unknown work to Incub
     [
       { id: "upstream-bugfixes", commits: ["c"] },
       { id: "tooling", commits: ["b"] },
+      { id: "build-ci", commits: [] },
       { id: "resumable-actions", commits: ["e"] },
       { id: "legacy-sidebar", commits: ["a"] },
       { id: "incubator", commits: ["d"] },
@@ -122,6 +124,7 @@ it("keeps exclusive files with their group and sends shared files to Incubator",
     {
       "upstream-bugfixes": ["upstream.ts"],
       tooling: ["tool.ts"],
+      "build-ci": [],
       "resumable-actions": [],
       "legacy-sidebar": [],
       incubator: ["shared.ts", "unattributed.ts"],
@@ -155,6 +158,67 @@ it("reconstructs renames without retaining the source path", () => {
 
     const result = runCarrySetShadowCheck(repo, tag);
     assert.equal(result.tree, git(repo, ["rev-parse", `${source}^{tree}`]));
+  } finally {
+    NodeFS.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+it("inspects the published compact chain without running reconstruction hooks", () => {
+  const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-inspect-test-"));
+  try {
+    git(repo, ["init", "--quiet"]);
+    git(repo, ["config", "user.name", "Carry test"]);
+    git(repo, ["config", "user.email", "carry-test@example.invalid"]);
+    git(repo, ["commit", "--allow-empty", "--quiet", "-m", "upstream"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
+    for (const group of CARRY_GROUPS) {
+      git(repo, [
+        "commit",
+        "--allow-empty",
+        "--quiet",
+        "-m",
+        `carry(${group})\n\nCarry-Group: ${group}`,
+      ]);
+    }
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    const tag = "lastcode/checkpoint/test-compact";
+    git(repo, ["tag", "-a", tag, "-m", `Upstream-Commit: ${base}\nLastCode-Commit: ${head}`]);
+    const manifestPath = NodePath.join(repo, "manifest.json");
+    NodeFS.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        ...manifest,
+        replay: { mode: "carry", bootstrap: { base, source: head, head } },
+      }),
+    );
+    const hooks = NodePath.join(repo, "hooks");
+    NodeFS.mkdirSync(hooks);
+    NodeFS.writeFileSync(NodePath.join(hooks, "pre-commit"), "#!/bin/sh\nexit 99\n", {
+      mode: 0o755,
+    });
+    git(repo, ["config", "core.hooksPath", hooks]);
+    const worktrees = git(repo, ["worktree", "list", "--porcelain"]);
+    const result = runCarrySetShadowCheck(repo, tag, manifestPath);
+    assert.deepStrictEqual(
+      result.groups.map(({ id }) => id),
+      [...CARRY_GROUPS],
+    );
+    assert.equal(result.tree, git(repo, ["rev-parse", `${head}^{tree}`]));
+    assert.equal(git(repo, ["worktree", "list", "--porcelain"]), worktrees);
+    assert.equal(git(repo, ["rev-parse", "HEAD"]), head);
+
+    git(repo, [
+      "tag",
+      "-a",
+      "lastcode/checkpoint/test-uncompacted",
+      base,
+      "-m",
+      `Upstream-Commit: ${base}\nLastCode-Commit: ${base}`,
+    ]);
+    assert.throws(
+      () => runCarrySetShadowCheck(repo, "lastcode/checkpoint/test-uncompacted", manifestPath),
+      /exactly 6 commits/,
+    );
   } finally {
     NodeFS.rmSync(repo, { recursive: true, force: true });
   }

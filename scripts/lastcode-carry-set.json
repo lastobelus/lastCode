@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
-  "order": ["upstream-bugfixes", "tooling", "resumable-actions", "legacy-sidebar", "incubator"],
+  "order": [
+    "upstream-bugfixes",
+    "tooling",
+    "build-ci",
+    "resumable-actions",
+    "legacy-sidebar",
+    "incubator"
+  ],
   "groups": {
     "upstream-bugfixes": {
       "pullRequests": [18, 24, 31, 45, 48, 56, 69, 74, 82, 102, 112],
@@ -41,6 +48,7 @@
         "fix(lastcode): deduplicate reconciled contract import"
       ]
     },
+    "build-ci": {},
     "resumable-actions": {
       "pullRequests": [28, 29, 34, 36, 71, 88, 92, 97, 98, 104, 106, 110, 111, 117, 143]
     },

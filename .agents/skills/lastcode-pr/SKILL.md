@@ -8,6 +8,11 @@ description: Deliver a LastCode-only change through its branch, Quick CI, GitHub
 Ship fork-only work from the canonical downstream base without contaminating the
 clean upstream mirror.
 
+When `scripts/lastcode-carry-set.json` enables carry replay, prepare source
+commits using the ownership and provenance rules in
+`docs/lastcode/nightly-workflow.md#carry-replay-ownership` before validation
+and review. A PR may contain several groups; each source commit has one owner.
+
 ## Classify and Branch
 
 Read `docs/lastcode/fork-conventions.md` and the repository `AGENTS.md` first.
