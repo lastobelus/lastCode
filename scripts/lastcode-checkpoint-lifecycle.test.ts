@@ -23,6 +23,23 @@ interface Fixture {
   readonly upstream: string;
 }
 
+const FIXTURE_RUNTIME_PATHS = [
+  ".gitignore",
+  "package.json",
+  "apps/web/src/components/branding/LastCodeWordmark.tsx",
+  "packages/shared/src/desktopDistribution.ts",
+  "scripts/lastcode-carry-checkpoint.ts",
+  "scripts/lastcode-carry-replay.ts",
+  "scripts/lastcode-carry-set.json",
+  "scripts/lastcode-carry-set.ts",
+  "scripts/lastcode-checkpoint-history.ts",
+  "scripts/lastcode-checkpoint.ts",
+  "scripts/lastcode-lock.mjs",
+  "scripts/lastcode-build-mac.ts",
+  "scripts/lastcode-nightly.ts",
+  "scripts/lib/lastcode-installable-tag.ts",
+] as const;
+
 function git(repo: string, args: ReadonlyArray<string>, input?: string): string {
   return NodeChildProcess.execFileSync("git", args, {
     cwd: repo,
@@ -79,23 +96,20 @@ function initFixture(): Fixture {
   const upstream = NodePath.join(root, "upstream.git");
   const home = NodePath.join(root, "home");
   NodeFS.mkdirSync(home);
-  git(root, ["clone", "--quiet", "--shared", "--no-tags", taskRoot, repo]);
-  git(repo, ["checkout", "--quiet", "--detach", git(taskRoot, ["rev-parse", "HEAD"])]);
+  NodeFS.mkdirSync(repo);
+  git(repo, ["init", "--quiet", "--initial-branch=fixture"]);
+  for (const path of FIXTURE_RUNTIME_PATHS) {
+    const target = NodePath.join(repo, path);
+    NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
+    NodeFS.copyFileSync(NodePath.join(taskRoot, path), target);
+  }
   git(repo, ["config", "user.name", "Carry lifecycle test"]);
   git(repo, ["config", "user.email", "carry-lifecycle@localhost"]);
   git(repo, ["config", "core.hooksPath", "/dev/null"]);
   git(root, ["init", "--quiet", "--bare", origin]);
   git(root, ["init", "--quiet", "--bare", upstream]);
-  git(repo, ["remote", "remove", "origin"]);
   git(repo, ["remote", "add", "origin", origin]);
   git(repo, ["remote", "add", "upstream", upstream]);
-  for (const path of [
-    "scripts/lastcode-carry-checkpoint.ts",
-    "scripts/lastcode-carry-replay.ts",
-    "scripts/lastcode-checkpoint.ts",
-  ]) {
-    NodeFS.copyFileSync(NodePath.join(taskRoot, path), NodePath.join(repo, path));
-  }
   installFixtureRuntime({ home, origin, repo, root, taskRoot, upstream });
   return { home, origin, repo, root, taskRoot, upstream };
 }
