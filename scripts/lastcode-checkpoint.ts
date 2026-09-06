@@ -234,6 +234,36 @@ function git(
   });
 }
 
+function fetchCarryReplayRefs(
+  repoRoot: string,
+  pushRemote: string,
+  bootstrap: CarryBootstrap,
+): void {
+  run(repoRoot, "git", [
+    "fetch",
+    pushRemote,
+    "refs/lastcode/carry-sources/*:refs/lastcode/carry-sources/*",
+  ]);
+  if (bootstrap.ref) {
+    run(repoRoot, "git", ["fetch", pushRemote, `${bootstrap.ref}:${bootstrap.ref}`]);
+  }
+}
+
+function assertCarryBootstrapRef(repoRoot: string, bootstrap: CarryBootstrap): void {
+  if (!bootstrap.ref) return;
+  const actual = git(repoRoot, ["rev-parse", "--verify", `${bootstrap.ref}^{commit}`], {
+    allowFailure: true,
+  });
+  if (!actual) {
+    throw new Error(`Carry bootstrap ref ${bootstrap.ref} is unavailable.`);
+  }
+  if (actual !== bootstrap.head) {
+    throw new Error(
+      `Carry bootstrap ref ${bootstrap.ref} resolves to ${actual}, expected ${bootstrap.head}.`,
+    );
+  }
+}
+
 export function shouldContinueRerereRebase(input: {
   readonly rebaseInProgress: boolean;
   readonly unmergedPaths: ReadonlyArray<string>;
@@ -1971,6 +2001,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     run(repoRoot, "git", ["fetch", options.pushRemote, immutableSourceFetchRefspec()], {
       allowFailure: replay.configuredMode !== "carry",
     });
+    if (replay.mode === "carry" && replay.bootstrap) {
+      fetchCarryReplayRefs(repoRoot, options.pushRemote, replay.bootstrap);
+    }
     run(repoRoot, "git", [
       "fetch",
       options.pushRemote,
@@ -1983,6 +2016,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         `+refs/heads/main:refs/remotes/${options.pushRemote}/main`,
       ]);
     }
+  }
+
+  if (replay.mode === "carry" && replay.bootstrap) {
+    assertCarryBootstrapRef(repoRoot, replay.bootstrap);
   }
 
   if (options.mirrorUpstreamMain) mirrorUpstreamMain(repoRoot, options);

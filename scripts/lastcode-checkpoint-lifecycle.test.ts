@@ -493,4 +493,99 @@ describe("checkpoint carry lifecycle", () => {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  it("fetches remote-only carry refs and validates the exact bootstrap head", () => {
+    const fixture = initFixture();
+    try {
+      const { repo } = fixture;
+      git(repo, ["add", "--force", "node_modules/.bin/vp"]);
+      const base = commit(repo, "fixture upstream base");
+      git(repo, ["tag", NIGHTLY_A, base]);
+      git(repo, ["push", "--quiet", "upstream", `${base}:refs/heads/main`, NIGHTLY_A]);
+
+      write(repo, "remote-only-bootstrap.txt", "prepared partition\n");
+      const partition = commit(
+        repo,
+        "prepare remote-only bootstrap partition",
+        "Carry-Group: tooling\n\nCarry-Fix: fixture#remote-only-bootstrap",
+      );
+      const source = commitTree(
+        repo,
+        git(repo, ["rev-parse", `${partition}^{tree}`]),
+        base,
+        "historical source",
+      );
+
+      checkout(repo, "activation-source", source);
+      const manifest = JSON.parse(
+        NodeFS.readFileSync(NodePath.join(repo, "scripts/lastcode-carry-set.json"), "utf8"),
+      ) as Record<string, unknown>;
+      const bootstrapRef = "refs/lastcode/carry-compiled/bootstrap/remote-only";
+      manifest.replay = {
+        mode: "carry",
+        bootstrap: { base, source, head: partition, ref: bootstrapRef },
+      };
+      write(repo, "scripts/lastcode-carry-set.json", `${JSON.stringify(manifest, undefined, 2)}\n`);
+      const activationHead = commit(
+        repo,
+        "activate carry replay from remote-only refs",
+        "Carry-Group: tooling\n\nCarry-Fix: fixture#remote-only-activation",
+      );
+      const activationRef = `refs/lastcode/carry-sources/pr-1/${activationHead}`;
+      const main = commitTree(
+        repo,
+        git(repo, ["rev-parse", `${activationHead}^{tree}`]),
+        source,
+        [
+          "activate carry replay from remote-only refs (#1)",
+          "",
+          `Carry-Source-Ref: ${activationRef}`,
+          `Carry-Source-Base: ${source}`,
+          `Carry-Source-Head: ${activationHead}`,
+        ].join("\n"),
+      );
+      git(repo, [
+        "push",
+        "--quiet",
+        "origin",
+        `${main}:refs/heads/lastcode/main`,
+        `${activationHead}:${activationRef}`,
+        `${partition}:${bootstrapRef}`,
+      ]);
+
+      const freshRepo = NodePath.join(fixture.root, "fresh-repository");
+      git(fixture.root, [
+        "clone",
+        "--quiet",
+        "--no-tags",
+        "--branch",
+        "lastcode/main",
+        fixture.origin,
+        freshRepo,
+      ]);
+      git(freshRepo, ["config", "user.name", "Fresh checkpoint test"]);
+      git(freshRepo, ["config", "user.email", "fresh-checkpoint@localhost"]);
+      git(freshRepo, ["config", "core.hooksPath", "/dev/null"]);
+      git(freshRepo, ["remote", "add", "upstream", fixture.upstream]);
+      const freshFixture = { ...fixture, repo: freshRepo };
+      installFixtureRuntime(freshFixture);
+
+      assert.equal(remoteMissing(freshRepo, activationRef), true);
+      assert.equal(remoteMissing(freshRepo, bootstrapRef), true);
+      const result = checkpoint(freshFixture, ["--no-smoke"]);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(git(freshRepo, ["rev-parse", `${activationRef}^{commit}`]), activationHead);
+      assert.equal(git(freshRepo, ["rev-parse", `${bootstrapRef}^{commit}`]), partition);
+
+      git(freshRepo, ["update-ref", bootstrapRef, base]);
+      const mismatch = checkpoint(freshFixture, ["--no-fetch", "--no-smoke"]);
+      assert.notEqual(mismatch.status, 0);
+      assert.match(
+        mismatch.stderr,
+        new RegExp(`Carry bootstrap ref .* resolves to ${base}, expected ${partition}`, "u"),
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 });
