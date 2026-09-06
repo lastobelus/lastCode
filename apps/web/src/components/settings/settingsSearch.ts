@@ -10,6 +10,7 @@ export type SettingsPath =
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/lastcode"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -56,6 +57,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
+  "/settings/lastcode": "LastCode",
   "/settings/archived": "Archive",
 };
 
@@ -519,6 +521,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [
       "automatic machine environment resources cpu memory capacity preference weight shared projects",
     ],
+  },
+  {
+    id: "local-nightlies",
+    title: "Show and install local nightlies",
+    to: "/settings/lastcode",
   },
   {
     id: "archive",

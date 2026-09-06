@@ -46,11 +46,19 @@
     "lastcode:checkpoint": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoint.ts",
     "lastcode:carry-set": "mise exec node@24.13.1 -- node scripts/lastcode-carry-set.ts",
     "lastcode:checkpoints": "mise exec node@24.13.1 -- node scripts/lastcode-checkpoints.mjs",
+    "lastcode:build": "mise exec node@24.13.1 -- node scripts/lastcode-build.mjs",
+    "lastcode:install": "mise exec node@24.13.1 -- node scripts/lastcode-install.mjs",
+    "lastcode:intel-build": "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts",
+    "lastcode:intel-stage": "mise exec node@24.13.1 -- node scripts/lastcode-intel-stage.mjs",
     "lastcode:managed-checkout": "mise exec node@24.13.1 -- node scripts/lastcode-managed-checkout.mjs",
     "lastcode:project-actions": "mise exec node@24.13.1 -- node scripts/lastcode-project-actions.mjs",
     "lastcode:headless-service": "mise exec node@24.13.1 -- node scripts/lastcode-headless-service.mjs",
     "lastcode:setup": "mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs",
     "lastcode:checkpoint:service": "mise exec node@24.13.1 -- node scripts/lastcode-nightly-service.ts",
+    "lastcode:build:mac:arm64": "mise exec node@24.13.1 -- node scripts/lastcode-build-mac.ts --arch arm64",
+    "lastcode:build:mac:x64": "mise exec node@24.13.1 -- node scripts/lastcode-build-mac.ts --arch x64",
+    "lastcode:ci": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --full",
+    "lastcode:ci:quick": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
     "lastcode:merge": "mise exec node@24.13.1 -- node scripts/lastcode-merge.ts",
     "lastcode:docs:check": "node scripts/lastcode-docs-features.ts --check",
     "lastcode:docs:readme": "node scripts/lastcode-docs-features.ts --write-readme",
@@ -63,7 +71,8 @@
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "knip": "6.34.0",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "yaml": "catalog:"
   },
   "engines": {
     "node": "^24.13.1"
