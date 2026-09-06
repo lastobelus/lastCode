@@ -8,6 +8,16 @@ Choose an icon, emoji, or image from the project to make it easier to recognize.
 to every checkout in the project group and appears on connected clients. Choose **Automatic** to
 let T3 Code detect an icon again.
 
+## Choose the icon shape
+
+Project icons keep the shape of their source image by default. To round their corners in the web
+or desktop app, open **Settings → LastCode** and enable **Rounded project icons**. This preference
+is saved in the current LastCode profile.
+
+T3 Code Mobile stores the same preference separately on each device. Open
+**Settings → Appearance** and enable **Rounded project icons** on every mobile device where you
+want rounded corners.
+
 ## Let an agent run an Action and resume
 
 Project Actions can hand long-running work back to Codex or Claude when they finish. Edit an
@@ -34,6 +44,7 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
+
 
 ## Keep the default branch current
 

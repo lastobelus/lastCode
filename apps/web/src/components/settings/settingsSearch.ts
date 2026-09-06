@@ -513,6 +513,31 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "scale-legacy-sidebar",
+    title: "Scale legacy sidebar",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "compact-status-indicators",
+    title: "Compact status indicators",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "show-worktree-indicators",
+    title: "Show worktree indicators (legacy sidebar)",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "rounded-project-icons",
+    title: "Rounded project icons",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "environment-icons",
+    title: "Environment icons",
+    to: "/settings/lastcode",
+  },
+  {
     id: "archive",
     title: "Archived threads",
     to: "/settings/archived",
