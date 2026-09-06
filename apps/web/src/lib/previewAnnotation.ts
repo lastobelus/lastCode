@@ -99,50 +99,42 @@ export function extractTrailingPreviewAnnotation(prompt: string): ExtractedPrevi
   };
 }
 
-async function previewAnnotationScreenshotFile(
-  annotation: PreviewAnnotationPayload,
-): Promise<File | null> {
-  if (!annotation.screenshot) return null;
-  const response = await fetch(annotation.screenshot.dataUrl);
-  const blob = await response.blob();
-  return new File([blob], `preview-annotation-${annotation.id}.png`, {
-    type: blob.type || "image/png",
-  });
-}
-
-/** Upper bound on turning a picked element's crop into a composer attachment. */
-export const PREVIEW_ANNOTATION_CAPTURE_TIMEOUT_MS = 5_000;
-
 export type PreviewAnnotationCapture =
-  /** The crop is ready to attach. */
   | { readonly status: "captured"; readonly file: File }
-  /** The pick carried no crop, which is normal for comment-only annotations. */
   | { readonly status: "none" }
-  /** The crop stalled or threw. Send the annotation without it. */
   | { readonly status: "failed" };
 
-/**
- * Bounded wrapper around `previewAnnotationScreenshotFile`. The picker holds the
- * composer while this runs, so it must always settle: a stalled crop resolves as
- * `failed` instead of leaving the caller waiting.
- */
+/** Decode the native PNG locally: the desktop CSP intentionally blocks data-URL fetches. */
 export async function capturePreviewAnnotationScreenshot(
   annotation: PreviewAnnotationPayload,
-  timeoutMs: number = PREVIEW_ANNOTATION_CAPTURE_TIMEOUT_MS,
 ): Promise<PreviewAnnotationCapture> {
   if (!annotation.screenshot) return { status: "none" };
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const file = await Promise.race([
-      previewAnnotationScreenshotFile(annotation),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
-      }),
-    ]);
-    return file ? { status: "captured", file } : { status: "failed" };
+    const prefix = "data:image/png;base64,";
+    const dataUrl = annotation.screenshot.dataUrl;
+    if (!dataUrl.startsWith(prefix)) return { status: "failed" };
+    const encoded = dataUrl.slice(prefix.length);
+    if (!encoded.length) return { status: "failed" };
+    // Decode in base64-aligned chunks so large crops yield to input and painting,
+    // and never retain a full-size intermediate binary string.
+    const chunkSize = 256 * 1024;
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    for (let offset = 0; offset < encoded.length; offset += chunkSize) {
+      const binary = atob(encoded.slice(offset, offset + chunkSize));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      chunks.push(bytes);
+      if (offset + chunkSize < encoded.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    return {
+      status: "captured",
+      file: new File(chunks, `preview-annotation-${annotation.id}.png`, { type: "image/png" }),
+    };
   } catch {
     return { status: "failed" };
-  } finally {
-    clearTimeout(timer);
   }
 }

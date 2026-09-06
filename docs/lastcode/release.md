@@ -105,6 +105,11 @@ one stable aggregate `CI Gate`. Head or base drift invalidates the result and
 requires the agent to decide whether to rebase, republish, and request review
 again.
 
+Open feature PRs do not pause checkpoints. When a checkpoint advances their
+base, update the feature branch to incorporate the new `lastcode/main`, push,
+and obtain fresh validation before merging. Rerunning CI from an old base does
+not validate the new one.
+
 This applies to authorized repair PRs opened during checkpoint or build recovery,
 without a separate request to babysit. After handling existing findings, call
 `list_project_actions`, select the eligible **Wait for PR** action (prefer
@@ -121,8 +126,10 @@ pnpm lastcode:merge
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 stale bases, draft or non-clean PRs, and PRs that do not target
-`lastcode/main`. It fetches and checks the base again after reading CI, then
-squash-merges with an exact-head guard and requests an immediate
+`lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
+Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
+head, base, and CI result again, then squash-merges with the exact-head guard.
+The lock is released before requesting an immediate
 checkpoint-daemon run when that service is installed on the current host. Hosts
 without the optional service skip the request silently. The daemon publishes a
 new installable LastCode revision when no new upstream
@@ -178,8 +185,9 @@ Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
 nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
 immutable tag and promotes main together with an atomic push leased against the
-selected source commit. Open LastCode PRs prevent publication in the service's
-normal promotion mode. Selected recovery cannot disable validation or
+selected source commit. Open PRs do not block publication or promotion. A merge
+arriving during validation makes the atomic push fail without publishing the tag
+or changing main. Selected recovery cannot disable validation or
 be automatically superseded. A changed head or source requires inspection and
 selection again. Failed validation retains the worktree and selection.
 

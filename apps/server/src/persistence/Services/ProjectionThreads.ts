@@ -9,12 +9,15 @@
 import {
   CommandId,
   IsoDateTime,
+  MessageId,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
   ThreadLinkedPullRequest,
+  ThreadAnnotation,
+  ThreadAttention,
   ThreadWorktreeCleanup,
   ThreadId,
   TurnId,
@@ -46,10 +49,14 @@ export const ProjectionThread = Schema.Struct({
   snoozedUntil: Schema.NullOr(IsoDateTime),
   snoozedAt: Schema.NullOr(IsoDateTime),
   pinnedAt: Schema.NullOr(IsoDateTime),
+  persistent: Schema.optional(NonNegativeInt),
   pinOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  annotation: Schema.NullOr(ThreadAnnotation),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  latestUserMessageId: Schema.NullOr(MessageId),
+  attention: Schema.NullOr(ThreadAttention),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
@@ -57,6 +64,14 @@ export const ProjectionThread = Schema.Struct({
   deletedAt: Schema.NullOr(IsoDateTime),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
+
+export const UpsertProjectionThreadInput = Schema.Struct({
+  ...ProjectionThread.fields,
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
+  latestUserMessageId: Schema.optional(Schema.NullOr(MessageId)),
+});
+export type UpsertProjectionThreadInput = typeof UpsertProjectionThreadInput.Type;
 
 export const GetProjectionThreadInput = Schema.Struct({
   threadId: ThreadId,
@@ -89,7 +104,9 @@ export interface ProjectionThreadRepositoryShape {
    *
    * Upserts by `threadId`.
    */
-  readonly upsert: (thread: ProjectionThread) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly upsert: (
+    thread: UpsertProjectionThreadInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
    * Read a projected thread row by id.

@@ -38,13 +38,14 @@ import {
   AlarmClockOffIcon,
   CheckIcon,
   ChevronDownIcon,
-  CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
   ClockIcon,
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
+  MessageSquareIcon,
+  MessageSquareLockIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
@@ -136,6 +137,8 @@ import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -290,43 +293,7 @@ function terminalProcessLabel(count: number): string {
   return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
 }
 
-function SidebarThreadTooltip({
-  thread,
-  projectTitle,
-  projectDisplayName,
-  projectCwd,
-  projectFaviconPath,
-  projectIcon,
-  environmentLabel,
-  environmentMachine,
-  providerEntry,
-  showInstanceBadge,
-  modelInstanceId,
-  modelLabel,
-  branchMismatch,
-  terminalStatus,
-  terminalProcessCount,
-}: {
-  thread: SidebarThreadSummary;
-  projectTitle: string | null;
-  projectDisplayName: string | null;
-  projectCwd: string | null;
-  projectFaviconPath: string | null;
-  projectIcon: ProjectIconOverride | null;
-  environmentLabel: string | null;
-  environmentMachine: EnvironmentMachineKind;
-  providerEntry: ProviderInstanceEntry | null;
-  showInstanceBadge: boolean;
-  modelInstanceId: string;
-  modelLabel: string;
-  branchMismatch: {
-    threadBranch: string;
-    currentBranch: string;
-  } | null;
-  terminalStatus: TerminalStatusIndicator | null;
-  terminalProcessCount: number;
-}) {
-  const driverKind = providerEntry?.driverKind ?? null;
+function SidebarThreadTooltip(props: SidebarThreadHoverContentProps) {
   return (
     <TooltipPopup
       side="right"
@@ -335,87 +302,7 @@ function SidebarThreadTooltip({
       variant="glass"
       className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
     >
-      <div className="flex min-w-0 max-w-80 flex-col gap-2 p-[var(--floating-content-inset)]">
-        <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
-          {thread.title}
-        </div>
-        <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
-          {projectDisplayName ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <ProjectFavicon
-                environmentId={thread.environmentId}
-                cwd={projectCwd ?? ""}
-                projectName={projectTitle ?? ""}
-                faviconPath={projectFaviconPath}
-                projectIcon={projectIcon}
-                className="size-3 shrink-0"
-              />
-              <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
-            </div>
-          ) : null}
-          {environmentLabel ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <EnvironmentMachineIcon
-                kind={environmentMachine}
-                className="size-3 shrink-0 stroke-muted-foreground"
-              />
-              <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
-            </div>
-          ) : null}
-          {thread.branch ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-              <div className="min-w-0 truncate text-foreground/75">{thread.branch}</div>
-            </div>
-          ) : null}
-          {branchMismatch ? (
-            <div className="flex min-w-0 items-start gap-2 text-warning">
-              <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 flex-1 wrap-break-word leading-5">
-                You're currently checked out on another branch.
-              </div>
-            </div>
-          ) : null}
-          {driverKind ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <ProviderInstanceIcon
-                driverKind={driverKind}
-                displayName={
-                  providerEntry?.displayName ?? thread.session?.providerName ?? modelInstanceId
-                }
-                accentColor={providerEntry?.accentColor}
-                // Initials would swallow a size-3 glyph: accent dot, name in label.
-                showBadge={showInstanceBadge && providerEntry?.accentColor !== undefined}
-                badgeContent="none"
-                badgeClassName="h-2 min-w-2 px-0"
-                iconClassName="size-3 shrink-0 grayscale opacity-60"
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {showInstanceBadge && providerEntry
-                  ? `${modelLabel} · ${providerEntry.displayName}`
-                  : modelLabel}
-              </div>
-            </div>
-          ) : null}
-          {terminalStatus ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <TerminalIcon
-                aria-hidden
-                className={cn("size-3 shrink-0", terminalStatus.colorClass)}
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {terminalProcessLabel(terminalProcessCount)}
-              </div>
-            </div>
-          ) : null}
-          {thread.session?.lastError ? (
-            <div className="flex min-w-0 items-center gap-2 text-red-600 dark:text-red-400">
-              <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 truncate">Error occurred</div>
-            </div>
-          ) : null}
-        </div>
-      </div>
+      <SidebarThreadHoverContent {...props} />
     </TooltipPopup>
   );
 }
@@ -1009,37 +896,43 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     icon: "waiting" as const,
                     className: "text-yellow-700 dark:text-yellow-300",
                   }
-                : status === "approval"
+                : status === "question"
                   ? {
-                      label: "Approval",
-                      icon: null,
-                      className: "text-amber-700 dark:text-amber-300",
+                      label: "Question",
+                      icon: "question" as const,
+                      className: "text-violet-600 dark:text-violet-300",
                     }
-                  : status === "input"
+                  : status === "approval"
                     ? {
-                        label: "Input",
+                        label: "Approval",
                         icon: null,
-                        className: "text-indigo-600 dark:text-indigo-300",
+                        className: "text-amber-700 dark:text-amber-300",
                       }
-                    : status === "failed"
+                    : status === "input"
                       ? {
-                          label: "Failed",
+                          label: "Input",
                           icon: null,
-                          className: "text-red-700 dark:text-red-300",
+                          className: "text-indigo-600 dark:text-indigo-300",
                         }
-                      : isWoke
+                      : status === "failed"
                         ? {
-                            label: "Woke",
-                            icon: "woke" as const,
-                            className: "text-amber-700 dark:text-amber-300",
+                            label: "Failed",
+                            icon: null,
+                            className: "text-red-700 dark:text-red-300",
                           }
-                        : isUnread
+                        : isWoke
                           ? {
-                              label: "Done",
-                              icon: "done" as const,
-                              className: "text-emerald-700 dark:text-emerald-300",
+                              label: "Woke",
+                              icon: "woke" as const,
+                              className: "text-amber-700 dark:text-amber-300",
                             }
-                          : null;
+                          : isUnread
+                            ? {
+                                label: "Done",
+                                icon: "done" as const,
+                                className: "text-emerald-700 dark:text-emerald-300",
+                              }
+                            : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -1321,7 +1214,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   ) : (
     <span
       className={cn(
-        "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+        "flex min-w-0 flex-1 items-center gap-1 text-sm transition-opacity motion-reduce:transition-none",
         shouldRecede ? "font-normal" : "font-medium",
         variant === "card"
           ? cn(
@@ -1345,9 +1238,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     : "text-secondary-label/70",
             ),
         isRegeneratingTitle && "opacity-[0.55]",
+        thread.persistent && "italic",
       )}
     >
-      {thread.title}
+      {thread.persistent ? (
+        <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+      ) : null}
+      <span className="truncate">{thread.title}</span>
     </span>
   );
 
@@ -1770,6 +1667,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                           />
                         ) : topStatus.icon === "done" ? (
                           <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                        ) : topStatus.icon === "question" ? (
+                          <span
+                            aria-hidden
+                            className="inline-flex h-4 w-2.5 shrink-0 items-center justify-center text-sm font-semibold leading-none"
+                          >
+                            ?
+                          </span>
                         ) : null}
                         {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
@@ -2039,8 +1943,11 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
             faviconPath={props.projectFaviconPath}
             projectIcon={props.projectIcon}
             className="size-4 shrink-0"
+            fallbackIcon={thread.persistent ? MessageSquareLockIcon : MessageSquareIcon}
           />
-          <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+          <span className={cn("min-w-0 flex-1 truncate", thread.persistent && "italic")}>
+            {thread.title}
+          </span>
           <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
             {threadTimeLabel(thread)}
           </span>
@@ -2092,6 +1999,7 @@ export default function Sidebar() {
     reorderPinnedThread,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -3312,6 +3220,7 @@ export default function Sidebar() {
       const unpinMenuItem = buildBulkUnpinContextMenuItem({
         pinnedCount: pinnedSelectedThreads.length,
       });
+      const hasPersistentThread = selectedThreads.some((thread) => thread.persistent === true);
       const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
@@ -3332,7 +3241,7 @@ export default function Sidebar() {
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
             { id: "mark-unread", label: `Mark unread (${count})` },
-            { id: "delete", label: `Delete (${count})`, destructive: true },
+            buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
           ],
           position,
         ),
@@ -3452,6 +3361,9 @@ export default function Sidebar() {
         return;
       }
       if (clicked.value !== "delete") return;
+      // Keep the handler safe if a platform context-menu implementation ever
+      // returns a disabled item.
+      if (hasPersistentThread) return;
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
           api.dialogs.confirm(
@@ -3464,15 +3376,25 @@ export default function Sidebar() {
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
+      // The menu and confirmation dialog may stay open while another client
+      // changes persistence. Rebuild from live shell state immediately before
+      // the destructive batch so an ordinary thread cannot be deleted before
+      // reaching a newly protected selection member.
+      const deleteEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: (threadKey) => {
+          const thread = threadByKeyRef.current.get(threadKey);
+          return thread ? { threadKey, thread } : undefined;
+        },
+      });
+      if (!deleteEntries) return;
       // Grown as deletions actually land, never seeded with the whole batch:
       // orphaned-worktree detection must only discount threads that are
       // really gone, or the first delete would treat still-alive batch mates
       // as deleted and remove a worktree they still point at.
       const deletedThreadKeys = new Set<string>();
       let firstError: unknown = null;
-      for (const threadKey of threadKeys) {
-        const thread = threadByKeyRef.current.get(threadKey);
-        if (!thread) continue;
+      for (const { threadKey, thread } of deleteEntries) {
         const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
           deletedThreadKeys,
         });
@@ -3557,6 +3479,7 @@ export default function Sidebar() {
             buildThreadActionMenuItems({
               branch: thread.branch ?? null,
               isPinned,
+              isPersistent: thread.persistent === true,
               isSettled,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
@@ -3568,6 +3491,9 @@ export default function Sidebar() {
                 settlement: supportsSettlement,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
+                persistence:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                    .threadPersistence === true,
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
@@ -3633,6 +3559,24 @@ export default function Sidebar() {
           case "unpin":
             attemptUnpin(threadRef);
             return;
+          case "mark-persistent":
+          case "disable-persistence": {
+            const result = await setThreadPersistence(
+              threadRef,
+              clicked.value === "mark-persistent",
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to update persistent thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "rename":
             startThreadRename(threadRef, thread.title);
             return;
@@ -3766,6 +3710,7 @@ export default function Sidebar() {
       markThreadUnread,
       openProjectSettings,
       projectCwdByKey,
+      setThreadPersistence,
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,

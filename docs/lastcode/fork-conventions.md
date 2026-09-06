@@ -302,14 +302,18 @@ Target `lastcode/main`. Pushing runs the quick local gate. Before merge, require
 a clean current-head Codex review, no unresolved threads, and a full local-CI
 stamp for the exact head and current base. Use the guarded LastCode merge command
 rather than merging directly in the GitHub UI. After the squash merge succeeds,
-the guard requests an immediate checkpoint-daemon run so the merged change can
-become an installable `lastcode/revision/...` without waiting for another
-upstream nightly.
+the guard notifies the checkpoint service. Interval schedules run immediately;
+daily schedules retain their configured cadence. The next run can publish the
+merged change as an installable `lastcode/revision/...` without waiting for
+another upstream nightly.
 
-An open PR targeting `lastcode/main` pauses nightly promotion, but the automation
-continues creating immutable checkpoint tags. Promotion catches up after the PR
-queue is empty. The daemon also publishes immutable LastCode revisions for
-merged downstream work and uses a later managed run to repair a missed merge trigger.
+Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
+promotion to `lastcode/main`. The daemon publishes immutable LastCode revisions
+for merged work and repairs missed merge triggers on later runs. Candidates pin
+the source they incorporate, and promotion leases against that source so a
+concurrent merge cannot be overwritten. A stale candidate must incorporate the
+new source before promotion. PRs whose base changes need fresh validation
+against the current base before merging, even when their head is unchanged.
 
 ### Inspect a specific pull request
 

@@ -6,10 +6,14 @@ import { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 export type ThreadStatusKind =
   | "pending-approval"
   | "awaiting-input"
+  | "question"
   | "working"
   | "waiting"
   | "connecting"
   | "error"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
   | "plan-ready";
 
 export interface ThreadStatusPresentation extends StatusTone {
@@ -51,6 +55,42 @@ function isLatestTurnSettled(
 export function resolveThreadStatus(
   thread: EnvironmentThreadShell,
 ): ThreadStatusPresentation | null {
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      kind: "cleanup-failed",
+      label: "Cleanup failed",
+      pillClassName: "bg-adaptive-rose-500-a12-a16",
+      textClassName: "text-adaptive-rose-700-300",
+      iconColor: "#ff453a",
+      iconBackground: "rgba(255,69,58,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "queued") {
+    return {
+      kind: "cleanup-queued",
+      label: "Deleting (Queued)",
+      pillClassName: "bg-adaptive-orange-500-a12-a16",
+      textClassName: "text-adaptive-orange-700-300",
+      iconColor: "#ff9f0a",
+      iconBackground: "rgba(255,159,10,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      kind: "cleanup-deleting",
+      label: "Deleting",
+      pillClassName: "bg-adaptive-orange-500-a12-a16",
+      textClassName: "text-adaptive-orange-700-300",
+      iconColor: "#ff9f0a",
+      iconBackground: "rgba(255,159,10,0.22)",
+      pulse: false,
+    };
+  }
+
   if (thread.hasPendingApprovals) {
     return {
       kind: "pending-approval",
@@ -71,6 +111,18 @@ export function resolveThreadStatus(
       textClassName: "text-adaptive-indigo-700-300",
       iconColor: "#5e5ce6",
       iconBackground: "rgba(94,92,230,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (thread.attention?.kind === "question") {
+    return {
+      kind: "question",
+      label: "Question",
+      pillClassName: "bg-adaptive-violet-500-a12-a16",
+      textClassName: "text-adaptive-violet-700-300",
+      iconColor: "#bf5af2",
+      iconBackground: "rgba(191,90,242,0.22)",
       pulse: false,
     };
   }
@@ -145,4 +197,21 @@ export function resolveThreadStatus(
   }
 
   return null;
+}
+
+/**
+ * Returns the durable cleanup status when a thread is being deleted. Mobile
+ * list variants use this shared presentation so cleanup state cannot fall
+ * through to the ordinary agent-status labels.
+ */
+export function resolveWorktreeCleanupStatus(
+  thread: EnvironmentThreadShell,
+): ThreadStatusPresentation | null {
+  if (thread.worktreeCleanup == null) return null;
+  const status = resolveThreadStatus(thread);
+  return status?.kind === "cleanup-failed" ||
+    status?.kind === "cleanup-queued" ||
+    status?.kind === "cleanup-deleting"
+    ? status
+    : null;
 }

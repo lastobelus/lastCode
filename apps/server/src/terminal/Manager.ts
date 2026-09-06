@@ -3076,6 +3076,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
       Effect.andThen(readHistory(input.threadId, input.terminalId)),
+      Effect.map((persistedHistory) => persistedHistory.value()),
     );
   };
 
