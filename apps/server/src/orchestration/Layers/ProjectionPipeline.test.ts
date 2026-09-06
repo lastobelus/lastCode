@@ -8,6 +8,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadAnnotation,
   TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -18,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
@@ -37,11 +39,16 @@ import {
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { makeTurnRequestWaitQuery } from "./TurnRequestWaitQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+
+const decodeThreadAnnotationJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ThreadAnnotation),
+);
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(
@@ -272,12 +279,34 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         payload: {
           threadId: ThreadId.make("thread-1"),
           messageId: MessageId.make("message-1"),
-          role: "assistant",
+          role: "user",
           text: "hello",
           turnId: null,
           streaming: false,
           createdAt: now,
           updatedAt: now,
+        },
+      });
+
+      yield* eventStore.append({
+        type: "thread.annotation-upserted",
+        eventId: EventId.make("evt-annotation"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:01:00.000Z",
+        commandId: CommandId.make("cmd-annotation"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-annotation"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: MessageId.make("message-1"),
+            createdAt: "2026-01-01T00:01:00.000Z",
+            updatedAt: "2026-01-01T00:01:00.000Z",
+            resolvedAt: null,
+          },
         },
       });
 
@@ -309,6 +338,20 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.deepEqual(messageRows, [{ messageId: "message-1", text: "hello" }]);
 
+      const annotationRows = yield* sql<{
+        readonly annotation: string | null;
+        readonly latestUserMessageId: string | null;
+      }>`
+        SELECT
+          annotation_json AS "annotation",
+          latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      const annotation = yield* decodeThreadAnnotationJson(annotationRows[0]?.annotation);
+      assert.equal(annotation.body, "# Follow up");
+      assert.equal(annotationRows[0]?.latestUserMessageId, "message-1");
+
       const stateRows = yield* sql<{
         readonly projector: string;
         readonly lastAppliedSequence: number;
@@ -321,7 +364,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.equal(stateRows.length, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
       for (const row of stateRows) {
-        assert.equal(row.lastAppliedSequence, 3);
+        assert.equal(row.lastAppliedSequence, 4);
       }
 
       yield* sql`CREATE TABLE thread_shell_updates (count INTEGER NOT NULL)`;
@@ -471,6 +514,58 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           unsettledAt: "2026-01-01T00:00:02.000Z",
         },
       ]);
+
+      const raisedAt = "2026-01-01T00:00:03.000Z";
+      yield* eventStore.append({
+        type: "thread.attention-set",
+        eventId: EventId.make("evt-attention-set"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: raisedAt,
+        commandId: CommandId.make("cmd-attention-set"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-attention-set"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          attention: { kind: "question", raisedAt },
+          updatedAt: raisedAt,
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      let attentionRows = yield* sql<{ readonly attention: string | null }>`
+        SELECT attention_json AS "attention"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(attentionRows, [
+        { attention: '{"kind":"question","raisedAt":"2026-01-01T00:00:03.000Z"}' },
+      ]);
+
+      yield* eventStore.append({
+        type: "thread.attention-cleared",
+        eventId: EventId.make("evt-attention-clear"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:00:04.000Z",
+        commandId: CommandId.make("cmd-attention-clear"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-attention-clear"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          updatedAt: "2026-01-01T00:00:04.000Z",
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      attentionRows = yield* sql<{ readonly attention: string | null }>`
+        SELECT attention_json AS "attention"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(attentionRows, [{ attention: null }]);
     }),
   );
 });
@@ -2039,6 +2134,43 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      const trackedMessageId = MessageId.make("message-turn-superseded");
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-ts-requested"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-requested"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-requested"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          trackRequestCorrelation: true,
+          createdAt: now,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.turn-request-resolved",
+        eventId: EventId.make("evt-ts-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-ts-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-ts-resolved"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: trackedMessageId,
+          outcome: { kind: "started", turnId: oldTurnId },
+        },
+      });
+
       const appendRunningSessionSet = (eventId: string, turnId: TurnId, updatedAt: string) =>
         eventStore.append({
           type: "thread.session-set",
@@ -2082,9 +2214,17 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         ORDER BY requested_at
       `;
       assert.deepEqual(rows, [
-        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:30.000Z" },
+        { turnId: oldTurnId, state: "interrupted", completedAt: "2026-01-01T00:00:30.000Z" },
         { turnId: newTurnId, state: "running", completedAt: null },
       ]);
+      assert.deepEqual(
+        yield* makeTurnRequestWaitQuery(sql).getState({ threadId, messageId: trackedMessageId }),
+        {
+          kind: "terminal",
+          state: "interrupted",
+          turnId: oldTurnId,
+        },
+      );
     }),
   );
 
@@ -3470,6 +3610,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+      const threadRows = yield* sql<{ readonly latestUserMessageId: string | null }>`
+        SELECT latest_user_message_id AS "latestUserMessageId"
+        FROM projection_threads
+        WHERE thread_id = 'thread-revert'
+      `;
+      assert.equal(threadRows[0]?.latestUserMessageId, null);
     }),
   );
 });
@@ -3600,6 +3746,87 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             AND state = 'pending'
         `;
         assert.deepEqual(pendingRows, [{ messageId: "new-message" }]);
+      }),
+    );
+  },
+);
+
+it.layer(makeProjectionPipelinePrefixedTestLayer("t3-turn-correlation-test-"))(
+  "OrchestrationProjectionPipeline tracked correlations",
+  (it) => {
+    it.effect("tracks marked starts only and preserves the first projected resolution", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-correlation");
+        const now = "2026-08-22T00:00:00.000Z";
+        for (const [index, tracked] of [false, true].entries()) {
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-correlation-start-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            commandId: CommandId.make(`cmd-correlation-start-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-correlation-start-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-correlation-${index}`),
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              ...(tracked ? { trackRequestCorrelation: true as const } : {}),
+              createdAt: now,
+            },
+          });
+        }
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-1"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-1"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "started", turnId: TurnId.make("turn-correlation") },
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-request-resolved",
+          eventId: EventId.make("evt-correlation-resolved-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-correlation-resolved-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-correlation-resolved-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-correlation-1"),
+            outcome: { kind: "terminal", state: "error", completedAt: now },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        const rows = yield* sql<{
+          readonly messageId: string;
+          readonly state: string;
+          readonly turnId: string | null;
+        }>`
+          SELECT message_id AS "messageId", state, turn_id AS "turnId"
+          FROM projection_turn_request_correlations
+        `;
+        assert.deepEqual(rows, [
+          { messageId: "message-correlation-1", state: "started", turnId: "turn-correlation" },
+        ]);
       }),
     );
   },

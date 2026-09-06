@@ -90,12 +90,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           worktree_path,
           linked_pull_request_json,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
           has_actionable_proposed_plan,
           pinned_at,
           pin_order_key,
+          annotation_json,
+          attention_json,
           created_at,
           updated_at,
           deleted_at
@@ -111,12 +114,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           '{"projectId":"project-1","repository":"pingdotgg/t3code","number":42,"url":"https://github.com/pingdotgg/t3code/pull/42"}',
           'turn-1',
+          'message-1',
           '2026-02-24T00:00:04.000Z',
           1,
           0,
           0,
           '2026-02-24T00:00:01.000Z',
           'gm',
+          '{"body":"# Follow up","anchorMessageId":"message-1","createdAt":"2026-02-24T00:00:02.500Z","updatedAt":"2026-02-24T00:00:02.500Z","resolvedAt":null}',
+          '{"kind":"question","raisedAt":"2026-02-24T00:00:02.500Z"}',
           '2026-02-24T00:00:02.000Z',
           '2026-02-24T00:00:03.000Z',
           NULL
@@ -130,6 +136,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           turn_id,
           role,
           text,
+          source_thread_id,
           is_streaming,
           created_at,
           updated_at
@@ -140,6 +147,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'turn-1',
           'assistant',
           'hello from projection',
+          'thread-source',
           0,
           '2026-02-24T00:00:04.000Z',
           '2026-02-24T00:00:05.000Z'
@@ -341,14 +349,24 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           snoozedUntil: null,
           snoozedAt: null,
           pinnedAt: "2026-02-24T00:00:01.000Z",
+          persistent: false,
           pinOrderKey: "gm",
           titleRegeneration: null,
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: asMessageId("message-1"),
+            createdAt: "2026-02-24T00:00:02.500Z",
+            updatedAt: "2026-02-24T00:00:02.500Z",
+            resolvedAt: null,
+          },
+          attention: { kind: "question", raisedAt: "2026-02-24T00:00:02.500Z" },
           deletedAt: null,
           messages: [
             {
               id: asMessageId("message-1"),
               role: "assistant",
               text: "hello from projection",
+              sourceThreadId: ThreadId.make("thread-source"),
               turnId: asTurnId("turn-1"),
               streaming: false,
               createdAt: "2026-02-24T00:00:04.000Z",
@@ -469,12 +487,22 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           snoozedUntil: null,
           snoozedAt: null,
           pinnedAt: "2026-02-24T00:00:01.000Z",
+          persistent: false,
           pinOrderKey: "gm",
           titleRegeneration: null,
+          annotation: {
+            body: "# Follow up",
+            anchorMessageId: asMessageId("message-1"),
+            createdAt: "2026-02-24T00:00:02.500Z",
+            updatedAt: "2026-02-24T00:00:02.500Z",
+            resolvedAt: null,
+          },
+          attention: { kind: "question", raisedAt: "2026-02-24T00:00:02.500Z" },
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            providerThreadId: "provider-thread-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -492,7 +520,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
-        assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+        const snapshotThread = snapshot.threads[0];
+        assert.ok(snapshotThread);
+        assert.ok(snapshotThread.session);
+        assert.deepEqual(threadDetail.value, {
+          ...snapshotThread,
+          session: {
+            ...snapshotThread.session,
+            providerThreadId: "provider-thread-1",
+          },
+        });
       }
 
       yield* sql`
@@ -576,7 +613,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.deepEqual(context.value, {
           id: ThreadId.make("thread-1"),
           title: "Thread 1",
-          session: snapshot.threads[0]?.session,
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            providerThreadId: "provider-thread-1",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: "2026-02-24T00:00:07.000Z",
+          },
         });
       }
 
@@ -643,6 +689,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -664,6 +711,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             NULL,
             NULL,
             NULL,
+            NULL,
             0,
             0,
             0,
@@ -679,6 +727,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{"provider":"codex","model":"gpt-5-codex"}',
             'full-access',
             'default',
+            NULL,
             NULL,
             NULL,
             NULL,
@@ -779,6 +828,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -797,6 +847,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '{"provider":"codex","model":"gpt-5-codex"}',
           'full-access',
           'default',
+          NULL,
           NULL,
           NULL,
           NULL,
@@ -1482,7 +1533,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("uses projection_threads.latest_turn_id for bulk command and shell snapshots", () =>
+  it.effect("uses projection_threads latest markers for bulk command and shell snapshots", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
@@ -1526,6 +1577,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           latest_turn_id,
+          latest_user_message_id,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -1545,6 +1597,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           'turn-running',
+          'message-user-2',
           '2026-04-03T00:00:04.000Z',
           0,
           0,
@@ -1553,6 +1606,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '2026-04-03T00:00:03.000Z',
           NULL,
           NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          'message-user-2',
+          'thread-1',
+          NULL,
+          'user',
+          'Latest prompt',
+          0,
+          '2026-04-03T00:00:30.000Z',
+          '2026-04-03T00:00:30.000Z'
         )
       `;
 
@@ -1623,6 +1699,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const commandReadModel = yield* snapshotQuery.getCommandReadModel();
       assert.equal(commandReadModel.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
       assert.equal(commandReadModel.threads[0]?.latestTurn?.state, "running");
+      assert.equal(commandReadModel.threads[0]?.messages.length, 0);
+      assert.equal(commandReadModel.threads[0]?.latestUserMessageId, asMessageId("message-user-2"));
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
