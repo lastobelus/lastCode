@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  assertGithubMergeProtection,
+  assertStrictGithubCiGate,
   evaluateGithubCi,
   githubBranchRulesArgs,
   githubCiJobsArgs,
@@ -40,6 +42,78 @@ const input = (overrides: Partial<GithubCiEvaluationInput> = {}): GithubCiEvalua
 });
 
 describe("LastCode GitHub CI evidence", () => {
+  it("proves strict CI applies to the authenticated merge actor without assuming bypass membership", () => {
+    const check = (bypassActors: unknown, enforcement = "active", actorId: unknown = 42) => {
+      const responses: Record<string, unknown> = {
+        "api user": { id: actorId },
+        "api repos/example/repo/rules/branches/lastcode%2Fmain": [
+          {
+            type: "required_status_checks",
+            ruleset_id: 7,
+            parameters: {
+              strict_required_status_checks_policy: true,
+              required_status_checks: [{ context: "CI Gate" }],
+            },
+          },
+        ],
+        "api repos/example/repo/rulesets/7": { enforcement, bypass_actors: bypassActors },
+      };
+      assertGithubMergeProtection(
+        "example/repo",
+        "lastcode/main",
+        <T>(args: ReadonlyArray<string>): T => responses[args.join(" ")] as T,
+      );
+    };
+    expect(() => check([])).not.toThrow();
+    expect(() =>
+      check([{ actor_type: "User", actor_id: 99, bypass_mode: "always" }]),
+    ).not.toThrow();
+    for (const bypass of [
+      { actor_type: "User", actor_id: 42, bypass_mode: "always" },
+      { actor_type: "User", actor_id: 42, bypass_mode: "pull_request" },
+      { actor_type: "Team", actor_id: 99, bypass_mode: "always" },
+      { actor_type: "RepositoryRole", actor_id: 5, bypass_mode: "always" },
+      { actor_type: "Integration", actor_id: 99, bypass_mode: "always" },
+      { actor_type: "OrganizationAdmin", actor_id: 1, bypass_mode: "always" },
+      { actor_type: "User", bypass_mode: "always" },
+    ]) {
+      expect(() => check([bypass])).toThrow("Cannot prove");
+    }
+    expect(() => check(undefined)).toThrow("Cannot prove");
+    expect(() => check([], "evaluate")).toThrow("Cannot prove");
+    expect(() => check([], "active", null)).toThrow("Cannot identify");
+    expect(() => check([], "active", "42")).toThrow("Cannot identify");
+  });
+
+  it("requires the CI gate itself to enforce an up-to-date base at merge time", () => {
+    const rule = {
+      type: "required_status_checks",
+      parameters: {
+        strict_required_status_checks_policy: true,
+        required_status_checks: [{ context: "CI Gate" }],
+      },
+    };
+    expect(() => assertStrictGithubCiGate([rule])).not.toThrow();
+    for (const rules of [
+      [],
+      [{ ...rule, parameters: { required_status_checks: [{ context: "CI Gate" }] } }],
+      [
+        {
+          ...rule,
+          parameters: { ...rule.parameters, strict_required_status_checks_policy: false },
+        },
+      ],
+      [
+        {
+          ...rule,
+          parameters: { ...rule.parameters, required_status_checks: [{ context: "Other" }] },
+        },
+      ],
+    ]) {
+      expect(() => assertStrictGithubCiGate(rules)).toThrow("require branches to be up to date");
+    }
+  });
+
   it("builds exact workflow, rules, run, and job queries", () => {
     expect(githubCiWorkflowArgs("lastobelus/lastCode")).toEqual([
       "api",

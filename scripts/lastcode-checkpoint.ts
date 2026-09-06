@@ -52,13 +52,12 @@ import {
 const DEFAULT_SOURCE_REF = "refs/remotes/origin/lastcode/main";
 const DEFAULT_UPSTREAM_REMOTE = "upstream";
 const DEFAULT_PUSH_REMOTE = "origin";
-const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 const CHECKPOINT_TAG_GLOB = "lastcode/checkpoint/v*-nightly.*";
 const REVISION_TAG_GLOB = "lastcode/revision/v*-nightly.*";
 const CARRY_MANIFEST_PATH = "scripts/lastcode-carry-set.json";
 const FINGERPRINT_DIFF_MAX_BUFFER = 64 * 1024 * 1024;
 
-export type PromotionMode = "never" | "always" | "if-no-open-prs";
+export type PromotionMode = "never" | "always";
 
 interface CheckpointOptions {
   readonly dryRun: boolean;
@@ -844,11 +843,8 @@ export function resolveCheckpointPlan(input: {
   }
 
   const latestCheckpointMatchesSource = latestCheckpoint?.sourceCommit === input.sourceCommit;
-  const sourceIsPromotedCheckpoint = sourceCheckpoint?.commit === input.sourceCommit;
   const candidateRef =
-    latestCheckpoint &&
-    (latestCheckpointMatchesSource ||
-      (sourceIsPromotedCheckpoint && sourceCheckpoint.nightly.tag !== latestCheckpoint.nightly.tag))
+    latestCheckpoint && latestCheckpointMatchesSource
       ? latestCheckpoint.checkpointTag
       : input.sourceRef;
   const candidateBase = candidateRef === input.sourceRef ? sourceBase : latestCheckpoint?.nightly;
@@ -1105,7 +1101,6 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     else if (arg === "--push-tags") pushTags = true;
     else if (arg === "--supersede-failed-recovery") supersedeFailedRecovery = true;
     else if (arg === "--promote") promotion = "always";
-    else if (arg === "--promote-if-no-open-prs") promotion = "if-no-open-prs";
     else if (
       arg === "--source-ref" ||
       arg === "--upstream-remote" ||
@@ -1411,7 +1406,7 @@ function publishRevisionIfNeeded(
   });
   if (plan.kind === "unavailable") return { handled: false };
   if (plan.kind === "represented") {
-    promoteCheckpoint(repoRoot, plan.installable.commit, options, platform, options.pushTags);
+    promoteCheckpoint(repoRoot, plan.installable.commit, options, sourceCommit, options.pushTags);
     console.log(
       `[lastcode:checkpoint] ${plan.installable.tag} already represents current LastCode main.`,
     );
@@ -1430,7 +1425,7 @@ function publishRevisionIfNeeded(
     throw new Error(`Recovery branch ${branch} already exists.`);
   }
 
-  run(repoRoot, "git", worktreeAddArgs(branch, worktree, sourceRef));
+  run(repoRoot, "git", worktreeAddArgs(branch, worktree, sourceCommit));
   let completed = false;
   let pendingTag: string | undefined;
   let candidateCommit = sourceCommit;
@@ -1460,6 +1455,12 @@ function publishRevisionIfNeeded(
     }
     failurePhase = "smoke";
     if (options.smoke) runSmokeGate(repoRoot, worktree);
+    if (
+      git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
+      git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+    ) {
+      throw new Error("Revision changed during validation; retain and inspect the worktree.");
+    }
     failurePhase = "publication";
     pendingTag = createRevisionTag(
       repoRoot,
@@ -1544,7 +1545,7 @@ function publishRevisionIfNeeded(
         repoRoot,
         candidateCommit,
         options,
-        platform,
+        sourceCommit,
         options.smoke || options.pushTags,
       ),
     () => runHistoricalShadowIfNeeded(repoRoot, plan.installableTag, replay),
@@ -1554,37 +1555,11 @@ function publishRevisionIfNeeded(
   return { handled: true };
 }
 
-export function openPullRequestListArgs(
-  repository: string = LASTCODE_GITHUB_REPOSITORY,
-): ReadonlyArray<string> {
-  return [
-    "pr",
-    "list",
-    "--repo",
-    repository,
-    "--base",
-    "lastcode/main",
-    "--state",
-    "open",
-    "--json",
-    "number",
-    "--jq",
-    "length",
-  ];
-}
-
-function openPullRequestCount(repoRoot: string): number {
-  const value = run(repoRoot, "gh", openPullRequestListArgs(), { capture: true });
-  const count = Number(value);
-  if (!Number.isSafeInteger(count) || count < 0) throw new Error(`Invalid gh PR count '${value}'.`);
-  return count;
-}
-
 function promoteCheckpoint(
   repoRoot: string,
   commit: string,
   options: CheckpointOptions,
-  platform: NodeJS.Platform,
+  sourceCommit: string,
   validated: boolean,
 ): void {
   if (options.promotion === "never") return;
@@ -1596,19 +1571,10 @@ function promoteCheckpoint(
     );
     return;
   }
-  if (options.promotion === "if-no-open-prs") {
-    const count = openPullRequestCount(repoRoot);
-    if (count > 0) {
-      console.log(
-        `[lastcode:checkpoint] Kept lastcode/main stable because ${count} PR(s) are open.`,
-      );
-      notify(
-        platform,
-        "LastCode checkpoint ready",
-        `${count} open PR(s) prevented lastcode/main promotion.`,
-      );
-      return;
-    }
+  if (expected !== sourceCommit) {
+    throw new Error(
+      `LastCode main changed from candidate source ${sourceCommit} to ${expected}; refusing stale promotion. Retry to incorporate the current main.`,
+    );
   }
 
   run(
@@ -2093,9 +2059,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
   if (selection)
     assertRecoverySelection(resolveAutomationWorktree(repoRoot), selection, sourceCommit);
-  const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, options.sourceRef);
+  const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, sourceCommit);
   const sourceNightlyTags = splitLines(
-    git(repoRoot, ["tag", "--merged", options.sourceRef, "--list", "v*-nightly.*"]),
+    git(repoRoot, ["tag", "--merged", sourceCommit, "--list", "v*-nightly.*"]),
   );
   const nightlyTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
   const supersededNightly = supersedeFailedRecovery(
@@ -2181,7 +2147,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     let failurePhase: "publication" | "smoke" = "smoke";
     try {
       runSmokeGate(repoRoot, worktree);
-      if (git(worktree, ["rev-parse", "HEAD"]) !== selection.head) {
+      if (
+        git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
+        git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+      ) {
         throw new Error("Selected checkpoint changed during validation; retain and inspect it.");
       }
       failurePhase = "publication";
@@ -2212,11 +2181,6 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             replay,
             timing,
           );
-      if (options.promotion === "if-no-open-prs" && openPullRequestCount(repoRoot) > 0) {
-        throw new Error(
-          "Open LastCode PRs prevent repaired checkpoint publication; retained for retry.",
-        );
-      }
       run(
         repoRoot,
         "git",
@@ -2288,7 +2252,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
   }
 
-  let candidateRef = plan.candidateRef;
+  let candidateRef = plan.candidateRef === options.sourceRef ? sourceCommit : plan.candidateRef;
   let candidateCommit = git(repoRoot, ["rev-parse", `${candidateRef}^{commit}`]);
   let newestProducedInstallableTag: string | undefined;
   let carryWorktreePrepared = false;
@@ -2327,7 +2291,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       ) {
         throw new Error(`Recovery branch ${carryBranch} already exists.`);
       }
-      run(repoRoot, "git", worktreeAddArgs(carryBranch, worktree, options.sourceRef));
+      run(repoRoot, "git", worktreeAddArgs(carryBranch, worktree, sourceCommit));
     }
     const startedAtMs = Date.now();
     try {
@@ -2391,8 +2355,17 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
     );
     try {
-      if (carryWorktreePrepared && options.smoke) {
-        runSmokeGate(repoRoot, resolveAutomationWorktree(repoRoot));
+      if (carryWorktreePrepared) {
+        const worktree = resolveAutomationWorktree(repoRoot);
+        if (options.smoke) runSmokeGate(repoRoot, worktree);
+        if (
+          git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
+          git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+        ) {
+          throw new Error(
+            "Carry bootstrap changed during validation; retain and inspect the worktree.",
+          );
+        }
       }
       bootstrapFailurePhase = "publication";
       const finishedAtMs = Date.now();
@@ -2524,6 +2497,14 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       let carryRevisionFailurePhase: "publication" | "smoke" = "smoke";
       try {
         if (options.smoke) runSmokeGate(repoRoot, worktree);
+        if (
+          git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
+          git(worktree, ["status", "--porcelain", "--untracked-files=all"])
+        ) {
+          throw new Error(
+            "Carry revision changed during validation; retain and inspect the worktree.",
+          );
+        }
         carryRevisionFailurePhase = "publication";
         pendingTag = createRevisionTag(
           repoRoot,
@@ -2607,7 +2588,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             repoRoot,
             candidateCommit,
             options,
-            hostPlatform,
+            sourceCommit,
             options.smoke || options.pushTags,
           ),
         () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
@@ -2637,7 +2618,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       return;
     }
     runPromotionThenShadow(
-      () => promoteCheckpoint(repoRoot, candidateCommit, options, hostPlatform, options.pushTags),
+      () => promoteCheckpoint(repoRoot, candidateCommit, options, sourceCommit, options.pushTags),
       () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
     );
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
@@ -2663,7 +2644,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
 
   if (!selection && !carryWorktreePrepared)
-    run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateRef));
+    run(repoRoot, "git", worktreeAddArgs(branch, worktree, candidateCommit));
   let completed = false;
   let pendingCheckpointTag: string | undefined;
   let attempt:
@@ -2777,11 +2758,6 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
         if (selection) {
-          if (options.promotion === "if-no-open-prs" && openPullRequestCount(repoRoot) > 0) {
-            throw new Error(
-              "Open LastCode PRs prevent repaired checkpoint publication; retained for retry.",
-            );
-          }
           run(
             repoRoot,
             "git",
@@ -2922,7 +2898,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         repoRoot,
         candidateCommit,
         options,
-        hostPlatform,
+        sourceCommit,
         options.smoke || options.pushTags,
       ),
     () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),

@@ -51,7 +51,7 @@ pnpm run lastcode:setup -- \
 pnpm run lastcode:checkpoint -- --dry-run
 
 # Checkpoint every missing nightly and push immutable tags.
-pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
+pnpm run lastcode:checkpoint -- --push-tags --promote
 
 # Enable managed background checkpointing.
 pnpm lastcode:checkpoint:service install \

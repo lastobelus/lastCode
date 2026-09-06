@@ -156,7 +156,7 @@ For each adjacent pair, reuse the checkpoint planner's ancestry invariant:
    the next source snapshot; and
 4. otherwise mark LastCode provenance unavailable for the whole interval.
 
-This handles both normal promotion and the open-PR/unpromoted revision path. It
+This handles both normal promotion and the published-but-unpromoted revision path. It
 also handles a checkpoint run that creates several missing nightlies from one
 unchanged source snapshot: every tag from that run records the same
 `Source-Commit`, so later replay edges contribute no new LastCode subjects.

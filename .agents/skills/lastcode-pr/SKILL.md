@@ -41,9 +41,15 @@ and should be proposed upstream, switch to `upstream-fix`.
    falls back to synchronous `pnpm lastcode:ci:quick`.
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
-An open PR targeting `lastcode/main` pauses promotion of a new nightly onto the
-branch. Checkpoint automation still publishes every immutable nightly tag and
-promotes the newest one after the PR queue is empty.
+Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
+promotion to `lastcode/main`. Never close, merge, or retarget an unrelated PR to
+unblock checkpoints. A candidate must incorporate its pinned source, and its
+promotion lease must protect that source against concurrent merges. Retain a
+selected recovery on source drift and reselect it against current main.
+
+When `lastcode/main` advances, obtain fresh validation against the new base
+before merging. Refresh the PR branch as needed; validation from the previous
+base does not remain valid merely because the PR head is unchanged.
 
 ## Babysit and Merge
 

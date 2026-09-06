@@ -57,7 +57,7 @@ Run it and publish checkpoint tags:
 ```bash
 pnpm run lastcode:checkpoint -- \
   --push-tags \
-  --promote-if-no-open-prs \
+  --promote \
   --mirror-upstream-main \
   --supersede-failed-recovery
 ```
@@ -96,18 +96,27 @@ validate the wrong revision.
 
 ### Promotion and open PRs
 
-`--promote-if-no-open-prs` keeps `lastcode/main` stable while any PR targeting it
-is open. Checkpoint tags are still created and pushed, so PR activity cannot
-cause a nightly to be missed. A later scheduled run promotes the newest
-checkpoint after the PR queue is empty.
+`--promote` advances `lastcode/main` independently of open pull requests.
+Open PRs never pause checkpoint creation, repaired-checkpoint publication, or
+promotion. Feature branches may remain open while daily updates advance.
 
-Promotion uses an exact `--force-with-lease` value. It refuses to overwrite a
-remote branch that changed after the job fetched it.
+Each candidate is prepared from a pinned `lastcode/main` source commit.
+Promotion uses that incorporated source as its exact `--force-with-lease`
+value, rather than adopting a newer remote head at publication time. A merge
+arriving during preparation therefore rejects promotion instead of being
+replaced by a candidate that omitted it. A later run recomputes from the new
+source, including the merged work.
 
-Checkpoint metadata records the exact `lastcode/main` source commit used for a
-rebase. If publication succeeds but promotion fails, a later run recognizes the
-published checkpoint as belonging to the unchanged source commit and retries
-promotion instead of treating the older main branch as current.
+Checkpoint metadata records the exact source as `Source-Commit`. If publication
+succeeds but promotion fails while the source remains unchanged, a later run
+retries the published candidate. If main has moved, the run incorporates the
+new source before promotion; a newer lease alone cannot make a stale candidate
+safe. Immutable publication may succeed before promotion is rejected.
+
+Open PRs must obtain fresh validation against the current base before merging.
+After a checkpoint changes `lastcode/main`, refresh the PR branch as needed and
+rerun validation; results for the previous base do not authorize a merge. Use
+the guarded merge command, which checks the exact head and current base.
 
 That source snapshot is stored as `Source-Commit` in every annotated checkpoint
 and revision tag. Besides making publication idempotent, it lets the packaged
@@ -118,16 +127,14 @@ source commit as the ancestry boundary. If the metadata or ancestry cannot
 establish a safe boundary, LastCode changes are reported as unavailable rather
 than inferred from commit titles.
 
-When a LastCode PR merges after a newer checkpoint was created while PR
-promotion was paused, the daemon replays only the newly merged commits onto that
-checkpoint. It publishes the result as the next immutable
+When a LastCode PR merges after a checkpoint was created, the daemon replays
+only the newly merged commits onto that checkpoint. It publishes the result as
+the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
 requests an immediate daemon run without interrupting one already in progress.
 Hosts without the optional service skip that request silently; the managed
 checkpoint service repairs a missed request where it is installed.
-
-Use `--promote` only when intentionally overriding the open-PR safeguard.
 
 ### Carry replay ownership
 
@@ -212,7 +219,25 @@ newer repository checkout. A desktop build that supports grouped notes requests
 LastCode provenance state and bounded, consecutive upstream-nightly groups. The
 build command and artifact protocol remain unchanged.
 
+The supervisor refreshes its installed script before invoking checkpoint code.
+When upgrading from the retired PR-gated command, an already-running older
+supervisor may fail once with an unknown option after refreshing itself. The
+next managed invocation uses `--promote`; preserve any selected recovery across
+that transition. No application restart is required.
+
 ### Failure recovery
+
+Selected repaired-checkpoint publication also pins the source revision and
+atomically publishes with a lease against that incorporated source. Open PRs
+are irrelevant to this check. If main changes after recovery selection, the
+publication is rejected and the recovery worktree is retained. Inspect the new
+source and select recovery again so the repair includes current merged work;
+do not retry a stale selection with an updated lease alone.
+
+Before following any recovery cleanup printed by a status report, verify the
+current daemon state and ownership of the retained worktree. Preserve active
+threads, processes, and operator work. A historical failure is not evidence
+that the same recovery is still pending.
 
 If a nightly or revision rebase or smoke validation fails, the command stops and
 retains both:
@@ -327,7 +352,7 @@ The supervisor executes the equivalent of:
 ```bash
 pnpm run lastcode:checkpoint -- \
   --push-tags \
-  --promote-if-no-open-prs \
+  --promote \
   --mirror-upstream-main \
   --supersede-failed-recovery
 ```
@@ -579,11 +604,11 @@ Configure the fork so that:
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
 - GitHub Actions are enabled for the manually dispatched
   [LastCode Intel artifact workflow](release.md#intel-build-publication) and the
-  pull-request CI workflow. During the hosted-CI proof stage, guarded merge still
-  requires the exact local Full CI stamp; the hosted run is observed and measured
-  before it replaces that local PR authority.
+  pull-request CI workflow; and
+- PR merge identities cannot bypass strict required `CI Gate` checks, so a base
+  change requires fresh validation even during the final merge request.
 
 Branch protection must permit the intentional force-with-lease promotion model.
-If GitHub cannot express that narrowly enough for a personal repository, rely on
-repository ownership plus the checkpoint command's lease check rather than a
-rule that makes promotion impossible.
+Keep checkpoint force-push permission separate from PR merge validation. The
+checkpoint command binds its lease to the incorporated source; PR merges require
+strict checks without an applicable bypass.

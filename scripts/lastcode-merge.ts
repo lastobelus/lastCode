@@ -16,7 +16,11 @@ import {
   resolveRepoRoot,
   runGit,
 } from "./lastcode-local-ci.ts";
-import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import {
+  assertGithubMergeProtection,
+  type GithubCiEvidence,
+  readGithubCi,
+} from "./lastcode-github-ci.ts";
 import {
   carrySquashBody,
   preserveCarrySource,
@@ -225,6 +229,12 @@ function main(argv: ReadonlyArray<string>): void {
     );
   }
   validatePullRequestForMerge(confirmedPullRequest, commit, baseCommit);
+  // GitHub must reject a base update racing the final client-side check.
+  assertGithubMergeProtection(
+    LASTCODE_GITHUB_REPOSITORY,
+    LASTCODE_BASE_BRANCH,
+    <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
+  );
   const carrySource = shouldRetainCarrySources(readCarryReplayManifest(repoRoot))
     ? validateCarrySourceRange(repoRoot, pullRequest.number, baseCommit, commit)
     : undefined;

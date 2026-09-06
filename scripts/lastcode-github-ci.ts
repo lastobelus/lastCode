@@ -8,8 +8,10 @@ export type GithubWorkflow = {
 };
 
 export type GithubBranchRule = {
+  readonly ruleset_id?: number;
   readonly type?: string;
   readonly parameters?: {
+    readonly strict_required_status_checks_policy?: boolean;
     readonly required_status_checks?: ReadonlyArray<{
       readonly context?: string;
     }>;
@@ -140,6 +142,68 @@ export function requiredGithubCiGate(branchRules: ReadonlyArray<GithubBranchRule
     (rule) =>
       rule.type === "required_status_checks" &&
       rule.parameters?.required_status_checks?.some(({ context }) => context === LASTCODE_CI_GATE),
+  );
+}
+
+export function assertStrictGithubCiGate(branchRules: ReadonlyArray<GithubBranchRule>): void {
+  if (
+    !branchRules.some(
+      (rule) =>
+        rule.type === "required_status_checks" &&
+        rule.parameters?.strict_required_status_checks_policy === true &&
+        rule.parameters.required_status_checks?.some(({ context }) => context === LASTCODE_CI_GATE),
+    )
+  ) {
+    throw new Error(
+      `Merging requires a strict ${LASTCODE_CI_GATE} branch rule (require branches to be up to date). This protects against base changes after local validation.`,
+    );
+  }
+}
+
+export function assertGithubMergeProtection(
+  repository: string,
+  baseBranch: string,
+  runGithubJson: RunGithubJson,
+): void {
+  const rules = runGithubJson<ReadonlyArray<GithubBranchRule>>(
+    githubBranchRulesArgs(repository, baseBranch),
+  );
+  assertStrictGithubCiGate(rules);
+  const actor = runGithubJson<{ readonly id?: number }>(["api", "user"]);
+  if (!Number.isSafeInteger(actor.id)) {
+    throw new Error(
+      "Cannot identify the GitHub merge actor; refusing to assume branch rules apply.",
+    );
+  }
+  const strictRules = rules.filter(
+    (rule) =>
+      rule.type === "required_status_checks" &&
+      rule.parameters?.strict_required_status_checks_policy === true &&
+      rule.parameters.required_status_checks?.some(({ context }) => context === LASTCODE_CI_GATE),
+  );
+  for (const rule of strictRules) {
+    if (!Number.isSafeInteger(rule.ruleset_id)) continue;
+    const ruleset = runGithubJson<{
+      readonly enforcement?: string;
+      readonly bypass_actors?: ReadonlyArray<{
+        readonly actor_id?: number;
+        readonly actor_type?: string;
+        readonly bypass_mode?: string;
+      }>;
+    }>(["api", `repos/${repository}/rulesets/${rule.ruleset_id}`]);
+    if (ruleset.enforcement !== "active" || !Array.isArray(ruleset.bypass_actors)) continue;
+    // Team, role, app and unknown bypass entries cannot establish that this
+    // credential is subject to the check. A different explicit user can.
+    const mayBypass = ruleset.bypass_actors.some(
+      (bypass) =>
+        bypass.actor_type !== "User" ||
+        !Number.isSafeInteger(bypass.actor_id) ||
+        bypass.actor_id === actor.id,
+    );
+    if (!mayBypass) return;
+  }
+  throw new Error(
+    `Cannot prove the GitHub merge actor is subject to strict ${LASTCODE_CI_GATE} checks: applicable rulesets allow bypass or could not be verified. Use a non-bypassing merge identity or a separate non-bypassable CI ruleset; checkpoint push permissions are independent.`,
   );
 }
 
