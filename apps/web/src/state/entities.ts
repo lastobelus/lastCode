@@ -229,6 +229,15 @@ export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId):
   );
 }
 
+/** Whether the server durably owns worktree cleanup after thread deletion.
+    Missing is unsupported so an older server cannot discard the user's cleanup choice. */
+export function readEnvironmentSupportsWorktreeCleanup(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadWorktreeCleanup === true
+  );
+}
+
 export function readEnvironmentThreadRefs(
   environmentId: EnvironmentId,
 ): ReadonlyArray<ScopedThreadRef> {
