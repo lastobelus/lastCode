@@ -17,6 +17,7 @@ import {
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
+  carryBootstrapFailureDisposition,
   carryCompilationNeeded,
   openPullRequestListArgs,
   promotionNeeded,
@@ -865,6 +866,36 @@ it("reuses an existing revision that already represents main", () => {
   );
 });
 
+it("creates a historical replacement when a carry installable represents main", () => {
+  const latest = nightly("v0.0.34-nightly.20260816.1105");
+  const installable = {
+    tag: `lastcode/revision/${latest.tag}.1`,
+    commit: "compact-revision",
+    nightly: latest,
+    revision: 1,
+    replayMode: "carry" as const,
+    sourceCommit: "represented-main",
+  };
+  for (const sourceCommit of [installable.commit, installable.sourceCommit]) {
+    assert.deepStrictEqual(
+      resolveRevisionPlan({
+        installableRefs: [installable],
+        sourceCommit,
+        isAncestor: () => false,
+        replayMode: "historical",
+      }),
+      {
+        kind: "create",
+        installableTag: `lastcode/revision/${latest.tag}.2`,
+        nightly: latest,
+        ontoRef: installable.tag,
+        replayBase: installable.sourceCommit,
+        revision: 2,
+      },
+    );
+  }
+});
+
 it("skips promotion when main already points at the checkpoint", () => {
   assert.equal(promotionNeeded("same", "same"), false);
   assert.equal(promotionNeeded("main", "checkpoint"), true);
@@ -937,6 +968,33 @@ it("cleans up publication failures but retains recovery state for earlier failur
   });
   assert.deepStrictEqual(
     checkpointFailureDisposition("lastcode/checkpoint/v1", "sync/nightly/v1", false),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "smoke",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: true,
+    }),
+    { cleanup: false, recoveryBranch: "sync/nightly/v1" },
+  );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "publication",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: true,
+    }),
+    { cleanup: true },
+  );
+  assert.deepStrictEqual(
+    carryBootstrapFailureDisposition({
+      failurePhase: "publication",
+      pendingCheckpointTag: "lastcode/checkpoint/v1",
+      recoveryBranch: "sync/nightly/v1",
+      tagDeleted: false,
+    }),
     { cleanup: false, recoveryBranch: "sync/nightly/v1" },
   );
 });

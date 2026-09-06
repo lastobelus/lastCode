@@ -731,13 +731,24 @@ export function resolveRevisionPlan(input: {
   readonly installableRefs: ReadonlyArray<InstallableRef>;
   readonly sourceCommit: string;
   readonly isAncestor: (ancestor: string, descendant: string) => boolean;
+  readonly replayMode?: CheckpointReplayMode;
 }): RevisionPlan {
   const installables = input.installableRefs.toSorted(compareLastCodeInstallableTags);
   const represented = installables.findLast(
     (installable) =>
       installable.commit === input.sourceCommit || installable.sourceCommit === input.sourceCommit,
   );
-  if (represented) return { kind: "represented", installable: represented };
+  if (represented) {
+    if (input.replayMode === "historical" && represented.replayMode === "carry") {
+      const replacement = nextRevisionPlan(represented.nightly, installables);
+      return {
+        ...replacement,
+        ontoRef: represented.tag,
+        replayBase: represented.sourceCommit ?? represented.commit,
+      };
+    }
+    return { kind: "represented", installable: represented };
+  }
 
   const latest = installables.at(-1);
   if (!latest) return { kind: "unavailable" };
@@ -993,6 +1004,21 @@ export function checkpointFailureDisposition(
   return pendingCheckpointTag && tagDeleted && !preserveRecovery
     ? { cleanup: true }
     : { cleanup: false, recoveryBranch };
+}
+
+export function carryBootstrapFailureDisposition(input: {
+  readonly failurePhase: "publication" | "smoke";
+  readonly pendingCheckpointTag?: string;
+  readonly recoveryBranch?: string;
+  readonly tagDeleted: boolean;
+}): { readonly cleanup: boolean; readonly recoveryBranch?: string } {
+  if (!input.recoveryBranch) return { cleanup: false };
+  return checkpointFailureDisposition(
+    input.pendingCheckpointTag,
+    input.recoveryBranch,
+    input.tagDeleted,
+    input.failurePhase !== "publication",
+  );
 }
 
 function deleteCheckpointTag(repoRoot: string, checkpointTag: string): boolean {
@@ -1369,6 +1395,7 @@ function publishRevisionIfNeeded(
     installableRefs: installables,
     sourceCommit,
     isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+    replayMode: replay.mode,
   });
   if (plan.kind === "unavailable") return { handled: false };
   if (plan.kind === "represented") {
@@ -2116,6 +2143,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       installableRefs: installables,
       sourceCommit,
       isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+      replayMode: replay.mode,
     });
     if (revisionPlan.kind === "create") {
       console.log(
@@ -2344,6 +2372,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   if (plan.bootstrapCheckpoint) {
     const startedAtMs = Date.now();
     let pendingCheckpointTag: string | undefined;
+    let bootstrapFailurePhase: "publication" | "smoke" = "smoke";
     const commitsRebased = Number(
       git(repoRoot, ["rev-list", "--count", `${plan.baseNightly.tag}..${candidateCommit}`]),
     );
@@ -2351,6 +2380,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       if (carryWorktreePrepared && options.smoke) {
         runSmokeGate(repoRoot, resolveAutomationWorktree(repoRoot));
       }
+      bootstrapFailurePhase = "publication";
       const finishedAtMs = Date.now();
       const timing = {
         commitsRebased,
@@ -2405,17 +2435,40 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       });
       newestProducedInstallableTag = checkpointTag;
     } catch (error) {
-      const localTagRetained = pendingCheckpointTag
-        ? !deleteCheckpointTag(repoRoot, pendingCheckpointTag)
-        : false;
+      const tagDeleted = pendingCheckpointTag
+        ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
+        : true;
+      const disposition = carryBootstrapFailureDisposition({
+        failurePhase: bootstrapFailurePhase,
+        ...(pendingCheckpointTag ? { pendingCheckpointTag } : {}),
+        ...(carryWorktreePrepared && carryBranch ? { recoveryBranch: carryBranch } : {}),
+        tagDeleted,
+      });
+      const worktree = carryWorktreePrepared ? resolveAutomationWorktree(repoRoot) : undefined;
+      let recoveryFingerprint: string | undefined;
+      if (disposition.cleanup && worktree && carryBranch) {
+        run(repoRoot, "git", ["worktree", "remove", worktree]);
+        git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
+        carryWorktreePrepared = false;
+      } else if (disposition.recoveryBranch && worktree) {
+        try {
+          recoveryFingerprint = checkpointRecoveryFingerprint(worktree, disposition.recoveryBranch);
+        } catch (fingerprintError) {
+          console.warn(
+            `[lastcode:checkpoint] Could not fingerprint retained carry bootstrap: ${fingerprintError instanceof Error ? fingerprintError.message : String(fingerprintError)}`,
+          );
+        }
+      }
       const finishedAtMs = Date.now();
       appendCheckpointRun(
         checkpointFailureRecord(
           {
             commitsRebased,
             error,
-            failurePhase: "publication",
-            ...(localTagRetained ? { localTagRetained: true } : {}),
+            failurePhase: bootstrapFailurePhase,
+            ...(!tagDeleted ? { localTagRetained: true } : {}),
+            ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
+            ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
             startedAtMs,
             upstreamTag: plan.baseNightly.tag,
             replayMode: replay.mode,
@@ -2425,6 +2478,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           finishedAtMs,
         ),
       );
+      if (disposition.recoveryBranch) {
+        notify(
+          hostPlatform,
+          "LastCode carry bootstrap needs attention",
+          `${disposition.recoveryBranch} is retained at ${worktree}.`,
+        );
+        console.error(
+          `[lastcode:checkpoint] Recovery branch ${disposition.recoveryBranch} is retained at ${worktree}.`,
+        );
+      }
       throw error;
     }
   }
