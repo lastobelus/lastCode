@@ -465,6 +465,100 @@ describe("carry replay core", () => {
     }
   });
 
+  it("accepts an exact carry squash after its base advances", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const bootstrap = prepareBootstrap(repo);
+      checkout(repo, "compile-a", bootstrap.historicalSource);
+      const compact = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base: bootstrap.base,
+        source: bootstrap.historicalSource,
+        preparedPartition: {
+          base: bootstrap.base,
+          source: bootstrap.historicalSource,
+          head: bootstrap.partition,
+        },
+      }).head;
+
+      checkout(repo, "reviewed-source", compact);
+      write(repo, "reviewed-source.txt", "reviewed carry delta\n");
+      const sourceHead = commit(
+        repo,
+        "retain reviewed carry delta",
+        "Carry-Group: tooling\nCarry-Observation: source metadata remains tied to the reviewed commit",
+      );
+      const sourceRef = `refs/lastcode/carry-sources/pr-3/${sourceHead}`;
+      git(repo, ["update-ref", sourceRef, sourceHead]);
+
+      checkout(repo, "advanced-base", compact);
+      write(repo, "advanced-base.txt", "main advanced after final check\n");
+      const advancedParent = commit(repo, "advance main after final check");
+      const mergedTree = git(repo, [
+        "merge-tree",
+        "--write-tree",
+        "--no-messages",
+        `--merge-base=${compact}`,
+        advancedParent,
+        sourceHead,
+      ]);
+      const squashMessage = [
+        "retain reviewed carry delta (#3)",
+        "",
+        `Carry-Source-Ref: ${sourceRef}`,
+        `Carry-Source-Base: ${compact}`,
+        `Carry-Source-Head: ${sourceHead}`,
+      ].join("\n");
+      const squash = commitTree(repo, mergedTree, advancedParent, squashMessage);
+
+      const expanded = expandCarrySource({
+        repo,
+        base: bootstrap.base,
+        source: squash,
+        preparedPartition: {
+          base: bootstrap.base,
+          source: compact,
+          head: compact,
+        },
+        representedSource: advancedParent,
+      });
+      assert.equal(expanded.contributions.tooling.length, 1);
+      assert.equal(expanded.contributions.tooling[0]?.sourceCommit, sourceHead);
+      assert.equal(
+        expanded.contributions.tooling[0]?.metadata["Carry-Observation"][0],
+        "source metadata remains tied to the reviewed commit",
+      );
+
+      checkout(repo, "changed-squash", advancedParent);
+      write(repo, "unexpected-change.txt", "semantic change outside reviewed source\n");
+      git(repo, ["add", "unexpected-change.txt"]);
+      const changedSquash = commitTree(
+        repo,
+        git(repo, ["write-tree"]),
+        advancedParent,
+        squashMessage,
+      );
+      assert.throws(
+        () =>
+          expandCarrySource({
+            repo,
+            base: bootstrap.base,
+            source: changedSquash,
+            preparedPartition: {
+              base: bootstrap.base,
+              source: compact,
+              head: compact,
+            },
+            representedSource: advancedParent,
+          }),
+        /does not equal squash tree/u,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("rejects a partition whose recorded base is not the squash parent", () => {
     const { repo, cleanup } = initRepo();
     try {

@@ -326,6 +326,17 @@ function binaryDiff(repo: string, base: string, head: string): string {
   return runGit(repo, ["diff", "--binary", "--full-index", base, head]);
 }
 
+function mergeTree(repo: string, base: string, current: string, source: string): string {
+  return runGit(repo, [
+    "merge-tree",
+    "--write-tree",
+    "--no-messages",
+    `--merge-base=${base}`,
+    current,
+    source,
+  ]);
+}
+
 function expandSquashCommit(
   repo: string,
   squashCommit: string,
@@ -345,23 +356,31 @@ function expandSquashCommit(
   if (sourceRef !== sourceHead) {
     throw new Error(`Carry source ref ${trailers.sourceRef} does not resolve to ${sourceHead}.`);
   }
-  if (sourceBase !== squashParents[0]) {
-    throw new Error(
-      `Carry source base ${sourceBase} does not equal squash parent ${squashParents[0]}.`,
-    );
-  }
-  if (resolveTree(repo, sourceBase) !== resolveTree(repo, squashParents[0])) {
-    throw new Error(
-      `Carry source base tree does not equal squash parent tree for ${squashCommit}.`,
-    );
-  }
-  if (resolveTree(repo, sourceHead) !== resolveTree(repo, squashCommit)) {
-    throw new Error(`Carry source head tree does not equal squash tree for ${squashCommit}.`);
-  }
-  if (
-    binaryDiff(repo, sourceBase, sourceHead) !== binaryDiff(repo, squashParents[0], squashCommit)
-  ) {
-    throw new Error(`Carry source diff does not equal squash delta for ${squashCommit}.`);
+  const squashParent = squashParents[0];
+  if (!squashParent) throw new Error(`Squash commit ${squashCommit} has no parent.`);
+  if (sourceBase === squashParent) {
+    if (resolveTree(repo, sourceBase) !== resolveTree(repo, squashParent)) {
+      throw new Error(
+        `Carry source base tree does not equal squash parent tree for ${squashCommit}.`,
+      );
+    }
+    if (resolveTree(repo, sourceHead) !== resolveTree(repo, squashCommit)) {
+      throw new Error(`Carry source head tree does not equal squash tree for ${squashCommit}.`);
+    }
+    if (binaryDiff(repo, sourceBase, sourceHead) !== binaryDiff(repo, squashParent, squashCommit)) {
+      throw new Error(`Carry source diff does not equal squash delta for ${squashCommit}.`);
+    }
+  } else {
+    if (!isAncestor(repo, sourceBase, squashParent)) {
+      throw new Error(
+        `Carry source base ${sourceBase} does not equal squash parent ${squashParent} or precede it.`,
+      );
+    }
+    if (resolveTree(repo, squashCommit) !== mergeTree(repo, sourceBase, squashParent, sourceHead)) {
+      throw new Error(
+        `Carry source merged from ${sourceBase} does not equal squash tree for ${squashCommit}.`,
+      );
+    }
   }
   return verifyPartitionRange(repo, sourceBase, sourceHead);
 }
