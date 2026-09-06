@@ -213,6 +213,36 @@ it("fingerprints retained recovery content so human edits prevent automatic clea
   NodeFS.rmSync(directory, { recursive: true, force: true });
 });
 
+it("fingerprints staged diffs larger than Git's default output buffer", () => {
+  const directory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-large-diff-"),
+  );
+  const git = (args: ReadonlyArray<string>) => {
+    const result = NodeChildProcess.spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  try {
+    git(["init", "--quiet", "--initial-branch=sync/nightly/v0.0.1-nightly.20260812.1"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    const largePath = NodePath.join(directory, "tooling-compact-group.txt");
+    NodeFS.writeFileSync(largePath, "base\n");
+    git(["add", "tooling-compact-group.txt"]);
+    git(["commit", "--quiet", "--message", "base"]);
+    const branch = "sync/nightly/v0.0.1-nightly.20260812.1";
+    NodeFS.writeFileSync(largePath, `${"x".repeat(2 * 1024 * 1024)}\n`);
+    git(["add", "tooling-compact-group.txt"]);
+    const first = checkpointRecoveryFingerprint(directory, branch);
+    expect(checkpointRecoveryFingerprint(directory, branch)).toBe(first);
+
+    NodeFS.writeFileSync(largePath, `${"y".repeat(2 * 1024 * 1024)}\n`);
+    git(["add", "tooling-compact-group.txt"]);
+    expect(checkpointRecoveryFingerprint(directory, branch)).not.toBe(first);
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 it("fingerprints tracked modes even when Git ignores filemode changes", () => {
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-recovery-"));
   const git = (args: ReadonlyArray<string>) => {
