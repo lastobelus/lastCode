@@ -16,9 +16,102 @@ import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it("maps local sections, unavailable provenance, and overflow summaries", () => {
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+        availableVersion: "1.2.4-nightly.20260814.1090",
+        releaseNotes: {
+          lastCode: {
+            status: "known",
+            items: ["feat(lastcode): new workflow"],
+            omittedItems: 2,
+          },
+          upstream: {
+            groups: [
+              {
+                version: "1.2.4-nightly.20260814.1090",
+                isTarget: true,
+                items: ["fix(web): newest upstream fix"],
+                omittedItems: 1,
+              },
+              {
+                version: "1.2.4-nightly.20260814.1089",
+                isTarget: false,
+                items: ["fix(server): earlier upstream fix"],
+                omittedItems: 0,
+              },
+            ],
+            omittedGroups: 3,
+          },
+        },
+      }),
+      [
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "LastCode changes",
+          items: ["feat(lastcode): new workflow"],
+          totalItems: 3,
+          summaries: ["…and 2 more LastCode changes"],
+        },
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "Upstream changes",
+          items: ["fix(web): newest upstream fix"],
+          totalItems: 2,
+          summaries: ["…and 1 more change"],
+        },
+        {
+          version: "1.2.4-nightly.20260814.1089",
+          heading: "Upstream changes in 1.2.4-nightly.20260814.1089",
+          items: ["fix(server): earlier upstream fix"],
+          totalItems: 1,
+          summaries: ["3 older nightlies not shown"],
+        },
+      ],
+    );
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/revision/v1.2.4-nightly.20260814.1090.1",
+        availableVersion: "1.2.4-nightly.20260814.1090.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      }),
+      [],
+    );
+    assert.deepEqual(
+      DesktopUpdates.mapLastCodeLocalReleaseNotes({
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+        availableVersion: "1.2.4-nightly.20260814.1090",
+        releaseNotes: {
+          lastCode: { status: "unavailable" },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      }),
+      [
+        {
+          version: "1.2.4-nightly.20260814.1090",
+          heading: "LastCode changes",
+          items: [],
+          totalItems: 0,
+          summaries: ["Couldn’t determine changes from this installed build."],
+        },
+      ],
+    );
+  });
+
   it("preserves complete causes for update poller and event failures", () => {
     const cause = Cause.combine(
       Cause.fail(new Error("updater failed")),
@@ -127,6 +220,441 @@ describe("DesktopUpdates", () => {
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect("builds an opted-in local revision without staging it through electron-updater", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: {
+          lastCode: {
+            status: "known",
+            items: ["feat(lastcode): local update"],
+            omittedItems: 0,
+          },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+        dmgSha256: "a".repeat(64),
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const available = yield* updates.getState;
+        assert.equal(available.source, "lastcode-local");
+        assert.equal(available.status, "available");
+        assert.deepEqual(available.releaseNotes[0]?.items, ["feat(lastcode): local update"]);
+        assert.equal(available.releaseNotes[0]?.heading, "LastCode changes");
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+        yield* flushCallbacks;
+
+        const downloaded = yield* updates.getState;
+        assert.equal(downloaded.status, "downloaded");
+        assert.equal(downloaded.downloadedVersion, "1.2.4-nightly.20260814.1089.1");
+        assert.deepEqual(harness.feedUrls(), [
+          { provider: "generic", url: "http://localhost:4141" },
+        ]);
+        assert.deepEqual(harness.installEvents(), []);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("preserves typed local build diagnostics after progress", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const targetVersion = "1.2.4-nightly.20260814.1089.1";
+    const buildError = "packaging failed: disk image is invalid";
+    let buildAttempts = 0;
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: targetVersion,
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuildEffect: (_checkpointTag, onProgress) =>
+        Effect.gen(function* () {
+          buildAttempts += 1;
+          if (onProgress) {
+            yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
+          }
+          if (buildAttempts === 1) {
+            return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+              operation: "build",
+              message: buildError,
+            });
+          }
+          return {
+            schemaVersion: 1,
+            status: "built",
+            checkpointTag,
+            outputDir: "/tmp/lastcode-local-build",
+            manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+            dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+            dmgSha256: "a".repeat(64),
+          };
+        }),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "error");
+        assert.equal(failed.message, buildError);
+        assert.equal(failed.localBuildProgress?.phase, "Building DMG");
+        assert.equal(failed.localBuildFailure?.errorKind, "packaging");
+
+        const retry = yield* updates.download;
+        assert.isTrue(retry.accepted);
+        assert.isTrue(retry.completed);
+        assert.equal(buildAttempts, 2);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("hands the exact local DMG to the helper before stopping backends and quitting", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const dmgPath = "/tmp/lastcode-local-build/LastCode-1.2.4.dmg";
+    const dmgSha256 = "b".repeat(64);
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath,
+        dmgSha256,
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.download;
+
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.deepEqual(harness.localInstallArgs(), [
+          {
+            dmgPath,
+            dmgSha256,
+            expectedVersion: "1.2.4-nightly.20260814.1089.1",
+          },
+        ]);
+        assert.deepEqual(harness.installEvents(), [
+          "prepare-install",
+          "stop-backend",
+          "commit-handoff",
+          "destroy-windows",
+          "quit-app",
+        ]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("keeps the current app usable when local install preflight fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+        dmgSha256: "c".repeat(64),
+      },
+      localPrepareInstall: () =>
+        Effect.fail(
+          new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "install",
+            message: "Install preflight failed.",
+          }),
+        ),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.download;
+
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.deepEqual(harness.installEvents(), ["prepare-install"]);
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "downloaded");
+        assert.equal(failed.errorContext, "install");
+        assert.equal(failed.message, "Install preflight failed.");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("cancels the handoff and restores running backends when shutdown fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+        dmgSha256: "d".repeat(64),
+      },
+      backends: [
+        { desiredRunning: true },
+        { desiredRunning: true, stop: Effect.die(new Error("backend stop failed")) },
+        { desiredRunning: false },
+      ],
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.download;
+        yield* updates.install;
+
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        const installEvents = harness.installEvents();
+        assert.equal(installEvents[0], "prepare-install");
+        assert.include(installEvents, "stop-backend");
+        assert.include(installEvents, "stop-backend-2");
+        assert.include(installEvents, "cancel-handoff");
+        assert.include(installEvents, "start-backend");
+        assert.include(installEvents, "start-backend-2");
+        assert.notInclude(installEvents, "start-backend-3");
+        assert.isBelow(
+          installEvents.indexOf("cancel-handoff"),
+          installEvents.indexOf("start-backend"),
+        );
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("restores running backends when committing the handoff fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089.1",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuild: {
+        schemaVersion: 1,
+        status: "built",
+        checkpointTag,
+        outputDir: "/tmp/lastcode-local-build",
+        manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+        dmgPath: "/tmp/lastcode-local-build/LastCode-1.2.4.dmg",
+        dmgSha256: "e".repeat(64),
+      },
+      backends: [{ desiredRunning: true }, { desiredRunning: true }],
+      localPrepareInstall: () =>
+        Effect.succeed({
+          commit: Effect.fail(
+            new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+              operation: "install",
+              message: "Could not transfer local install ownership.",
+            }),
+          ),
+          cancel: Effect.void,
+        }),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        yield* updates.download;
+        yield* updates.install;
+
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.include(harness.installEvents(), "start-backend");
+        assert.include(harness.installEvents(), "start-backend-2");
+        const failed = yield* updates.getState;
+        assert.equal(failed.status, "downloaded");
+        assert.equal(failed.errorContext, "install");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("keeps hosted installs on electron-updater", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        yield* updates.install;
+        assert.deepEqual(harness.localInstallArgs(), []);
+        assert.deepEqual(harness.installEvents(), ["stop-backend", "squirrel-install"]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("restores hosted updates immediately when local nightlies are disabled", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        status: "up-to-date",
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+        availableVersion: "1.2.3-nightly.20260814.1089",
+      },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const local = yield* updates.getState;
+        assert.equal(local.source, "lastcode-local");
+        assert.equal(local.channel, "nightly");
+
+        const settings = yield* updates.setShowAndInstallLocalNightlies(false);
+        const hosted = yield* updates.getState;
+
+        assert.isFalse(settings.showAndInstallLocalNightlies);
+        assert.equal(hosted.source, "hosted");
+        assert.equal(hosted.channel, "latest");
+        assert.isTrue(hosted.enabled);
+        assert.equal(harness.checkCount(), 1);
+        assert.deepEqual(harness.feedUrls().at(-1), {
+          provider: "generic",
+          url: "http://localhost:4141",
+        });
+        assert.deepEqual(harness.differentialDownloadValues(), [false, false]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("serializes disabling local nightlies with an active checkpoint inspection", () =>
+    Effect.gen(function* () {
+      const inspectionStarted = yield* Deferred.make<void>();
+      const releaseInspection = yield* Deferred.make<void>();
+      let blockInspection = false;
+      const inspection = {
+        schemaVersion: 2 as const,
+        status: "up-to-date" as const,
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+        availableVersion: "1.2.3-nightly.20260814.1089",
+      };
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: () =>
+          blockInspection
+            ? Deferred.succeed(inspectionStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseInspection)),
+                Effect.as(inspection),
+              )
+            : Effect.succeed(inspection),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          blockInspection = true;
+
+          const checkFiber = yield* updates.check("poll").pipe(Effect.forkScoped);
+          yield* Deferred.await(inspectionStarted);
+          const toggleFiber = yield* updates
+            .setShowAndInstallLocalNightlies(false)
+            .pipe(Effect.forkScoped);
+
+          yield* Deferred.succeed(releaseInspection, undefined);
+          yield* Fiber.join(checkFiber);
+          const settings = yield* Fiber.join(toggleFiber);
+          const state = yield* updates.getState;
+
+          assert.isFalse(settings.showAndInstallLocalNightlies);
+          assert.equal(state.source, "hosted");
+          assert.isTrue(state.enabled);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    }),
+  );
 
   it.effect("enables nightly full changelog release notes and broadcasts summaries", () => {
     const harness = makeHarness();
@@ -336,9 +864,14 @@ describe("DesktopUpdates", () => {
       const installStarted = yield* Deferred.make<void>();
       const releaseInstall = yield* Deferred.make<void>();
       const harness = makeHarness({
-        stopBackend: Deferred.succeed(installStarted, undefined).pipe(
-          Effect.andThen(Deferred.await(releaseInstall)),
-        ),
+        backends: [
+          {
+            desiredRunning: true,
+            stop: Deferred.succeed(installStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseInstall)),
+            ),
+          },
+        ],
       });
 
       yield* Effect.scoped(

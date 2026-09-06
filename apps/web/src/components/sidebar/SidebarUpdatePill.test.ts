@@ -1,0 +1,171 @@
+import { describe, expect, it } from "vite-plus/test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import {
+  keyReleaseNoteGroups,
+  resolveReleaseNoteHeading,
+  SidebarUpdateReleaseNotes,
+} from "./SidebarUpdateReleaseNotes.tsx";
+import {
+  resolveSidebarUpdateButtonToneClassName,
+  SidebarLocalBuildFailurePopover,
+} from "./SidebarUpdatePill.tsx";
+
+describe("SidebarUpdatePill release notes", () => {
+  it("prefers explicit local headings and preserves hosted fallbacks", () => {
+    expect(
+      resolveReleaseNoteHeading(
+        {
+          version: "1.2.4-nightly.2",
+          heading: "LastCode changes",
+          items: ["feat(lastcode): local change"],
+          totalItems: 1,
+        },
+        0,
+      ),
+    ).toBe("LastCode changes");
+    expect(
+      resolveReleaseNoteHeading({ version: "1.2.4-nightly.2", items: [], totalItems: 0 }, 0),
+    ).toBe("What's changed");
+    expect(
+      resolveReleaseNoteHeading({ version: "1.2.4-nightly.1", items: [], totalItems: 0 }, 1),
+    ).toBe("Changes in 1.2.4-nightly.1");
+  });
+
+  it("keys LastCode and upstream groups independently at the same version", () => {
+    const keyed = keyReleaseNoteGroups([
+      {
+        version: "1.2.4-nightly.2",
+        heading: "LastCode changes",
+        items: ["local"],
+        totalItems: 1,
+      },
+      {
+        version: "1.2.4-nightly.2",
+        heading: "Upstream changes",
+        items: ["upstream"],
+        totalItems: 1,
+      },
+      {
+        version: "1.2.4-nightly.2",
+        heading: "LastCode changes",
+        items: ["duplicate section fixture"],
+        totalItems: 1,
+      },
+    ]);
+
+    expect(new Set(keyed.map(({ key }) => key)).size).toBe(3);
+    expect(keyed.map(({ releaseNote }) => releaseNote.heading)).toEqual([
+      "LastCode changes",
+      "Upstream changes",
+      "LastCode changes",
+    ]);
+  });
+
+  it("renders ordered sections, summaries outside bullets, separators, and scrolling", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SidebarUpdateReleaseNotes, {
+        shell: undefined,
+        tooltip: "Update available",
+        state: {
+          enabled: true,
+          source: "lastcode-local",
+          status: "available",
+          channel: "nightly",
+          currentVersion: "1.2.4-nightly.1",
+          hostArch: "arm64",
+          appArch: "arm64",
+          runningUnderArm64Translation: false,
+          availableVersion: "1.2.4-nightly.2",
+          downloadedVersion: null,
+          releaseNotes: [
+            {
+              version: "1.2.4-nightly.2",
+              heading: "LastCode changes",
+              items: ["local change"],
+              totalItems: 1,
+              summaries: ["2 more LastCode changes"],
+            },
+            {
+              version: "1.2.4-nightly.2",
+              heading: "Upstream changes",
+              items: ["upstream change"],
+              totalItems: 1,
+            },
+          ],
+          omittedReleaseCount: 0,
+          downloadPercent: null,
+          checkedAt: null,
+          message: null,
+          errorContext: null,
+          canRetry: false,
+          localBuildProgress: null,
+          localBuildFailure: null,
+        },
+      }),
+    );
+
+    expect(markup.indexOf("LastCode changes")).toBeLessThan(markup.indexOf("Upstream changes"));
+    expect(markup).toContain("overflow-y-auto");
+    expect(markup).toContain("my-3 bg-border/60");
+    expect(markup).toContain('<li class="list-disc break-words">local change</li>');
+    expect(markup).toContain('<p class="break-words">2 more LastCode changes</p>');
+    expect(markup).not.toContain('<li class="list-disc break-words">2 more LastCode changes</li>');
+  });
+});
+
+describe("SidebarUpdatePill local failure", () => {
+  it("uses the themed update tone and lets a local failure override it", () => {
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: true,
+        isInteractionDisabled: false,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-destructive/12");
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        isInteractionDisabled: false,
+        showUpdateIconState: true,
+      }),
+    ).toContain("bg-update-surface text-update-foreground ring-update/40");
+  });
+
+  it("keeps disabled update details hoverable without applying action hover styling", () => {
+    expect(
+      resolveSidebarUpdateButtonToneClassName({
+        hasLocalBuildFailure: false,
+        isInteractionDisabled: true,
+        showUpdateIconState: true,
+      }),
+    ).not.toContain("hover:");
+  });
+  it("renders persistent failure context and an accessible copy action", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SidebarLocalBuildFailurePopover, {
+        failure: {
+          checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.4",
+          phase: "Building DMG",
+          percent: 94,
+          errorKind: "packaging",
+          currentVersion: "1.2.2",
+          targetVersion: "1.2.3-nightly.4",
+          logPath: "/Users/test/.lastcode/local-updates/build.log",
+          error: "hdiutil \u001B[31mfailed\u001B[0m\0",
+        },
+        isCopied: false,
+        onCopy: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Local build failed");
+    expect(markup).toContain("Building DMG · 94% est.");
+    expect(markup).toContain("hdiutil failed");
+    expect(markup).not.toContain("\u001B");
+    expect(markup).not.toContain("\0");
+    expect(markup).toContain('aria-label="Copy local build failure details"');
+  });
+});
