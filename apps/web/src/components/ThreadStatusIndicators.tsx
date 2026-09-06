@@ -503,13 +503,15 @@ export function ThreadStatusLabel({
         <TooltipTrigger
           render={
             <span
+              role="img"
               aria-label={status.label}
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
         >
           <span
-            className={`size-[9px] rounded-full ${status.dotClass} ${
+            data-legacy-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
               status.pulse ? "animate-status-pulse" : ""
             }`}
           />
@@ -530,7 +532,8 @@ export function ThreadStatusLabel({
         }
       >
         <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
+          data-legacy-sidebar-unscaled-content
+          className={`size-1.5 rounded-full ${status.dotClass} ${
             status.pulse ? "animate-status-pulse" : ""
           }`}
         />

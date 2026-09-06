@@ -51,6 +51,9 @@ import { useTheme } from "./useTheme";
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
 type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
+export type ClientSettingsUpdate =
+  | ClientSettingsPatch
+  | ((settings: ClientSettings) => ClientSettingsPatch);
 
 const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
@@ -203,6 +206,12 @@ export function persistClientSettingsPatch(
       ...safeErrorLogAttributes(error),
     });
   });
+}
+
+export function updateClientSettings(update: ClientSettingsUpdate): void {
+  const currentSettings = getClientSettingsSnapshot();
+  const patch = typeof update === "function" ? update(currentSettings) : update;
+  persistClientSettingsPatch(patch);
 }
 
 /**
@@ -558,9 +567,7 @@ export function useUpdatePrimarySettings() {
 }
 
 export function useUpdateClientSettings() {
-  return useCallback((patch: ClientSettingsPatch) => {
-    persistClientSettingsPatch(patch);
-  }, []);
+  return useCallback(updateClientSettings, []);
 }
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;

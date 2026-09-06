@@ -272,9 +272,40 @@ describe("ClientSettings environment identification", () => {
   });
 });
 
+describe("ClientSettings environment icons", () => {
+  it("defaults to semantic colors with the local icon hidden", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.environmentIconColors).toEqual({});
+    expect(settings.showLocalEnvironmentIcon).toBe(false);
+  });
+
+  it("accepts per-environment hex colors and the local icon opt-in", () => {
+    const input = {
+      environmentIconColors: { primary: "#2563eb", remote: "#7C3AED" },
+      showLocalEnvironmentIcon: true,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["blue", "#123", "#12345678", "#gg0000"])(
+    "rejects an invalid environment icon color: %s",
+    (color) => {
+      expect(() => decodeClientSettings({ environmentIconColors: { primary: color } })).toThrow();
+      expect(() =>
+        decodeClientSettingsPatch({ environmentIconColors: { primary: color } }),
+      ).toThrow();
+    },
+  );
+});
+
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar", () => {
-    expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
+    const settings = decodeClientSettings({});
+    expect(settings.compactLegacySidebarStatuses).toBe(false);
+    expect(settings.showThreadWorktreeIndicators).toBe(true);
+    expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.legacySidebarScale).toBe(100);
   });
 
   it("drops the retired sidebar v2 beta keys, resetting everyone to the default", () => {
@@ -298,6 +329,36 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
     expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+
+  it("preserves compact legacy sidebar status indicators", () => {
+    expect(
+      decodeClientSettings({ compactLegacySidebarStatuses: true }).compactLegacySidebarStatuses,
+    ).toBe(true);
+    expect(
+      decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
+        .compactLegacySidebarStatuses,
+    ).toBe(true);
+  });
+
+  it("preserves an explicit worktree indicator preference", () => {
+    expect(
+      decodeClientSettings({ showThreadWorktreeIndicators: false }).showThreadWorktreeIndicators,
+    ).toBe(false);
+    expect(
+      decodeClientSettingsPatch({ showThreadWorktreeIndicators: false })
+        .showThreadWorktreeIndicators,
+    ).toBe(false);
+  });
+
+  it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
+    expect(decodeClientSettings({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+    expect(decodeClientSettingsPatch({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+  });
+
+  it.each([49, 101, 74.5])("rejects an invalid legacy sidebar scale: %s", (value) => {
+    expect(() => decodeClientSettings({ legacySidebarScale: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ legacySidebarScale: value })).toThrow();
   });
 });
 
@@ -354,6 +415,14 @@ describe("ServerSettings thread settlement", () => {
   it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
     expect(() => decodeServerSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
     expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+  });
+});
+
+describe("ClientSettings project icons", () => {
+  it("defaults to unrounded icons and preserves an explicit opt-in", () => {
+    expect(decodeClientSettings({}).roundedProjectIcons).toBe(false);
+    expect(decodeClientSettings({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+    expect(decodeClientSettingsPatch({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
   });
 });
 

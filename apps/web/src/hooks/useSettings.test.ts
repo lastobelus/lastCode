@@ -24,6 +24,7 @@ import {
   persistClientSettingsPatch,
   persistClientSettingsUpdate,
   resolveEnvironmentIdentificationMode,
+  updateClientSettings,
 } from "./useSettings";
 
 beforeEach(() => {
@@ -294,6 +295,36 @@ describe("persistClientSettingsUpdate", () => {
     await expect(
       persistClientSettingsUpdate((current) => ({ ...current, wordWrap: false }), persist),
     ).resolves.toMatchObject({ wordWrap: false });
+  });
+});
+
+describe("updateClientSettings", () => {
+  it("applies repeated functional updates and persists them in invocation order", async () => {
+    const writes: Array<{
+      readonly settings: ClientSettings;
+      readonly resolve: () => void;
+    }> = [];
+    persistenceMocks.setClientSettings.mockImplementation(
+      (settings) =>
+        new Promise<void>((resolve) => {
+          writes.push({ settings, resolve });
+        }),
+    );
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+
+    updateClientSettings((settings) => ({
+      legacySidebarEnabled: !settings.legacySidebarEnabled,
+    }));
+    expect(getClientSettings().legacySidebarEnabled).toBe(true);
+
+    updateClientSettings((settings) => ({
+      legacySidebarEnabled: !settings.legacySidebarEnabled,
+    }));
+    expect(getClientSettings().legacySidebarEnabled).toBe(false);
+
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]?.settings.legacySidebarEnabled).toBe(false);
+    writes[0]?.resolve();
   });
 });
 
