@@ -397,7 +397,13 @@ export function expandCarrySource(input: {
         "Prepared bootstrap partition base does not equal the configured upstream base.",
       );
     }
-    const partition = verifyPartitionRange(input.repo, preparedBase, preparedHead);
+    const preparedCommits = firstParentCommits(input.repo, preparedBase, preparedHead);
+    assertLinearRange(input.repo, preparedBase, preparedCommits);
+    const preparedCompact = preparedCommits.some(
+      (commit) => parseCarryTrailers(commitMessage(input.repo, commit)).contributions.length > 0,
+    )
+      ? readCarryGroupChain(input.repo, preparedHead, preparedBase)
+      : undefined;
     if (resolveTree(input.repo, preparedHead) !== resolveTree(input.repo, preparedSource)) {
       throw new Error(
         "Prepared bootstrap partition tree does not equal its frozen historical source tree.",
@@ -412,7 +418,16 @@ export function expandCarrySource(input: {
         "Current source does not descend from the prepared bootstrap source or its proven represented source.",
       );
     }
-    for (const entry of partition) add(entry.commit, entry.metadata);
+    if (preparedCompact) {
+      for (const group of preparedCompact) {
+        items.push({ commit: group.commit, group: group.group });
+        for (const contribution of group.contributions)
+          grouped.get(group.group)?.push(contribution);
+      }
+    } else {
+      for (const entry of verifyPartitionRange(input.repo, preparedBase, preparedHead))
+        add(entry.commit, entry.metadata);
+    }
     const tail = firstParentCommits(input.repo, representedSource, currentSource);
     assertLinearRange(input.repo, representedSource, tail);
     for (const squashCommit of tail) {

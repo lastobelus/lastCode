@@ -223,6 +223,69 @@ describe("carry replay core", () => {
     }
   });
 
+  it("retains nested provenance when recompiling a prepared compact bootstrap", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const bootstrap = prepareBootstrap(repo);
+      checkout(repo, "initial-compile", bootstrap.historicalSource);
+      const initial = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base: bootstrap.base,
+        source: bootstrap.historicalSource,
+        preparedPartition: {
+          base: bootstrap.base,
+          source: bootstrap.historicalSource,
+          head: bootstrap.partition,
+        },
+      });
+      const initialActions = readCarryGroupChain(repo, initial.head, bootstrap.base).find(
+        ({ group }) => group === "resumable-actions",
+      );
+      assert.equal(initialActions?.contributions.length, 1);
+
+      const pr = makePartitionedSquash(repo, initial.head, () => {
+        write(repo, "second-generation.txt", "compiled bootstrap remains attributable\n");
+      });
+      checkout(repo, "recompile-bootstrap", pr.squash);
+      const result = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base: bootstrap.base,
+        source: pr.squash,
+        preparedPartition: {
+          base: bootstrap.base,
+          source: initial.head,
+          head: initial.head,
+        },
+      });
+
+      assert.equal(
+        git(repo, ["rev-parse", `${result.head}^{tree}`]),
+        git(repo, ["rev-parse", `${pr.squash}^{tree}`]),
+      );
+      const actions = readCarryGroupChain(repo, result.head, bootstrap.base).find(
+        ({ group }) => group === "resumable-actions",
+      );
+      assert.equal(actions?.contributions.length, 2);
+      const original = actions?.contributions.find(({ metadata }) =>
+        metadata["Carry-Fix"].includes("lastcode#actions"),
+      );
+      assert.equal(original?.sourceCommit, bootstrap.partition);
+      assert.equal(
+        original?.metadata["Carry-Observation"][0],
+        "recovery keeps the resolved action state",
+      );
+      assert.equal(original?.metadata["Carry-Supersedes"][0], "lastcode#older-actions");
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(repo, "second-generation.txt"), "utf8"),
+        "compiled bootstrap remains attributable\n",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("keeps globally enabled rerere out of carry replay while retaining explicit conflict recovery", () => {
     const { repo, cleanup } = initRepo();
     try {
