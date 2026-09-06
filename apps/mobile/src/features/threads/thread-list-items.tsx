@@ -6,9 +6,10 @@ import type {
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import type { MenuAction } from "@react-native-menu/menu";
+import * as Cause from "effect/Cause";
 import { SymbolView } from "../../components/AppSymbol";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
-import { Pressable, useWindowDimensions, View } from "react-native";
+import { Alert, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import Svg, { Circle, Path } from "react-native-svg";
@@ -23,11 +24,14 @@ import { relativeTime } from "../../lib/time";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { terminalEnvironment } from "../../state/terminal";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr, type ThreadPrPresentation } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
-import { resolveThreadStatus } from "./threadPresentation";
+import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -452,12 +456,23 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const { thread, onSelectThread, onArchiveThread, onDeleteThread, onRegenerateThreadTitle } =
     props;
+  const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread, props.projectCwd);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
-  const threadAccessibilityLabel = pr ? `${thread.title}, ${pr.accessibilityLabel}` : thread.title;
+  const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status?.kind ?? null);
+  const threadAccessibilityLabel = [
+    thread.title,
+    showActionWaitingIndicator && runningAction
+      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
+      : null,
+    pr?.accessibilityLabel ?? null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(", ");
   const subtitleParts = [props.environmentLabel, thread.branch].filter((part): part is string =>
     Boolean(part),
   );
@@ -481,6 +496,20 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
+  const handleCancelAction = useCallback(async () => {
+    if (runningAction === null) return;
+    const result = await closeTerminal({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id, terminalId: runningAction.terminalId },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not cancel Action",
+        error instanceof Error ? error.message : "The Project Action could not be cancelled.",
+      );
+    }
+  }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
   const menuActions = useMemo<MenuAction[]>(
     () => [
       THREAD_ROW_MENU_ACTIONS[0]!,
@@ -488,9 +517,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
+      ...(runningAction === null
+        ? []
+        : [
+            {
+              id: "cancel-action",
+              title: `Cancel ${runningAction.actionName}`,
+              image: "stop.fill",
+              attributes: { destructive: true },
+            } satisfies MenuAction,
+          ]),
       THREAD_ROW_MENU_ACTIONS[1]!,
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [props.titleRegenerationSupported, runningAction, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
     () => ({
@@ -505,9 +544,10 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
+      if (nativeEvent.event === "cancel-action") void handleCancelAction();
       if (nativeEvent.event === "delete") handleDelete();
     },
-    [handleArchive, handleDelete, handleRegenerateTitle],
+    [handleArchive, handleCancelAction, handleDelete, handleRegenerateTitle],
   );
 
   const statusPill = effectiveStatus ? (
@@ -517,6 +557,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       </Text>
     </View>
   ) : null;
+  const actionStatusIndicator =
+    showActionWaitingIndicator && runningAction ? (
+      <View
+        accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
+        className="size-3 items-center justify-center"
+      >
+        <View className="size-1.5 rounded-full bg-adaptive-yellow-500-300" />
+      </View>
+    ) : null;
 
   const subtitleRow =
     subtitleParts.length > 0 || pr !== null ? (
@@ -588,6 +637,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
                 {thread.title}
               </Text>
               <View className="flex-row items-center gap-2">
+                {actionStatusIndicator}
                 {statusPill}
                 <Text className="text-base tabular-nums text-foreground-tertiary">{timestamp}</Text>
                 <SymbolView
@@ -647,6 +697,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               {thread.title}
             </Text>
             <View className="flex-row items-center gap-2">
+              {actionStatusIndicator}
               {statusPill}
               <Text
                 className={cn(

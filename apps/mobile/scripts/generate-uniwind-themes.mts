@@ -73,6 +73,10 @@ const ADAPTIVE_COLORS = {
     color("black", undefined, 0.15),
     color("black", undefined, 0.35),
   ],
+  "--color-adaptive-black-a10-white-a10": [
+    color("black", undefined, 0.1),
+    color("white", undefined, 0.1),
+  ],
   "--color-adaptive-emerald-500-a12-a16": [
     color("emerald", 500, 0.12),
     color("emerald", 500, 0.16),
@@ -132,6 +136,18 @@ const ADAPTIVE_COLORS = {
   "--color-adaptive-violet-600-400": [color("violet", 600), color("violet", 400)],
   "--color-adaptive-violet-700-300": [color("violet", 700), color("violet", 300)],
   "--color-adaptive-white-neutral-950-a70": [color("white"), color("neutral", 950, 0.7)],
+  "--color-adaptive-yellow-400-a35-300-a20": [
+    color("yellow", 400, 0.35),
+    color("yellow", 300, 0.2),
+  ],
+  "--color-adaptive-yellow-500-a12-a16": [color("yellow", 500, 0.12), color("yellow", 500, 0.16)],
+  "--color-adaptive-yellow-500-300": [color("yellow", 500), color("yellow", 300)],
+  "--color-adaptive-yellow-700-300": [color("yellow", 700), color("yellow", 300)],
+  "--color-adaptive-yellow-800-200": [color("yellow", 800), color("yellow", 200)],
+  "--color-adaptive-yellow-800-a75-200-a70": [
+    color("yellow", 800, 0.75),
+    color("yellow", 200, 0.7),
+  ],
   "--color-adaptive-zinc-500-a12-a16": [color("zinc", 500, 0.12), color("zinc", 500, 0.16)],
   "--color-adaptive-zinc-500-400": [color("zinc", 500), color("zinc", 400)],
   "--color-adaptive-zinc-600-300": [color("zinc", 600), color("zinc", 300)],
