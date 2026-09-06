@@ -1329,6 +1329,28 @@ it.layer(
     );
   }
 
+  it.effect("flushes pending terminal output before reading persisted history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData("fresh output\n");
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "output" && event.data === "fresh output\n"),
+        ),
+      );
+
+      assert.equal(
+        yield* manager.history({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID }),
+        "fresh output\n",
+      );
+    }),
+  );
+
   it.effect("strips replay-unsafe terminal query and reply sequences from persisted history", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
@@ -1340,6 +1362,7 @@ it.layer(
       process.emitData("prompt ");
       process.emitData("\u001b[32mok\u001b[0m ");
       process.emitData("\u001b]11;rgb:ffff/ffff/ffff\u0007");
+      process.emitData("\u001b]777;T3ActionEvent;run-1;token;payload\u0007");
       process.emitData("\u001b[1;1R");
       process.emitData("done\n");
 
@@ -1617,12 +1640,23 @@ it.layer(
       yield* manager.open(openInput({ terminalId: "default" }));
       yield* manager.open(openInput({ terminalId: "sidecar" }));
 
+      yield* manager.close({
+        threadId: "thread-1",
+        terminalId: "default",
+        deleteHistory: true,
+      });
       yield* manager.close({ threadId: "thread-1" });
 
       const closedEvents = (yield* getEvents).filter(
         (event): event is Extract<TerminalEvent, { type: "closed" }> => event.type === "closed",
       );
       expect(closedEvents.map((event) => event.terminalId).sort()).toEqual(["default", "sidecar"]);
+      expect(closedEvents.find((event) => event.terminalId === "default")?.deleteHistory).toBe(
+        true,
+      );
+      expect(closedEvents.find((event) => event.terminalId === "sidecar")?.deleteHistory).toBe(
+        false,
+      );
     }),
   );
 
@@ -1733,7 +1767,7 @@ it.layer(
         },
       }).pipe(Effect.provide(withHostPlatform("win32")));
 
-      yield* manager.open(openInput());
+      const snapshot = yield* manager.open(openInput());
 
       expect(ptyAdapter.spawnInputs[0]).toEqual(
         expect.objectContaining({
@@ -1741,6 +1775,33 @@ it.layer(
           args: ["-NoLogo"],
         }),
       );
+      expect(snapshot.shellFamily).toBe("powershell");
+    }),
+  );
+
+  it.effect("reports cmd when Windows shell fallback reaches ComSpec", () =>
+    Effect.gen(function* () {
+      const ptyAdapter = new FakePtyAdapter();
+      const { manager } = yield* createManager(5, {
+        ptyAdapter,
+        shellResolver: () => "C:\\missing\\custom-shell.exe",
+        env: {
+          ComSpec: "C:\\Windows\\System32\\cmd.exe",
+          PATH: "C:\\Windows\\System32",
+          SystemRoot: "C:\\Windows",
+        },
+      }).pipe(Effect.provide(withHostPlatform("win32")));
+      ptyAdapter.spawnFailures.push(
+        new Error("spawn custom-shell.exe ENOENT"),
+        new Error("spawn pwsh.exe ENOENT"),
+        new Error("spawn built-in powershell.exe ENOENT"),
+        new Error("spawn powershell.exe ENOENT"),
+      );
+
+      const snapshot = yield* manager.open(openInput());
+
+      expect(ptyAdapter.spawnInputs.at(-1)?.shell).toBe("C:\\Windows\\System32\\cmd.exe");
+      expect(snapshot.shellFamily).toBe("cmd");
     }),
   );
 

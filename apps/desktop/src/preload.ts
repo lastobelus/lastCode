@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstraps"]>;
   },
+  reportRunningActionCount: (count) =>
+    ipcRenderer.invoke(IpcChannels.REPORT_RUNNING_ACTION_COUNT_CHANNEL, count),
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
@@ -131,10 +133,15 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   onQuitShortcut: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, hint: unknown) => {
+    const wrappedListener = (
+      _event: Electron.IpcRendererEvent,
+      hint: unknown,
+      runningActionCount: unknown,
+    ) => {
       if (typeof hint !== "object" || hint === null || !("state" in hint)) return;
+      const actionCount = typeof runningActionCount === "number" ? runningActionCount : 0;
       if (hint.state === "up") {
-        listener({ state: "up" });
+        listener({ state: "up" }, actionCount);
         return;
       }
       if (
@@ -142,7 +149,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         "mode" in hint &&
         (hint.mode === "hold" || hint.mode === "double-click")
       ) {
-        listener({ state: "down", mode: hint.mode });
+        listener({ state: "down", mode: hint.mode }, actionCount);
       }
     };
 
