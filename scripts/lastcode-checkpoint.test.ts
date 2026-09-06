@@ -34,6 +34,7 @@ import {
   recoverySupersessionMode,
   supersededRecoveryNightly,
   unpublishedCheckpointTags,
+  unexpectedHistoricalCheckpointChanges,
   upstreamMainMirrorPushArgs,
   validateHistoricalBootstrapSource,
   worktreeAddArgs,
@@ -697,6 +698,107 @@ it("accepts cross-base bootstrap provenance only from the exact annotated instal
         repoRoot: directory,
       }),
     ).toThrow("resolves to");
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps a historical repair in a separate hunk of a source-touched file", () => {
+  const directory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-historical-hunks-"),
+  );
+  const git = (args: ReadonlyArray<string>, input?: string): string =>
+    NodeChildProcess.execFileSync("git", args, {
+      cwd: directory,
+      encoding: "utf8",
+      ...(input === undefined ? {} : { input }),
+    }).trim();
+  const commit = (message: string): string => {
+    git(["add", "--all"]);
+    git(["commit", "--quiet", "--message", message]);
+    return git(["rev-parse", "HEAD"]);
+  };
+  try {
+    git(["init", "--quiet", "--initial-branch=main"]);
+    git(["config", "user.email", "checkpoint@example.com"]);
+    git(["config", "user.name", "Checkpoint Test"]);
+    const sharedPath = NodePath.join(directory, "shared.txt");
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=base\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    commit("base");
+
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    const representedSource = commit("represented source");
+
+    git(["checkout", "--quiet", "-B", "historical", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=historical\n",
+    );
+    const historicalCommit = commit("historical repair");
+
+    git(["checkout", "--quiet", "-B", "current", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=current\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=base\n",
+    );
+    const currentSource = commit("current source change");
+    const expectedTree = git([
+      "merge-tree",
+      "--write-tree",
+      "--no-messages",
+      `--merge-base=${representedSource}`,
+      historicalCommit,
+      currentSource,
+    ]);
+    const candidateCommit = git(
+      ["commit-tree", expectedTree, "-p", currentSource, "-F", "-"],
+      "candidate preserving both hunks\n",
+    );
+
+    assert.deepStrictEqual(
+      unexpectedHistoricalCheckpointChanges({
+        repoRoot: directory,
+        historicalCommit,
+        candidateCommit,
+        representedSource,
+        currentSource,
+      }),
+      [],
+    );
+    assert.deepStrictEqual(
+      unexpectedHistoricalCheckpointChanges({
+        repoRoot: directory,
+        historicalCommit,
+        candidateCommit: currentSource,
+        representedSource,
+        currentSource,
+      }),
+      ["shared.txt"],
+    );
+
+    git(["checkout", "--quiet", "-B", "conflicting-source", representedSource]);
+    NodeFS.writeFileSync(
+      sharedPath,
+      "source=represented\ncontext=1\ncontext=2\ncontext=3\ncontext=4\ncontext=5\ncontext=6\nrepair=current\n",
+    );
+    const conflictingSource = commit("conflicting source change");
+    assert.throws(
+      () =>
+        unexpectedHistoricalCheckpointChanges({
+          repoRoot: directory,
+          historicalCommit,
+          candidateCommit: conflictingSource,
+          representedSource,
+          currentSource: conflictingSource,
+        }),
+      /merge-tree/u,
+    );
   } finally {
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }

@@ -1758,28 +1758,24 @@ export function unexpectedHistoricalCheckpointChanges(input: {
       "Historical checkpoint source is not an ancestor of current LastCode main; its preserved resolution paths cannot be verified.",
     );
   }
-  const sourcePaths = new Set(
-    splitNul(
-      git(input.repoRoot, [
-        "diff",
-        "--no-renames",
-        "--name-only",
-        "-z",
-        input.representedSource,
-        input.currentSource,
-      ]),
-    ),
-  );
+  const expectedTree = git(input.repoRoot, [
+    "merge-tree",
+    "--write-tree",
+    "--no-messages",
+    `--merge-base=${input.representedSource}`,
+    input.historicalCommit,
+    input.currentSource,
+  ]);
   return splitNul(
     git(input.repoRoot, [
       "diff",
       "--no-renames",
       "--name-only",
       "-z",
-      input.historicalCommit,
+      expectedTree,
       input.candidateCommit,
     ]),
-  ).filter((path) => !sourcePaths.has(path));
+  );
 }
 
 export function recoveryPublicationArgs(
