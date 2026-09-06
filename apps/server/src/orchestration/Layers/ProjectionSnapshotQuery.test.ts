@@ -1757,6 +1757,32 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.projects.length, 0);
       assert.equal(shellSnapshot.threads.length, 0);
+
+      yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = NULL
+        WHERE project_id = 'project-deleted'
+      `;
+      yield* sql`
+        UPDATE projection_threads
+        SET
+          worktree_path = '/tmp/deleted-project-worktrees/thread-deleted',
+          worktree_cleanup_json = '{"status":"deleting","repositoryRoot":"/tmp/deleted-project","worktreePath":"/tmp/deleted-project-worktrees/thread-deleted","startedAt":"2026-04-05T00:00:05.000Z"}'
+        WHERE thread_id = 'thread-deleted'
+      `;
+
+      const cleanupShellSnapshot = yield* snapshotQuery.getShellSnapshot();
+      assert.equal(cleanupShellSnapshot.projects.length, 1);
+      assert.deepStrictEqual(cleanupShellSnapshot.threads[0]?.worktreeCleanup, {
+        status: "deleting",
+        repositoryRoot: "/tmp/deleted-project",
+        worktreePath: "/tmp/deleted-project-worktrees/thread-deleted",
+        startedAt: "2026-04-05T00:00:05.000Z",
+      });
+      const cleanupDetail = yield* snapshotQuery.getThreadDetailById(
+        ThreadId.make("thread-deleted"),
+      );
+      assert.equal(cleanupDetail._tag, "None");
     }),
   );
 

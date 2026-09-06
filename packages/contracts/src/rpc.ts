@@ -11,6 +11,13 @@ import {
   ProviderSetupError,
   ProviderSetupInput,
 } from "./providerSetup.ts";
+import {
+  UpdateDrainCancelInput,
+  UpdateDrainCommandReceipt,
+  UpdateDrainError,
+  UpdateDrainStartInput,
+  UpdateDrainState,
+} from "./updateDrain.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -332,6 +339,9 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+  serverStartUpdateDrain: "server.startUpdateDrain",
+  serverCancelUpdateDrain: "server.cancelUpdateDrain",
+  serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -614,6 +624,24 @@ export const WsServerGetBackgroundPolicyRpc = Rpc.make(WS_METHODS.serverGetBackg
   payload: Schema.Struct({}),
   success: BackgroundPolicySnapshot,
   error: EnvironmentAuthorizationError,
+});
+
+export const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
+  payload: UpdateDrainStartInput,
+  success: UpdateDrainCommandReceipt,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
+  payload: UpdateDrainCancelInput,
+  success: UpdateDrainCommandReceipt,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
+  payload: Schema.Struct({}),
+  success: UpdateDrainState,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
 const PullRequestRpcError = Schema.Union([
@@ -1236,6 +1264,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
+  WsServerStartUpdateDrainRpc,
+  WsServerCancelUpdateDrainRpc,
+  WsServerGetUpdateDrainStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,

@@ -135,6 +135,7 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -604,6 +605,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
+      const updateDrain = yield* UpdateDrain.UpdateDrain;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -758,7 +760,6 @@ const makeWsRpcLayer = (
                 projectId: ProjectId.make(event.aggregateId),
               }),
             );
-          case "thread.deleted":
           case "thread.archived":
             return Effect.succeed(
               Option.some({
@@ -767,6 +768,8 @@ const makeWsRpcLayer = (
                 threadId: ThreadId.make(event.aggregateId),
               }),
             );
+          case "thread.deleted":
+            return threadUpsertOrRemove(event.payload.threadId, event.sequence);
           case "thread.unarchived":
             return threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence);
           default:
@@ -2063,6 +2066,34 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverGetBackgroundPolicy]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetBackgroundPolicy, backgroundPolicy.snapshot, {
             "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverStartUpdateDrain]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverStartUpdateDrain,
+            Effect.flatMap(nowIso, (createdAt) =>
+              updateDrain.dispatch({
+                type: "update-drain.start",
+                ...input,
+                createdAt,
+              }),
+            ),
+            { "rpc.aggregate": "update-drain" },
+          ),
+        [WS_METHODS.serverCancelUpdateDrain]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverCancelUpdateDrain,
+            Effect.flatMap(nowIso, (createdAt) =>
+              updateDrain.dispatch({
+                type: "update-drain.cancel",
+                ...input,
+                createdAt,
+              }),
+            ),
+            { "rpc.aggregate": "update-drain" },
+          ),
+        [WS_METHODS.serverGetUpdateDrainStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverGetUpdateDrainStatus, updateDrain.status, {
+            "rpc.aggregate": "update-drain",
           }),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.cloudGetRelayClientStatus, relayClient.resolve, {

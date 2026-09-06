@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "order": ["upstream-bugfixes", "tooling", "resumable-actions", "legacy-sidebar", "incubator"],
+  "groups": {
+    "upstream-bugfixes": {
+      "pullRequests": [18, 24, 31, 45, 48, 56, 69, 74, 82, 102, 112],
+      "upstreamPullRequests": {
+        "18": ["https://github.com/pingdotgg/t3code/pull/7253"],
+        "24": ["https://github.com/pingdotgg/t3code/pull/7120"],
+        "31": ["https://github.com/pingdotgg/t3code/pull/7282"],
+        "45": ["https://github.com/pingdotgg/t3code/pull/7282"],
+        "48": [
+          "https://github.com/pingdotgg/t3code/pull/7468",
+          "https://github.com/pingdotgg/t3code/pull/7848"
+        ],
+        "56": ["https://github.com/pingdotgg/t3code/pull/7874"],
+        "69": [
+          "https://github.com/pingdotgg/t3code/pull/7468",
+          "https://github.com/pingdotgg/t3code/pull/7848",
+          "https://github.com/pingdotgg/t3code/pull/7937"
+        ],
+        "74": ["https://github.com/pingdotgg/t3code/pull/3902"],
+        "82": ["https://github.com/pingdotgg/t3code/pull/8132"],
+        "102": ["https://github.com/pingdotgg/t3code/pull/8338"],
+        "112": ["https://github.com/pingdotgg/t3code/pull/7961"]
+      }
+    },
+    "tooling": {
+      "pullRequests": [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 22, 25, 26, 27, 30, 37, 41, 46, 47, 49, 51,
+        53, 55, 57, 58, 60, 62, 64, 65, 67, 70, 76, 77, 80, 81, 83, 84, 89, 90, 94, 107, 109, 114,
+        115, 116, 118, 119, 139, 142, 149, 166, 171
+      ],
+      "subjects": [
+        "document fork evaluation conventions",
+        "Add LastCode nightly sync and local release tooling",
+        "Add LastCode plan and PR review skills",
+        "feat(lastcode): share local build progress model",
+        "fix(lastcode): secure build progress assets",
+        "test(lastcode): keep progress model typecheck-safe",
+        "fix(lastcode): deduplicate reconciled contract import"
+      ]
+    },
+    "resumable-actions": {
+      "pullRequests": [28, 29, 34, 36, 71, 88, 92, 97, 98, 104, 106, 110, 111, 117, 143]
+    },
+    "legacy-sidebar": {
+      "pullRequests": [23, 32, 35, 40, 42, 43, 44, 75, 91, 96, 99, 100, 113]
+    },
+    "incubator": {
+      "default": true
+    }
+  }
+}

@@ -124,6 +124,8 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -135,6 +137,7 @@ import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import { forkParked, ServerActivation } from "./serverActivation.ts";
+import * as ServerOwnerLease from "./serverOwnerLease.ts";
 
 // MCP handoff thread IDs include escaped provenance and can exceed find-my-way's
 // 100-character default for one path segment.
@@ -298,6 +301,12 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
 
+const UpdateDrainLayerLive = UpdateDrain.layer.pipe(
+  Layer.provide(UpdateDrainRepositoryLive),
+  Layer.provide(PersistenceLayerLive),
+);
+const PersistenceAndUpdateDrainLayerLive = Layer.merge(PersistenceLayerLive, UpdateDrainLayerLive);
+
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
 );
@@ -459,7 +468,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
-  Layer.provideMerge(PersistenceLayerLive),
+  Layer.provideMerge(PersistenceAndUpdateDrainLayerLive),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
   Layer.provideMerge(
@@ -560,6 +569,10 @@ export const makeRoutesLayer = Layer.mergeAll(
 export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    yield* Effect.acquireRelease(
+      ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+      (lease) => lease.release,
+    );
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const activationLayer = Layer.succeed(ServerActivation, awaitActivation);
