@@ -109,6 +109,15 @@ rebase. If publication succeeds but promotion fails, a later run recognizes the
 published checkpoint as belonging to the unchanged source commit and retries
 promotion instead of treating the older main branch as current.
 
+That source snapshot is stored as `Source-Commit` in every annotated checkpoint
+and revision tag. Besides making publication idempotent, it lets the packaged
+desktop updater distinguish new LastCode commits from patches replayed with new
+SHAs during later checkpoint rebases. The updater walks adjacent immutable
+installable tags, using either the previous installable commit or its recorded
+source commit as the ancestry boundary. If the metadata or ancestry cannot
+establish a safe boundary, LastCode changes are reported as unavailable rather
+than inferred from commit titles.
+
 When a LastCode PR merges after a newer checkpoint was created while PR
 promotion was paused, the daemon replays only the newly merged commits onto that
 checkpoint. It publishes the result as the next immutable
@@ -155,6 +164,15 @@ This remains a shadow losslessness gate, not the active checkpoint implementatio
 claim that intermediate groups build independently, run product validation against them, publish
 the generated commits, create refs or tags for them, alter promotion, or change what the desktop
 updater or operator installs. Those are later rollout gates.
+
+### Local updater inspection protocol
+
+The dependency-free local-update helper keeps its unflagged inspect response in
+the original flat format so an already-installed app can discover and build a
+newer repository checkout. A desktop build that supports grouped notes requests
+`--release-notes-format grouped-v1`. That negotiated response carries separate
+LastCode provenance state and bounded, consecutive upstream-nightly groups. The
+build command and artifact protocol remain unchanged.
 
 ### Failure recovery
 
@@ -400,3 +418,114 @@ installations.
 
 The launch agent is opt-in. Repository installation and tests never register it.
 
+## Selecting a Build
+
+For routine use, install the userland build command beside the checkpoint
+dashboard:
+
+```bash
+pnpm run lastcode:build -- --install
+pnpm run lastcode:install -- --install
+```
+
+The installer places the versioned command under `~/.lastcode/bin` and exposes
+it through the dotfiles-managed `~/.local/bin` PATH. With no selector, it builds
+the newest local checkpoint or revision. The final nightly sequence number is
+accepted as shorthand and selects the newest revision of that checkpoint:
+
+```bash
+lastcode-build
+lastcode-build 1090
+lastcode-build --checkpoint 1090
+```
+
+`1090` is a **checkpoint selector**: it resolves to the newest immutable
+checkpoint or revision for nightly sequence `1090`. A full version, checkpoint
+tag, or revision tag is also accepted. The command uses the same dedicated worktree,
+full local CI, immutable artifact directory, and DMG/ZIP builder as the in-app
+local updater. During a build it shows the latest log line above a stage-weighted
+estimated progress bar; the complete output remains in
+`~/.lastcode/local-updates/build.log`. Completed builds are reused. Manual and
+in-app builds share the same marker and weight model: the sidebar coalesces
+updates into a concise phase and forward-only `% est.`, while the command keeps
+its terminal presentation. They also share a cross-process lock for the complete
+checkout, CI, packaging, and artifact-validation sequence; an overlapping
+request exits without touching the shared worktree.
+
+Remove the optional userland commands with their reverse operations:
+
+```bash
+lastcode-build --uninstall
+lastcode-install --uninstall
+```
+
+Uninstall removes only each command's managed launcher, copied module, helper,
+and matching PATH symlink. It preserves shared checkpoint configuration, build
+artifacts, and any foreign file or symlink.
+
+Use `lastcode-install` to install one of those retained DMGs. It presents every
+DMG under `~/.lastcode/local-updates/artifacts` in an `fzf` picker, ordered with
+the newest build selected. After selection it validates and mounts the image,
+stages the app beside `/Applications/LastCode.app`, asks a running LastCode to
+quit, safely replaces it, detaches the image, and relaunches LastCode. The old
+app remains in place until the replacement has been completely copied and is
+restored if the final swap fails. The normal path does not invoke `sudo` or
+request a password.
+
+```bash
+lastcode-install
+lastcode-install ~/.lastcode/local-updates/artifacts/.../LastCode-...-arm64.dmg
+```
+
+For lower-level or diagnostic use, check out the desired installable tag, run
+full checkpoint CI, then build that same tag. Replace the checkpoint tag below
+with a `lastcode/revision/...` tag when building a LastCode-only revision:
+
+```bash
+git switch --detach lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+pnpm run lastcode:build:mac:arm64 -- \
+  --checkpoint lastcode/checkpoint/v0.0.34-nightly.20260812.1072
+```
+
+The build refuses a dirty worktree, a mismatched HEAD, a missing checkpoint CI
+stamp, or an existing output directory. Fetching a newer upstream tag cannot
+change the selected version.
+
+Output is grouped by upstream nightly and LastCode commit:
+
+```text
+release-lastcode/
+  v0.0.34-nightly.20260812.1072/
+    <lastcode-short-sha>/
+      LastCode-0.0.34-nightly.20260812.1072-arm64.dmg
+      LastCode-0.0.34-nightly.20260812.1072-arm64.zip
+      build-manifest.json
+      SHA256SUMS
+```
+
+`build-manifest.json` records the selected checkpoint or revision tag, upstream tag and commit,
+LastCode commit, build tag, build time, platform, architecture, artifact sizes,
+and SHA-256 hashes. `SHA256SUMS` provides a conventional verification file.
+
+The build creates a local annotated `lastcode/build/...` tag. Pass `--push-tag`
+only when that build record should be published to the fork.
+
+## GitHub Rules
+
+Configure the fork so that:
+
+- immutable releases are enabled under repository **Settings → Releases**;
+- checkpoint, revision, and build tags cannot be modified or deleted;
+- only the owner or automation identity can force-push `lastcode/main`;
+- ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
+- GitHub Actions are enabled for the manually dispatched
+  [LastCode Intel artifact workflow](release.md#intel-build-publication) and the
+  pull-request CI workflow. During the hosted-CI proof stage, guarded merge still
+  requires the exact local Full CI stamp; the hosted run is observed and measured
+  before it replaces that local PR authority.
+
+Branch protection must permit the intentional force-with-lease promotion model.
+If GitHub cannot express that narrowly enough for a personal repository, rely on
+repository ownership plus the checkpoint command's lease check rather than a
+rule that makes promotion impossible.
