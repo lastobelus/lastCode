@@ -156,7 +156,9 @@ it("reconstructs renames without retaining the source path", () => {
       `Carry set rename test\n\nUpstream-Commit: ${base}\nLastCode-Commit: ${source}`,
     ]);
 
-    const result = runCarrySetShadowCheck(repo, tag);
+    const manifestPath = NodePath.join(repo, "manifest.json");
+    NodeFS.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const result = runCarrySetShadowCheck(repo, tag, manifestPath);
     assert.equal(result.tree, git(repo, ["rev-parse", `${source}^{tree}`]));
   } finally {
     NodeFS.rmSync(repo, { recursive: true, force: true });
