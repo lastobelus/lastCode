@@ -2446,13 +2446,22 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       });
       const worktree = carryWorktreePrepared ? resolveAutomationWorktree(repoRoot) : undefined;
       let recoveryFingerprint: string | undefined;
+      let recoveryBranch = disposition.recoveryBranch;
       if (disposition.cleanup && worktree && carryBranch) {
-        run(repoRoot, "git", ["worktree", "remove", worktree]);
-        git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
-        carryWorktreePrepared = false;
-      } else if (disposition.recoveryBranch && worktree) {
         try {
-          recoveryFingerprint = checkpointRecoveryFingerprint(worktree, disposition.recoveryBranch);
+          run(repoRoot, "git", ["worktree", "remove", worktree]);
+          git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
+          carryWorktreePrepared = false;
+        } catch (cleanupError) {
+          recoveryBranch = carryBranch;
+          console.warn(
+            `[lastcode:checkpoint] Could not clean failed carry bootstrap; ${carryBranch} may be retained at ${worktree}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+        }
+      }
+      if (recoveryBranch && worktree && NodeFS.existsSync(worktree)) {
+        try {
+          recoveryFingerprint = checkpointRecoveryFingerprint(worktree, recoveryBranch);
         } catch (fingerprintError) {
           console.warn(
             `[lastcode:checkpoint] Could not fingerprint retained carry bootstrap: ${fingerprintError instanceof Error ? fingerprintError.message : String(fingerprintError)}`,
@@ -2467,7 +2476,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             error,
             failurePhase: bootstrapFailurePhase,
             ...(!tagDeleted ? { localTagRetained: true } : {}),
-            ...(disposition.recoveryBranch ? { recoveryBranch: disposition.recoveryBranch } : {}),
+            ...(recoveryBranch ? { recoveryBranch } : {}),
             ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
             startedAtMs,
             upstreamTag: plan.baseNightly.tag,
@@ -2478,14 +2487,14 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           finishedAtMs,
         ),
       );
-      if (disposition.recoveryBranch) {
+      if (recoveryBranch) {
         notify(
           hostPlatform,
           "LastCode carry bootstrap needs attention",
-          `${disposition.recoveryBranch} is retained at ${worktree}.`,
+          `${recoveryBranch} is retained at ${worktree}.`,
         );
         console.error(
-          `[lastcode:checkpoint] Recovery branch ${disposition.recoveryBranch} is retained at ${worktree}.`,
+          `[lastcode:checkpoint] Recovery branch ${recoveryBranch} is retained at ${worktree}.`,
         );
       }
       throw error;

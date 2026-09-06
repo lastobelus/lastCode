@@ -357,6 +357,31 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(buildGroup?.contributions.at(-1)?.sourceCommit, sourceHead);
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainWithPr);
 
+      const rollbackReason = "verify same-source historical rollback";
+      const rollback = checkpoint(fixture, [
+        "--push-tags",
+        "--replay-mode",
+        "historical",
+        "--rollback-reason",
+        rollbackReason,
+      ]);
+      assert.equal(rollback.status, 0, rollback.stderr || rollback.stdout);
+      const historicalRevision = `lastcode/revision/${NIGHTLY_C}.2`;
+      const historicalRevisionMessage = git(repo, [
+        "for-each-ref",
+        `refs/tags/${historicalRevision}`,
+        "--format=%(contents)",
+      ]);
+      assert.match(historicalRevisionMessage, /^Replay-Mode: historical$/mu);
+      assert.match(
+        historicalRevisionMessage,
+        /^Rollback-Reason: verify same-source historical rollback$/mu,
+      );
+      assert.equal(
+        remoteCommit(fixture.origin, `refs/tags/${historicalRevision}`),
+        git(repo, ["rev-parse", `${historicalRevision}^{commit}`]),
+      );
+
       checkout(repo, "upstream-main", upstreamC);
       write(repo, "lifecycle-conflict.txt", "upstream build behavior\n");
       const upstreamD = commit(repo, "upstream D conflicts with downstream build behavior");
@@ -587,6 +612,42 @@ describe("checkpoint carry lifecycle", () => {
 
       assert.equal(remoteMissing(freshRepo, activationRef), true);
       assert.equal(remoteMissing(freshRepo, bootstrapRef), true);
+
+      const bootstrapRetained = recoveryWorktree(freshRepo);
+      const hooks = NodePath.join(fixture.root, "hooks");
+      NodeFS.mkdirSync(hooks);
+      NodeFS.writeFileSync(
+        NodePath.join(hooks, "pre-push"),
+        `#!/bin/sh\necho cleanup-blocker >> ${JSON.stringify(NodePath.join(bootstrapRetained, "remote-only-bootstrap.txt"))}\necho fixture publication failure >&2\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      git(freshRepo, ["config", "core.hooksPath", hooks]);
+      const failedBootstrap = checkpoint(freshFixture, ["--push-tags", "--no-smoke"]);
+      assert.notEqual(failedBootstrap.status, 0);
+      assert.match(failedBootstrap.stderr, /fixture publication failure/u);
+      assert.match(failedBootstrap.stderr, /Could not clean failed carry bootstrap/u);
+      assert.equal(NodeFS.existsSync(bootstrapRetained), true);
+      const failedRun = JSON.parse(
+        NodeFS.readFileSync(
+          NodePath.join(fixture.home, ".lastcode", "automation", "checkpoint-runs.jsonl"),
+          "utf8",
+        )
+          .trim()
+          .split(/\r?\n/u)
+          .at(-1) ?? "{}",
+      ) as Record<string, unknown>;
+      assert.match(String(failedRun.error), /git push .* failed with exit code/u);
+      assert.equal(failedRun.recoveryBranch, `sync/nightly/${NIGHTLY_A}`);
+      assert.equal(typeof failedRun.recoveryFingerprint, "string");
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_A}`),
+        true,
+      );
+
+      git(freshRepo, ["config", "core.hooksPath", "/dev/null"]);
+      git(freshRepo, ["worktree", "remove", "--force", bootstrapRetained]);
+      git(freshRepo, ["update-ref", "-d", `refs/heads/sync/nightly/${NIGHTLY_A}`]);
+
       const result = checkpoint(freshFixture, ["--no-smoke"]);
       assert.equal(result.status, 0, result.stderr || result.stdout);
       assert.equal(git(freshRepo, ["rev-parse", `${activationRef}^{commit}`]), activationHead);
