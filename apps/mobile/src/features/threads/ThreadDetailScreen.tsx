@@ -78,6 +78,7 @@ import { PendingApprovalCard } from "./PendingApprovalCard";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import { ActionResumeNotice } from "./ActionResumeNotice";
 import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
@@ -871,6 +872,19 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       report={usageLimitsReport}
                       environmentId={props.environmentId}
                       onClose={dismissUsageLimits}
+                    />
+                  </Animated.View>
+                ) : null}
+                {props.selectedThread.actionResume?.outcome === "running" ||
+                props.selectedThread.actionResume?.delivery === "available" ? (
+                  <Animated.View
+                    className="shrink-0 px-4 pb-3"
+                    entering={FadeInDown.duration(220)}
+                    exiting={FadeOut.duration(140)}
+                  >
+                    <ActionResumeNotice
+                      environmentId={props.environmentId}
+                      thread={props.selectedThread}
                     />
                   </Animated.View>
                 ) : null}
