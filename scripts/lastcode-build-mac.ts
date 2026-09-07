@@ -6,6 +6,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { validateInstallableMigrations } from "./lastcode-migration-validation.ts";
 import { assertCheckpointCiStamp, assertCleanWorktree } from "./lastcode-local-ci.ts";
 import {
   buildTagFromInstallableTag,
@@ -168,6 +169,20 @@ function main(argv: ReadonlyArray<string>): void {
   const upstreamCommit = git(repoRoot, ["rev-parse", `${nightlyTag}^{commit}`]);
   const commonGitDir = git(repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   assertCheckpointCiStamp(commonGitDir, checkpointCommit, options.checkpointTag, upstreamCommit);
+
+  const tagMessage = git(repoRoot, [
+    "for-each-ref",
+    `refs/tags/${options.checkpointTag}`,
+    "--format=%(contents)",
+  ]);
+  const representedSource = /^Source-Commit: (.+)$/m.exec(tagMessage)?.[1];
+  validateInstallableMigrations({
+    repoRoot,
+    candidateRef: checkpointCommit,
+    upstreamRef: upstreamCommit,
+    installableTag: options.checkpointTag,
+    ...(representedSource ? { sourceRef: representedSource } : {}),
+  });
 
   const shortCommit = git(repoRoot, ["rev-parse", "--short=10", commit]);
   const outputDir = NodePath.resolve(

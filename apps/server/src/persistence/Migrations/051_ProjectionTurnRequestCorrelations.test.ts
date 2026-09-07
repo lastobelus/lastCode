@@ -6,6 +6,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionTurnRequestCorrelationRepositoryLive } from "../Layers/ProjectionTurnRequestCorrelations.ts";
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ProjectionTurnRequestCorrelationRepository } from "../Services/ProjectionTurnRequestCorrelations.ts";
 
@@ -19,6 +20,7 @@ layer("051_ProjectionTurnRequestCorrelations", (it) => {
   it.effect("inserts once, resolves once, and deletes by owning thread", () =>
     Effect.gen(function* () {
       yield* runMigrations();
+      yield* runLastCodeMigrations();
       const repository = yield* ProjectionTurnRequestCorrelationRepository;
       const sql = yield* SqlClient.SqlClient;
       const key = { threadId: ThreadId.make("thread-1"), messageId: MessageId.make("message-1") };

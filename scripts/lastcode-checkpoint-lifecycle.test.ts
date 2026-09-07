@@ -35,6 +35,8 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-carry-set.ts",
   "scripts/lastcode-checkpoint-history.ts",
   "scripts/lastcode-checkpoint.ts",
+  "scripts/lastcode-migration-history.ts",
+  "scripts/lastcode-migration-validation.ts",
   "scripts/lastcode-lock.mjs",
   "scripts/lastcode-main-write-lock.ts",
   "scripts/lastcode-build-mac.ts",
@@ -75,7 +77,11 @@ function commitTree(repo: string, tree: string, parent: string, message: string)
 
 function fakeVp(path: string): void {
   NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
-  NodeFS.writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  NodeFS.writeFileSync(
+    path,
+    '#!/bin/sh\nif [ "$1" = install ]; then mkdir -p node_modules/.bin; if [ ! -f node_modules/.bin/vp ]; then cp "$0" node_modules/.bin/vp; fi; fi\nexit 0\n',
+    { mode: 0o755 },
+  );
 }
 
 function installFixtureRuntime(fixture: Fixture): void {
@@ -105,6 +111,30 @@ function initFixture(): Fixture {
     NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
     NodeFS.copyFileSync(NodePath.join(taskRoot, path), target);
   }
+  const persistence = "apps/server/src/persistence";
+  write(
+    repo,
+    `${persistence}/Migrations.ts`,
+    'import initial from "./Migrations/001_Initial.ts";\nexport const migrationEntries = [[1, "Initial", initial]] as const;\n',
+  );
+  write(repo, `${persistence}/Migrations/001_Initial.ts`, 'export default "upstream migration";\n');
+  write(
+    repo,
+    `${persistence}/LastCodeMigrations.ts`,
+    'import initial from "./LastCodeMigrations/001_Initial.ts";\nexport const lastcodeMigrationEntries = [[1, "Initial", initial]] as const;\n',
+  );
+  write(
+    repo,
+    `${persistence}/LastCodeMigrations/001_Initial.ts`,
+    'export default "LastCode migration";\n',
+  );
+  write(
+    repo,
+    `${persistence}/LegacyMigrationHistories.ts`,
+    'export const legacyMigrationHistories = [{ source: "fixture-release", entries: [[1, "Initial"]] }] as const;\n',
+  );
+  write(repo, `${persistence}/DatabaseMigrations.ts`, "export {};\n");
+  write(repo, `${persistence}/DatabaseMigrations.test.ts`, "export {};\n");
   git(repo, ["config", "user.name", "Carry lifecycle test"]);
   git(repo, ["config", "user.email", "carry-lifecycle@localhost"]);
   git(repo, ["config", "core.hooksPath", "/dev/null"]);
@@ -194,6 +224,7 @@ function historicalFixture(conflict = false) {
     repo,
     "node_modules/.bin/vp",
     `#!/bin/sh
+if [ "$1" = test ] && [ "$3" = apps/server/src/persistence/DatabaseMigrations.test.ts ] && [ "$FIXTURE_FAIL_MIGRATIONS" = 1 ]; then exit 79; fi
 if [ "$1" = install ] && [ "$FIXTURE_MERGE_PHASE" = smoke ] && [ -n "$FIXTURE_MERGE_COMMIT" ] && [ ! -f "$FIXTURE_MERGE_MARKER" ]; then
   git --git-dir="$FIXTURE_ORIGIN" update-ref refs/heads/lastcode/main "$FIXTURE_MERGE_COMMIT" "$FIXTURE_SOURCE" || exit 1
   touch "$FIXTURE_MERGE_MARKER"
@@ -251,6 +282,34 @@ done
     },
   };
 }
+
+describe("mandatory migration validation", () => {
+  it("does not publish when the candidate migration test fails with smoke disabled", () => {
+    const { fixture, environment } = historicalFixture();
+    try {
+      const result = checkpoint(fixture, ["--push-tags", "--no-smoke"], {
+        ...environment,
+        FIXTURE_FAIL_MIGRATIONS: "1",
+      });
+      assert.notEqual(result.status, 0);
+      assert.include(result.stderr, "DatabaseMigrations.test.ts");
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+        true,
+      );
+      assert.equal(
+        gitResult(fixture.repo, [
+          "rev-parse",
+          "--verify",
+          `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`,
+        ]).status !== 0,
+        true,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("checkpoint publication with open PRs", () => {
   it("publishes ordinary tags during a guarded merge and promotes safely after the merge releases its lock", () => {
