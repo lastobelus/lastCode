@@ -70,7 +70,6 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain(
       'run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"',
     );
-    expect(workflow).toContain("pull_request:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(checkBlock).toContain(
@@ -85,6 +84,21 @@ describe("LastCode GitHub CI workflow", () => {
     expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
+  });
+
+  it("validates topic bases and retargeted PRs without enabling upstream mirror pushes", () => {
+    const triggers = asRecord(asRecord(parse(workflow))?.on);
+    const pullRequest = asRecord(triggers?.pull_request);
+    expect(pullRequest?.branches).toBeUndefined();
+    expect(pullRequest?.["branches-ignore"]).toEqual(["main"]);
+    expect(pullRequest?.types).toEqual([
+      "opened",
+      "synchronize",
+      "reopened",
+      "ready_for_review",
+      "edited",
+    ]);
+    expect(asRecord(triggers?.push)?.branches).toEqual(["lastcode/main"]);
   });
 
   it("rejects nonstandard and dynamic runners without matching comments or mirror files", () => {
