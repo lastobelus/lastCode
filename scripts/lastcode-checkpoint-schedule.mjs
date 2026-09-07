@@ -127,6 +127,7 @@ export function runCheckpointSchedule(options, overrides = {}) {
     runSupervisor: () => {
       const result = NodeChildProcess.spawnSync(process.execPath, [paths.supervisorPath, "run"], {
         cwd: process.cwd(),
+        env: { ...process.env, LASTCODE_CHECKPOINT_SCHEDULER_PID: String(process.pid) },
         stdio: "inherit",
       });
       if (result.error) throw result.error;

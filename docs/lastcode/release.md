@@ -150,7 +150,10 @@ List Actions, launch the eligible returned ID with
 The action observes the active local macOS checkpoint service. It does not start
 a checkpoint, rebuild, recover, install, or restart anything. It captures the
 active process and launch count, waits for it to finish, and reports the terminal
-state whose recorded supervisor PID matches that process. A result written while
+state whose recorded launchd PID matches that process (the scheduler for daily
+runs, or the supervisor for interval runs). Reinstall the managed service when
+updating this observer so its state producer records that identity; older state
+without it is rejected. A result written while
 the supervisor is still delivering notifications is accepted after exit. The
 installed supervisor must include this PID field. A missing active run,
 unavailable service, replaced run, missing matching
