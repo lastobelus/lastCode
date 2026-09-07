@@ -1071,6 +1071,9 @@ function mapCollabAgentEvent(
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(agentPath ? { agentPath } : {}),
+    ...(typeof payload.parentThreadId === "string"
+      ? { parentAgentId: payload.parentThreadId }
+      : {}),
     timelineBypass: true,
   } as const;
 

@@ -43,13 +43,13 @@ describe("projectScriptKeybindings", () => {
     expect(() =>
       decodeProjectScriptKeybindingRule({
         keybinding: "mod+k",
-        command: "script.BAD.run" as KeybindingCommand,
+        command: "script..run" as KeybindingCommand,
       }),
     ).toThrowError(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
   });
 
   it("can edit or delete a legacy script without a shortcut", () => {
-    const command = commandForProjectScript("install-javascript-dependencies");
+    const command = commandForProjectScript(" invalid ");
     expect(keybindingValueForCommand([], command)).toBeNull();
     expect(decodeProjectScriptKeybindingRule({ keybinding: null, command })).toBeNull();
     expect(() => decodeProjectScriptKeybindingRule({ keybinding: "mod+k", command })).toThrowError(
