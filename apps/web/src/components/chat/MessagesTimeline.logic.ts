@@ -361,7 +361,8 @@ export type MessagesTimelineRow =
       kind: "thinking";
       id: string;
       createdAt: string | null;
-    };
+    }
+  | { kind: "waiting"; id: string; createdAt: string };
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -826,6 +827,7 @@ export function deriveMessagesTimelineRows(input: {
   activeTurnStartedAt: string | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
+  waitingStartedAt?: string | null;
 }): MessagesTimelineRow[] {
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
@@ -1207,6 +1209,13 @@ export function deriveMessagesTimelineRows(input: {
       createdAt: input.activeTurnStartedAt,
     });
   }
+  if (!input.isWorking && input.waitingStartedAt) {
+    nextRows.push({
+      kind: "waiting",
+      id: "waiting-indicator-row",
+      createdAt: input.waitingStartedAt,
+    });
+  }
 
   return attachTrailingToolGroupsToAssistant(nextRows);
 }
@@ -1312,6 +1321,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   switch (a.kind) {
     case "working":
     case "thinking":
+      return a.createdAt === (b as typeof a).createdAt;
+    case "waiting":
       return a.createdAt === (b as typeof a).createdAt;
 
     case "assistant-meta": {

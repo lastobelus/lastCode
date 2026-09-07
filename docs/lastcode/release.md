@@ -105,6 +105,14 @@ one stable aggregate `CI Gate`. Head or base drift invalidates the result and
 requires the agent to decide whether to rebase, republish, and request review
 again.
 
+This applies to authorized repair PRs opened during checkpoint or build recovery,
+without a separate request to babysit. After handling existing findings, call
+`list_project_actions`, select the eligible **Wait for PR** action (prefer
+`lc-wait-for-pr`), call `run_project_action_and_resume`, and end the turn.
+Executing `scripts/lastcode-wait-for-pr.ts` directly in a shell keeps the agent
+turn open and defeats the quota-saving handoff. On resume, inspect the result
+and recheck the current revision before continuing.
+
 Merge the current ready PR with:
 
 ```bash
@@ -123,6 +131,68 @@ the already-completed GitHub merge; the managed checkpoint service remains the
 repair path. The request never terminates a daemon run already in progress.
 
 ## Checkpoint CI
+
+### Waiting for the checkpoint service
+
+After an authorized service run has started, use the independent **Wait for
+Checkpoint** Project Action (`lc-wait-for-checkpoint`) to observe its completion.
+List Actions, launch the eligible returned ID with
+`run_project_action_and_resume`, and end the turn immediately. Do not poll
+`launchctl`, processes, dashboard output, or log tails while it runs.
+
+The action observes the active local macOS checkpoint service. It does not start
+a checkpoint, rebuild, recover, install, or restart anything. It captures the
+active process and launch count, waits for it to finish, and reports the terminal
+state whose recorded supervisor PID matches that process. A result written while
+the supervisor is still delivering notifications is accepted after exit. The
+installed supervisor must include this PID field. A missing active run,
+unavailable service, replaced run, missing matching
+result, or one-hour timeout requires attention; an old success is not proof of
+the requested checkpoint. Cancelling the action leaves the service running.
+After resume, inspect the result and use `lastcode-checkpoints --verbose` once
+for the concrete next recovery or verification step.
+
+The importable declaration is in `t3.json`. As with the PR action, the owning
+environment must import it and grant resume permission. Managed installations
+use the `lc-wait-for-checkpoint` trust entry. The command loads from
+`T3CODE_PROJECT_ROOT`, so an older maintenance-thread worktree can use the
+updated observer after the primary checkout is refreshed. If the action is missing or
+disabled, report that setup problem rather than reverting to a sleep loop.
+
+### Resuming a repaired checkpoint
+
+When a retained nightly rebase is complete but validation required additional
+commits, do not delete the worktree and rely on rerere: Git only remembers
+conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
+any downstream merges made since that attempt before selecting its exact head:
+
+```bash
+pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>
+pnpm lastcode:checkpoint:service run-now
+```
+
+`--recovery-source` is the operator's assertion that the repaired tree includes
+that exact LastCode main revision. Inspect the replay and subsequent commits
+before making it; upstream ancestry alone cannot prove this after a rebase.
+Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
+bound to its head, nightly, and current source. The service skips only that
+nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
+immutable tag and promotes main together with an atomic push leased against the
+selected source commit. Open LastCode PRs prevent publication in the service's
+normal promotion mode. Selected recovery cannot disable validation or
+be automatically superseded. A changed head or source requires inspection and
+selection again. Failed validation retains the worktree and selection.
+
+Use **Wait for Checkpoint** immediately after requesting the service run, and
+end the turn. After publication, use **Build Local Package** on the exact new
+installable tag; selection and publication do not install or restart the app.
+Selected recovery processes only its selected nightly. Request another service
+run afterward to continue remaining nightlies from the repaired main branch.
+If publication succeeded but cleanup was interrupted, a retry recognizes the
+matching immutable tag represented on main and finishes cleanup without
+republishing.
+
+### Validating a checkpoint manually
 
 A release build uses a different full-CI context because rebasing intentionally
 rewrites ancestry. Check out the immutable checkpoint or revision and run:
