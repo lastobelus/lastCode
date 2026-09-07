@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
@@ -12,8 +13,9 @@ layer("048_ProjectionThreadAnnotation", (it) => {
   it.effect("adds annotation and latest user marker fields to thread projections", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
 
-      yield* runMigrations({ toMigrationInclusive: 47 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 0 });
 
       yield* sql`
         INSERT INTO projection_threads (
@@ -67,7 +69,7 @@ layer("048_ProjectionThreadAnnotation", (it) => {
             '2026-02-24T00:01:00.000Z'
           )
       `;
-      yield* runMigrations({ toMigrationInclusive: 48 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 1 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_threads)

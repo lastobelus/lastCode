@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
@@ -12,9 +13,10 @@ layer("056_ProjectionThreadsPersistent", (it) => {
   it.effect("adds a false-by-default persistent marker", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 55 });
-      const executed = yield* runMigrations({ toMigrationInclusive: 56 });
-      assert.deepStrictEqual(executed, [[56, "ProjectionThreadsPersistent"]]);
+      yield* runMigrations();
+      yield* runLastCodeMigrations({ toMigrationInclusive: 8 });
+      const executed = yield* runLastCodeMigrations({ toMigrationInclusive: 9 });
+      assert.deepStrictEqual(executed, [[9, "ProjectionThreadsPersistent"]]);
       const columns = yield* sql<{
         readonly name: string;
         readonly notnull: number;

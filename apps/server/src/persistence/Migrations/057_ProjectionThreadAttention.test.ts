@@ -4,14 +4,16 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))("057_ProjectionThreadAttention", (it) => {
   it.effect("adds nullable attention JSON to thread projections", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 56 });
-      yield* runMigrations({ toMigrationInclusive: 57 });
+      yield* runMigrations();
+      yield* runLastCodeMigrations({ toMigrationInclusive: 9 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 10 });
 
       const columns = yield* sql<{
         readonly name: string;
