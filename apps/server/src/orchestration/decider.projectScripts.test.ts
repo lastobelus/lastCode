@@ -143,6 +143,26 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
     });
   };
 
+  for (const id of ["install-javascript-dependencies", "A", "a.b", "a b", "-a", "a".repeat(25)]) {
+    it.effect(`accepts a new external script ID: ${id}`, () =>
+      Effect.gen(function* () {
+        const readModel = yield* projectWithScripts([]);
+        const scripts = [script("lint"), script(id)];
+        const result = yield* decideOrchestrationCommand({
+          readModel,
+          command: {
+            type: "project.meta.update",
+            commandId: CommandId.make("cmd-external-script"),
+            projectId: asProjectId("project-scripts"),
+            scripts,
+          },
+        });
+        const event = Array.isArray(result) ? result[0] : result;
+        expect(event.payload).toMatchObject({ scripts });
+      }),
+    );
+  }
+
   for (const id of ["", " ", " leading", "trailing "]) {
     it.effect(`rejects a new script ID that cannot have a shortcut: ${id}`, () =>
       Effect.gen(function* () {
@@ -185,13 +205,13 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
   );
 
   it.effect(
-    "keeps legacy scripts readable, editable and removable while allowing valid additions",
+    "keeps external scripts readable, editable and removable while rejecting padded additions",
     () =>
       Effect.gen(function* () {
         const legacy = script("install-javascript-dependencies");
         const readModel = yield* projectWithScripts([legacy]);
         expect(readModel.projects[0]?.scripts).toEqual([legacy]);
-        for (const scripts of [[{ ...legacy, command: "vp install" }, script("lint")], []]) {
+        for (const scripts of [[{ ...legacy, command: "vp install" }, script("external.id")], []]) {
           const result = yield* decideOrchestrationCommand({
             readModel,
             command: {
