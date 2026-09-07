@@ -73,7 +73,16 @@ describe("projectScripts helpers", () => {
     expect(projectScriptIdFromCommand("terminal.toggle")).toBeNull();
   });
 
-  it.each(["install-javascript-dependencies", "A", "a.b", "a b", "-a", "", "a".repeat(25)])(
+  it.each(["install-javascript-dependencies", "A", "a.b", "a b", "-a", "a".repeat(25)])(
+    "round-trips supported external script ID %j",
+    (id) => {
+      const command = commandForProjectScript(id);
+      expect(command).toBe(`script.${id}.run`);
+      expect(projectScriptIdFromCommand(command ?? "")).toBe(id);
+    },
+  );
+
+  it.each(["", " ", " lint", "lint "])(
     "omits the shortcut for legacy script ID %j without crashing script menus",
     (id) => {
       const commands = ["lint", id, "test"].map(commandForProjectScript);
