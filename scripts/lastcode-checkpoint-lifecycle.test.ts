@@ -620,6 +620,15 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
 
       checkout(repo, "upstream-main", upstreamB);
+      const skippedNightly = "v9.9.9-nightly.20990103.2";
+      write(
+        repo,
+        "lifecycle-skipped-upstream.txt",
+        "included without an intermediate checkpoint\n",
+      );
+      const skippedUpstream = commit(repo, "intermediate upstream");
+      git(repo, ["tag", skippedNightly, skippedUpstream]);
+      git(repo, ["push", "--quiet", "upstream", skippedNightly]);
       write(repo, "lifecycle-upstream-next.txt", "upstream C\n");
       const upstreamC = commit(repo, "upstream C");
       git(repo, ["tag", NIGHTLY_C, upstreamC]);
@@ -630,6 +639,14 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
       const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
       assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),
+        true,
+      );
+      assert.equal(
+        git(repo, ["show", `${compactC}:lifecycle-skipped-upstream.txt`]),
+        "included without an intermediate checkpoint",
+      );
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainA);
 
       checkout(repo, "source-pr-2", mainA);
@@ -854,6 +871,11 @@ describe("checkpoint carry lifecycle", () => {
         mainWithPr,
       ]);
       assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+
+      // A newer release arriving during repair must not replace the selected target.
+      const newerDuringRepair = "v9.9.9-nightly.20990104.5";
+      git(repo, ["tag", newerDuringRepair, upstreamD]);
+      git(repo, ["push", "--quiet", "upstream", newerDuringRepair]);
 
       const published = checkpoint(fixture, ["--push-tags", "--promote"]);
       assert.equal(published.status, 0, published.stderr || published.stdout);

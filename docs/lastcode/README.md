@@ -50,7 +50,7 @@ pnpm run lastcode:setup -- \
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
 
-# Checkpoint every missing nightly and push immutable tags.
+# Checkpoint the newest available nightly and push immutable tags.
 pnpm run lastcode:checkpoint -- --push-tags --promote
 
 # Enable managed background checkpointing.

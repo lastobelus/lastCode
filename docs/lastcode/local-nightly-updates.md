@@ -19,8 +19,10 @@ Code's state.
 Before enabling it, install the checkpoint service and dashboard:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 pnpm run lastcode:build -- --install
 pnpm run lastcode:install -- --install
