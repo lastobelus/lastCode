@@ -15,7 +15,9 @@ export const forkParked = <A, E, R>(
   Effect.gen(function* () {
     const activation = yield* ServerActivation;
     if (activation === undefined) {
-      yield* Effect.forkScoped(effect);
+      const started = yield* Deferred.make<void>();
+      yield* Effect.forkScoped(Deferred.succeed(started, undefined).pipe(Effect.andThen(effect)));
+      yield* Deferred.await(started);
       return;
     }
     const parked = yield* Deferred.make<void>();
