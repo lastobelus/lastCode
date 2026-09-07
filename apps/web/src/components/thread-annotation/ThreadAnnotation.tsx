@@ -162,7 +162,7 @@ export function ThreadAnnotationEditorDialog(props: {
   );
 }
 
-export function ThreadAnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
+function ThreadAnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
   return (
     <span className="text-[11px] text-warning-foreground">
