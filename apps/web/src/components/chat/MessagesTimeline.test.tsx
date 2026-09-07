@@ -1,13 +1,18 @@
-import { CheckpointRef, EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
-import { codexFeedbackMessage } from "@t3tools/client-runtime/state/threads";
+import { CheckpointRef, EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { act, createRef, useLayoutEffect, type ReactNode, type Ref } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef, MaintainScrollAtEndOptions } from "@legendapp/list/react";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
+import { Window } from "happy-dom";
+import { buildThreadRouteLocation } from "../../threadRoutes";
+
+const threadShellMockState = vi.hoisted(() => ({ available: true }));
 
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
@@ -130,11 +135,73 @@ vi.mock("../DiffWorkerPoolProvider", () => ({
   DiffWorkerPoolProvider: ({ children }: { children?: ReactNode }) => children,
 }));
 
+vi.mock("../../state/entities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/entities")>();
+  return {
+    ...actual,
+    useThreadShell: () =>
+      threadShellMockState.available
+        ? {
+            id: ThreadId.make("thread-source"),
+            title: "Mobile Reconnect Issue",
+            hasActionableProposedPlan: false,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            interactionMode: "default",
+            latestTurn: null,
+            session: { status: "running" },
+            backgroundLiveness: null,
+            actionResume: null,
+            worktreeCleanup: null,
+          }
+        : null,
+  };
+});
+
 function matchMedia() {
   return {
     matches: false,
     addEventListener: () => {},
     removeEventListener: () => {},
+  };
+}
+
+function installBrowserGlobals(browser: Window) {
+  const values = {
+    window: browser,
+    document: browser.document,
+    navigator: browser.navigator,
+    Node: browser.Node,
+    Element: browser.Element,
+    HTMLElement: browser.HTMLElement,
+    HTMLIFrameElement: browser.HTMLIFrameElement,
+    Event: browser.Event,
+    MouseEvent: browser.MouseEvent,
+    MutationObserver: browser.MutationObserver,
+    ResizeObserver: browser.ResizeObserver,
+    getComputedStyle: browser.getComputedStyle.bind(browser),
+    requestAnimationFrame: browser.requestAnimationFrame.bind(browser),
+    cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  } as const;
+  const descriptors = new Map(
+    Object.keys(values).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+
+  for (const [key, value] of Object.entries(values)) {
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+
+  return {
+    restore() {
+      for (const [key, descriptor] of descriptors) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    },
   };
 }
 
@@ -332,6 +399,143 @@ describe("MessagesTimeline", () => {
     },
   );
 
+  it("renders cross-thread posts as agent messages with their attachments", () => {
+    const sourceThreadId = ThreadId.make("thread-source");
+    const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+    const turnId = TurnId.make("turn-after-cross-thread-post");
+    const assistantBase = buildAssistantTimelineEntry("Acknowledged.");
+    const assistantEntry = {
+      ...assistantBase,
+      id: "entry-after-cross-thread-post",
+      message: {
+        ...assistantBase.message,
+        id: MessageId.make("message-after-cross-thread-post"),
+        turnId,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        supportsConversationRollback
+        timelineEntries={[
+          {
+            ...entry,
+            message: {
+              ...entry.message,
+              sourceThreadId,
+              attachments: [
+                {
+                  type: "file" as const,
+                  id: "attachment-report-pdf",
+                  name: "handoff.pdf",
+                  mimeType: "application/pdf",
+                  sizeBytes: 42,
+                  previewUrl: "https://environment.test/api/assets/handoff.pdf",
+                },
+              ],
+            },
+          },
+          assistantEntry,
+        ]}
+        turnDiffSummaries={[
+          {
+            turnId,
+            checkpointTurnCount: 2,
+            checkpointRef: CheckpointRef.make("checkpoint-after-cross-thread-post"),
+            status: "ready",
+            files: [],
+            assistantMessageId: assistantEntry.message.id,
+            completedAt: MESSAGE_CREATED_AT,
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("AGENT MESSAGE");
+    expect(markup).toContain("Mobile Reconnect Issue");
+    expect(markup).toContain("Working");
+    expect(markup).not.toContain("animate-status-pulse");
+    expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
+    expect(markup).toContain('aria-label="Revert to this message"');
+    expect(markup).toContain('download="handoff.pdf"');
+  });
+
+  it("navigates to the source thread when the rendered title is activated", async () => {
+    const sourceThreadId = ThreadId.make("thread-source");
+    const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+    const navigate = vi.fn();
+    const browser = new Window({ url: "https://lastcode.test" });
+    const globals = installBrowserGlobals(browser);
+    const container = browser.document.createElement("div");
+    browser.document.body.append(container);
+    const root = createRoot(container as unknown as Element);
+
+    try {
+      await act(() => {
+        root.render(
+          <MessagesTimeline
+            {...buildProps()}
+            onOpenSourceThread={(threadId) => {
+              navigate(
+                buildThreadRouteLocation(scopeThreadRef(ACTIVE_THREAD_ENVIRONMENT_ID, threadId)),
+              );
+            }}
+            timelineEntries={[
+              {
+                ...entry,
+                message: { ...entry.message, sourceThreadId },
+              },
+            ]}
+          />,
+        );
+      });
+
+      const sourceLink = container.querySelector(
+        'button[aria-label="Open source thread: Mobile Reconnect Issue"]',
+      );
+      expect(sourceLink).not.toBeNull();
+      await act(() =>
+        sourceLink?.dispatchEvent(new browser.MouseEvent("click", { bubbles: true })),
+      );
+      expect(navigate).toHaveBeenCalledOnce();
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/$environmentId/$threadId",
+        params: {
+          environmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+          threadId: sourceThreadId,
+        },
+      });
+    } finally {
+      await act(() => root.unmount());
+      globals.restore();
+      await browser.close();
+    }
+  });
+
+  it("does not link to a source thread that is no longer available", () => {
+    threadShellMockState.available = false;
+    try {
+      const sourceThreadId = ThreadId.make("thread-source");
+      const entry = buildUserTimelineEntry("The reconnect fix is ready for review.");
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              ...entry,
+              message: { ...entry.message, sourceThreadId },
+            },
+          ]}
+        />,
+      );
+
+      expect(markup).toContain("source thread unavailable");
+      expect(markup).not.toContain("Open source thread:");
+    } finally {
+      threadShellMockState.available = true;
+    }
+  });
+
   it("shows compact completed Action results without embedding detailed output", () => {
     const actionText = formatActionResumeFollowUp({
       actionName: "Run Full CI",
@@ -412,61 +616,6 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Detailed output retained in the Action terminal.");
   });
 
-  it("renders a feedback command and its pending response as normal thread messages", () => {
-    const submission = {
-      id: MessageId.make("feedback-command"),
-      command: "/feedback The agent stopped early.",
-      createdAt: MESSAGE_CREATED_AT,
-      status: "uploading" as const,
-    };
-    const messages = [
-      codexFeedbackMessage(submission),
-      codexFeedbackMessage(submission, "assistant"),
-    ];
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={messages.map((message) => ({
-          id: message.id,
-          kind: "message" as const,
-          createdAt: message.createdAt,
-          message,
-        }))}
-      />,
-    );
-
-    expect(markup).toContain("/feedback The agent stopped early.");
-    expect(markup).toContain("Sending feedback to OpenAI...");
-  });
-
-  it("renders the returned Codex thread ID in the feedback response", () => {
-    const submission = {
-      id: MessageId.make("feedback-command"),
-      command: "/feedback The agent stopped early.",
-      createdAt: MESSAGE_CREATED_AT,
-      status: "sent" as const,
-      feedbackId: "codex-thread-1",
-    };
-    const messages = [
-      codexFeedbackMessage(submission),
-      codexFeedbackMessage(submission, "assistant"),
-    ];
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={messages.map((message) => ({
-          id: message.id,
-          kind: "message" as const,
-          createdAt: message.createdAt,
-          message,
-        }))}
-      />,
-    );
-
-    expect(markup).toContain("Feedback sent to OpenAI.");
-    expect(markup).toContain("codex-thread-1");
-  });
-
   it("renders elapsed time for a completed turn", () => {
     const turnId = TurnId.make("turn-with-fold");
     const assistantEntry = buildAssistantTimelineEntry("Done.");
@@ -502,6 +651,66 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain("Worked for 8.0s");
+  });
+
+  it("keeps an annotation visible in the minimap with only one loaded marker", () => {
+    const entry = buildUserTimelineEntry("Annotated prompt");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "# Follow up",
+          anchorMessageId: entry.message.id,
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: null,
+        }}
+        timelineEntries={[entry]}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-minimap"');
+    expect(markup).toContain("data-thread-annotation-marker");
+    expect(markup).toContain('data-slot="popover-trigger"');
+    expect(markup).toContain("[@media(pointer:coarse)]:block");
+    expect(markup).toContain("[@media(pointer:coarse)]:opacity-100");
+    expect(markup).not.toContain("data-thread-annotation-overflow");
+  });
+
+  it("uses an honest earlier-message marker when the anchor is outside loaded history", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        annotation={{
+          body: "Resolved note",
+          anchorMessageId: MessageId.make("older-message"),
+          createdAt: MESSAGE_CREATED_AT,
+          updatedAt: MESSAGE_CREATED_AT,
+          resolvedAt: MESSAGE_CREATED_AT,
+        }}
+        timelineEntries={[buildUserTimelineEntry("Loaded prompt")]}
+      />,
+    );
+
+    expect(markup).toContain("data-thread-annotation-overflow");
+    expect(markup).toContain('aria-label="Annotation attached to an earlier message"');
+    expect(markup).toContain('data-slot="popover-trigger"');
+    expect(markup).toContain('class="pointer-events-auto absolute left-3"');
+    expect(markup).not.toContain("data-thread-annotation-marker");
+  });
+
+  it("uses the larger leading inset only when the top fade is enabled", () => {
+    const timelineEntries = [buildUserTimelineEntry("Hello")];
+
+    const compactMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} />,
+    );
+    const fadedMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} topFadeEnabled />,
+    );
+
+    expect(compactMarkup).toContain('class="h-3 sm:h-4"');
+    expect(fadedMarkup).toContain('class="h-[var(--workspace-titlebar-scroll-fade-height)]"');
   });
 
   it("keeps assistant changed-files headers sticky below the thread header", () => {
