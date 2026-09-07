@@ -128,6 +128,11 @@ function initFixture(): Fixture {
     `${persistence}/LastCodeMigrations/001_Initial.ts`,
     'export default "LastCode migration";\n',
   );
+  write(
+    repo,
+    `${persistence}/LegacyMigrationHistories.ts`,
+    'export const legacyMigrationHistories = [{ source: "fixture-release", entries: [[1, "Initial"]] }] as const;\n',
+  );
   write(repo, `${persistence}/DatabaseMigrations.ts`, "export {};\n");
   write(repo, `${persistence}/DatabaseMigrations.test.ts`, "export {};\n");
   git(repo, ["config", "user.name", "Carry lifecycle test"]);
