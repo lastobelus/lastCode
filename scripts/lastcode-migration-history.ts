@@ -3,6 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 
 const UPSTREAM_REGISTRY = "apps/server/src/persistence/Migrations.ts";
+const LEGACY_HISTORIES = "apps/server/src/persistence/LegacyMigrationHistories.ts";
 const LASTCODE_REGISTRY = "apps/server/src/persistence/LastCodeMigrations.ts";
 
 export interface MigrationIdentity {
@@ -69,6 +70,36 @@ export function assertAppendOnlyMigrations(
   }
 }
 
+function readLegacyHistories(source: string) {
+  const body = /export const legacyMigrationHistories = \[([\s\S]*?)\] as const;/u.exec(
+    source,
+  )?.[1];
+  if (body === undefined) throw new Error("Missing literal legacy migration histories.");
+  const histories = new Map<string, Array<readonly [number, string]>>();
+  let remaining = body.trim();
+  while (remaining.length > 0) {
+    const history = /^\{\s*source:\s*"([^"]+)",\s*entries:\s*\[([\s\S]*?)\],?\s*\},?\s*/u.exec(
+      remaining,
+    );
+    if (!history) throw new Error("Unsupported literal legacy migration history.");
+    const entries: Array<readonly [number, string]> = [];
+    let entrySource = history[2]!.trim();
+    while (entrySource.length > 0) {
+      const entry = /^\[(\d+),\s*"([^"]+)"\],?\s*/u.exec(entrySource);
+      if (!entry) throw new Error("Unsupported literal legacy migration identity.");
+      entries.push([Number(entry[1]), entry[2]!]);
+      entrySource = entrySource.slice(entry[0].length);
+    }
+    if (entries.length === 0 || histories.has(history[1]!)) {
+      throw new Error("Empty or duplicate legacy migration history.");
+    }
+    histories.set(history[1]!, entries);
+    remaining = remaining.slice(history[0].length);
+  }
+  if (histories.size === 0) throw new Error("Legacy migration histories are empty.");
+  return histories;
+}
+
 function git(repoRoot: string, args: ReadonlyArray<string>): string {
   return NodeChildProcess.execFileSync("git", [...args], {
     cwd: repoRoot,
@@ -131,8 +162,16 @@ export function assertMigrationHistory(input: {
       );
     }
   }
+  const legacyHistories = readLegacyHistories(read(candidate, LEGACY_HISTORIES));
   if (!input.previousRef) return;
   const previous = git(repoRoot, ["rev-parse", `${input.previousRef}^{commit}`]).trim();
+  if (hasFile(repoRoot, previous, LEGACY_HISTORIES)) {
+    for (const [source, entries] of readLegacyHistories(read(previous, LEGACY_HISTORIES))) {
+      if (JSON.stringify(legacyHistories.get(source)) !== JSON.stringify(entries)) {
+        throw new Error(`Legacy migration history ${source} was removed or changed after release.`);
+      }
+    }
+  }
   // The initial split adopts a legacy combined history. Subsequent checkpoints
   // must retain the independently versioned LastCode history from that release.
   if (!hasFile(repoRoot, previous, LASTCODE_REGISTRY)) return;

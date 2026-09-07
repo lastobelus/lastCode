@@ -8,6 +8,11 @@ import { assert, describe, it } from "@effect/vitest";
 import { assertMigrationHistory, readMigrationIdentities } from "./lastcode-migration-history.ts";
 
 const ROOT = "apps/server/src/persistence/";
+const legacyHistories = (name = "Annotation", extra = "") =>
+  `export const legacyMigrationHistories = [
+    { source: "lastcode/build/released", entries: [[42, "${name}"]], },
+    ${extra}
+  ] as const;`;
 const registry = (names: ReadonlyArray<string>, downstream = false) =>
   names.map((name, i) => `import Migration${i} from "./Migrations/${name}.ts";`).join("\n") +
   `\nexport const ${downstream ? "lastcodeMigrationEntries" : "migrationEntries"} = [\n` +
@@ -88,6 +93,7 @@ describe("checkpoint migration history", () => {
         write(`${ROOT}LastCodeMigrations.ts`, registry(names, true));
         for (const name of names)
           write(`${ROOT}Migrations/${name}.ts`, `export default "${name}";\n`);
+        write(`${ROOT}LegacyMigrationHistories.ts`, legacyHistories());
         write(`${ROOT}DatabaseMigrations.ts`, "// legacy conversion and separate runners\n");
         write(`${ROOT}DatabaseMigrations.test.ts`, "// historical upgrade fixtures\n");
       };
@@ -131,6 +137,31 @@ describe("checkpoint migration history", () => {
           upstreamRef: thirdUpstream,
           previousRef: secondRelease,
         });
+      write(`${ROOT}LegacyMigrationHistories.ts`, legacyHistories("Changed"));
+      commit("bad replay changes a recognized historical identity");
+      assert.throws(check, /Legacy migration history .* removed or changed/);
+      git("reset", "--hard", thirdRelease);
+      write(
+        `${ROOT}LegacyMigrationHistories.ts`,
+        legacyHistories().replace("lastcode/build/released", "lastcode/build/other"),
+      );
+      commit("bad replay drops a recognized historical release");
+      assert.throws(check, /Legacy migration history .* removed or changed/);
+      git("reset", "--hard", thirdRelease);
+      write(
+        `${ROOT}LegacyMigrationHistories.ts`,
+        legacyHistories(
+          "Annotation",
+          '{ source: "lastcode/build/additional", entries: [[43, "Attention"]] },',
+        ),
+      );
+      commit("retain histories while recognizing another release");
+      assert.doesNotThrow(check);
+      git("reset", "--hard", thirdRelease);
+      git("rm", `${ROOT}LegacyMigrationHistories.ts`);
+      commit("bad replay drops historical registry");
+      assert.throws(check);
+      git("reset", "--hard", thirdRelease);
       write(`${ROOT}LastCodeMigrations.ts`, registry(["Attention"], true));
       commit("bad replay replaces a released identity");
       assert.throws(check, /removed, reordered, or reassigned/);
