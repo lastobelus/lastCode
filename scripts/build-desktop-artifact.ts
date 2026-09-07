@@ -12,7 +12,7 @@ import {
   statFile,
   type DirectoryRecord,
 } from "@electron/asar";
-
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -22,11 +22,8 @@ import desktopPackageJson from "../apps/desktop/package.json" with { type: "json
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 import { applyWebBrandAssets } from "./apply-web-brand-assets.ts";
-import {
-  BRAND_ASSET_PATHS,
-  resolveWebAssetBrandForChannel,
-  type WebAssetBrand,
-} from "./lib/brand-assets.ts";
+import { resolveWebAssetBrandForChannel, type WebAssetBrand } from "./lib/brand-assets.ts";
+import { LASTCODE_BRAND_ASSET_PATHS } from "./lib/lastcode-brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import {
   findInlinedExternalPackages,
@@ -52,9 +49,7 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
-
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 
@@ -1267,7 +1262,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: LASTCODE_DESKTOP_DISTRIBUTION.appId,
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -2512,7 +2507,7 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
 });
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
-  return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
+  return /-nightly\.\d{8}\.\d+(?:\.\d+)?$/.test(version) ? "nightly" : "latest";
 }
 
 function isDesktopPreviewVersion(version: string): boolean {
@@ -2526,16 +2521,16 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
   if (resolveDesktopUpdateChannel(version) === "nightly") {
     return {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     };
   }
 
   return {
-    macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-    linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-    windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    macIconPng: LASTCODE_BRAND_ASSET_PATHS.productionMacIconPng,
+    linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.productionLinuxIconPng,
+    windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.productionWindowsIconIco,
   };
 }
 
@@ -2556,10 +2551,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
-  return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+export function resolveDesktopProductName(_version: string): string {
+  return LASTCODE_DESKTOP_DISTRIBUTION.productName;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2582,9 +2575,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   arch?: typeof BuildArch.Type,
 ) {
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    appId: LASTCODE_DESKTOP_DISTRIBUTION.appId,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    artifactName: `${LASTCODE_DESKTOP_DISTRIBUTION.asciiName}-\${version}-\${arch}.\${ext}`,
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2626,10 +2619,19 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(!signed
+        ? {
+            identity: "-",
+            hardenedRuntime: false,
+          }
+        : {}),
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: LASTCODE_DESKTOP_DISTRIBUTION.asciiName,
+          schemes: [
+            LASTCODE_DESKTOP_DISTRIBUTION.productionScheme,
+            LASTCODE_DESKTOP_DISTRIBUTION.developmentScheme,
+          ],
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
@@ -2668,21 +2670,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code",
+      executableName: LASTCODE_DESKTOP_DISTRIBUTION.executableName,
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // t3code:// OAuth callbacks to the app.
+      // LastCode OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: LASTCODE_DESKTOP_DISTRIBUTION.asciiName,
+          schemes: [
+            LASTCODE_DESKTOP_DISTRIBUTION.productionScheme,
+            LASTCODE_DESKTOP_DISTRIBUTION.developmentScheme,
+          ],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: LASTCODE_DESKTOP_DISTRIBUTION.executableName,
         },
       },
     };
@@ -3657,14 +3662,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: "lastcode",
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "T3 Code desktop build",
-    author: "T3 Tools",
+    description: "LastCode desktop build",
+    author: "LastCode",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
       options.platform,

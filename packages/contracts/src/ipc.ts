@@ -169,6 +169,7 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
+export type DesktopUpdateSource = "hosted" | "lastcode-local";
 export type DesktopAppStageLabel = "Alpha" | "Dev" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
@@ -184,6 +185,7 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
+export const DesktopUpdateSourceSchema = Schema.Literals(["hosted", "lastcode-local"]);
 export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Dev", "Nightly"]);
 
 export interface DesktopAppBranding {
@@ -204,8 +206,44 @@ export interface DesktopRuntimeInfo {
   runningUnderArm64Translation: boolean;
 }
 
+export const DesktopLocalBuildErrorKindSchema = Schema.Literals(["build", "packaging"]);
+export type DesktopLocalBuildErrorKind = typeof DesktopLocalBuildErrorKindSchema.Type;
+const DesktopLocalBuildPercentSchema = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: 99 }),
+);
+
+export interface DesktopLocalBuildProgress {
+  checkpointTag: string;
+  phase: string;
+  percent: number;
+  errorKind: DesktopLocalBuildErrorKind;
+}
+
+export const DesktopLocalBuildProgressSchema = Schema.Struct({
+  checkpointTag: Schema.String,
+  phase: Schema.String,
+  percent: DesktopLocalBuildPercentSchema,
+  errorKind: DesktopLocalBuildErrorKindSchema,
+});
+
+export interface DesktopLocalBuildFailure extends DesktopLocalBuildProgress {
+  currentVersion: string;
+  targetVersion: string;
+  logPath: string;
+  error: string;
+}
+
+export const DesktopLocalBuildFailureSchema = Schema.Struct({
+  ...DesktopLocalBuildProgressSchema.fields,
+  currentVersion: Schema.String,
+  targetVersion: Schema.String,
+  logPath: Schema.String,
+  error: Schema.String,
+});
+
 export interface DesktopUpdateState {
   enabled: boolean;
+  source: DesktopUpdateSource;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
   currentVersion: string;
@@ -217,6 +255,8 @@ export interface DesktopUpdateState {
   releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>;
   omittedReleaseCount: number;
   downloadPercent: number | null;
+  localBuildProgress: DesktopLocalBuildProgress | null;
+  localBuildFailure: DesktopLocalBuildFailure | null;
   checkedAt: string | null;
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
@@ -227,16 +267,21 @@ export interface DesktopUpdateReleaseNote {
   version: string;
   items: ReadonlyArray<string>;
   totalItems: number;
+  heading?: string;
+  summaries?: ReadonlyArray<string>;
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   version: Schema.String,
   items: Schema.Array(Schema.String),
   totalItems: Schema.Number,
+  heading: Schema.optionalKey(Schema.String),
+  summaries: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
+  source: DesktopUpdateSourceSchema,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,
   currentVersion: Schema.String,
@@ -248,10 +293,24 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   releaseNotes: Schema.Array(DesktopUpdateReleaseNoteSchema),
   omittedReleaseCount: Schema.Number,
   downloadPercent: Schema.NullOr(Schema.Number),
+  localBuildProgress: Schema.NullOr(DesktopLocalBuildProgressSchema),
+  localBuildFailure: Schema.NullOr(DesktopLocalBuildFailureSchema),
   checkedAt: Schema.NullOr(Schema.String),
   message: Schema.NullOr(Schema.String),
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
+});
+
+export interface DesktopLastCodeSettingsState {
+  supported: boolean;
+  showAndInstallLocalNightlies: boolean;
+  message: string | null;
+}
+
+export const DesktopLastCodeSettingsStateSchema = Schema.Struct({
+  supported: Schema.Boolean,
+  showAndInstallLocalNightlies: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
 });
 
 export interface DesktopUpdateActionResult {
@@ -1146,6 +1205,8 @@ export interface DesktopBridge {
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
+  getLastCodeSettings: () => Promise<DesktopLastCodeSettingsState>;
+  setShowAndInstallLocalNightlies: (enabled: boolean) => Promise<DesktopLastCodeSettingsState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
