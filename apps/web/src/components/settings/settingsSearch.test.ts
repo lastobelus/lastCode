@@ -250,6 +250,13 @@ describe("searchSettings", () => {
     });
   });
 
+  it("routes scrollbar sizing to LastCode settings", () => {
+    expect(searchSettings("scrollbar margin")[0]).toMatchObject({
+      id: "larger-scrollbars",
+      to: "/settings/lastcode",
+    });
+  });
+
   it("routes project icon rounding to LastCode settings", () => {
     expect(searchSettings("rounded project icons")[0]).toMatchObject({
       id: "rounded-project-icons",

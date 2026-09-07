@@ -181,6 +181,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         readEvents: () => Stream.empty,
         readThreadEvents: () => Stream.empty,
         getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+        getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
@@ -268,6 +269,7 @@ it.effect.each([
         readEvents: () => Stream.empty,
         readThreadEvents: () => Stream.empty,
         getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+        getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command]).pipe(
             Effect.as({ sequence: 1 }),
@@ -400,6 +402,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         readEvents: () => Stream.empty,
         readThreadEvents: () => Stream.empty,
         getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+        getTurnRequestWaitState: () => Effect.succeed({ kind: "correlation-not-found" }),
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),

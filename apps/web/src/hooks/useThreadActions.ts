@@ -244,6 +244,9 @@ export function useThreadActions() {
   const unarchiveThreadMutation = useAtomCommand(threadEnvironment.unarchive, {
     reportFailure: false,
   });
+  const setThreadPersistenceMutation = useAtomCommand(threadEnvironment.setPersistence, {
+    reportFailure: false,
+  });
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -372,6 +375,15 @@ export function useThreadActions() {
       return result;
     },
     [unarchiveThreadMutation],
+  );
+
+  const setThreadPersistence = useCallback(
+    (target: ScopedThreadRef, persistent: boolean) =>
+      setThreadPersistenceMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, persistent },
+      }),
+    [setThreadPersistenceMutation],
   );
 
   const deleteThread = useCallback(
@@ -855,6 +867,7 @@ export function useThreadActions() {
     () => ({
       archiveThread,
       unarchiveThread,
+      setThreadPersistence,
       deleteThread,
       confirmAndDeleteThread,
       settleThread,
@@ -878,6 +891,7 @@ export function useThreadActions() {
       settleThread,
       snoozeThread,
       unarchiveThread,
+      setThreadPersistence,
       unpinThread,
       unsettleThread,
       unsnoozeThread,

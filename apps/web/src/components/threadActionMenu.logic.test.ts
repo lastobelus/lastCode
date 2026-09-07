@@ -5,13 +5,20 @@ import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./thread
 const baseState: ThreadActionMenuState = {
   branch: null,
   isPinned: false,
+  isPersistent: false,
   isSettled: false,
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
   hasRunningAction: false,
-  supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
+  supports: {
+    settlement: true,
+    snooze: true,
+    pinning: true,
+    persistence: true,
+    titleRegeneration: true,
+  },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
@@ -32,7 +39,13 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: {
+          settlement: false,
+          snooze: false,
+          pinning: false,
+          persistence: false,
+          titleRegeneration: false,
+        },
       }),
     ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
   });
@@ -101,7 +114,13 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: {
+          settlement: false,
+          snooze: false,
+          pinning: false,
+          persistence: false,
+          titleRegeneration: false,
+        },
       }),
     ).toContain("archive");
   });
@@ -111,5 +130,16 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("replaces the mark action and blocks archive and delete for the persistent thread", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, isPersistent: true });
+    expect(items).toContainEqual(
+      expect.objectContaining({ id: "disable-persistence", label: "Disable persistent thread" }),
+    );
+    expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "archive")?.label).toContain("disable persistence");
+    expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "delete")?.label).toContain("disable persistence");
   });
 });

@@ -54,6 +54,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
+import { captureAnnotationImage } from "./AnnotationScreenshot.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -306,12 +307,8 @@ const normalizeCaptureRect = (value: unknown): PreviewAnnotationRect | null => {
   ) {
     return null;
   }
-  return {
-    x: Math.max(0, Math.floor(x)),
-    y: Math.max(0, Math.floor(y)),
-    width: Math.max(1, Math.ceil(width)),
-    height: Math.max(1, Math.ceil(height)),
-  };
+  // Keep CSS-pixel precision until the crop is mapped into the captured image.
+  return { x, y, width, height };
 };
 
 /** `capturePage` never settles when the guest's compositor is wedged. */
@@ -331,17 +328,7 @@ const captureAnnotationScreenshot = (
     // The unused abort signal is what makes this interruptible, and therefore
     // what lets the timeout below fire. Drop the parameter and a stalled
     // capture strands the pick session again.
-    try: (_signal) =>
-      wc.capturePage(
-        cropRect
-          ? {
-              x: cropRect.x,
-              y: cropRect.y,
-              width: cropRect.width,
-              height: cropRect.height,
-            }
-          : undefined,
-      ),
+    try: (_signal) => captureAnnotationImage(wc, cropRect),
     catch: (cause) =>
       new PreviewOperationError({
         operation: "captureAnnotationScreenshot",
@@ -350,15 +337,6 @@ const captureAnnotationScreenshot = (
         cause,
       }),
   }).pipe(
-    Effect.map((image): PreviewAnnotationPayload["screenshot"] => {
-      const size = image.getSize();
-      return {
-        dataUrl: image.toDataURL(),
-        width: size.width,
-        height: size.height,
-        cropRect: cropRect ?? { x: 0, y: 0, width: size.width, height: size.height },
-      };
-    }),
     Effect.timeoutOption(ANNOTATION_SCREENSHOT_TIMEOUT),
     Effect.flatMap((screenshot) =>
       Option.isSome(screenshot)

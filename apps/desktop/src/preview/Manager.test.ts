@@ -3415,6 +3415,101 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("delivers the iframe annotation with its native image crop", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let onPicked: ((event: unknown, ...args: unknown[]) => void) | undefined;
+        const crop = vi.fn(() => ({
+          isEmpty: () => false,
+          getSize: () => ({ width: 200, height: 60 }),
+          toDataURL: () => "data:image/png;base64,crop",
+        }));
+        const capturePage = vi.fn(async (...args: unknown[]) => {
+          if (args.length) throw new Error("UnknownVizError");
+          return {
+            isEmpty: () => false,
+            getSize: () => ({ width: 1280, height: 720 }),
+            toJPEG: () => Buffer.from("image"),
+            crop,
+          };
+        });
+        const wc = Object.assign(makeTestPreviewWebContents(capturePage), {
+          once: vi.fn(),
+          isFocused: () => true,
+        });
+        wc.ipc.removeListener = vi.fn();
+        vi.mocked(wc.ipc.on).mockImplementation((channel, listener) => {
+          if (channel === "preview:element-picked") {
+            onPicked = (event, ...args) => listener(event as Electron.IpcMainEvent, ...args);
+          }
+          return wc.ipc;
+        });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+        const pick = yield* manager.pickElement("tab_1").pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        const rect = { x: 900, y: 300, width: 200, height: 60 };
+        const payload = {
+          id: "annotation_1",
+          pageUrl: "https://example.com/editor",
+          pageTitle: "Editor",
+          comment: "Tighten this spacing",
+          elements: [
+            {
+              id: "element_1",
+              rect,
+              element: {
+                pageUrl: "about:srcdoc",
+                pageTitle: "Preview",
+                tagName: "h1",
+                selector: "h1",
+                htmlPreview: "<h1>Preview</h1>",
+                componentName: null,
+                source: null,
+                stack: [],
+                styles: "color: black",
+                pickedAt: "2026-06-11T00:00:00.000Z",
+                framePath: [{ pageUrl: "https://example.com/editor", selector: "iframe" }],
+              },
+            },
+          ],
+          regions: [],
+          strokes: [],
+          styleChanges: [],
+          screenshot: null,
+          createdAt: "2026-06-11T00:00:00.000Z",
+        };
+        onPicked?.({}, payload, rect, "attach");
+        const result = yield* Fiber.join(pick);
+        expect(result).toEqual({
+          annotation: {
+            ...payload,
+            screenshot: {
+              dataUrl: "data:image/png;base64,crop",
+              width: 200,
+              height: 60,
+              cropRect: rect,
+            },
+          },
+          submission: "attach",
+        });
+        expect(capturePage).toHaveBeenCalledWith();
+        expect(crop).toHaveBeenCalledWith(rect);
+        expect(webviewSend).toHaveBeenCalledWith("preview:annotation-captured");
+        capturePage.mockRejectedValueOnce(new Error("Compositor unavailable"));
+        const failedPick = yield* manager.pickElement("tab_1").pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        onPicked?.({}, payload, rect, "send");
+        expect(yield* Fiber.join(failedPick)).toEqual({
+          annotation: payload,
+          submission: "send",
+          screenshotFailed: true,
+        });
+      }),
+    ),
+  );
+
   effectIt.effect("settles the pick when the annotation screenshot never arrives", () =>
     withManager((manager) =>
       Effect.gen(function* () {
@@ -3435,6 +3530,7 @@ describe("PreviewManager", () => {
           once: vi.fn(),
           off: vi.fn(),
           // A wedged compositor leaves `capturePage` pending forever.
+          executeJavaScript: vi.fn(async () => ({ width: 1280, height: 800 })),
           capturePage: vi.fn(() => new Promise(() => {})),
           ipc: {
             on: vi.fn((channel: string, listener: typeof onPicked) => {
@@ -3512,6 +3608,7 @@ describe("PreviewManager", () => {
           on: vi.fn(),
           once: vi.fn(),
           off: vi.fn(),
+          executeJavaScript: vi.fn(async () => ({ width: 1280, height: 800 })),
           capturePage: vi.fn(() => new Promise(() => {})),
           ipc: {
             on: vi.fn((channel: string, listener: typeof onPicked) => {
