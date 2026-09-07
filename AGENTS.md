@@ -132,6 +132,19 @@ Most code changes do not need an internal documentation change. Agents can read 
 - Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
 - `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
 
+## Public repository boundary
+
+Keep deployment-specific infrastructure out of this public repository. Do not
+commit real machine names, private endpoints, host roles, network topology,
+private ports, operator schedules, or paths that identify a maintainer's
+environment. Public automation must expose environment-neutral tools and
+document their contracts with generic examples. Put the concrete wiring and
+deployment policy in the private infrastructure repository that owns it.
+
+Before publishing a LastCode change, inspect the diff, PR body, issue text, and
+review replies for infrastructure details. Test fixtures must use unmistakably
+generic names such as `workstation.example`, `managed-server`, or `build-host`.
+
 ## Plans and work artifacts
 
 - Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree. `.plans/` is gitignored only as a safety net for legacy tooling.
