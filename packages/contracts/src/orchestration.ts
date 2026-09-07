@@ -419,7 +419,7 @@ const ActionProtocolEventFields = Schema.Union([
     report: ActionReport,
   }),
 ]);
-export const ACTION_PROTOCOL_EVENT_MAX_JSON_CHARS = 10_000;
+const ACTION_PROTOCOL_EVENT_MAX_JSON_CHARS = 10_000;
 export const ActionProtocolEvent = ActionProtocolEventFields.check(
   Schema.makeFilter(
     (event) =>
