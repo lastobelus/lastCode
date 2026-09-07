@@ -19,7 +19,6 @@ import {
   checkpointVpPaths,
   carryBootstrapFailureDisposition,
   carryCompilationNeeded,
-  openPullRequestListArgs,
   promotionNeeded,
   rerereRebaseMadeProgress,
   rebaseStateFiles,
@@ -42,23 +41,6 @@ import {
 } from "./lastcode-checkpoint.ts";
 import type { CarrySetShadowRecord } from "./lastcode-checkpoint-history.ts";
 import { parseNightlyTag } from "./lastcode-nightly.ts";
-
-it("scopes checkpoint PR queries to the configured LastCode repository", () => {
-  expect(openPullRequestListArgs("example/fork")).toEqual([
-    "pr",
-    "list",
-    "--repo",
-    "example/fork",
-    "--base",
-    "lastcode/main",
-    "--state",
-    "open",
-    "--json",
-    "number",
-    "--jq",
-    "length",
-  ]);
-});
 
 function nightly(tag: string) {
   const value = parseNightlyTag(tag);
@@ -955,7 +937,7 @@ it("increments revisions already based on the latest installable", () => {
   if (plan.kind === "create") assert.equal(plan.replayBase, undefined);
 });
 
-it("replays the next merge when an open PR kept the previous revision off main", () => {
+it("replays the next merge when the previous revision was published but not promoted", () => {
   const latest = nightly("v0.0.34-nightly.20260816.1105");
   const plan = resolveRevisionPlan({
     installableRefs: [
@@ -1250,7 +1232,12 @@ it("continues from a newer unpromoted checkpoint when main has not changed", () 
   const plan = resolveCheckpointPlan({
     checkpointRefs: [
       { checkpointTag: `lastcode/checkpoint/${old.tag}`, commit: "main", nightly: old },
-      { checkpointTag: `lastcode/checkpoint/${newer.tag}`, commit: "checkpoint", nightly: newer },
+      {
+        checkpointTag: `lastcode/checkpoint/${newer.tag}`,
+        commit: "checkpoint",
+        nightly: newer,
+        sourceCommit: "main",
+      },
     ],
     nightlyTags: [old.tag, newer.tag, "v0.0.2-nightly.20260103.3"],
     sourceCommit: "main",
@@ -1265,6 +1252,31 @@ it("continues from a newer unpromoted checkpoint when main has not changed", () 
     plan.missingNightlies.map(({ tag }) => tag),
     ["v0.0.2-nightly.20260103.3"],
   );
+});
+
+it("does not reuse a newer checkpoint whose source differs from promoted main", () => {
+  const old = nightly("v0.0.1-nightly.20260101.1");
+  const newer = nightly("v0.0.1-nightly.20260102.2");
+  for (const sourceCommit of [undefined, "unrelated-source"]) {
+    const plan = resolveCheckpointPlan({
+      checkpointRefs: [
+        { checkpointTag: `lastcode/checkpoint/${old.tag}`, commit: "main", nightly: old },
+        {
+          checkpointTag: `lastcode/checkpoint/${newer.tag}`,
+          commit: "checkpoint",
+          nightly: newer,
+          ...(sourceCommit ? { sourceCommit } : {}),
+        },
+      ],
+      nightlyTags: [old.tag, newer.tag, "v0.0.2-nightly.20260103.3"],
+      sourceCommit: "main",
+      sourceCheckpointTag: `lastcode/checkpoint/${old.tag}`,
+      sourceNightlyTags: [old.tag],
+      sourceRef: "origin/lastcode/main",
+    });
+    assert.equal(plan.candidateRef, "origin/lastcode/main");
+    assert.equal(plan.baseNightly.tag, old.tag);
+  }
 });
 
 it("retries promotion of a published checkpoint created from the current main", () => {

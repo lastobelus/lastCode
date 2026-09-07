@@ -77,6 +77,10 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).toContain(
       "--supersede-failed-recovery",
     );
+    expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).toContain("--promote");
+    expect(test.dependencies.runPhase.mock.calls.at(-1)?.[2]).not.toContain(
+      "--promote-if-no-open-prs",
+    );
     expect(test.dependencies.refreshSupervisor).toHaveBeenCalledOnce();
     expect(test.dependencies.refreshPrimaryCheckout).toHaveBeenCalledOnce();
     expect(test.dependencies.reconcileProjectActions).toHaveBeenCalledWith(undefined, []);

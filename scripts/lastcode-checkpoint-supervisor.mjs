@@ -14,7 +14,7 @@ import * as NodeUtil from "node:util";
 const CHECKPOINT_ARGS = [
   "scripts/lastcode-checkpoint.ts",
   "--push-tags",
-  "--promote-if-no-open-prs",
+  "--promote",
   "--mirror-upstream-main",
   "--supersede-failed-recovery",
 ];
