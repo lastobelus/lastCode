@@ -41,6 +41,14 @@ and should be proposed upstream, switch to `upstream-fix`.
    falls back to synchronous `pnpm lastcode:ci:quick`.
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
+For an explicitly requested stack, a child may instead branch from and target
+its same-repository parent PR, whose chain must lead to `lastcode/main`. Follow
+[Sequential Stack Babysitting](../_references/stacked-pr-babysit.md) for target
+selection and ordered delivery. The ordinary instruction to rebase onto main
+does not flatten an unmerged stack: preserve the parent until it lands, then
+restack the child and refresh validation. Quick CI still uses the canonical
+workstream base, not the parent branch.
+
 Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
 promotion to `lastcode/main`. Never close, merge, or retarget an unrelated PR to
 unblock checkpoints. A candidate must incorporate its pinned source, and its
@@ -71,18 +79,26 @@ current GitHub thread and review-query mechanics.
    `../_references/external-review-mechanics.md`. Do not merge until Codex gives
    an explicit clean result or every finding for the exact current head has a
    durable handled state, and no review thread remains unresolved.
-4. While exact-head GitHub CI or Codex review is passive and no current finding
+4. For stacks or a PR outside the Action checkout, prepare the single explicit
+   target using the stack reference before listing Actions. For checkout-derived
+   waits, clear any old explicit target first. While exact-head GitHub CI or
+   Codex review is passive and no current finding
    needs judgement, call `list_project_actions`. Select the eligible **Wait for
    PR** action by its returned stable ID, preferring repository-managed
    `lc-wait-for-pr` over the older saved `wait-for-pr` if both exist. Call
    `run_project_action_and_resume` and end the turn immediately. Do not follow
    the launch with GitHub queries, sleeps, process checks, or output polling.
-   Do not execute `scripts/lastcode-wait-for-pr.ts` through a shell tool: running
-   the wait script directly keeps the agent turn open and loses the resume handoff.
+   Do not execute the wait script's polling mode through a shell tool: running
+   it directly keeps the agent turn open and loses the resume handoff. Its
+   bounded `--target` and `--clear-target` commands only prepare the selection.
    After resume, inspect the wake reason and verify the current head/base before
    deciding whether to fix, rebase, retry, or request another review. If the
    action is missing or disabled, report the setup blocker; do not substitute a
    manual polling loop.
+   A succeeded Action with pending delivery still owns the continuation slot;
+   end the turn so that follow-up can arrive. For an interrupted continuation
+   requiring Resume, report the actual blocker. Neither a stack nor a new user
+   message permits bypassing the single-continuation guard.
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, a clean current PR, and an unchanged fetched
@@ -92,6 +108,8 @@ current GitHub thread and review-query mechanics.
    old worktree scripts, which do not participate in this coordination. Preserve
    an uncertain remote lock until its owner and operation outcome are verified.
 6. Verify the PR is merged and `origin/lastcode/main` contains the merge result.
+   For a whole-stack merge request, restack and validate the next authorized
+   member using the stack reference; one merged PR does not finish the request.
 7. If the work is tracked by Markover, confirm the GitHub terminal state and
    run the service-free command from the Markover checkout:
 
