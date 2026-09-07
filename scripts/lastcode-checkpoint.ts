@@ -6,6 +6,11 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import {
+  migrationDependenciesInstalled,
+  validateInstallableMigrations,
+} from "./lastcode-migration-validation.ts";
+
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import { acquirePortableLock } from "./lastcode-lock.mjs";
@@ -1250,6 +1255,13 @@ function createCheckpointTag(
   },
 ): string {
   const checkpointTag = checkpointTagFromNightlyTag(nightly.tag);
+  validateInstallableMigrations({
+    repoRoot,
+    candidateRef: commit,
+    upstreamRef: nightly.tag,
+    installableTag: checkpointTag,
+    sourceRef: sourceCommit,
+  });
   const canonicalSourceRef = sourceObjectRef(checkpointTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, checkpointTag, sourceCommit);
   try {
@@ -1285,6 +1297,13 @@ function createRevisionTag(
   sourceCommit: string,
   replay: EffectiveReplayConfiguration,
 ): string {
+  validateInstallableMigrations({
+    repoRoot,
+    candidateRef: commit,
+    upstreamRef: plan.nightly.tag,
+    installableTag: plan.installableTag,
+    sourceRef: sourceCommit,
+  });
   const canonicalSourceRef = sourceObjectRef(plan.installableTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, plan.installableTag, sourceCommit);
   try {
@@ -1335,6 +1354,7 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
   const environment = checkpointSmokeEnvironment();
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
   run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
+  migrationDependenciesInstalled(worktree);
   assertForkInvariants(worktree);
   run(worktree, vp.isolated, checkpointSmokeFormatAndLintCommand(), { environment });
   run(
@@ -1350,8 +1370,6 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
       "scripts/lastcode-local-ci.test.ts",
       "scripts/build-desktop-artifact.test.ts",
       "apps/desktop/src/electron/ElectronProtocol.test.ts",
-      "apps/server/src/persistence/Migrations/053_ProjectionThreadLinkedPullRequest.test.ts",
-      "apps/server/src/persistence/Migrations/054_ProjectionThreadsUnsettledAt.test.ts",
     ],
     { environment },
   );

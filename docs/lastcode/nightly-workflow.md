@@ -306,14 +306,14 @@ still stop for review. Automatic continuation also stops if Git rejects
 or signing key fails), preserving the recovery worktree for operator action
 instead of retrying in a loop.
 
-Migration numbers are part of deployed database history, not just filenames.
-When upstream claims a number already used by LastCode, reserve that number for
-upstream in the source manifest, shift the LastCode migrations forward, and add
-a new highest-numbered idempotent bridge for any upstream schema change that an
-already-upgraded LastCode database would otherwise skip. The checkpoint smoke
-gate runs the bridge regression and typechecks the server so broken migration
-imports, incompatible projection fixtures, and invalid upgrade paths stop before
-a checkpoint tag is published.
+Upstream migration history must match the selected nightly exactly. LastCode
+migrations use a separate, append-only history: never renumber, remove, or edit
+a released migration; append a repair instead. Every checkpoint and revision,
+including bootstrap and recovery, verifies both histories against its exact
+candidate and previous installable before publishing any tag. The focused
+database upgrade regression is mandatory even when optional smoke is disabled.
+Packaging repeats these checks against the requested installable checkout;
+a prior CI stamp does not replace migration validation.
 
 No later nightly is checkpointed after a current or changed failure. The only
 automatic exception is an untouched, automation-owned rebase or smoke attempt
