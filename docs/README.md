@@ -5,6 +5,8 @@
 - [Install T3 Code](./user/install.md)
 - [Messages and context](./user/composer.md)
 - [Working with threads](./user/thread-sidebar.md)
+- [Resumable Project Actions in LastCode](./user/resumable-project-actions.md)
+- [Use an agent to add resumable Project Actions](./user/resumable-project-actions-for-agents.md)
 - [Permission modes](./user/permission-modes.md)
 - [Terminal history](./user/terminal.md)
 - [Source control](./user/source-control.md)
@@ -46,6 +48,12 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Mobile development lifecycle](./internals/mobile-development.md)
 - [Terminal runtime](./internals/terminal-runtime.md)
 - [Voice input](./internals/voice-input.md)
+- [Agent implementation guide to resumable Project
+  Actions](./internals/resumable-project-actions-for-agents.md)
+- [Implementation tutorial: build a resumable wait like Wait for
+  PR](./internals/resumable-project-actions-wait-for-pr.md)
+- [Implementation runbook: set up resumable Project Actions with an
+  agent](./internals/resumable-project-actions-setup.md)
 
 ### Runbooks
 
