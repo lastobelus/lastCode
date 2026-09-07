@@ -12,10 +12,6 @@
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
-    "scripts": {
-      // Knip loads its preprocessor through a CLI option, not a source import.
-      "entry": ["knip-schemas.ts"],
-    },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
       "entry": [
@@ -45,6 +41,7 @@
     "scripts": {
       // Spawned by filename, or declarations paired with JavaScript tooling.
       "entry": [
+        "knip-schemas.ts",
         "fixtures/lastcode-docs-install.mjs",
         "fixtures/lastcode-docs-local-update.mjs",
         "lastcode-packaged-server-supervisor.mjs!",
