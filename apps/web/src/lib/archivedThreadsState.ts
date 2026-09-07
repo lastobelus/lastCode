@@ -62,7 +62,7 @@ export function loadArchivedThreadsForEnvironment(
   });
 }
 
-export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<EnvironmentId>): {
+function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<EnvironmentId>): {
   readonly snapshots: ReadonlyArray<ArchivedSnapshotEntry>;
   readonly error: string | null;
   readonly isLoading: boolean;
