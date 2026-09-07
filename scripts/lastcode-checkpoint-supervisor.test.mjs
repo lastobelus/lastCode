@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   boundedCommandDiagnostic,
   checkpointEnvironment,
+  checkpointSchedulerPid,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
   changedGitlink,
@@ -60,12 +61,51 @@ function fixture(overrides = {}) {
 }
 
 describe("LastCode checkpoint supervisor", () => {
+  it("only accepts the actual scheduler parent identity", () => {
+    expect(checkpointSchedulerPid({}, 42)).toBeUndefined();
+    expect(checkpointSchedulerPid({ LASTCODE_CHECKPOINT_SCHEDULER_PID: "42" }, 42)).toBe(42);
+    for (const value of ["", "0", "-1", "42.5", "042", "43", "bad"]) {
+      expect(() =>
+        checkpointSchedulerPid({ LASTCODE_CHECKPOINT_SCHEDULER_PID: value }, 42),
+      ).toThrow("parent process");
+    }
+  });
+
+  it("records daily scheduler identity on success and failure", () => {
+    for (const failing of [false, true]) {
+      const test = fixture({
+        dependencies: {
+          runPhase: vi.fn(() => {
+            if (failing) throw new Error("failed");
+          }),
+        },
+      });
+      const run = () =>
+        runCheckpointSupervisor(
+          {
+            environment: {
+              LASTCODE_CHECKPOINT_SCHEDULER_PID: String(process.ppid),
+            },
+          },
+          test.dependencies,
+        );
+      if (failing) expect(run).toThrow("failed");
+      else run();
+      expect(test.state).toMatchObject({
+        supervisorPid: process.pid,
+        launchdPid: process.ppid,
+        status: failing ? "failed" : "success",
+      });
+    }
+  });
+
   it("runs the complete checkpoint pipeline and records terminal success", () => {
     const test = fixture();
 
     expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({
       status: "success",
       supervisorPid: process.pid,
+      launchdPid: process.pid,
       phase: "complete",
     });
     expect(test.dependencies.runPhase.mock.calls.map(([phase]) => phase)).toEqual([

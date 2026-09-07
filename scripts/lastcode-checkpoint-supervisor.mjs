@@ -793,6 +793,16 @@ function attemptDelivery(state, config, dependencies) {
   return nextState;
 }
 
+export function checkpointSchedulerPid(environment, parentPid = process.ppid) {
+  const value = environment.LASTCODE_CHECKPOINT_SCHEDULER_PID;
+  if (value === undefined) return undefined;
+  const pid = Number(value);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || String(pid) !== value || pid !== parentPid) {
+    throw new Error("Checkpoint scheduler PID must identify the supervisor's parent process.");
+  }
+  return pid;
+}
+
 export function runCheckpointSupervisor(options = {}, overrides = {}) {
   const home = options.home ?? NodeOS.homedir();
   const repoRoot = options.repoRoot ?? process.cwd();
@@ -805,6 +815,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
     now: () => new Date().toISOString(),
     supervisorPid: process.pid,
+    launchdPid: checkpointSchedulerPid(options.environment ?? process.env) ?? process.pid,
     notify: (title, message) => notify(title, message, environment),
     reconcileProjectActions: (primaryWorktree, trustedProjectActionIds) =>
       reconcilePrimaryProjectActions(primaryWorktree, home, trustedProjectActionIds, environment),
@@ -955,6 +966,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     let state = {
       schemaVersion: 1,
       supervisorPid: dependencies.supervisorPid,
+      launchdPid: dependencies.launchdPid,
       status: "failed",
       phase: failure.phase,
       startedAt,
@@ -1052,6 +1064,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   let state = {
     schemaVersion: 1,
     supervisorPid: dependencies.supervisorPid,
+    launchdPid: dependencies.launchdPid,
     status: "success",
     phase: "complete",
     startedAt,
