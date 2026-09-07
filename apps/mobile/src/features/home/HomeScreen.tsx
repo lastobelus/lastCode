@@ -627,6 +627,15 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     return supported;
   }, [serverConfigs]);
+  const persistenceEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadPersistence === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   const machineByEnvironmentId = useMemo(
     () =>
       new Map(
@@ -766,7 +775,7 @@ export function HomeScreen(props: HomeScreenProps) {
         settledShelfHeaderIndex: threadListV2Layout.settledShelfHeaderIndex,
         snoozeLabelNow: `${nowMinute}:00.000Z`,
       }),
-    [settledShelfExpanded, snoozedShelfExpanded, threadListV2Layout, v2PendingTasks],
+    [nowMinute, settledShelfExpanded, snoozedShelfExpanded, threadListV2Layout, v2PendingTasks],
   );
 
   const renderV2Item = useCallback(
@@ -865,6 +874,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onArchiveThread={props.onArchiveThread}
           onRegenerateThreadTitle={handleRegenerateThreadTitle}
           titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+          persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
           settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
           onSettleThread={handleSettleThread}
           snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -905,6 +915,7 @@ export function HomeScreen(props: HomeScreenProps) {
       handleUnsettleThread,
       pinningEnvironmentIds,
       machineByEnvironmentId,
+      persistenceEnvironmentIds,
       pinReorderEnvironmentIds,
       projectByKey,
       props.onArchiveThread,
@@ -1020,6 +1031,7 @@ export function HomeScreen(props: HomeScreenProps) {
               onDeleteThread={props.onDeleteThread}
               onRegenerateThreadTitle={handleRegenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+              persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
               onSelectThread={props.onSelectThread}
               onSwipeableClose={handleSwipeableClose}
               onSwipeableWillOpen={handleSwipeableWillOpen}
@@ -1044,6 +1056,7 @@ export function HomeScreen(props: HomeScreenProps) {
       handleRegenerateThreadTitle,
       machineByEnvironmentId,
       queuedThreadKeys,
+      persistenceEnvironmentIds,
       props.onArchiveThread,
       props.onDeletePendingTask,
       props.onDeleteThread,

@@ -1,4 +1,5 @@
-import type { PickedElementPayload } from "@t3tools/contracts";
+import { type PickedElementPayload, PickedElementPayloadSchema } from "@t3tools/contracts";
+import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -12,6 +13,30 @@ import {
   newElementContextId,
   normalizeElementContextSelection,
 } from "./elementContext";
+
+it("preserves nested frame context in packaged prompts and distinguishes sibling srcdoc picks", () => {
+  const raw = makePayload({
+    pageUrl: "about:srcdoc",
+    framePath: [
+      { pageUrl: "https://example.com/editor", selector: "iframe:nth-child(1)" },
+      { pageUrl: "about:srcdoc", selector: "iframe.preview" },
+    ],
+  });
+  const context = normalizeElementContextSelection(
+    Schema.decodeUnknownSync(PickedElementPayloadSchema)(raw),
+  )!;
+  expect(context.framePath).toEqual(raw.framePath);
+  const block = buildElementContextBlock([context]);
+  expect(block).toContain("url: about:srcdoc");
+  expect(block).toContain("frame path (outer to inner");
+  expect(block).toContain(JSON.stringify(raw.framePath![0]));
+  expect(block).toContain(JSON.stringify(raw.framePath![1]));
+  const sibling = normalizeElementContextSelection({
+    ...raw,
+    framePath: [{ pageUrl: "https://example.com/editor", selector: "iframe:nth-child(2)" }],
+  })!;
+  expect(elementContextDedupKey(sibling)).not.toBe(elementContextDedupKey(context));
+});
 
 function makePayload(overrides?: Partial<PickedElementPayload>): PickedElementPayload {
   return {

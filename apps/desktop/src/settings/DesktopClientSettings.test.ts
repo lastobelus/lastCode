@@ -65,6 +65,9 @@ const clientSettings: ClientSettings = {
   loadBalancingEnabled: false,
   loadBalancingWeights: { "environment-1": 75, "environment-2": 0 },
   legacySidebarScale: 100,
+  largerScrollbarsEnabled: true,
+  scrollbarWidth: 10,
+  scrollbarMargin: 4,
   timestampFormat: "24-hour",
   wordWrap: true,
 };
