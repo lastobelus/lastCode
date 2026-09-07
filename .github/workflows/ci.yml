@@ -3,8 +3,10 @@ run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number 
 
 on:
   pull_request:
-    branches:
-      - lastcode/main
+    # Topic bases support stacked PRs; main remains the upstream mirror.
+    branches-ignore:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches:
       - lastcode/main
