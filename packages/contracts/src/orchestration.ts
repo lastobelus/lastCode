@@ -591,6 +591,39 @@ export const ThreadLinkedPullRequest = Schema.Struct({
 });
 export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 
+const ThreadWorktreeCleanupBase = {
+  repositoryRoot: TrimmedNonEmptyString,
+  /**
+   * Canonical Git common directory used to serialize worktree operations.
+   * Optional for cleanup rows written before repository identity was added;
+   * those rows fall back to repositoryRoot when selecting a blocker/worker.
+   */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
+  worktreePath: TrimmedNonEmptyString,
+} as const;
+
+export const ThreadWorktreeCleanup = Schema.Union([
+  Schema.Struct({
+    ...ThreadWorktreeCleanupBase,
+    status: Schema.Literal("deleting"),
+    startedAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    ...ThreadWorktreeCleanupBase,
+    status: Schema.Literal("queued"),
+    queuedAt: IsoDateTime,
+    blockedByThreadId: ThreadId,
+  }),
+  Schema.Struct({
+    ...ThreadWorktreeCleanupBase,
+    status: Schema.Literal("failed"),
+    startedAt: IsoDateTime,
+    failedAt: IsoDateTime,
+    error: Schema.String,
+  }),
+]);
+export type ThreadWorktreeCleanup = typeof ThreadWorktreeCleanup.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -637,6 +670,7 @@ export const OrchestrationThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -702,6 +736,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -894,11 +929,21 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   scripts: Schema.optional(Schema.Array(ProjectScript)),
 });
 
+const ProjectScriptsReconcileCommand = Schema.Struct({
+  type: Schema.Literal("project.scripts.reconcile"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  expectedScripts: Schema.Array(ProjectScript),
+  scripts: Schema.Array(ProjectScript),
+});
+
 const ProjectDeleteCommand = Schema.Struct({
   type: Schema.Literal("project.delete"),
   commandId: CommandId,
   projectId: ProjectId,
   force: Schema.optional(Schema.Boolean),
+  /** Resolved by command normalization for forced worktree cleanup. */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
 });
 
 const ThreadCreateCommand = Schema.Struct({
@@ -920,6 +965,21 @@ const ThreadCreateCommand = Schema.Struct({
 
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  deleteWorktree: Schema.optional(Schema.Boolean),
+  /** Resolved by command normalization from the thread's project checkout. */
+  repositoryKey: Schema.optional(TrimmedNonEmptyString),
+});
+
+const ThreadWorktreeCleanupRetryCommand = Schema.Struct({
+  type: Schema.Literal("thread.worktree-cleanup.retry"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadWorktreeCleanupAbandonCommand = Schema.Struct({
+  type: Schema.Literal("thread.worktree-cleanup.abandon"),
   commandId: CommandId,
   threadId: ThreadId,
 });
@@ -1177,9 +1237,12 @@ const ThreadSessionStopCommand = Schema.Struct({
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadWorktreeCleanupRetryCommand,
+  ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadSettleCommand,
@@ -1207,9 +1270,12 @@ export type DispatchableClientOrchestrationCommand =
 export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
+  ProjectScriptsReconcileCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
+  ThreadWorktreeCleanupRetryCommand,
+  ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadSettleCommand,
@@ -1337,6 +1403,13 @@ const ThreadPullRequestSyncCommand = Schema.Struct({
   linkedPullRequest: Schema.optional(ThreadLinkedPullRequest),
 });
 
+const ThreadWorktreeCleanupUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.worktree-cleanup.update"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  cleanup: Schema.NullOr(ThreadWorktreeCleanup),
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
@@ -1349,6 +1422,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
   ThreadPullRequestSyncCommand,
+  ThreadWorktreeCleanupUpdateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1364,6 +1438,7 @@ export const OrchestrationEventType = Schema.Literals([
   "project.deleted",
   "thread.created",
   "thread.deleted",
+  "thread.worktree-cleanup-updated",
   "thread.archived",
   "thread.unarchived",
   "thread.settled",
@@ -1446,6 +1521,13 @@ export const ThreadCreatedPayload = Schema.Struct({
 export const ThreadDeletedPayload = Schema.Struct({
   threadId: ThreadId,
   deletedAt: IsoDateTime,
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+});
+
+export const ThreadWorktreeCleanupUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  cleanup: Schema.NullOr(ThreadWorktreeCleanup),
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadArchivedPayload = Schema.Struct({
@@ -1690,6 +1772,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.deleted"),
     payload: ThreadDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.worktree-cleanup-updated"),
+    payload: ThreadWorktreeCleanupUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
