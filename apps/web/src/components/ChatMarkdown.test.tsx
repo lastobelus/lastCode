@@ -73,6 +73,34 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
 }
 
 describe("ChatMarkdown file-link labels", () => {
+  it.each([
+    [String.raw`read \] here`, "read ] here"],
+    [String.raw`read \[ here`, "read [ here"],
+    [String.raw`read \\\] here`, String.raw`read \] here`],
+  ])("round-trips copied file-link label %s", async (sourceLabel, label) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/repo" text={`[${sourceLabel}](/repo/example.ts:12)`} />,
+        );
+      });
+      const authoredLabel = () =>
+        renderer!.root.findAllByType("span").find((node) => node.children.includes(label));
+      expect(authoredLabel()).toBeDefined();
+      const copied = authoredLabel()!.props["data-markdown-copy"];
+      await act(async () => {
+        renderer!.update(<ChatMarkdown cwd="/repo" text={copied} />);
+      });
+      expect(authoredLabel()).toBeDefined();
+      expect(authoredLabel()!.props["data-markdown-copy"]).toBe(copied);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains descriptive prose, emphasis, destinations, and copy text", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

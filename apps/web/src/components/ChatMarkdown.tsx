@@ -2974,7 +2974,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
     }
 
     const label = nodeToPlainText(children);
-    const copyMarkdown = `[${label || fileLinkMeta.basename}](${normalizedHref})`;
+    const escapedLabel = (label || fileLinkMeta.basename)
+      .replaceAll("\\", "\\\\")
+      .replaceAll("[", "\\[")
+      .replaceAll("]", "\\]");
+    const copyMarkdown = `[${escapedLabel}](${normalizedHref})`;
     const chip = fileLinkChip(fileLinkMeta, copyMarkdown, props.className, normalizedHref);
     return isMarkdownFileLinkLabel(label, normalizedHref) ? (
       chip
