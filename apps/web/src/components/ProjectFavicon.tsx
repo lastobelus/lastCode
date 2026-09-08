@@ -227,7 +227,8 @@ function ProjectFaviconImage({
         <img
           src={displayedSrc}
           alt=""
-          className={cn("size-3.5 shrink-0 rounded-[37.5%] object-contain", className)}
+          data-slot="project-favicon"
+          className={cn("size-3.5 shrink-0 object-contain", className)}
           onError={() => handleLoadError(displayedSrc)}
         />
       ) : null}

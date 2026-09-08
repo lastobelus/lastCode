@@ -202,6 +202,12 @@ describe("mobile connection storage", () => {
     await expect(loadPreferences()).resolves.toEqual({});
   });
 
+  it("preserves the device-local project icon shape preference", async () => {
+    mocks.setPreferencesJson(JSON.stringify({ roundedProjectIcons: true }), 10);
+
+    await expect(loadPreferences()).resolves.toEqual({ roundedProjectIcons: true });
+  });
+
   it("falls back to secure storage when SQLite cannot save preferences", async () => {
     mocks.setDatabaseFailures(true, true);
     await expect(savePreferencesPatch({ baseFontSize: 19 })).resolves.toEqual({ baseFontSize: 19 });
