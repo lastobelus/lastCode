@@ -284,6 +284,31 @@ done
 }
 
 describe("pinned checkpoint revisions", () => {
+  it("accepts an older published lightweight tag while planning and publishing a revision", () => {
+    const { fixture, source, merged, environment } = historicalFixture();
+    try {
+      const older = "lastcode/revision/v9.9.9-nightly.20900101.1.1";
+      git(fixture.repo, ["tag", older, source]);
+      git(fixture.repo, ["push", "--quiet", "origin", `refs/tags/${older}`]);
+      git(fixture.repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
+      const preview = checkpoint(fixture, ["--revision-only", NIGHTLY_A, "--dry-run"], environment);
+      assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+      const publish = checkpoint(
+        fixture,
+        ["--revision-only", NIGHTLY_A, "--push-tags"],
+        environment,
+      );
+      assert.equal(publish.status, 0, publish.stderr || publish.stdout);
+      assert.equal(remoteCommit(fixture.origin, `refs/tags/${older}`), source);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        false,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("cleans a matching published revision on retry but preserves operator edits", () => {
     const { fixture, merged, environment } = historicalFixture();
     try {

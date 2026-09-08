@@ -774,14 +774,13 @@ function publishedInstallableRefs(
       `refs/tags/${REVISION_TAG_GLOB}`,
     ]),
   );
-  const published = new Set(
-    remoteRefs
-      .map((line) => line.split(/\s+/)[1])
-      .filter(
-        (ref): ref is string =>
-          ref !== undefined && ref.startsWith("refs/tags/") && !ref.endsWith("^{}"),
-      )
-      .map((ref) => ref.slice("refs/tags/".length)),
+  const published = new Map(
+    remoteRefs.flatMap((line) => {
+      const [object, ref] = line.split(/\s+/);
+      return object && ref?.startsWith("refs/tags/") && !ref.endsWith("^{}")
+        ? [[ref.slice("refs/tags/".length), object] as const]
+        : [];
+    }),
   );
   const peeledCommits = new Map(
     remoteRefs.flatMap((line) => {
@@ -792,7 +791,7 @@ function publishedInstallableRefs(
     }),
   );
   const localTags = new Set(installables.map(({ tag }) => tag));
-  const missingLocalTag = [...published]
+  const missingLocalTag = [...published.keys()]
     .filter((tag) => parseLastCodeInstallableTag(tag))
     .find((tag) => !localTags.has(tag));
   if (missingLocalTag) {
@@ -802,10 +801,7 @@ function publishedInstallableRefs(
   }
   return installables.filter((installable) => {
     if (!published.has(installable.tag)) return false;
-    const remoteCommit = peeledCommits.get(installable.tag);
-    if (!remoteCommit) {
-      throw new Error(`Published installable ${installable.tag} must be an annotated tag.`);
-    }
+    const remoteCommit = peeledCommits.get(installable.tag) ?? published.get(installable.tag);
     if (remoteCommit !== installable.commit) {
       throw new Error(
         `Published installable ${installable.tag} resolves remotely to ${remoteCommit}, but the local tag resolves to ${installable.commit}.`,
