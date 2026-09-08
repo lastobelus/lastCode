@@ -59,6 +59,7 @@ import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./updates/LastCodeLocalUpdates.ts";
 import * as BrowserImport from "./preview/BrowserImport/BrowserImport.ts";
 import * as LinuxBrowserSecret from "./preview/BrowserImport/LinuxBrowserSecret.ts";
 import * as BrowserSession from "./preview/BrowserSession.ts";
@@ -207,6 +208,7 @@ const desktopApplicationLayer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(desktopSnapShotLayer),
   Layer.provideMerge(DesktopUpdates.layer),
+  Layer.provideMerge(LastCodeLocalUpdates.layer),
   Layer.provideMerge(desktopWslBackendLayer),
   Layer.provideMerge(desktopLocalEnvironmentAuthLayer),
 );
