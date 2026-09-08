@@ -203,6 +203,30 @@ If publication succeeded but cleanup was interrupted, a retry recognizes the
 matching immutable tag represented on main and finishes cleanup without
 republishing.
 
+### Publishing a revision while newer nightlies are on hold
+
+To include merged LastCode fixes without advancing upstream, explicitly name the
+latest published checkpoint's upstream nightly:
+
+```bash
+pnpm lastcode:checkpoint -- --revision-only v0.0.34-nightly.20260825.1185 --push-tags --promote
+```
+
+This mode rejects an unpublished or older checkpoint base and a source that
+already contains a newer upstream nightly. It keeps the normal validation and
+publication guards, but uses a separate revision worktree and leaves any retained
+nightly repair and recovery selection untouched. It does not change the schedule
+or permanently block future nightlies. A retained selection may need to be
+reconciled with the newly promoted source before it can later resume.
+
+Pinned revision runs use `checkpoint-revision-runs.jsonl` in the automation
+history directory so they do not replace the nightly recovery record. Retrying
+after an interrupted publication cleans up only a clean revision worktree that
+matches the published commit; changed repairs remain available for inspection.
+
+After publication, select the exact revision tag for **Build Local Package**.
+Publishing or building does not install or restart the app.
+
 ### Validating a checkpoint manually
 
 A release build uses a different full-CI context because rebasing intentionally

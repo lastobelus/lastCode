@@ -128,6 +128,10 @@ export function checkpointRunHistoryPath(home = NodeOS.homedir()): string {
   return NodePath.join(home, ".lastcode", "automation", "checkpoint-runs.jsonl");
 }
 
+export function checkpointRevisionRunHistoryPath(home = NodeOS.homedir()): string {
+  return NodePath.join(home, ".lastcode", "automation", "checkpoint-revision-runs.jsonl");
+}
+
 export function readLatestCheckpointRun(
   historyPath = checkpointRunHistoryPath(),
 ): CheckpointRunRecord | undefined {
@@ -170,4 +174,12 @@ export function appendCheckpointRun(
     );
     return false;
   }
+}
+
+export function appendCheckpointRevisionRun(
+  record: CheckpointHistoryRecord,
+  historyPath = checkpointRevisionRunHistoryPath(),
+  warn: (message: string) => void = console.warn,
+): boolean {
+  return appendCheckpointRun(record, historyPath, warn);
 }

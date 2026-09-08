@@ -7,7 +7,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   appendCheckpointRun,
+  appendCheckpointRevisionRun,
   checkpointFailureRecord,
+  checkpointRevisionRunHistoryPath,
   checkpointRunHistoryPath,
   readLatestCheckpointRun,
 } from "./lastcode-checkpoint-history.ts";
@@ -17,6 +19,53 @@ describe("checkpoint run history", () => {
     expect(checkpointRunHistoryPath("/Users/example")).toBe(
       "/Users/example/.lastcode/automation/checkpoint-runs.jsonl",
     );
+    expect(checkpointRevisionRunHistoryPath("/Users/example")).toBe(
+      "/Users/example/.lastcode/automation/checkpoint-revision-runs.jsonl",
+    );
+  });
+
+  it("keeps the latest nightly failure across revision success and failure records", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-history-"));
+    const checkpointHistoryPath = NodePath.join(directory, "checkpoint-runs.jsonl");
+    const revisionHistoryPath = NodePath.join(directory, "checkpoint-revision-runs.jsonl");
+    const nightlyFailure = checkpointFailureRecord({
+      commitsRebased: 14,
+      error: new Error("nightly replay needs repair"),
+      failurePhase: "rebase",
+      recoveryBranch: "sync/nightly/v0.0.1-nightly.20260813.2",
+      recoveryFingerprint: "nightly-fingerprint",
+      startedAtMs: 1_000,
+      upstreamTag: "v0.0.1-nightly.20260813.2",
+    });
+    const revisionSuccess = {
+      schemaVersion: 1,
+      status: "success",
+      upstreamTag: "v0.0.1-nightly.20260812.1",
+      startedAt: "1970-01-01T00:00:02.000Z",
+      finishedAt: "1970-01-01T00:00:03.000Z",
+      durationMs: 1_000,
+      commitsRebased: 0,
+      checkpointTag: "lastcode/revision/v0.0.1-nightly.20260812.1.1",
+    } as const;
+    const revisionFailure = checkpointFailureRecord({
+      commitsRebased: 0,
+      error: new Error("revision smoke failed"),
+      failurePhase: "smoke",
+      recoveryBranch: "sync/revision-only/v0.0.1-nightly.20260812.1.2",
+      startedAtMs: 4_000,
+      upstreamTag: "v0.0.1-nightly.20260812.1",
+    });
+
+    try {
+      expect(appendCheckpointRun(nightlyFailure, checkpointHistoryPath)).toBe(true);
+      expect(appendCheckpointRevisionRun(revisionSuccess, revisionHistoryPath)).toBe(true);
+      expect(readLatestCheckpointRun(checkpointHistoryPath)).toEqual(nightlyFailure);
+      expect(appendCheckpointRevisionRun(revisionFailure, revisionHistoryPath)).toBe(true);
+      expect(readLatestCheckpointRun(checkpointHistoryPath)).toEqual(nightlyFailure);
+      expect(readLatestCheckpointRun(revisionHistoryPath)).toEqual(revisionFailure);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not let dashboard history failures change checkpoint results", () => {

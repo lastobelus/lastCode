@@ -35,9 +35,11 @@ import {
 
 import {
   appendCheckpointRun,
+  appendCheckpointRevisionRun,
   checkpointFailureRecord,
   readLatestCheckpointRun,
   type CarrySetShadowRecord,
+  type CheckpointHistoryRecord,
   type CheckpointRunRecord,
 } from "./lastcode-checkpoint-history.ts";
 import { runCarrySetShadowCheck, type CarrySetShadowResult } from "./lastcode-carry-set.ts";
@@ -78,8 +80,16 @@ interface CheckpointOptions {
   readonly pushRemote: string;
   readonly selectRecovery?: string;
   readonly recoverySource?: string;
+  readonly revisionOnly?: string;
   readonly replayMode?: CheckpointReplayMode;
   readonly rollbackReason?: string;
+}
+
+function appendCheckpointRunForOptions(
+  options: CheckpointOptions,
+  record: CheckpointHistoryRecord,
+): boolean {
+  return options.revisionOnly ? appendCheckpointRevisionRun(record) : appendCheckpointRun(record);
 }
 
 export interface CheckpointRef {
@@ -94,6 +104,50 @@ export interface InstallableRef extends LastCodeInstallableTag {
   readonly sourceCommit?: string;
   readonly replayMode?: CheckpointReplayMode;
   readonly sourceObjectRef?: string;
+}
+
+export function revisionOnlyNightlyTags(
+  requestedTag: string,
+  installables: ReadonlyArray<InstallableRef>,
+  sourceCommit: string,
+  sourceNightlyTags: ReadonlyArray<string>,
+  isAncestor: (ancestor: string, descendant: string) => boolean,
+): ReadonlyArray<string> {
+  const requested = parseNightlyTag(requestedTag);
+  if (!requested) throw new Error("--revision-only requires an exact upstream nightly tag.");
+
+  const latest = installables.toSorted(compareLastCodeInstallableTags).at(-1);
+  if (!latest) {
+    throw new Error("--revision-only requires a published LastCode installable base.");
+  }
+  if (latest.nightly.tag !== requested.tag) {
+    throw new Error(
+      `--revision-only must name the latest published LastCode installable base ${latest.nightly.tag}; received ${requested.tag}.`,
+    );
+  }
+
+  const representedSource = latest.sourceObjectRef ?? latest.sourceCommit;
+  if (
+    !isAncestor(latest.commit, sourceCommit) &&
+    (!representedSource || !isAncestor(representedSource, sourceCommit))
+  ) {
+    throw new Error(
+      `Current LastCode source ${sourceCommit} does not contain the source represented by ${latest.tag}.`,
+    );
+  }
+
+  const newerSourceNightly = sourceNightlyTags
+    .map(parseNightlyTag)
+    .filter((nightly): nightly is NightlyTag => nightly !== undefined)
+    .filter((nightly) => compareNightlyTags(nightly, requested) > 0)
+    .toSorted(compareNightlyTags)
+    .at(-1);
+  if (newerSourceNightly) {
+    throw new Error(
+      `Current LastCode source contains newer upstream nightly ${newerSourceNightly.tag}; refusing to label it as a revision of ${requested.tag}.`,
+    );
+  }
+  return [requested.tag];
 }
 
 function representedSourceFor(installable: InstallableRef): string {
@@ -706,6 +760,61 @@ function listInstallableRefs(repoRoot: string): ReadonlyArray<InstallableRef> {
     .toSorted(compareLastCodeInstallableTags);
 }
 
+function publishedInstallableRefs(
+  repoRoot: string,
+  pushRemote: string,
+  installables: ReadonlyArray<InstallableRef>,
+): ReadonlyArray<InstallableRef> {
+  const remoteRefs = splitLines(
+    git(repoRoot, [
+      "ls-remote",
+      "--tags",
+      pushRemote,
+      `refs/tags/${CHECKPOINT_TAG_GLOB}`,
+      `refs/tags/${REVISION_TAG_GLOB}`,
+    ]),
+  );
+  const published = new Set(
+    remoteRefs
+      .map((line) => line.split(/\s+/)[1])
+      .filter(
+        (ref): ref is string =>
+          ref !== undefined && ref.startsWith("refs/tags/") && !ref.endsWith("^{}"),
+      )
+      .map((ref) => ref.slice("refs/tags/".length)),
+  );
+  const peeledCommits = new Map(
+    remoteRefs.flatMap((line) => {
+      const [commit, ref] = line.split(/\s+/);
+      return commit && ref?.startsWith("refs/tags/") && ref.endsWith("^{}")
+        ? [[ref.slice("refs/tags/".length, -"^{}".length), commit] as const]
+        : [];
+    }),
+  );
+  const localTags = new Set(installables.map(({ tag }) => tag));
+  const missingLocalTag = [...published]
+    .filter((tag) => parseLastCodeInstallableTag(tag))
+    .find((tag) => !localTags.has(tag));
+  if (missingLocalTag) {
+    throw new Error(
+      `Published installable ${missingLocalTag} is not available locally; fetch before selecting a revision base.`,
+    );
+  }
+  return installables.filter((installable) => {
+    if (!published.has(installable.tag)) return false;
+    const remoteCommit = peeledCommits.get(installable.tag);
+    if (!remoteCommit) {
+      throw new Error(`Published installable ${installable.tag} must be an annotated tag.`);
+    }
+    if (remoteCommit !== installable.commit) {
+      throw new Error(
+        `Published installable ${installable.tag} resolves remotely to ${remoteCommit}, but the local tag resolves to ${installable.commit}.`,
+      );
+    }
+    return true;
+  });
+}
+
 export function validateHistoricalBootstrapSource(input: {
   readonly bootstrap: CarryBootstrap;
   readonly installables: ReadonlyArray<InstallableRef>;
@@ -1103,6 +1212,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   let pushRemote = DEFAULT_PUSH_REMOTE;
   let selectRecovery: string | undefined;
   let recoverySource: string | undefined;
+  let revisionOnly: string | undefined;
   let replayMode: CheckpointReplayMode | undefined;
   let rollbackReason: string | undefined;
 
@@ -1122,6 +1232,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
       arg === "--push-remote" ||
       arg === "--select-recovery" ||
       arg === "--recovery-source" ||
+      arg === "--revision-only" ||
       arg === "--replay-mode" ||
       arg === "--rollback-reason"
     ) {
@@ -1132,6 +1243,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
       else if (arg === "--push-remote") pushRemote = value;
       else if (arg === "--select-recovery") selectRecovery = value;
       else if (arg === "--recovery-source") recoverySource = value;
+      else if (arg === "--revision-only") revisionOnly = value;
       else if (arg === "--replay-mode") {
         if (value !== "carry" && value !== "historical") {
           throw new Error("--replay-mode must be 'carry' or 'historical'.");
@@ -1147,6 +1259,22 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
   if (Boolean(selectRecovery) !== Boolean(recoverySource)) {
     throw new Error("--select-recovery and --recovery-source must be supplied together.");
   }
+  if (
+    revisionOnly &&
+    (!fetch ||
+      selectRecovery ||
+      recoverySource ||
+      supersedeFailedRecovery ||
+      mirrorUpstreamMain ||
+      !smoke)
+  ) {
+    throw new Error(
+      "--revision-only cannot be combined with --no-fetch, recovery selection, --supersede-failed-recovery, --mirror-upstream-main, or --no-smoke.",
+    );
+  }
+  if (revisionOnly && !dryRun && !pushTags) {
+    throw new Error("--revision-only requires --push-tags unless used with --dry-run.");
+  }
   return {
     dryRun,
     fetch,
@@ -1160,6 +1288,7 @@ function parseArgs(argv: ReadonlyArray<string>): CheckpointOptions {
     pushRemote,
     ...(selectRecovery ? { selectRecovery } : {}),
     ...(recoverySource ? { recoverySource } : {}),
+    ...(revisionOnly ? { revisionOnly } : {}),
     ...(replayMode ? { replayMode } : {}),
     ...(rollbackReason ? { rollbackReason } : {}),
   };
@@ -1397,7 +1526,7 @@ function notify(platform: NodeJS.Platform, title: string, message: string): void
   );
 }
 
-function resolveAutomationWorktree(repoRoot: string): string {
+function resolveAutomationWorktree(repoRoot: string, name = "lastcode-nightly-sync"): string {
   const primaryWorktree = splitLines(git(repoRoot, ["worktree", "list", "--porcelain"]))
     .find((line) => line.startsWith("worktree "))
     ?.slice("worktree ".length);
@@ -1405,7 +1534,7 @@ function resolveAutomationWorktree(repoRoot: string): string {
   return NodePath.join(
     NodePath.dirname(primaryWorktree),
     `${NodePath.basename(primaryWorktree)}-worktrees`,
-    "lastcode-nightly-sync",
+    name,
   );
 }
 
@@ -1417,6 +1546,36 @@ export function runPromotionThenShadow(promote: () => void, shadow: () => void):
   }
 }
 
+function releasePublishedPinnedRevision(
+  repoRoot: string,
+  worktree: string,
+  installables: ReadonlyArray<InstallableRef>,
+): void {
+  if (!NodeFS.existsSync(worktree)) return;
+  const branch = git(worktree, ["branch", "--show-current"]);
+  const head = git(worktree, ["rev-parse", "HEAD"]);
+  const installable = installables.find((candidate) => {
+    const expectedBranch = `sync/revision-only/${candidate.nightly.tag}`;
+    return (
+      candidate.revision > 0 &&
+      candidate.commit === head &&
+      (branch === expectedBranch || branch === `${expectedBranch}.${candidate.revision}`)
+    );
+  });
+  if (
+    !installable ||
+    rebaseInProgress(worktree) ||
+    git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]) ||
+    unexpectedIgnoredRecoveryPaths(worktree).length > 0
+  ) {
+    throw new Error(
+      "Retained pinned revision differs from the published revision; inspect before cleanup.",
+    );
+  }
+  run(repoRoot, "git", ["worktree", "remove", worktree]);
+  git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, installable.commit]);
+}
+
 function publishRevisionIfNeeded(
   repoRoot: string,
   sourceRef: string,
@@ -1425,6 +1584,7 @@ function publishRevisionIfNeeded(
   options: CheckpointOptions,
   platform: NodeJS.Platform,
   replay: EffectiveReplayConfiguration,
+  automationWorktreeName?: string,
 ): { readonly handled: boolean } {
   const plan = resolveRevisionPlan({
     installableRefs: installables,
@@ -1441,14 +1601,14 @@ function publishRevisionIfNeeded(
     return { handled: true };
   }
 
-  const worktree = resolveAutomationWorktree(repoRoot);
+  const worktree = resolveAutomationWorktree(repoRoot, automationWorktreeName);
   if (NodeFS.existsSync(worktree)) {
     throw new Error(
       `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
     );
   }
   NodeFS.mkdirSync(NodePath.dirname(worktree), { recursive: true });
-  const branch = `sync/revision/${plan.nightly.tag}.${plan.revision}`;
+  const branch = `${automationWorktreeName ? "sync/revision-only" : "sync/revision"}/${plan.nightly.tag}.${plan.revision}`;
   if (git(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`], { allowFailure: true })) {
     throw new Error(`Recovery branch ${branch} already exists.`);
   }
@@ -1521,7 +1681,7 @@ function publishRevisionIfNeeded(
     pendingTag = undefined;
     completed = true;
     const finishedAtMs = Date.now();
-    appendCheckpointRun({
+    appendCheckpointRunForOptions(options, {
       schemaVersion: 1,
       status: "success",
       upstreamTag: plan.nightly.tag,
@@ -1538,7 +1698,8 @@ function publishRevisionIfNeeded(
     });
   } catch (error) {
     if (pendingTag) completed = deleteCheckpointTag(repoRoot, pendingTag);
-    appendCheckpointRun(
+    appendCheckpointRunForOptions(
+      options,
       checkpointFailureRecord({
         commitsRebased: 0,
         error,
@@ -1576,7 +1737,10 @@ function publishRevisionIfNeeded(
         sourceCommit,
         options.smoke || options.pushTags,
       ),
-    () => runHistoricalShadowIfNeeded(repoRoot, plan.installableTag, replay),
+    () =>
+      runHistoricalShadowIfNeeded(repoRoot, plan.installableTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      ),
   );
   notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
   console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
@@ -1713,8 +1877,16 @@ function runHistoricalShadowIfNeeded(
   repoRoot: string,
   checkpointTag: string | undefined,
   replay: EffectiveReplayConfiguration,
+  append: (record: CarrySetShadowRecord) => boolean = appendCheckpointRun,
 ): void {
-  if (replay.mode === "historical") runCarrySetShadowAfterPublication(repoRoot, checkpointTag);
+  if (replay.mode !== "historical") return;
+  runCarrySetShadowAfterPublication(repoRoot, checkpointTag, {
+    append,
+    check: runCarrySetShadowCheck,
+    error: (message) => console.error(message),
+    log: (message) => console.log(message),
+    now: Date.now,
+  });
 }
 
 export interface RecoverySelection {
@@ -1962,13 +2134,17 @@ function main(argv: ReadonlyArray<string>): void {
 
 function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPath: string): void {
   const hostPlatform = Effect.runSync(HostProcessPlatform);
+  const automationWorktreeName = options.revisionOnly
+    ? `lastcode-revision-${options.revisionOnly}`
+    : undefined;
+  const automationWorktree = () => resolveAutomationWorktree(repoRoot, automationWorktreeName);
   let replay = resolveCheckpointReplay({
     configured: readManifestReplayConfiguration(NodePath.join(repoRoot, CARRY_MANIFEST_PATH)),
     ...(options.replayMode ? { requestedMode: options.replayMode } : {}),
     ...(options.rollbackReason ? { rollbackReason: options.rollbackReason } : {}),
   });
   if (options.selectRecovery && options.recoverySource) {
-    const worktree = resolveAutomationWorktree(repoRoot);
+    const worktree = automationWorktree();
     const branch = git(worktree, ["branch", "--show-current"]);
     const selected = parseRecoverySelection({
       head: options.selectRecovery,
@@ -2018,9 +2194,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     );
     return;
   }
-  const selection = NodeFS.existsSync(selectionPath)
-    ? parseRecoverySelection(JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")))
-    : undefined;
+  const selection =
+    !options.revisionOnly && NodeFS.existsSync(selectionPath)
+      ? parseRecoverySelection(JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")))
+      : undefined;
   if (selection?.replayMode && !options.replayMode) {
     replay = resolveCheckpointReplay({
       configured: readManifestReplayConfiguration(NodePath.join(repoRoot, CARRY_MANIFEST_PATH)),
@@ -2086,13 +2263,20 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
 
   if (options.mirrorUpstreamMain) mirrorUpstreamMain(repoRoot, options);
 
-  if (options.pushTags && !options.dryRun) {
+  if (options.pushTags && !options.dryRun && !options.revisionOnly) {
     pruneUnpublishedInstallableTags(repoRoot, options.pushRemote);
   }
 
   const sourceCommit = git(repoRoot, ["rev-parse", `${options.sourceRef}^{commit}`]);
-  const checkpoints = listCheckpointRefs(repoRoot);
-  const installables = listInstallableRefs(repoRoot);
+  const allCheckpoints = listCheckpointRefs(repoRoot);
+  const allInstallables = listInstallableRefs(repoRoot);
+  const installables = options.revisionOnly
+    ? publishedInstallableRefs(repoRoot, options.pushRemote, allInstallables)
+    : allInstallables;
+  const publishedInstallableTags = new Set(installables.map(({ tag }) => tag));
+  const checkpoints = options.revisionOnly
+    ? allCheckpoints.filter(({ checkpointTag }) => publishedInstallableTags.has(checkpointTag))
+    : allCheckpoints;
   // A crash after pushing but before clearing the selection must not republish or
   // rebase the repaired commit. The published immutable tag now preserves it.
   if (selection && publishedRecoveryInstallable(installables, selection)) {
@@ -2101,24 +2285,27 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         "Published recovery is not represented on main; inspect before releasing it.",
       );
     if (!options.dryRun)
-      releasePublishedRecovery(
-        repoRoot,
-        resolveAutomationWorktree(repoRoot),
-        selectionPath,
-        selection,
-      );
+      releasePublishedRecovery(repoRoot, automationWorktree(), selectionPath, selection);
     console.log(
       "[lastcode:checkpoint] Selected recovery was already published; released its retained worktree. Run the service again to continue.",
     );
     return;
   }
-  if (selection)
-    assertRecoverySelection(resolveAutomationWorktree(repoRoot), selection, sourceCommit);
+  if (selection) assertRecoverySelection(automationWorktree(), selection, sourceCommit);
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, sourceCommit);
   const sourceNightlyTags = splitLines(
     git(repoRoot, ["tag", "--merged", sourceCommit, "--list", "v*-nightly.*"]),
   );
-  const nightlyTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
+  const availableNightlyTags = splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]));
+  const nightlyTags = options.revisionOnly
+    ? revisionOnlyNightlyTags(
+        options.revisionOnly,
+        installables,
+        sourceCommit,
+        sourceNightlyTags,
+        (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+      )
+    : availableNightlyTags;
   const supersededNightly = supersedeFailedRecovery(
     repoRoot,
     nightlyTags,
@@ -2150,6 +2337,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           sourceRef: options.sourceRef,
           ...(supersededNightly ? { supersedeThroughNightlyTag: supersededNightly.tag } : {}),
         });
+  if (
+    options.revisionOnly &&
+    (plan.baseNightly.tag !== options.revisionOnly ||
+      plan.bootstrapCheckpoint ||
+      plan.missingNightlies.length > 0)
+  ) {
+    throw new Error(
+      `Pinned revision planning escaped ${options.revisionOnly}; refusing checkpoint or bootstrap work.`,
+    );
+  }
   if (
     selection &&
     (plan.bootstrapCheckpoint
@@ -2194,8 +2391,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
   if (options.dryRun) return;
 
+  if (options.revisionOnly) {
+    releasePublishedPinnedRevision(
+      repoRoot,
+      automationWorktree(),
+      installables.filter((installable) => installable.nightly.tag === options.revisionOnly),
+    );
+  }
+
   if (selection) {
-    const worktree = resolveAutomationWorktree(repoRoot);
+    const worktree = automationWorktree();
     const startedAtMs = Date.now();
     const commitsRebased = Number(
       git(repoRoot, ["rev-list", "--count", `${selection.nightlyTag}..${selection.head}`]),
@@ -2241,7 +2446,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       publishRepairedCheckpoint(repoRoot, options.pushRemote, pendingTag, selection);
       const publishedTag = pendingTag;
       pendingTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: nightly.tag,
@@ -2254,7 +2459,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit: selection.sourceCommit,
       });
       releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
-      runHistoricalShadowIfNeeded(repoRoot, publishedTag, replay);
+      runHistoricalShadowIfNeeded(repoRoot, publishedTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      );
       console.log(
         "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
       );
@@ -2272,7 +2479,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           // The validation or publication error remains authoritative.
         }
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord({
           commitsRebased,
           error,
@@ -2317,14 +2525,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         })
       : undefined;
   if (carryNeedsCompilation) {
-    const worktree = resolveAutomationWorktree(repoRoot);
+    const worktree = automationWorktree();
     if (NodeFS.existsSync(worktree) && !selection) {
       throw new Error(
         `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
       );
     }
     const firstNightly = plan.missingNightlies[0];
-    carryBranch = carryRecoveryBranch(firstNightly?.tag ?? plan.baseNightly.tag);
+    carryBranch = options.revisionOnly
+      ? `sync/revision-only/${options.revisionOnly}`
+      : carryRecoveryBranch(firstNightly?.tag ?? plan.baseNightly.tag);
     if (!selection) {
       NodeFS.mkdirSync(NodePath.dirname(worktree), { recursive: true });
       if (
@@ -2373,7 +2583,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           `[lastcode:checkpoint] Could not fingerprint retained carry recovery: ${fingerprintError instanceof Error ? fingerprintError.message : String(fingerprintError)}`,
         );
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord({
           commitsRebased: 0,
           error,
@@ -2399,7 +2610,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     );
     try {
       if (carryWorktreePrepared) {
-        const worktree = resolveAutomationWorktree(repoRoot);
+        const worktree = automationWorktree();
         if (options.smoke) runSmokeGate(repoRoot, worktree);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
@@ -2442,16 +2653,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
               : {
                   kind: "pre-push",
                   candidateCommit,
-                  checkoutHead: git(
-                    carryWorktreePrepared ? resolveAutomationWorktree(repoRoot) : repoRoot,
-                    ["rev-parse", "HEAD"],
-                  ),
+                  checkoutHead: git(carryWorktreePrepared ? automationWorktree() : repoRoot, [
+                    "rev-parse",
+                    "HEAD",
+                  ]),
                 },
           ),
         );
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: plan.baseNightly.tag,
@@ -2474,7 +2685,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         ...(carryWorktreePrepared && carryBranch ? { recoveryBranch: carryBranch } : {}),
         tagDeleted,
       });
-      const worktree = carryWorktreePrepared ? resolveAutomationWorktree(repoRoot) : undefined;
+      const worktree = carryWorktreePrepared ? automationWorktree() : undefined;
       let recoveryFingerprint: string | undefined;
       let recoveryBranch = disposition.recoveryBranch;
       if (disposition.cleanup && worktree && carryBranch) {
@@ -2499,7 +2710,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       const finishedAtMs = Date.now();
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord(
           {
             commitsRebased,
@@ -2533,7 +2745,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
 
   if (plan.missingNightlies.length === 0) {
     if (carryWorktreePrepared && !plan.bootstrapCheckpoint) {
-      const worktree = resolveAutomationWorktree(repoRoot);
+      const worktree = automationWorktree();
       const revisionPlan = nextRevisionPlan(plan.baseNightly, installables);
       const startedAtMs = Date.now();
       let pendingTag: string | undefined;
@@ -2577,7 +2789,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           );
         }
         const finishedAtMs = Date.now();
-        appendCheckpointRun({
+        appendCheckpointRunForOptions(options, {
           schemaVersion: 1,
           status: "success",
           upstreamTag: revisionPlan.nightly.tag,
@@ -2603,7 +2815,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             // The original validation or publication error remains authoritative.
           }
         }
-        appendCheckpointRun(
+        appendCheckpointRunForOptions(
+          options,
           checkpointFailureRecord({
             commitsRebased: 0,
             error,
@@ -2634,13 +2847,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             sourceCommit,
             options.smoke || options.pushTags,
           ),
-        () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+        () =>
+          runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+            appendCheckpointRunForOptions(options, record),
+          ),
       );
       console.log(`[lastcode:checkpoint] Created ${newestProducedInstallableTag}.`);
       return;
     }
     if (carryWorktreePrepared && plan.bootstrapCheckpoint) {
-      const worktree = resolveAutomationWorktree(repoRoot);
+      const worktree = automationWorktree();
       run(repoRoot, "git", ["worktree", "remove", worktree]);
       if (carryBranch) git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
       carryWorktreePrepared = false;
@@ -2654,6 +2870,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           options,
           hostPlatform,
           replay,
+          automationWorktreeName,
         )
       : { handled: false };
     if (revisionPublication.handled) {
@@ -2662,13 +2879,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
     runPromotionThenShadow(
       () => promoteCheckpoint(repoRoot, candidateCommit, options, sourceCommit, options.pushTags),
-      () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+      () =>
+        runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+          appendCheckpointRunForOptions(options, record),
+        ),
     );
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
   }
 
-  const worktree = resolveAutomationWorktree(repoRoot);
+  const worktree = automationWorktree();
   if (NodeFS.existsSync(worktree) && !selection && !carryWorktreePrepared) {
     throw new Error(
       `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
@@ -2823,7 +3043,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: nightly.tag,
@@ -2866,7 +3086,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           );
         }
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord(
           {
             commitsRebased: attempt.commitsRebased,
@@ -2900,7 +3121,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       );
       console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
     }
-    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay);
+    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+      appendCheckpointRunForOptions(options, record),
+    );
     throw error;
   } finally {
     if (completed) {
@@ -2914,7 +3137,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
 
   if (selection) {
-    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay);
+    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+      appendCheckpointRunForOptions(options, record),
+    );
     console.log(
       "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
     );
@@ -2930,7 +3155,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit,
         options.smoke || options.pushTags,
       ),
-    () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+    () =>
+      runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      ),
   );
   notify(hostPlatform, "LastCode nightly checkpoint complete", `${candidateRef} is ready.`);
 }
