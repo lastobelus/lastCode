@@ -53,7 +53,7 @@ function sameBuildLogIdentity(
   return left?.device === right.device && left.inode === right.inode;
 }
 
-export function resolveLocalBuildErrorKind(phaseIndex: number): "build" | "packaging" {
+function resolveLocalBuildErrorKind(phaseIndex: number): "build" | "packaging" {
   return phaseIndex >= PACKAGING_PHASE_INDEX ? "packaging" : "build";
 }
 

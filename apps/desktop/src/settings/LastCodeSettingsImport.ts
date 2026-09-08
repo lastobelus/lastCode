@@ -63,7 +63,7 @@ const CATEGORY_DEFINITIONS: ReadonlyArray<{
   },
 ];
 
-export const LASTCODE_SETTINGS_IMPORT_EXCLUSIONS = [
+const LASTCODE_SETTINGS_IMPORT_EXCLUSIONS = [
   "Projects, threads, checkpoints, attachments, and databases",
   "Provider configuration, credentials, instances, and model selections",
   "Saved environments, connections, and machine identity",
