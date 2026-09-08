@@ -44,7 +44,10 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
-import { inlineCodeFilePathCandidate } from "@t3tools/client-runtime/markdown-links";
+import {
+  inlineCodeFilePathCandidate,
+  isMarkdownFileLinkLabel,
+} from "@t3tools/client-runtime/markdown-links";
 import { mediaFileReference, mediaUrlReference } from "@t3tools/client-runtime/media-reference";
 import { mediaKindFromPath, mediaMimeTypeFromExtension } from "@t3tools/shared/filePreview";
 import * as Cause from "effect/Cause";
@@ -2970,11 +2973,15 @@ const CHAT_MARKDOWN_COMPONENTS = {
       );
     }
 
-    return fileLinkChip(
-      fileLinkMeta,
-      `[${fileLinkMeta.basename}](${normalizedHref})`,
-      props.className,
-      normalizedHref,
+    const label = nodeToPlainText(children);
+    const copyMarkdown = `[${label || fileLinkMeta.basename}](${normalizedHref})`;
+    const chip = fileLinkChip(fileLinkMeta, copyMarkdown, props.className, normalizedHref);
+    return isMarkdownFileLinkLabel(label, normalizedHref) ? (
+      chip
+    ) : (
+      <span data-markdown-copy={copyMarkdown}>
+        {children} ({chip})
+      </span>
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {

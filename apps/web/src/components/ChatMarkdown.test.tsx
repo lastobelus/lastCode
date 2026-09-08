@@ -72,6 +72,39 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   return button.props as ComponentProps<typeof Button>;
 }
 
+describe("ChatMarkdown file-link labels", () => {
+  it("retains descriptive prose, emphasis, destinations, and copy text", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text="This function [**validates** the input](/repo/src/example.ts:12)."
+          />,
+        );
+      });
+      expect(renderer!.root.findByType("strong").children).toEqual(["validates"]);
+      const label = renderer!.root
+        .findAllByType("span")
+        .find((node) => node.children.includes(" the input"));
+      expect(label).toBeDefined();
+      expect(label!.props["data-markdown-copy"]).toBe(
+        "[validates the input](/repo/src/example.ts:12)",
+      );
+      expect(
+        renderer!.root
+          .findAllByType("span")
+          .some((node) => node.children.includes("example.ts · L12")),
+      ).toBe(true);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("ChatMarkdown favicon privacy", () => {
   it("suppresses private link images while preserving public links across updates", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
