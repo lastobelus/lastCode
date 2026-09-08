@@ -27,6 +27,7 @@ import {
   resolveCheckpointPlan,
   resolveCarryCheckpointPlan,
   resolveRevisionPlan,
+  revisionOnlyNightlyTags,
   resolveUpstreamMainMirror,
   revisionMessage,
   shouldContinueRerereRebase,
@@ -47,6 +48,30 @@ function nightly(tag: string) {
   assert.ok(value);
   return value;
 }
+
+it("pins revision planning only when current source represents the latest published base", () => {
+  const tag = "v0.0.1-nightly.20990101.1";
+  const installable = {
+    tag: `lastcode/checkpoint/${tag}`,
+    nightly: nightly(tag),
+    revision: 0,
+    commit: "checkpoint",
+    sourceCommit: "represented",
+  };
+  assert.deepStrictEqual(
+    revisionOnlyNightlyTags(
+      tag,
+      [installable],
+      "current",
+      [tag],
+      (ancestor) => ancestor === "represented",
+    ),
+    [tag],
+  );
+  assert.throws(() => revisionOnlyNightlyTags(tag, [installable], "unrelated", [], () => false));
+  assert.throws(() => revisionOnlyNightlyTags(tag, [], "current", [], () => true));
+  assert.throws(() => revisionOnlyNightlyTags("invalid", [installable], "current", [], () => true));
+});
 
 it("uses Git's supported short option when creating the recovery branch", () => {
   assert.deepStrictEqual(worktreeAddArgs("sync/nightly/v1", "/tmp/sync", "checkpoint"), [

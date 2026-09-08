@@ -283,6 +283,124 @@ done
   };
 }
 
+describe("pinned checkpoint revisions", () => {
+  it("publishes a revision without touching a newer retained repair or selection", () => {
+    const { fixture, source, merged, environment } = historicalFixture();
+    try {
+      const { repo } = fixture;
+      git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
+      const retained = recoveryWorktree(repo);
+      git(repo, ["worktree", "add", "-b", `sync/nightly/${NIGHTLY_B}`, retained, NIGHTLY_B]);
+      write(retained, "operator-repair.txt", "preserve this unfinished repair\n");
+      const selectionPath = NodePath.join(repo, ".git", "lastcode-recovery-selection.json");
+      const selection = JSON.stringify({
+        nightlyTag: NIGHTLY_B,
+        head: git(retained, ["rev-parse", "HEAD"]),
+        sourceCommit: source,
+      });
+      NodeFS.writeFileSync(selectionPath, selection);
+      const retainedHead = git(retained, ["rev-parse", "HEAD"]);
+      const preview = checkpoint(fixture, ["--revision-only", NIGHTLY_A, "--dry-run"], environment);
+      assert.equal(preview.status, 0, preview.stderr || preview.stdout);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        true,
+      );
+      assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
+      const result = checkpoint(
+        fixture,
+        ["--revision-only", NIGHTLY_A, "--push-tags", "--promote"],
+        environment,
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const revision = `refs/tags/lastcode/revision/${NIGHTLY_A}.1`;
+      const built = remoteCommit(fixture.origin, revision);
+      assert.notEqual(gitResult(repo, ["merge-base", "--is-ancestor", NIGHTLY_B, built]).status, 0);
+      assert.equal(
+        remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_A}`),
+        source,
+      );
+      assert.equal(
+        git(repo, ["show", `${built}:merged-during-checkpoint.txt`]),
+        "concurrent merge must survive",
+      );
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+        true,
+      );
+      assert.equal(git(retained, ["rev-parse", "HEAD"]), retainedHead);
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(retained, "operator-repair.txt"), "utf8"),
+        "preserve this unfinished repair\n",
+      );
+      assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), built);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unpublished nightly and cannot disable validation", () => {
+    const { fixture, environment } = historicalFixture();
+    try {
+      for (const args of [
+        ["--revision-only", NIGHTLY_B, "--push-tags"],
+        ["--revision-only", NIGHTLY_A, "--push-tags", "--no-smoke"],
+        ["--revision-only", NIGHTLY_A, "--push-tags", "--no-fetch"],
+        ["--revision-only", NIGHTLY_A, "--push-tags", "--supersede-failed-recovery"],
+      ]) {
+        const result = checkpoint(fixture, args, environment);
+        assert.notEqual(result.status, 0, result.stdout);
+      }
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        true,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to label a source containing newer upstream work as the older nightly", () => {
+    const { fixture, environment } = historicalFixture();
+    try {
+      git(fixture.repo, ["merge", "--no-ff", NIGHTLY_B, "-m", "advance upstream source"]);
+      git(fixture.repo, ["push", "--quiet", "origin", "HEAD:refs/heads/lastcode/main"]);
+      const result = checkpoint(
+        fixture,
+        ["--revision-only", NIGHTLY_A, "--push-tags"],
+        environment,
+      );
+      assert.notEqual(result.status, 0, result.stdout);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        true,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an older base once a newer checkpoint has been published", () => {
+    const { fixture, source, environment } = historicalFixture();
+    try {
+      annotatedCheckpoint(fixture, NIGHTLY_B, git(fixture.repo, ["rev-parse", NIGHTLY_B]), source);
+      const result = checkpoint(
+        fixture,
+        ["--revision-only", NIGHTLY_A, "--push-tags"],
+        environment,
+      );
+      assert.notEqual(result.status, 0, result.stdout);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        true,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("mandatory migration validation", () => {
   it("does not publish when the candidate migration test fails with smoke disabled", () => {
     const { fixture, environment } = historicalFixture();
@@ -661,7 +779,7 @@ describe("checkpoint carry lifecycle", () => {
       git(repo, ["update-ref", "refs/heads/lastcode-source", mainA]);
       git(repo, ["push", "--quiet", "origin", `${mainA}:refs/heads/lastcode/main`]);
 
-      const first = checkpoint(fixture, ["--push-tags"]);
+      const first = checkpoint(fixture, ["--revision-only", NIGHTLY_B, "--push-tags"]);
       assert.equal(first.status, 0, first.stderr || first.stdout);
       assert.equal(remoteCommit(fixture.origin, `refs/tags/${historicalTagB}`), checkpointB);
       const revisionB = `lastcode/revision/${NIGHTLY_B}.1`;
