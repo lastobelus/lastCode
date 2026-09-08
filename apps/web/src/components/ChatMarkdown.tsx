@@ -192,6 +192,7 @@ interface ChatMarkdownProps {
   /** Environment that owns non-thread markdown, such as a pull request panel. */
   environmentId?: EnvironmentId | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
+  taskListDisabled?: boolean;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   className?: string;
@@ -2117,7 +2118,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       >
         {/* The full path: the chip already shows the shortened form, and a link
             to the workspace root collapses to a bare label that repeats it. */}
-        <div className="overflow-x-auto whitespace-nowrap [scrollbar-color:color-mix(in_srgb,var(--contrast-border)_78%,transparent)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[color-mix(in_srgb,var(--contrast-border)_78%,transparent)] [&::-webkit-scrollbar-track]:bg-transparent">
+        <div className="overflow-x-auto whitespace-nowrap [scrollbar-color:color-mix(in_srgb,var(--contrast-border)_78%,transparent)_transparent] [scrollbar-width:var(--app-native-scrollbar-width)] [&::-webkit-scrollbar]:h-[var(--app-compact-scrollbar-height)] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[color-mix(in_srgb,var(--contrast-border)_78%,transparent)] [&::-webkit-scrollbar-track]:bg-transparent">
           {targetPath}
         </div>
       </TooltipPopup>
@@ -2158,6 +2159,7 @@ function useChatMarkdownState({
   pullRequestPanelRef,
   environmentId: explicitEnvironmentId,
   onTaskListChange,
+  taskListDisabled = false,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
   onUseArtifactTemplate,
@@ -2582,6 +2584,7 @@ function useChatMarkdownState({
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
+      taskListDisabled,
       onUseArtifactTemplate,
       openChangeRequestLink,
       openDeferredMarkdownLink,
@@ -2608,6 +2611,7 @@ function useChatMarkdownState({
       linkTargetPreference,
       markdownFileLinkMetaByHref,
       onTaskListChange,
+      taskListDisabled,
       onUseArtifactTemplate,
       openChangeRequestLink,
       openDeferredMarkdownLink,
@@ -2692,7 +2696,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     );
   },
   input: function MarkdownInput({ node: _node, type, checked, disabled: _disabled, ...props }) {
-    const { onTaskListChange } = use(ChatMarkdownRendererContext);
+    const { onTaskListChange, taskListDisabled } = use(ChatMarkdownRendererContext);
     if (type !== "checkbox" || !onTaskListChange) {
       return (
         <input
@@ -2711,6 +2715,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         name="markdown-task"
         aria-label="Toggle task"
         checked={checked}
+        disabled={taskListDisabled}
         onChange={(event) => {
           const markerOffset = Number(event.currentTarget.closest("li")?.dataset.taskMarkerOffset);
           if (!Number.isSafeInteger(markerOffset)) return;

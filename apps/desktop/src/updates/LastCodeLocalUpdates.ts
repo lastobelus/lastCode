@@ -269,7 +269,7 @@ const decodeDashboardConfig = Schema.decodeUnknownSync(Schema.fromJsonString(Das
 const decodeInspectionResult = Schema.decodeUnknownSync(InspectionResult);
 const decodeBuildResult = Schema.decodeUnknownSync(BuildResult);
 
-export class LastCodeLocalUpdateError extends Schema.TaggedErrorClass<LastCodeLocalUpdateError>()(
+export class LastCodeLocalUpdateError extends Schema.TaggedError<LastCodeLocalUpdateError>()(
   "LastCodeLocalUpdateError",
   {
     operation: Schema.Literals(["configuration", "inspect", "build", "install"]),

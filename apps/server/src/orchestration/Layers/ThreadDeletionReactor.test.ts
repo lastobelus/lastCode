@@ -201,6 +201,7 @@ function cleanupRow(
     annotation: null,
     worktreeCleanup: cleanup,
     latestUserMessageId: null,
+    attention: null,
     latestUserMessageAt: null,
     pendingApprovalCount: 0,
     pendingUserInputCount: 0,

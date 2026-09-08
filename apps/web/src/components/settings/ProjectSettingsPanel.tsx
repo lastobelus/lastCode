@@ -113,6 +113,7 @@ import {
   ProjectFaviconPickerDialog,
 } from "./ProjectFaviconPickerDialog";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
+import { projectsContainPersistentThread } from "../projectPersistence.logic";
 
 const ProjectIconPickerDialog = lazy(() =>
   import("./ProjectIconPickerDialog").then((module) => ({
@@ -407,6 +408,8 @@ function ProjectDetail({
   const updateClientSettings = useUpdateClientSettings();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const threads = useThreadShells();
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
   const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
   const updateServerSettings = useAtomCommand(serverEnvironment.updateSettings, "project setting");
   const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
@@ -481,6 +484,10 @@ function ProjectDetail({
   const deleteProject = useAtomCommand(projectEnvironment.delete, { reportFailure: false });
   const projectNameEditedRef = useRef(false);
 
+  const projectRemovalBlocked = projectsContainPersistentThread({
+    members: group.memberProjects,
+    threads,
+  });
   const faviconPath = representative.faviconPath ?? null;
   const projectIcon = representative.projectIcon ?? null;
   const pickProjectFavicon =
@@ -797,6 +804,18 @@ function ProjectDetail({
       const api = readLocalApi();
       if (!api) return;
 
+      if (projectsContainPersistentThread({ members, threads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+
       const memberKeys = new Set(members.map(memberKey));
       const projectThreads = threads.filter((thread) =>
         memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
@@ -834,9 +853,25 @@ function ProjectDetail({
       );
       if (confirmed._tag === "Failure" || !confirmed.value) return;
 
+      const currentThreads = threadsRef.current;
+      if (projectsContainPersistentThread({ members, threads: currentThreads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+      const currentProjectThreads = currentThreads.filter((thread) =>
+        memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+      );
+
       const draftStore = useComposerDraftStore.getState();
       for (const member of members) {
-        const memberThreads = projectThreads.filter(
+        const memberThreads = currentProjectThreads.filter(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
         );
@@ -1383,24 +1418,29 @@ function ProjectDetail({
                   : "Remove project"
             }
             description={
-              hasOtherMembers
-                ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
-                : group.memberProjects.length > 1
-                  ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                  : "Deletes the project entry and its threads. Files on disk are not touched."
+              projectRemovalBlocked
+                ? "Disable persistence or move it to another thread before removing this project."
+                : hasOtherMembers
+                  ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+                  : group.memberProjects.length > 1
+                    ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                    : "Deletes the project entry and its threads. Files on disk are not touched."
             }
             control={
               <Button
                 size="sm"
                 variant="destructive-outline"
+                disabled={projectRemovalBlocked}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
-                {hasOtherMembers
-                  ? "Remove checkout"
-                  : group.memberProjects.length > 1
-                    ? "Remove all entries"
-                    : "Remove project"}
+                {projectRemovalBlocked
+                  ? "Disable persistence first"
+                  : hasOtherMembers
+                    ? "Remove checkout"
+                    : group.memberProjects.length > 1
+                      ? "Remove all entries"
+                      : "Remove project"}
               </Button>
             }
           />

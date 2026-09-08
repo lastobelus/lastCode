@@ -1125,8 +1125,8 @@ describe("deriveMessagesTimelineRows", () => {
       timelineEntries: [],
       activeTurnStartedAt: "2026-01-01T00:01:00Z",
       waitingStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
     };
 
     expect(deriveMessagesTimelineRows({ ...base, isWorking: false })).toEqual([
