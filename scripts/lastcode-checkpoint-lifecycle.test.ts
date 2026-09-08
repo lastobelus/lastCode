@@ -284,10 +284,77 @@ done
 }
 
 describe("pinned checkpoint revisions", () => {
+  it("cleans a matching published revision on retry but preserves operator edits", () => {
+    const { fixture, merged, environment } = historicalFixture();
+    try {
+      const { repo } = fixture;
+      git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
+      const args = ["--revision-only", NIGHTLY_A, "--push-tags"];
+      const first = checkpoint(fixture, args, environment);
+      assert.equal(first.status, 0, first.stderr || first.stdout);
+      const published = remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`);
+      const worktree = NodePath.join(
+        NodePath.dirname(recoveryWorktree(repo)),
+        `lastcode-revision-${NIGHTLY_A}`,
+      );
+      for (const branch of [
+        `sync/revision-only/${NIGHTLY_A}.1`,
+        `sync/revision-only/${NIGHTLY_A}`,
+      ]) {
+        git(repo, ["worktree", "add", "-b", branch, worktree, published]);
+        write(worktree, "operator-edit.txt", "preserve me\n");
+        const dirty = checkpoint(fixture, args, environment);
+        assert.notEqual(dirty.status, 0);
+        assert.equal(
+          NodeFS.readFileSync(NodePath.join(worktree, "operator-edit.txt"), "utf8"),
+          "preserve me\n",
+        );
+        NodeFS.unlinkSync(NodePath.join(worktree, "operator-edit.txt"));
+        const retry = checkpoint(fixture, args, environment);
+        assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+        assert.equal(NodeFS.existsSync(worktree), false);
+        assert.notEqual(
+          gitResult(repo, ["show-ref", "--verify", `refs/heads/${branch}`]).status,
+          0,
+        );
+      }
+      assert.equal(
+        remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        published,
+      );
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.2`),
+        true,
+      );
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes a revision without touching a newer retained repair or selection", () => {
     const { fixture, source, merged, environment } = historicalFixture();
     try {
       const { repo } = fixture;
+      const historyFile = NodePath.join(
+        fixture.home,
+        ".lastcode",
+        "automation",
+        "checkpoint-runs.jsonl",
+      );
+      const nightlyHistory =
+        JSON.stringify({
+          schemaVersion: 1,
+          status: "failed",
+          upstreamTag: NIGHTLY_B,
+          startedAt: "2099-01-02T00:00:00.000Z",
+          finishedAt: "2099-01-02T00:00:01.000Z",
+          durationMs: 1000,
+          commitsRebased: 1,
+          recoveryBranch: `sync/nightly/${NIGHTLY_B}`,
+          recoveryFingerprint: "retained-fingerprint",
+        }) + "\n";
+      NodeFS.mkdirSync(NodePath.dirname(historyFile), { recursive: true });
+      NodeFS.writeFileSync(historyFile, nightlyHistory);
       git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
       const retained = recoveryWorktree(repo);
       git(repo, ["worktree", "add", "-b", `sync/nightly/${NIGHTLY_B}`, retained, NIGHTLY_B]);
@@ -335,6 +402,14 @@ describe("pinned checkpoint revisions", () => {
       );
       assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), built);
+      assert.equal(NodeFS.readFileSync(historyFile, "utf8"), nightlyHistory);
+      assert.match(
+        NodeFS.readFileSync(
+          NodePath.join(NodePath.dirname(historyFile), "checkpoint-revision-runs.jsonl"),
+          "utf8",
+        ),
+        /"status":"success"/,
+      );
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }

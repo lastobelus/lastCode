@@ -219,6 +219,11 @@ nightly repair and recovery selection untouched. It does not change the schedule
 or permanently block future nightlies. A retained selection may need to be
 reconciled with the newly promoted source before it can later resume.
 
+Pinned revision runs use `checkpoint-revision-runs.jsonl` in the automation
+history directory so they do not replace the nightly recovery record. Retrying
+after an interrupted publication cleans up only a clean revision worktree that
+matches the published commit; changed repairs remain available for inspection.
+
 After publication, select the exact revision tag for **Build Local Package**.
 Publishing or building does not install or restart the app.
 

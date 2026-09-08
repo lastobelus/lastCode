@@ -35,9 +35,11 @@ import {
 
 import {
   appendCheckpointRun,
+  appendCheckpointRevisionRun,
   checkpointFailureRecord,
   readLatestCheckpointRun,
   type CarrySetShadowRecord,
+  type CheckpointHistoryRecord,
   type CheckpointRunRecord,
 } from "./lastcode-checkpoint-history.ts";
 import { runCarrySetShadowCheck, type CarrySetShadowResult } from "./lastcode-carry-set.ts";
@@ -81,6 +83,13 @@ interface CheckpointOptions {
   readonly revisionOnly?: string;
   readonly replayMode?: CheckpointReplayMode;
   readonly rollbackReason?: string;
+}
+
+function appendCheckpointRunForOptions(
+  options: CheckpointOptions,
+  record: CheckpointHistoryRecord,
+): boolean {
+  return options.revisionOnly ? appendCheckpointRevisionRun(record) : appendCheckpointRun(record);
 }
 
 export interface CheckpointRef {
@@ -1537,6 +1546,29 @@ export function runPromotionThenShadow(promote: () => void, shadow: () => void):
   }
 }
 
+function releasePublishedPinnedRevision(
+  repoRoot: string,
+  worktree: string,
+  installable: InstallableRef,
+): void {
+  if (!NodeFS.existsSync(worktree)) return;
+  const branch = git(worktree, ["branch", "--show-current"]);
+  const expectedBranch = `sync/revision-only/${installable.nightly.tag}`;
+  if (
+    installable.revision === 0 ||
+    (branch !== expectedBranch && branch !== `${expectedBranch}.${installable.revision}`) ||
+    git(worktree, ["rev-parse", "HEAD"]) !== installable.commit ||
+    rebaseInProgress(worktree) ||
+    git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
+  ) {
+    throw new Error(
+      "Retained pinned revision differs from the published revision; inspect before cleanup.",
+    );
+  }
+  run(repoRoot, "git", ["worktree", "remove", worktree]);
+  git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, installable.commit]);
+}
+
 function publishRevisionIfNeeded(
   repoRoot: string,
   sourceRef: string,
@@ -1642,7 +1674,7 @@ function publishRevisionIfNeeded(
     pendingTag = undefined;
     completed = true;
     const finishedAtMs = Date.now();
-    appendCheckpointRun({
+    appendCheckpointRunForOptions(options, {
       schemaVersion: 1,
       status: "success",
       upstreamTag: plan.nightly.tag,
@@ -1659,7 +1691,8 @@ function publishRevisionIfNeeded(
     });
   } catch (error) {
     if (pendingTag) completed = deleteCheckpointTag(repoRoot, pendingTag);
-    appendCheckpointRun(
+    appendCheckpointRunForOptions(
+      options,
       checkpointFailureRecord({
         commitsRebased: 0,
         error,
@@ -1697,7 +1730,10 @@ function publishRevisionIfNeeded(
         sourceCommit,
         options.smoke || options.pushTags,
       ),
-    () => runHistoricalShadowIfNeeded(repoRoot, plan.installableTag, replay),
+    () =>
+      runHistoricalShadowIfNeeded(repoRoot, plan.installableTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      ),
   );
   notify(platform, "LastCode revision ready", `${plan.installableTag} is installable.`);
   console.log(`[lastcode:checkpoint] Created ${plan.installableTag} at ${candidateCommit}.`);
@@ -1834,8 +1870,16 @@ function runHistoricalShadowIfNeeded(
   repoRoot: string,
   checkpointTag: string | undefined,
   replay: EffectiveReplayConfiguration,
+  append: (record: CarrySetShadowRecord) => boolean = appendCheckpointRun,
 ): void {
-  if (replay.mode === "historical") runCarrySetShadowAfterPublication(repoRoot, checkpointTag);
+  if (replay.mode !== "historical") return;
+  runCarrySetShadowAfterPublication(repoRoot, checkpointTag, {
+    append,
+    check: runCarrySetShadowCheck,
+    error: (message) => console.error(message),
+    log: (message) => console.log(message),
+    now: Date.now,
+  });
 }
 
 export interface RecoverySelection {
@@ -2340,6 +2384,18 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
   if (options.dryRun) return;
 
+  if (options.revisionOnly) {
+    const revision = resolveRevisionPlan({
+      installableRefs: installables,
+      sourceCommit,
+      isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
+      replayMode: replay.mode,
+    });
+    if (revision.kind === "represented") {
+      releasePublishedPinnedRevision(repoRoot, automationWorktree(), revision.installable);
+    }
+  }
+
   if (selection) {
     const worktree = automationWorktree();
     const startedAtMs = Date.now();
@@ -2387,7 +2443,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       publishRepairedCheckpoint(repoRoot, options.pushRemote, pendingTag, selection);
       const publishedTag = pendingTag;
       pendingTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: nightly.tag,
@@ -2400,7 +2456,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit: selection.sourceCommit,
       });
       releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
-      runHistoricalShadowIfNeeded(repoRoot, publishedTag, replay);
+      runHistoricalShadowIfNeeded(repoRoot, publishedTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      );
       console.log(
         "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
       );
@@ -2418,7 +2476,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           // The validation or publication error remains authoritative.
         }
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord({
           commitsRebased,
           error,
@@ -2521,7 +2580,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           `[lastcode:checkpoint] Could not fingerprint retained carry recovery: ${fingerprintError instanceof Error ? fingerprintError.message : String(fingerprintError)}`,
         );
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord({
           commitsRebased: 0,
           error,
@@ -2599,7 +2659,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         );
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: plan.baseNightly.tag,
@@ -2647,7 +2707,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       const finishedAtMs = Date.now();
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord(
           {
             commitsRebased,
@@ -2725,7 +2786,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           );
         }
         const finishedAtMs = Date.now();
-        appendCheckpointRun({
+        appendCheckpointRunForOptions(options, {
           schemaVersion: 1,
           status: "success",
           upstreamTag: revisionPlan.nightly.tag,
@@ -2751,7 +2812,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             // The original validation or publication error remains authoritative.
           }
         }
-        appendCheckpointRun(
+        appendCheckpointRunForOptions(
+          options,
           checkpointFailureRecord({
             commitsRebased: 0,
             error,
@@ -2782,7 +2844,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             sourceCommit,
             options.smoke || options.pushTags,
           ),
-        () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+        () =>
+          runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+            appendCheckpointRunForOptions(options, record),
+          ),
       );
       console.log(`[lastcode:checkpoint] Created ${newestProducedInstallableTag}.`);
       return;
@@ -2811,7 +2876,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
     runPromotionThenShadow(
       () => promoteCheckpoint(repoRoot, candidateCommit, options, sourceCommit, options.pushTags),
-      () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+      () =>
+        runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+          appendCheckpointRunForOptions(options, record),
+        ),
     );
     console.log("[lastcode:checkpoint] No uncheckpointed upstream nightlies remain.");
     return;
@@ -2972,7 +3040,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRun({
+      appendCheckpointRunForOptions(options, {
         schemaVersion: 1,
         status: "success",
         upstreamTag: nightly.tag,
@@ -3015,7 +3083,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           );
         }
       }
-      appendCheckpointRun(
+      appendCheckpointRunForOptions(
+        options,
         checkpointFailureRecord(
           {
             commitsRebased: attempt.commitsRebased,
@@ -3049,7 +3118,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       );
       console.error("[lastcode:checkpoint] Publication failed; the next run will retry.");
     }
-    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay);
+    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+      appendCheckpointRunForOptions(options, record),
+    );
     throw error;
   } finally {
     if (completed) {
@@ -3063,7 +3134,9 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   }
 
   if (selection) {
-    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay);
+    runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+      appendCheckpointRunForOptions(options, record),
+    );
     console.log(
       "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
     );
@@ -3079,7 +3152,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit,
         options.smoke || options.pushTags,
       ),
-    () => runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay),
+    () =>
+      runHistoricalShadowIfNeeded(repoRoot, newestProducedInstallableTag, replay, (record) =>
+        appendCheckpointRunForOptions(options, record),
+      ),
   );
   notify(hostPlatform, "LastCode nightly checkpoint complete", `${candidateRef} is ready.`);
 }
