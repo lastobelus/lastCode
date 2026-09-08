@@ -87,7 +87,9 @@ describe("ChatMarkdown file-link labels", () => {
         );
       });
       const authoredLabel = () =>
-        renderer!.root.findAllByType("span").find((node) => node.children.includes(label));
+        renderer!.root
+          .findAll((node) => typeof node.type === "string" && node.children.includes(label))
+          .at(0);
       expect(authoredLabel()).toBeDefined();
       const copied = authoredLabel()!.props["data-markdown-copy"];
       await act(async () => {
@@ -95,6 +97,22 @@ describe("ChatMarkdown file-link labels", () => {
       });
       expect(authoredLabel()).toBeDefined();
       expect(authoredLabel()!.props["data-markdown-copy"]).toBe(copied);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("copies the filename for a whitespace-only link label", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(<ChatMarkdown cwd="/repo" text="[   ](/repo/example.ts:12)" />);
+      });
+      expect(renderer!.root.findByType("button").props["data-markdown-copy"]).toBe(
+        "[example.ts](/repo/example.ts:12)",
+      );
     } finally {
       await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
@@ -114,9 +132,14 @@ describe("ChatMarkdown file-link labels", () => {
         );
       });
       expect(renderer!.root.findByType("strong").children).toEqual(["validates"]);
+      expect(
+        renderer!.root
+          .findAllByType("button")
+          .some((button) => button.findAllByType("strong").length > 0),
+      ).toBe(true);
       const label = renderer!.root
-        .findAllByType("span")
-        .find((node) => node.children.includes(" the input"));
+        .findAll((node) => typeof node.type === "string" && node.children.includes(" the input"))
+        .at(0);
       expect(label).toBeDefined();
       expect(label!.props["data-markdown-copy"]).toBe(
         "[validates the input](/repo/src/example.ts:12)",

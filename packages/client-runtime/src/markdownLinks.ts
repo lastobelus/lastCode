@@ -346,7 +346,8 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!target) return false;
   const path = (parseMarkdownFileLink(label)?.path ?? splitFilePathPosition(label.trim()).path)
     .replaceAll("\\", "/")
-    .replace(/^\.\//, "");
-  const targetPath = target.path.replaceAll("\\", "/");
+    .replace(/^\.\//, "")
+    .replace(/([^/:])\/+$/, "$1");
+  const targetPath = target.path.replaceAll("\\", "/").replace(/([^/:])\/+$/, "$1");
   return path === targetPath || targetPath.endsWith(`/${path}`);
 }

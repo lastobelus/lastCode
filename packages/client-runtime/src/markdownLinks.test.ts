@@ -186,6 +186,12 @@ describe("isMarkdownFileLinkLabel", () => {
     "preserves authored label %s",
     (label) => expect(isMarkdownFileLinkLabel(label, "/repo/src/example.ts:12")).toBe(false),
   );
+  it.each(["favicons", "favicons/", "/tmp/favicons/"])(
+    "keeps directory label %s compact",
+    (label) => {
+      expect(isMarkdownFileLinkLabel(label, "/tmp/favicons/")).toBe(true);
+    },
+  );
   it("recognizes Windows paths and encoded destinations", () => {
     expect(isMarkdownFileLinkLabel("src\\example.ts:12", "C:\\repo\\src\\example.ts:12")).toBe(
       true,
