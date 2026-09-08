@@ -1549,17 +1549,24 @@ export function runPromotionThenShadow(promote: () => void, shadow: () => void):
 function releasePublishedPinnedRevision(
   repoRoot: string,
   worktree: string,
-  installable: InstallableRef,
+  installables: ReadonlyArray<InstallableRef>,
 ): void {
   if (!NodeFS.existsSync(worktree)) return;
   const branch = git(worktree, ["branch", "--show-current"]);
-  const expectedBranch = `sync/revision-only/${installable.nightly.tag}`;
+  const head = git(worktree, ["rev-parse", "HEAD"]);
+  const installable = installables.find((candidate) => {
+    const expectedBranch = `sync/revision-only/${candidate.nightly.tag}`;
+    return (
+      candidate.revision > 0 &&
+      candidate.commit === head &&
+      (branch === expectedBranch || branch === `${expectedBranch}.${candidate.revision}`)
+    );
+  });
   if (
-    installable.revision === 0 ||
-    (branch !== expectedBranch && branch !== `${expectedBranch}.${installable.revision}`) ||
-    git(worktree, ["rev-parse", "HEAD"]) !== installable.commit ||
+    !installable ||
     rebaseInProgress(worktree) ||
-    git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
+    git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]) ||
+    unexpectedIgnoredRecoveryPaths(worktree).length > 0
   ) {
     throw new Error(
       "Retained pinned revision differs from the published revision; inspect before cleanup.",
@@ -2385,15 +2392,11 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   if (options.dryRun) return;
 
   if (options.revisionOnly) {
-    const revision = resolveRevisionPlan({
-      installableRefs: installables,
-      sourceCommit,
-      isAncestor: (ancestor, descendant) => isAncestor(repoRoot, ancestor, descendant),
-      replayMode: replay.mode,
-    });
-    if (revision.kind === "represented") {
-      releasePublishedPinnedRevision(repoRoot, automationWorktree(), revision.installable);
-    }
+    releasePublishedPinnedRevision(
+      repoRoot,
+      automationWorktree(),
+      installables.filter((installable) => installable.nightly.tag === options.revisionOnly),
+    );
   }
 
   if (selection) {

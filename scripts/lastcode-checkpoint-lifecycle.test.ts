@@ -310,6 +310,16 @@ describe("pinned checkpoint revisions", () => {
           "preserve me\n",
         );
         NodeFS.unlinkSync(NodePath.join(worktree, "operator-edit.txt"));
+        write(repo, ".git/info/exclude", "operator-notes/\n");
+        write(worktree, "operator-notes/repair.txt", "ignored repair notes\n");
+        const ignored = checkpoint(fixture, args, environment);
+        assert.notEqual(ignored.status, 0);
+        assert.equal(
+          NodeFS.readFileSync(NodePath.join(worktree, "operator-notes/repair.txt"), "utf8"),
+          "ignored repair notes\n",
+        );
+        NodeFS.unlinkSync(NodePath.join(worktree, "operator-notes/repair.txt"));
+        NodeFS.rmdirSync(NodePath.join(worktree, "operator-notes"));
         const retry = checkpoint(fixture, args, environment);
         assert.equal(retry.status, 0, retry.stderr || retry.stdout);
         assert.equal(NodeFS.existsSync(worktree), false);
@@ -326,6 +336,29 @@ describe("pinned checkpoint revisions", () => {
         remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.2`),
         true,
       );
+      git(repo, [
+        "worktree",
+        "add",
+        "-b",
+        `sync/revision-only/${NIGHTLY_A}.1`,
+        worktree,
+        published,
+      ]);
+      git(repo, [
+        "switch",
+        "-c",
+        "next-fix",
+        remoteCommit(fixture.origin, "refs/heads/lastcode/main"),
+      ]);
+      write(repo, "next-fix.txt", "next revision fix\n");
+      git(repo, ["add", "next-fix.txt"]);
+      git(repo, ["commit", "-m", "next downstream fix"]);
+      git(repo, ["push", "--quiet", "origin", "HEAD:refs/heads/lastcode/main"]);
+      const successor = checkpoint(fixture, args, environment);
+      assert.equal(successor.status, 0, successor.stderr || successor.stdout);
+      const next = remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.2`);
+      assert.equal(git(repo, ["show", `${next}:next-fix.txt`]), "next revision fix");
+      assert.equal(NodeFS.existsSync(worktree), false);
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
