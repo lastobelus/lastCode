@@ -25,6 +25,12 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+          # The dispatcher needs automation, not the vendored reference files.
+          # Tracked gitlinks still require root .gitmodules entries for cleanup.
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node
         uses: actions/setup-node@v6

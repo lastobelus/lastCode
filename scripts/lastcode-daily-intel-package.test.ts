@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Workflow fixture reads use Node directly.
 import * as NodeFS from "node:fs";
+import * as NodeChildProcess from "node:child_process";
 
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -12,6 +13,37 @@ import {
 const sha = (character: string) => character.repeat(40);
 
 describe("lastcode-daily-intel-package", () => {
+  it("registers every tracked gitlink so checkout credential cleanup can traverse it", () => {
+    const cwd = new URL("../", import.meta.url);
+    const git = (...args: string[]) =>
+      NodeChildProcess.execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    const paths = git("ls-files", "--stage", "-z")
+      .split("\0")
+      .filter((entry) => entry.startsWith("160000 "))
+      .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+    const modules = git(
+      "config",
+      "--file",
+      ".gitmodules",
+      "--get-regexp",
+      "^submodule\\..*\\.path$",
+    );
+    for (const path of paths) {
+      expect(modules.split("\n").some((line) => line.endsWith(` ${path}`))).toBe(true);
+      expect(
+        git("config", "--file", ".gitmodules", "--get", `submodule.${path}.url`).trim(),
+      ).not.toBe("");
+      expect(
+        git("config", "--file", ".gitmodules", "--get", `submodule.${path}.update`).trim(),
+      ).toBe("none");
+    }
+    expect(() => git("submodule", "foreach", "--recursive", "true")).not.toThrow();
+  });
+
   it("runs daily with only the permissions needed to dispatch the existing builder", () => {
     const workflow = NodeFS.readFileSync(
       new URL("../.github/workflows/lastcode-daily-intel-package.yml", import.meta.url),
@@ -24,6 +56,8 @@ describe("lastcode-daily-intel-package", () => {
     expect(workflow).toContain("group: lastcode-daily-intel-package");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("node scripts/lastcode-daily-intel-package.ts");
+    expect(workflow).toMatch(/sparse-checkout: \|\s+\/\*\s+!\/\.repos\//u);
+    expect(workflow).toContain("sparse-checkout-cone-mode: false");
   });
 
   it("selects the newest strict installable and peels annotated tags", () => {
