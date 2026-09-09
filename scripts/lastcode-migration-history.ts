@@ -17,10 +17,12 @@ export interface MigrationIdentity {
 export function readMigrationIdentities(
   source: string,
   exportName: string,
+  allowPrivate = false,
 ): ReadonlyArray<MigrationIdentity> {
-  const body = new RegExp(`export const ${exportName} = \\[([\\s\\S]*?)\\] as const;`, "u").exec(
-    source,
-  )?.[1];
+  const body = new RegExp(
+    `(?:^|\\n)${allowPrivate ? "(?:export )?" : "export "}const ${exportName} = \\[([\\s\\S]*?)\\] as const;`,
+    "u",
+  ).exec(source)?.[1];
   if (body === undefined) throw new Error(`Missing literal migration registry ${exportName}.`);
   const imports = new Map(
     Array.from(
@@ -144,7 +146,7 @@ export function assertMigrationHistory(input: {
       "Checkpoint changed the upstream migration registry. Keep LastCode migrations in their own ledger.",
     );
   }
-  for (const entry of readMigrationIdentities(upstreamSource, "migrationEntries")) {
+  for (const entry of readMigrationIdentities(upstreamSource, "migrationEntries", true)) {
     const path = migrationPath(UPSTREAM_REGISTRY, entry.implementation);
     if (read(candidate, path) !== read(upstream, path)) {
       throw new Error(`Checkpoint changed upstream migration ${entry.id}_${entry.name}: ${path}`);
