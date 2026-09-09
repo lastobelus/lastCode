@@ -64,7 +64,7 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
-export const makeSqlitePersistenceReadOnly = Effect.fn("makeSqlitePersistenceReadOnly")(function* (
+const makeSqlitePersistenceReadOnly = Effect.fn("makeSqlitePersistenceReadOnly")(function* (
   dbPath: string,
 ) {
   const path = yield* Path.Path;

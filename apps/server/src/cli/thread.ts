@@ -49,13 +49,13 @@ import {
   resolveThreadInspectionConfig,
 } from "./config.ts";
 
-export const THREAD_READ_DEFAULT_TURN_LIMIT = 5;
-export const THREAD_READ_MAX_TURN_LIMIT = 20;
+const THREAD_READ_DEFAULT_TURN_LIMIT = 5;
+const THREAD_READ_MAX_TURN_LIMIT = 20;
 export const THREAD_LIST_MAX_RESULTS = 50;
 export const THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS = 20;
 export const THREAD_TRANSCRIPT_MAX_CHARS = 64_000;
 export const THREAD_ACTIVITY_MAX_RESULTS = 200;
-export const THREAD_WAIT_MAX_TIMEOUT_MS = 600_000;
+const THREAD_WAIT_MAX_TIMEOUT_MS = 600_000;
 
 export class ThreadCliError extends Schema.TaggedError<ThreadCliError>()("ThreadCliError", {
   operation: Schema.String,
