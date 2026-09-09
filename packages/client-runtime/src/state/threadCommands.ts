@@ -1,4 +1,5 @@
 import * as Crypto from "effect/Crypto";
+import { WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 import { WS_METHODS } from "@t3tools/contracts";
 
@@ -201,6 +202,18 @@ export function createThreadEnvironmentAtoms<R, E>(
     unlinkPullRequest: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unlink-pull-request",
       execute: (input: UnlinkThreadPullRequestInput) => unlinkThreadPullRequest(input),
+      scheduler,
+      concurrency,
+    }),
+    resumeAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:resume-action",
+      tag: WS_METHODS.actionResumeResume,
+      scheduler,
+      concurrency,
+    }),
+    discardAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:discard-action",
+      tag: WS_METHODS.actionResumeDiscard,
       scheduler,
       concurrency,
     }),
