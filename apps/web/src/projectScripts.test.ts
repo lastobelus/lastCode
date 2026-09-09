@@ -60,10 +60,26 @@ describe("projectScripts helpers", () => {
     const command = commandForProjectScript("lint");
     expect(command).toBe("script.lint.run");
     expect(projectScriptIdFromCommand(command ?? "")).toBe("lint");
+
+    const externalId = "123e4567-e89b-42d3-a456-426614174000";
+    const externalCommand = commandForProjectScript(externalId);
+    expect(externalCommand).toBe(`script.${externalId}.run`);
+    expect(projectScriptIdFromCommand(externalCommand ?? "")).toBe(externalId);
+
+    expect(projectScriptIdFromCommand("script. lint .run")).toBeNull();
     expect(projectScriptIdFromCommand("terminal.toggle")).toBeNull();
   });
 
-  it.each(["install-javascript-dependencies", "A", "a.b", "a b", "-a", "", "a".repeat(25)])(
+  it.each(["install-javascript-dependencies", "A", "a.b", "a b", "-a", "a".repeat(25)])(
+    "round-trips supported external script ID %j",
+    (id) => {
+      const command = commandForProjectScript(id);
+      expect(command).toBe(`script.${id}.run`);
+      expect(projectScriptIdFromCommand(command ?? "")).toBe(id);
+    },
+  );
+
+  it.each(["", " ", " lint", "lint "])(
     "omits the shortcut for legacy script ID %j without crashing script menus",
     (id) => {
       const commands = ["lint", id, "test"].map(commandForProjectScript);
