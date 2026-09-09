@@ -2063,13 +2063,15 @@ export function assertRetainedRevision(input: {
   expectedBranch: string;
   rebasing: boolean;
   status: string;
+  unexpectedIgnoredPaths: ReadonlyArray<string>;
 }): void {
   if (
     input.phase !== "compile" ||
     input.recordedSource !== input.source ||
     input.branch !== input.expectedBranch ||
     input.rebasing ||
-    input.status
+    input.status ||
+    input.unexpectedIgnoredPaths.length > 0
   ) {
     throw new Error("Retained revision must be a clean, completed carry repair for current main.");
   }
@@ -2576,6 +2578,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           expectedBranch: carryBranch,
           rebasing: rebaseInProgress(worktree),
           status: git(worktree, ["status", "--porcelain", "--untracked-files=all"]),
+          unexpectedIgnoredPaths: unexpectedIgnoredRecoveryPaths(worktree),
         });
       }
       const result = retainedRevision

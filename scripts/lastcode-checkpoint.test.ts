@@ -86,6 +86,7 @@ it("leaves an unpublished pinned revision available for compilation recovery", (
       expectedBranch: "sync/revision-only/v0.0.1-nightly.20990101.1",
       rebasing: false,
       status: git(worktree, ["status", "--porcelain"]),
+      unexpectedIgnoredPaths: [],
     });
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
@@ -101,6 +102,7 @@ it("resumes only clean completed revision compilations bound to current source a
     expectedBranch: "sync/revision-only/nightly",
     rebasing: false,
     status: "",
+    unexpectedIgnoredPaths: [],
   };
   assert.doesNotThrow(() => assertRetainedRevision(valid));
   for (const invalid of [
@@ -111,6 +113,7 @@ it("resumes only clean completed revision compilations bound to current source a
     { rebasing: true },
     { status: " M file" },
     { status: "?? file" },
+    { unexpectedIgnoredPaths: ["operator-notes.md"] },
   ])
     assert.throws(() => assertRetainedRevision({ ...valid, ...invalid }), /Retained revision/);
 });
