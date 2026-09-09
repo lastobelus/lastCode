@@ -18,9 +18,10 @@ export function readMigrationIdentities(
   source: string,
   exportName: string,
 ): ReadonlyArray<MigrationIdentity> {
-  const body = new RegExp(`export const ${exportName} = \\[([\\s\\S]*?)\\] as const;`, "u").exec(
-    source,
-  )?.[1];
+  const body = new RegExp(
+    `(?:^|\\n)(?:export )?const ${exportName} = \\[([\\s\\S]*?)\\] as const;`,
+    "u",
+  ).exec(source)?.[1];
   if (body === undefined) throw new Error(`Missing literal migration registry ${exportName}.`);
   const imports = new Map(
     Array.from(

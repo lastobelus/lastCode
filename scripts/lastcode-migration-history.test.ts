@@ -49,6 +49,29 @@ function fixture(
 }
 
 describe("checkpoint migration history", () => {
+  it("reads private and exported literal registries identically", () => {
+    const exported = registry(["First", "Second"]);
+    const privateRegistry = exported.replace(
+      "export const migrationEntries",
+      "const migrationEntries",
+    );
+    assert.deepStrictEqual(
+      readMigrationIdentities(privateRegistry, "migrationEntries"),
+      readMigrationIdentities(exported, "migrationEntries"),
+    );
+    assert.throws(
+      () =>
+        readMigrationIdentities(
+          privateRegistry.replace(
+            "const migrationEntries = [",
+            "const migrationEntries = makeRegistry([",
+          ),
+          "migrationEntries",
+        ),
+      /Missing literal/,
+    );
+  });
+
   it("rejects duplicate slots, duplicate names, and computed registries", () => {
     const source = registry(["First", "Second"], true);
     assert.throws(
