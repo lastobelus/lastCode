@@ -3,6 +3,7 @@ import {
   DesktopUpdateChannelSchema,
   DesktopUpdateCheckResultSchema,
   DesktopUpdateStateSchema,
+  DesktopLastCodeSettingsStateSchema,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -18,6 +19,26 @@ export const getUpdateState = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.updates.getState")(function* () {
     const updates = yield* DesktopUpdates.DesktopUpdates;
     return yield* updates.getState;
+  }),
+});
+
+export const getLastCodeSettings = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LASTCODE_SETTINGS_GET_CHANNEL,
+  payload: Schema.Void,
+  result: DesktopLastCodeSettingsStateSchema,
+  handler: Effect.fn("desktop.ipc.updates.getLastCodeSettings")(function* () {
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    return yield* updates.getLastCodeSettings;
+  }),
+});
+
+export const setShowAndInstallLocalNightlies = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL,
+  payload: Schema.Boolean,
+  result: DesktopLastCodeSettingsStateSchema,
+  handler: Effect.fn("desktop.ipc.updates.setShowAndInstallLocalNightlies")(function* (enabled) {
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    return yield* updates.setShowAndInstallLocalNightlies(enabled);
   }),
 });
 
