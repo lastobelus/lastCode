@@ -2570,6 +2570,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     try {
       const retainedPlan = retainedRevision ? readCarryReplayPlan(worktree) : undefined;
       if (retainedRevision) {
+        // Apply the same loss-prevention checks used before retiring recovery worktrees.
+        checkpointRecoveryFingerprint(worktree, carryBranch);
         assertRetainedRevision({
           phase: retainedPlan?.phase,
           recordedSource: retainedPlan?.source,
