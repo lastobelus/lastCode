@@ -56,7 +56,15 @@ describe("checkpoint migration history", () => {
       "const migrationEntries",
     );
     assert.deepStrictEqual(
-      readMigrationIdentities(privateRegistry, "migrationEntries"),
+      readMigrationIdentities(privateRegistry, "migrationEntries", true),
+      readMigrationIdentities(exported, "migrationEntries"),
+    );
+    assert.throws(
+      () => readMigrationIdentities(privateRegistry, "migrationEntries"),
+      /Missing literal/,
+    );
+    assert.deepStrictEqual(
+      readMigrationIdentities(privateRegistry + "\n" + exported, "migrationEntries"),
       readMigrationIdentities(exported, "migrationEntries"),
     );
     assert.throws(
