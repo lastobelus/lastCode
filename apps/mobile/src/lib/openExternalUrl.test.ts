@@ -22,8 +22,9 @@ describe("tryOpenExternalUrl", () => {
     openURL.mockResolvedValue(undefined);
 
     await expect(
-      tryOpenExternalUrl("https://github.com/pingdotgg/t3code", "pull-request"),
+      tryOpenExternalUrl("https://github.com/pingdotgg/t3code/actions/runs/1", "action-report"),
     ).resolves.toBe(true);
+    expect(openURL).toHaveBeenCalledWith("https://github.com/pingdotgg/t3code/actions/runs/1");
   });
 
   it("logs stable URL context without exposing the opening failure", async () => {
