@@ -1,16 +1,52 @@
-import type { DesktopLastCodeSettingsState } from "@t3tools/contracts";
-import { MoonStarIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { type DesktopLastCodeSettingsState, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_LEGACY_SIDEBAR_SCALE,
+  LEGACY_SIDEBAR_SCALE_REFERENCE,
+  MAX_LEGACY_SIDEBAR_SCALE,
+  MIN_LEGACY_SIDEBAR_SCALE,
+} from "@t3tools/contracts/settings";
+import { useAtomValue } from "@effect/atom-react";
+import { MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 
+import { environmentCatalog } from "../../connection/catalog";
 import { isElectron } from "../../env";
+import { EnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
+import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
 import { searchableSetting } from "./settingsSearch";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
+import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
+import {
+  SettingResetButton,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
+
+const STATUS_INDICATOR_PREVIEW = {
+  colorClass: "text-sky-600 dark:text-sky-300/80",
+  dotClass: "bg-sky-500 dark:bg-sky-300/80",
+  label: "Working",
+  pulse: false,
+} as const;
+
+const WORKTREE_INDICATOR_PREVIEW_THREAD = {
+  id: ThreadId.make("settings-worktree-preview"),
+  branch: "feature/example",
+  worktreePath: "/example/worktrees/example",
+};
 
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
+  const clientSettings = usePrimarySettings();
+  const updateClientSettings = useUpdateClientSettings();
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -61,6 +97,21 @@ export function LastCodeSettingsPanel() {
         : settings?.showAndInstallLocalNightlies
           ? "Enabled. LastCode checks your local repository and shows new checkpoints and LastCode revisions in the sidebar."
           : "Off by default. No local repositories, builds, or installers are touched while disabled."));
+  const legacySidebarScaleRatio =
+    (clientSettings.legacySidebarScale - MIN_LEGACY_SIDEBAR_SCALE) /
+    (MAX_LEGACY_SIDEBAR_SCALE - MIN_LEGACY_SIDEBAR_SCALE);
+  const legacySidebarScaleSliderStyle = {
+    "--settings-slider-progress": `${legacySidebarScaleRatio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - legacySidebarScaleRatio}rem`,
+  } as CSSProperties;
+  const environmentSettings = useMemo(
+    () =>
+      deriveLastCodeEnvironmentSettingEntries({
+        entries: catalog.entries,
+        primaryEnvironmentId,
+      }),
+    [catalog.entries, primaryEnvironmentId],
+  );
 
   return (
     <SettingsPageContainer>
@@ -80,6 +131,183 @@ export function LastCodeSettingsPanel() {
             />
           }
         />
+      </SettingsSection>
+      <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("scale-legacy-sidebar")}
+          description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
+          resetAction={
+            clientSettings.legacySidebarScale !== DEFAULT_LEGACY_SIDEBAR_SCALE ? (
+              <SettingResetButton
+                label="legacy sidebar scale"
+                onClick={() =>
+                  updateClientSettings({ legacySidebarScale: DEFAULT_LEGACY_SIDEBAR_SCALE })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full items-center gap-3 sm:w-64">
+              <output
+                className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                htmlFor="legacy-sidebar-scale"
+              >
+                {clientSettings.legacySidebarScale}%
+              </output>
+              <div className="relative min-w-0 flex-1 pb-3">
+                <input
+                  aria-label="Scale legacy sidebar"
+                  className="settings-slider block w-full"
+                  id="legacy-sidebar-scale"
+                  max={MAX_LEGACY_SIDEBAR_SCALE}
+                  min={MIN_LEGACY_SIDEBAR_SCALE}
+                  onChange={(event) => {
+                    const legacySidebarScale = Number(event.currentTarget.value);
+                    if (
+                      Number.isInteger(legacySidebarScale) &&
+                      legacySidebarScale >= MIN_LEGACY_SIDEBAR_SCALE &&
+                      legacySidebarScale <= MAX_LEGACY_SIDEBAR_SCALE
+                    ) {
+                      updateClientSettings({ legacySidebarScale });
+                    }
+                  }}
+                  step={1}
+                  style={legacySidebarScaleSliderStyle}
+                  type="range"
+                  value={clientSettings.legacySidebarScale}
+                />
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute top-5 left-1/2 flex -translate-x-1/2 flex-col items-center text-[9px] leading-none text-muted-foreground"
+                >
+                  <span className="h-1.5 border-muted-foreground/60 border-l" />
+                  <span className="mt-0.5">{LEGACY_SIDEBAR_SCALE_REFERENCE}%</span>
+                </span>
+              </div>
+            </div>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("rounded-project-icons")}
+          description="Round the corners of project favicon images. Leave this off to show each icon's original shape."
+          control={
+            <Switch
+              checked={clientSettings.roundedProjectIcons}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ roundedProjectIcons: Boolean(checked) })
+              }
+              aria-label="Rounded project icons"
+            />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("compact-status-indicators")}
+          description="Show colored dot only for agent status, hiding labels like “Working” and “Completed.”"
+          status={
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-sidebar px-2 py-1 text-sm text-foreground">
+              <ThreadStatusLabel
+                compact={clientSettings.compactLegacySidebarStatuses}
+                status={STATUS_INDICATOR_PREVIEW}
+              />
+              <span>Title</span>
+            </span>
+          }
+          control={
+            <Switch
+              checked={clientSettings.compactLegacySidebarStatuses}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ compactLegacySidebarStatuses: Boolean(checked) })
+              }
+              aria-label="Compact status indicators"
+            />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("show-worktree-indicators")}
+          description="Show the worktree icon beside threads that use a dedicated worktree in the legacy sidebar."
+          status={
+            <span className="inline-flex items-center gap-1 rounded-full bg-sidebar px-2 py-1 text-[10px] tabular-nums text-secondary-label">
+              {clientSettings.showThreadWorktreeIndicators ? (
+                <ThreadWorktreeIndicator thread={WORKTREE_INDICATOR_PREVIEW_THREAD} />
+              ) : null}
+              <EnvironmentIcon kind="server" context="legacy-row" className="size-3" />
+              <span>5m ago</span>
+            </span>
+          }
+          control={
+            <Switch
+              checked={clientSettings.showThreadWorktreeIndicators}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ showThreadWorktreeIndicators: Boolean(checked) })
+              }
+              aria-label="Show worktree indicators (legacy sidebar)"
+            />
+          }
+        />
+      </SettingsSection>
+      <SettingsSection
+        id="environment-icons"
+        title="Environments"
+        icon={<ServerIcon className="size-5" />}
+      >
+        {environmentSettings.map((environment) => {
+          const color = clientSettings.environmentIconColors[environment.environmentId];
+          const isLocal = environment.kind === "local";
+          return (
+            <SettingsRow
+              key={environment.environmentId}
+              title={
+                <span className="inline-flex min-w-0 items-center gap-2">
+                  <EnvironmentIcon
+                    kind={isLocal ? "laptop" : "server"}
+                    context="settings"
+                    color={color}
+                    className="size-4 shrink-0"
+                  />
+                  <span className="truncate">{environment.label}</span>
+                </span>
+              }
+              description={isLocal ? "Primary machine" : "Saved remote environment"}
+            >
+              <div className="space-y-4 px-0 pb-3 sm:px-4">
+                <ProviderAccentColorPicker
+                  displayName={environment.label}
+                  value={color}
+                  label="Icon color"
+                  defaultOptionLabel="Default"
+                  commitDelayMs={120}
+                  onCommit={(value) =>
+                    updateClientSettings((settings) => ({
+                      environmentIconColors: updateEnvironmentIconColors(
+                        settings.environmentIconColors,
+                        environment.environmentId,
+                        value,
+                      ),
+                    }))
+                  }
+                  description="Used for this environment in sidebars and thread details."
+                />
+                {isLocal ? (
+                  <div className="flex items-center justify-between gap-6 border-border/70 border-t pt-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-xs font-medium text-foreground">Show local icon</div>
+                      <p className="max-w-xl text-xs leading-[1.45] text-muted-foreground">
+                        Show a Laptop icon for local threads. Legacy rows always reserve its space.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={clientSettings.showLocalEnvironmentIcon}
+                      onCheckedChange={(checked) =>
+                        updateClientSettings({ showLocalEnvironmentIcon: Boolean(checked) })
+                      }
+                      aria-label="Show local icon"
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </SettingsRow>
+          );
+        })}
       </SettingsSection>
     </SettingsPageContainer>
   );
