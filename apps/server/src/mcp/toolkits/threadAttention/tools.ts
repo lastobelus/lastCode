@@ -13,7 +13,7 @@ const dependencies = [
 ];
 const result = Schema.Struct({ attention: Schema.NullOr(ThreadAttention) });
 
-export const SetThreadAttentionTool = Tool.make("set_thread_attention", {
+const SetThreadAttentionTool = Tool.make("set_thread_attention", {
   description:
     "Mark this thread as waiting for the user to answer a question. Call this immediately before ending a turn only when your final response contains a question that blocks useful progress. The thread is derived from your authenticated session; never identify a thread yourself.",
   parameters: Schema.Struct({ kind: Schema.Literal("question") }),
@@ -26,7 +26,7 @@ export const SetThreadAttentionTool = Tool.make("set_thread_attention", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
-export const ClearThreadAttentionTool = Tool.make("clear_thread_attention", {
+const ClearThreadAttentionTool = Tool.make("clear_thread_attention", {
   description:
     "Clear a question marker you previously set when the question was withdrawn or no answer is required. A user reply clears the marker automatically.",
   parameters: Schema.Record(Schema.String, Schema.Never),

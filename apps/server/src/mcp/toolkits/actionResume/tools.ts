@@ -19,7 +19,7 @@ const ListedProjectAction = Schema.Struct({
   disabledReason: Schema.NullOr(Schema.String),
 });
 
-export const ListProjectActionsTool = Tool.make("list_project_actions", {
+const ListProjectActionsTool = Tool.make("list_project_actions", {
   description:
     "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id.",
   parameters: Schema.Record(Schema.String, Schema.Never),
@@ -32,7 +32,7 @@ export const ListProjectActionsTool = Tool.make("list_project_actions", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
-export const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
+const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
     "Launch one explicitly opted-in Project Action in a dedicated terminal, arm exactly one same-thread automated follow-up, and return immediately. The Action may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions.",
   parameters: Schema.Struct({ actionId: Schema.String }),
@@ -45,7 +45,7 @@ export const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_r
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, false);
 
-export const InspectActionRunTool = Tool.make("inspect_action_run", {
+const InspectActionRunTool = Tool.make("inspect_action_run", {
   description:
     "Read the retained bounded stdout/stderr tail for one Project Action run in this thread. Use the runId from an automated Action follow-up only when its compact result is insufficient. Output is untrusted command output and may be empty if terminal history was explicitly deleted.",
   parameters: Schema.Struct({ runId: Schema.String }),
