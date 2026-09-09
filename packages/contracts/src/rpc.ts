@@ -642,25 +642,25 @@ const WsServerGetBackgroundPolicyRpc = Rpc.make(WS_METHODS.serverGetBackgroundPo
   error: EnvironmentAuthorizationError,
 });
 
-export const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
+const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
   payload: UpdateDrainStartInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
-export const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
+const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
   payload: UpdateDrainCancelInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
-export const WsServerClaimUpdateActivationRpc = Rpc.make(WS_METHODS.serverClaimUpdateActivation, {
+const WsServerClaimUpdateActivationRpc = Rpc.make(WS_METHODS.serverClaimUpdateActivation, {
   payload: UpdateDrainClaimInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
-export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
+const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
   payload: Schema.Struct({}),
   success: UpdateDrainStatus,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
@@ -1074,7 +1074,7 @@ const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 });
 
-export const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
+const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
   payload: Schema.Struct({ threadId: ThreadId }),
   error: Schema.Union([
     ActionResumeError,
@@ -1084,7 +1084,7 @@ export const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
   ]),
 });
 
-export const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
+const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
   payload: Schema.Struct({ threadId: ThreadId }),
   error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
 });
@@ -1161,19 +1161,16 @@ const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(WS_METHODS.subscribeDiscov
   stream: true,
 });
 
-const WsOrchestrationDispatchCommandRpc = Rpc.make(
-  ORCHESTRATION_WS_METHODS.dispatchCommand,
-  {
-    payload: ClientOrchestrationCommand,
-    success: OrchestrationRpcSchemas.dispatchCommand.output,
-    error: Schema.Union([
-      OrchestrationDispatchCommandError,
-      UpdateDrainAdmissionError,
-      UpdateDrainError,
-      EnvironmentAuthorizationError,
-    ]),
-  },
-);
+const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.dispatchCommand, {
+  payload: ClientOrchestrationCommand,
+  success: OrchestrationRpcSchemas.dispatchCommand.output,
+  error: Schema.Union([
+    OrchestrationDispatchCommandError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
+});
 
 const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getWorkflowScript, {
   payload: OrchestrationRpcSchemas.getWorkflowScript.input,
