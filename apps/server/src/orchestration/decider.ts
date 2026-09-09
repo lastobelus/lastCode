@@ -1,6 +1,5 @@
 import {
   EventId,
-  MAX_SCRIPT_ID_LENGTH,
   SCRIPT_RUN_COMMAND_PATTERN,
   MessageId,
   ThreadLinkedPullRequest,
@@ -257,7 +256,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           if (!existingIds.has(script.id) && !isScriptRunCommand(`script.${script.id}.run`)) {
             return yield* new OrchestrationCommandInvariantError({
               commandType: command.type,
-              detail: `Script ID '${script.id}' must be 1-${MAX_SCRIPT_ID_LENGTH} lowercase letters, digits or hyphens, starting with a letter or digit.`,
+              detail: `Script ID '${script.id}' must be non-empty and trimmed.`,
             });
           }
         }
