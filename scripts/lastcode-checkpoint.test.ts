@@ -7,6 +7,8 @@ import * as NodePath from "node:path";
 import { assert, expect, it } from "@effect/vitest";
 
 import {
+  assertRetainedRevision,
+  releasePublishedPinnedRevision,
   checkpointRecoveryFingerprint,
   checkpointFailureDisposition,
   checkpointMessage,
@@ -48,6 +50,73 @@ function nightly(tag: string) {
   assert.ok(value);
   return value;
 }
+
+it("leaves an unpublished pinned revision available for compilation recovery", () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-pinned-resume-"));
+  const repo = NodePath.join(root, "repo");
+  const worktree = NodePath.join(root, "revision");
+  const git = (cwd: string, args: string[]) =>
+    NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  try {
+    NodeFS.mkdirSync(repo);
+    git(repo, ["init"]);
+    git(repo, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "source",
+    ]);
+    git(repo, ["worktree", "add", "-b", "sync/revision-only/v0.0.1-nightly.20990101.1", worktree]);
+    const head = git(worktree, ["rev-parse", "HEAD"]);
+    releasePublishedPinnedRevision(repo, worktree, []);
+    assert.equal(git(worktree, ["rev-parse", "HEAD"]), head);
+    assertRetainedRevision({
+      phase: "compile",
+      recordedSource: head,
+      source: head,
+      branch: git(worktree, ["branch", "--show-current"]),
+      expectedBranch: "sync/revision-only/v0.0.1-nightly.20990101.1",
+      rebasing: false,
+      status: git(worktree, ["status", "--porcelain"]),
+      unexpectedIgnoredPaths: [],
+    });
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("resumes only clean completed revision compilations bound to current source and branch", () => {
+  const valid = {
+    phase: "compile",
+    recordedSource: "source",
+    source: "source",
+    branch: "sync/revision-only/nightly",
+    expectedBranch: "sync/revision-only/nightly",
+    rebasing: false,
+    status: "",
+    unexpectedIgnoredPaths: [],
+  };
+  assert.doesNotThrow(() => assertRetainedRevision(valid));
+  for (const invalid of [
+    { phase: undefined },
+    { phase: "replay" },
+    { recordedSource: "old-source" },
+    { branch: "unrelated" },
+    { rebasing: true },
+    { status: " M file" },
+    { status: "?? file" },
+    { unexpectedIgnoredPaths: ["operator-notes.md"] },
+  ])
+    assert.throws(() => assertRetainedRevision({ ...valid, ...invalid }), /Retained revision/);
+});
 
 it("pins revision planning only when current source represents the latest published base", () => {
   const tag = "v0.0.1-nightly.20990101.1";
