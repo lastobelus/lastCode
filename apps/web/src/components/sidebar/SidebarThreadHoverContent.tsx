@@ -57,11 +57,13 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
-              environmentId={props.thread.environmentId}
-              cwd={props.projectCwd ?? ""}
-              projectName={props.projectTitle ?? ""}
-              faviconPath={props.projectFaviconPath}
-              projectIcon={props.projectIcon ?? null}
+              project={{
+                environmentId: props.thread.environmentId,
+                workspaceRoot: props.projectCwd ?? "",
+                title: props.projectTitle ?? "",
+                faviconPath: props.projectFaviconPath,
+                projectIcon: props.projectIcon ?? null,
+              }}
               className="size-3 shrink-0"
             />
             <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
