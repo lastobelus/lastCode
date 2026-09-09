@@ -1542,7 +1542,7 @@ export function runPromotionThenShadow(promote: () => void, shadow: () => void):
   }
 }
 
-function releasePublishedPinnedRevision(
+export function releasePublishedPinnedRevision(
   repoRoot: string,
   worktree: string,
   installables: ReadonlyArray<InstallableRef>,
@@ -1558,8 +1558,9 @@ function releasePublishedPinnedRevision(
       (branch === expectedBranch || branch === `${expectedBranch}.${candidate.revision}`)
     );
   });
+  // Unpublished repairs belong to the guarded compilation-resume path below.
+  if (!installable) return;
   if (
-    !installable ||
     rebaseInProgress(worktree) ||
     git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]) ||
     unexpectedIgnoredRecoveryPaths(worktree).length > 0
