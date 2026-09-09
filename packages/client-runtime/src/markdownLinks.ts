@@ -344,7 +344,10 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!label.trim()) return true;
   const target = parseMarkdownFileLink(href);
   if (!target) return false;
-  const path = (parseMarkdownFileLink(label)?.path ?? splitFilePathPosition(label.trim()).path)
+  const labelPosition = parseMarkdownFileLink(label) ?? splitFilePathPosition(label.trim());
+  if (labelPosition.line !== undefined && labelPosition.line !== target.line) return false;
+  if (labelPosition.column !== undefined && labelPosition.column !== target.column) return false;
+  const path = labelPosition.path
     .replaceAll("\\", "/")
     .replace(/^\.\//, "")
     .replace(/([^/:])\/+$/, "$1");

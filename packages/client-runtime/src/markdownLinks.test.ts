@@ -172,6 +172,21 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["example.ts:99", "/repo/example.ts:12", false],
+    ["example.ts:12:8", "/repo/example.ts:12:4", false],
+    ["example.ts:12", "/repo/example.ts", false],
+    ["example.ts:12:4", "/repo/example.ts:12", false],
+    ["file:///repo/example.ts#L99", "/repo/example.ts:12", false],
+    ["file:///repo/example.ts#L12C8", "/repo/example.ts:12:4", false],
+    ["example.ts", "/repo/example.ts:12:4", true],
+    ["example.ts:12", "/repo/example.ts:12:4", true],
+    ["example.ts:12:4", "/repo/example.ts:12:4", true],
+    ["file:///repo/example.ts#L12C4", "/repo/example.ts:12:4", true],
+  ])("matches explicit positions in %s against %s", (label, href, compact) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(compact);
+  });
+
+  it.each([
     "example.ts",
     "example.ts:12",
     "src/example.ts",
