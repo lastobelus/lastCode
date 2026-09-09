@@ -28,7 +28,7 @@ layer("ProjectionThreadMessageRepository", (it) => {
         createdAt: "2026-02-28T19:05:06.000Z",
         updatedAt: "2026-02-28T19:05:06.000Z",
       });
-      assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
+      assert.isNull(yield* repository.getLatestUserMessage({ threadId }));
 
       const messages = [
         { role: "user", createdAt: "2026-02-28T19:05:02.000Z" },
