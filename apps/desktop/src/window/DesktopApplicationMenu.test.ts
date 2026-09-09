@@ -63,6 +63,8 @@ const desktopUpdatesLayer = Layer.succeed(DesktopUpdates.DesktopUpdates, {
   isActionActive: Effect.succeed(false),
   isInstallActive: Effect.succeed(false),
   subscribe: Effect.die("unexpected subscribe"),
+  getLastCodeSettings: Effect.die("unexpected getLastCodeSettings"),
+  setShowAndInstallLocalNightlies: () => Effect.die("unexpected local nightly toggle"),
   emitState: Effect.void,
   disabledReason: Effect.succeed(Option.none()),
   configure: Effect.void,
