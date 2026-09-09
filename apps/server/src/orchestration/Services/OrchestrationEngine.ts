@@ -11,10 +11,12 @@
  * @module OrchestrationEngineService
  */
 import type {
+  MessageId,
   OrchestrationClientOrigin,
   OrchestrationCommand,
   OrchestrationEvent,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -22,7 +24,10 @@ import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
+import type {
+  OrchestrationEventStoreError,
+  ProjectionRepositoryError,
+} from "../../persistence/Errors.ts";
 import type { OrchestrationAggregateReplayStats } from "../../persistence/Services/OrchestrationEventStore.ts";
 
 export interface OrchestrationThreadReplayRange {
@@ -31,10 +36,28 @@ export interface OrchestrationThreadReplayRange {
   readonly toSequenceInclusive: number;
 }
 
+export type TurnRequestWaitState =
+  | { readonly kind: "thread-not-found" | "correlation-not-found" | "pending" }
+  | {
+      readonly kind: "terminal";
+      readonly state: "completed";
+      readonly turnId: TurnId;
+      readonly response: string;
+    }
+  | {
+      readonly kind: "terminal";
+      readonly state: "error" | "interrupted";
+      readonly turnId?: TurnId;
+    };
+
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
  */
 export interface OrchestrationEngineShape {
+  readonly getTurnRequestWaitState: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<TurnRequestWaitState, ProjectionRepositoryError>;
   /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
    *

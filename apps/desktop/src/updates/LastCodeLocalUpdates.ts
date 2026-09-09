@@ -53,7 +53,7 @@ function sameBuildLogIdentity(
   return left?.device === right.device && left.inode === right.inode;
 }
 
-export function resolveLocalBuildErrorKind(phaseIndex: number): "build" | "packaging" {
+function resolveLocalBuildErrorKind(phaseIndex: number): "build" | "packaging" {
   return phaseIndex >= PACKAGING_PHASE_INDEX ? "packaging" : "build";
 }
 
@@ -269,7 +269,7 @@ const decodeDashboardConfig = Schema.decodeUnknownSync(Schema.fromJsonString(Das
 const decodeInspectionResult = Schema.decodeUnknownSync(InspectionResult);
 const decodeBuildResult = Schema.decodeUnknownSync(BuildResult);
 
-export class LastCodeLocalUpdateError extends Schema.TaggedErrorClass<LastCodeLocalUpdateError>()(
+export class LastCodeLocalUpdateError extends Schema.TaggedError<LastCodeLocalUpdateError>()(
   "LastCodeLocalUpdateError",
   {
     operation: Schema.Literals(["configuration", "inspect", "build", "install"]),

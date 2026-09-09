@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
@@ -12,7 +13,8 @@ layer("052_ProjectionThreadWorktreeCleanup", (it) => {
   it.effect("adds nullable cleanup state without changing existing rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 51 });
+      yield* runMigrations();
+      yield* runLastCodeMigrations({ toMigrationInclusive: 4 });
       yield* sql`
         INSERT INTO projection_threads (
           thread_id,
@@ -36,7 +38,7 @@ layer("052_ProjectionThreadWorktreeCleanup", (it) => {
         )
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 5 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_threads)
