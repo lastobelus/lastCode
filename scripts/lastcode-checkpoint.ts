@@ -2054,6 +2054,26 @@ export function parseRecoverySelection(value: unknown): RecoverySelection {
   };
 }
 
+export function assertRetainedRevision(input: {
+  phase: string | undefined;
+  recordedSource: string | undefined;
+  source: string;
+  branch: string;
+  expectedBranch: string;
+  rebasing: boolean;
+  status: string;
+}): void {
+  if (
+    input.phase !== "compile" ||
+    input.recordedSource !== input.source ||
+    input.branch !== input.expectedBranch ||
+    input.rebasing ||
+    input.status
+  ) {
+    throw new Error("Retained revision must be a clean, completed carry repair for current main.");
+  }
+}
+
 export function assertRecoverySelection(
   worktree: string,
   selection: RecoverySelection,
@@ -2522,7 +2542,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       : undefined;
   if (carryNeedsCompilation) {
     const worktree = automationWorktree();
-    if (NodeFS.existsSync(worktree) && !selection) {
+    const retainedRevision = options.revisionOnly && NodeFS.existsSync(worktree);
+    if (NodeFS.existsSync(worktree) && !selection && !retainedRevision) {
       throw new Error(
         `Nightly sync worktree already exists at ${worktree}. Resolve or remove it first.`,
       );
@@ -2531,7 +2552,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     carryBranch = options.revisionOnly
       ? `sync/revision-only/${options.revisionOnly}`
       : carryRecoveryBranch(firstNightly?.tag ?? plan.baseNightly.tag);
-    if (!selection) {
+    if (!selection && !retainedRevision) {
       NodeFS.mkdirSync(NodePath.dirname(worktree), { recursive: true });
       if (
         git(repoRoot, ["show-ref", "--verify", `refs/heads/${carryBranch}`], {
@@ -2544,29 +2565,43 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
     const startedAtMs = Date.now();
     try {
-      const result = previousCompact
-        ? compileCarrySetSameBase({
-            repo: repoRoot,
-            worktree,
-            base: plan.baseNightly.tag,
-            source: sourceCommit,
-            previousCompactHead: previousCompact.commit,
-            representedSource: representedSourceFor(previousCompact),
-          })
-        : compileCarrySetSameBase({
-            repo: repoRoot,
-            worktree,
-            base: replay.bootstrap?.base ?? "",
-            source: sourceCommit,
-            preparedPartition: {
+      const retainedPlan = retainedRevision ? readCarryReplayPlan(worktree) : undefined;
+      if (retainedRevision) {
+        assertRetainedRevision({
+          phase: retainedPlan?.phase,
+          recordedSource: retainedPlan?.source,
+          source: sourceCommit,
+          branch: git(worktree, ["branch", "--show-current"]),
+          expectedBranch: carryBranch,
+          rebasing: rebaseInProgress(worktree),
+          status: git(worktree, ["status", "--porcelain", "--untracked-files=all"]),
+        });
+      }
+      const result = retainedRevision
+        ? completeCarryReplay(worktree)
+        : previousCompact
+          ? compileCarrySetSameBase({
+              repo: repoRoot,
+              worktree,
+              base: plan.baseNightly.tag,
+              source: sourceCommit,
+              previousCompactHead: previousCompact.commit,
+              representedSource: representedSourceFor(previousCompact),
+            })
+          : compileCarrySetSameBase({
+              repo: repoRoot,
+              worktree,
               base: replay.bootstrap?.base ?? "",
-              source: replay.bootstrap?.source ?? "",
-              head: replay.bootstrap?.head ?? "",
-            },
-            ...(bootstrapRepresentedSource
-              ? { representedSource: bootstrapRepresentedSource }
-              : {}),
-          });
+              source: sourceCommit,
+              preparedPartition: {
+                base: replay.bootstrap?.base ?? "",
+                source: replay.bootstrap?.source ?? "",
+                head: replay.bootstrap?.head ?? "",
+              },
+              ...(bootstrapRepresentedSource
+                ? { representedSource: bootstrapRepresentedSource }
+                : {}),
+            });
       candidateRef = result.head;
       candidateCommit = result.head;
       carryWorktreePrepared = true;

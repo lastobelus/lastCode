@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import { assert, expect, it } from "@effect/vitest";
 
 import {
+  assertRetainedRevision,
   checkpointRecoveryFingerprint,
   checkpointFailureDisposition,
   checkpointMessage,
@@ -48,6 +49,29 @@ function nightly(tag: string) {
   assert.ok(value);
   return value;
 }
+
+it("resumes only clean completed revision compilations bound to current source and branch", () => {
+  const valid = {
+    phase: "compile",
+    recordedSource: "source",
+    source: "source",
+    branch: "sync/revision-only/nightly",
+    expectedBranch: "sync/revision-only/nightly",
+    rebasing: false,
+    status: "",
+  };
+  assert.doesNotThrow(() => assertRetainedRevision(valid));
+  for (const invalid of [
+    { phase: undefined },
+    { phase: "replay" },
+    { recordedSource: "old-source" },
+    { branch: "unrelated" },
+    { rebasing: true },
+    { status: " M file" },
+    { status: "?? file" },
+  ])
+    assert.throws(() => assertRetainedRevision({ ...valid, ...invalid }), /Retained revision/);
+});
 
 it("pins revision planning only when current source represents the latest published base", () => {
   const tag = "v0.0.1-nightly.20990101.1";
