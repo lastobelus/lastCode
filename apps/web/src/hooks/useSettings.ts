@@ -573,7 +573,6 @@ export function useUpdateClientSettings() {
     return persistClientSettingsPatch(patch);
   }, []);
 }
-
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
