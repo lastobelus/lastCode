@@ -207,7 +207,8 @@ function serializeNode(node: Node): string {
     const imageCount = element.getAttribute("data-markdown-copy-images");
     const incomplete =
       (fullText !== null && element.textContent !== fullText) ||
-      (imageCount !== null && element.querySelectorAll("img").length !== Number(imageCount));
+      (imageCount !== null &&
+        element.querySelectorAll("[data-markdown-copy-media]").length !== Number(imageCount));
     return incomplete ? serializeChildren(element) : markdownCopy;
   }
   if (isSkippedElement(element)) return "";

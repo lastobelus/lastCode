@@ -61,7 +61,13 @@ class FakeElement {
 
   querySelectorAll(selector: string): FakeElement[] {
     return this.children.flatMap((child) => [
-      ...(child.tagName === selector.toUpperCase() ? [child] : []),
+      ...((
+        selector === "[data-markdown-copy-media]"
+          ? child.hasAttribute("data-markdown-copy-media")
+          : child.tagName === selector.toUpperCase()
+      )
+        ? [child]
+        : []),
       ...child.querySelectorAll(selector),
     ]);
   }
@@ -145,26 +151,31 @@ describe("serializeRenderedMarkdownFragment", () => {
     );
   });
 
-  it("does not restore an unselected image when only the complete chip is selected", () => {
-    const attributes = {
-      "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
-      "data-markdown-copy-text": " (example.ts)",
-      "data-markdown-copy-images": "1",
-    };
-    const partial = new FakeElement("DIV").append(
-      new FakeElement("A", [], attributes).append(new FakeText(" (example.ts)")),
-    );
-    expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("(example.ts)");
-    const complete = new FakeElement("DIV").append(
-      new FakeElement("A", [], attributes).append(
-        new FakeElement("IMG", [], { alt: "diagram", src: "preview.png" }),
-        new FakeText(" (example.ts)"),
-      ),
-    );
-    expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
-      attributes["data-markdown-copy"],
-    );
-  });
+  it.each(["IMG", "VIDEO", "SPAN"])(
+    "validates partial and complete selections with rendered %s media",
+    (tag) => {
+      const attributes = {
+        "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
+        "data-markdown-copy-text": " (example.ts)",
+        "data-markdown-copy-images": "1",
+      };
+      const partial = new FakeElement("DIV").append(
+        new FakeElement("A", [], attributes).append(new FakeText(" (example.ts)")),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("(example.ts)");
+      const complete = new FakeElement("DIV").append(
+        new FakeElement("A", [], attributes).append(
+          new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+            new FakeElement(tag, [], { alt: "diagram", src: "preview.png" }),
+          ),
+          new FakeText(" (example.ts)"),
+        ),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
+        attributes["data-markdown-copy"],
+      );
+    },
+  );
 
   beforeEach(() => {
     vi.stubGlobal("Node", { TEXT_NODE, ELEMENT_NODE });

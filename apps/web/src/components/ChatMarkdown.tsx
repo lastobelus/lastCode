@@ -643,6 +643,18 @@ function nodeImageCount(node: ReactNode): number {
   return nodeImageCount(node.props.children);
 }
 
+function markFileLabelMedia(node: ReactNode): ReactNode {
+  return React.Children.map(node, (child) => {
+    if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(child)) return child;
+    if (child.type === "img" || child.props.node?.tagName === "img") {
+      return <span data-markdown-copy-media>{child}</span>;
+    }
+    return child.props.children === undefined
+      ? child
+      : React.cloneElement(child, undefined, markFileLabelMedia(child.props.children));
+  });
+}
+
 function extractCodeBlock(
   children: ReactNode,
 ): { className: string | undefined; code: string } | null {
@@ -1535,6 +1547,24 @@ function ChatMarkdownVideo(props: {
   readonly actionsSource?: MediaActionSource | undefined;
   readonly onRetry?: (() => Promise<void>) | undefined;
 }) {
+  const insideLink = use(MarkdownLinkContext);
+  if (insideLink) {
+    return props.src && !props.sourceFailed ? (
+      <video
+        src={props.src}
+        aria-label={props.alt}
+        preload="metadata"
+        playsInline
+        controls={false}
+        tabIndex={-1}
+        data-markdown-copy={props.copyMarkdown}
+        className={CHAT_MARKDOWN_MEDIA_BOUNDS_CLASS_NAME}
+        style={props.style}
+      />
+    ) : (
+      <span data-markdown-copy={props.copyMarkdown}>{props.alt}</span>
+    );
+  }
   return (
     <MediaVideoPlayer
       key={props.mediaIdentity ?? props.copyMarkdown ?? props.src}
@@ -3028,7 +3058,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       props.className,
       normalizedHref,
       !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : (
-        <MarkdownLinkContext value>{children}</MarkdownLinkContext>
+        <MarkdownLinkContext value>{markFileLabelMedia(children)}</MarkdownLinkContext>
       ),
     );
   },

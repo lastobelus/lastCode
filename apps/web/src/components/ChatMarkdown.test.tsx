@@ -138,6 +138,31 @@ describe("ChatMarkdown file-link labels", () => {
     },
   );
 
+  it("keeps video labels non-interactive and marks their selection structure", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text="[![clip](https://example.com/preview.mp4)](/repo/example.ts)"
+          />,
+        );
+      });
+      expect(renderer!.root.findByType("video").props.controls).toBe(false);
+      expect(renderer!.root.findAllByType("button")).toHaveLength(1);
+      expect(
+        renderer!.root.findAll(
+          (node) => node.type === "span" && node.props["data-markdown-copy-media"] !== undefined,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("copies the filename for a whitespace-only link label", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
