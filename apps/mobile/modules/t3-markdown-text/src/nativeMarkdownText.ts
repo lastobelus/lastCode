@@ -392,6 +392,20 @@ function appendNode(
   }
 }
 
+/** Text beside an image remains part of the enclosing link, without another destination chip. */
+export function nativeMarkdownImageLabelRuns(
+  node: MarkdownNode,
+  href: string,
+  headingLevel?: number,
+): ReadonlyArray<NativeMarkdownTextRun> {
+  return appendChildren([], node, {
+    ...EMPTY_CONTEXT,
+    href,
+    role: headingLevel === undefined ? "body" : "heading",
+    ...(headingLevel === undefined ? {} : { headingLevel }),
+  });
+}
+
 export function nativeMarkdownTextRuns(node: MarkdownNode): ReadonlyArray<NativeMarkdownTextRun> {
   return appendChildren([], node, EMPTY_CONTEXT);
 }

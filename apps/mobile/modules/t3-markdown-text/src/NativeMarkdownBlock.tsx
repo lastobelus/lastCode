@@ -9,6 +9,7 @@ import {
   markdownLinkHasImage,
   markdownLinkLabelText,
   nativeMarkdownInlineGroups,
+  nativeMarkdownImageLabelRuns,
   nativeMarkdownDocumentRuns,
   nativeMarkdownListItemBlocks,
 } from "./nativeMarkdownText";
@@ -471,12 +472,13 @@ function NativeMarkdownImage(props: {
 function NativeImageLabel(props: {
   readonly node: MarkdownNode;
   readonly headingLevel?: number | undefined;
+  readonly linkHref?: string | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
 }) {
   const href = props.node.type === "link" ? props.node.href : undefined;
-  const content = <NativeMixedParagraph {...props} />;
+  const content = <NativeMixedParagraph {...props} linkHref={href ?? props.linkHref} />;
   return href ? (
     <View style={{ gap: 8 }}>
       <Pressable
@@ -511,6 +513,7 @@ function NativeImageLabel(props: {
 function NativeMixedParagraph(props: {
   readonly node: MarkdownNode;
   readonly headingLevel?: number | undefined;
+  readonly linkHref?: string | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
@@ -532,7 +535,15 @@ function NativeMixedParagraph(props: {
             key={nodeKey(child, index)}
             node={child}
             headingLevel={headingLevel}
+            linkHref={props.linkHref}
             skills={props.skills}
+            textStyle={props.textStyle}
+            onLinkPress={props.onLinkPress}
+          />
+        ) : props.linkHref ? (
+          <NativeMarkdownSelectableText
+            key={nodeKey(child, index)}
+            runs={nativeMarkdownImageLabelRuns(child, props.linkHref, headingLevel)}
             textStyle={props.textStyle}
             onLinkPress={props.onLinkPress}
           />

@@ -4,6 +4,7 @@ import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 import {
   markdownLinkHasImage,
   nativeMarkdownInlineGroups,
+  nativeMarkdownImageLabelRuns,
   markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
@@ -14,6 +15,31 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it.each(["https://example.com", "/repo/example.ts"])(
+    "retains mixed image label styling without extra chips for %s",
+    (href) => {
+      const runs = nativeMarkdownImageLabelRuns(
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", content: "Read " },
+            { type: "bold", children: [{ type: "text", content: "this" }] },
+            { type: "code_inline", content: "example.ts" },
+          ],
+        },
+        href,
+        2,
+      );
+      expect(runs.map((run) => run.text).join("")).toBe("Read thisexample.ts");
+      expect(
+        runs.every((run) => run.href === href && run.role === "heading" && run.headingLevel === 2),
+      ).toBe(true);
+      expect(runs.every((run) => run.fileIcon === undefined)).toBe(true);
+      expect(runs[1]?.bold).toBe(true);
+      expect(runs[2]?.code).toBe(true);
+    },
+  );
+
   it.each([
     [{ alt: "diagram" }, "diagram"],
     [{ alt: "", title: "Overview" }, "Overview"],
