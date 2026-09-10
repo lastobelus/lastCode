@@ -356,7 +356,7 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
     const normalized = normalizePath(path);
     return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
   };
-  const normalizedLabel = normalizeMarkdownLinkDestination(label);
+  const normalizedLabel = label.trim();
   if (matchesPath(normalizedLabel)) return true;
   const suffix = normalizedLabel.match(POSITION_SUFFIX_CAPTURE_PATTERN);
   const anchor = normalizedLabel
@@ -399,7 +399,9 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   ) {
     return false;
   }
-  const labelPosition = parseMarkdownFileLink(label) ?? splitFilePathPosition(label.trim());
+  // Angle brackets wrap Markdown destinations, but are literal in rendered labels.
+  if (normalizedLabel.startsWith("<") && normalizedLabel.endsWith(">")) return false;
+  const labelPosition = parseMarkdownFileLink(normalizedLabel) ?? literalPosition;
   if (labelPosition.line !== undefined && labelPosition.line !== target.line) return false;
   if (labelPosition.column !== undefined && labelPosition.column !== target.column) return false;
   return matchesPath(labelPosition.path);

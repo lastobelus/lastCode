@@ -313,6 +313,8 @@ export function markdownLinkLabelText(node: MarkdownNode): string {
       return textNodeContent(nodeTextContent(node));
     case "html_inline":
       return inlineHtmlText(nodeTextContent(node));
+    case "image":
+      return node.alt || node.title || "";
     case "code_inline":
       return nodeTextContent(node);
     case "soft_break":

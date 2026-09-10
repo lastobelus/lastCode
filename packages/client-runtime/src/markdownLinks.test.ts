@@ -172,6 +172,15 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["<example.ts>", "/repo/example.ts", false],
+    ["<example.ts:12>", "/repo/example.ts:12", false],
+    ["<example.ts>", "/tmp/%3Cexample.ts%3E", true],
+    ["<example.ts>:12", "/tmp/%3Cexample.ts%3E:12", true],
+  ])("preserves literal angle brackets in %s", (label, href, compact) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(compact);
+  });
+
+  it.each([
     ["README.md#L0", "/tmp/README.md%23L0", true],
     ["README.md#L0", "/tmp/README.md#L0", false],
     ["README.md#L12C0", "/tmp/README.md%23L12C0", true],

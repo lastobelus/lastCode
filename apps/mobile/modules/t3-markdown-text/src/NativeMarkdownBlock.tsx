@@ -6,6 +6,7 @@ import { CopyTextButton } from "./CopyTextButton";
 import { MarkdownTextPrimitive } from "./MarkdownTextPrimitive";
 import {
   markdownLinkHasImage,
+  markdownLinkLabelText,
   nativeMarkdownInlineGroups,
   nativeMarkdownDocumentRuns,
   nativeMarkdownListItemBlocks,
@@ -377,13 +378,26 @@ function NativeTable(props: {
                   paddingVertical: 8,
                 }}
               >
-                <NativeMarkdownSelectableText
-                  runs={nativeMarkdownDocumentRuns(documentFor(cell), props.skills).map((run) =>
-                    rowIndex === 0 || cell.isHeader ? { ...run, bold: true } : run,
-                  )}
-                  textStyle={props.textStyle}
-                  onLinkPress={props.onLinkPress}
-                />
+                {markdownLinkHasImage(cell) ? (
+                  <NativeMixedParagraph
+                    node={cell}
+                    skills={props.skills}
+                    textStyle={
+                      rowIndex === 0 || cell.isHeader
+                        ? { ...props.textStyle, fontFamily: props.textStyle.boldFontFamily }
+                        : props.textStyle
+                    }
+                    onLinkPress={props.onLinkPress}
+                  />
+                ) : (
+                  <NativeMarkdownSelectableText
+                    runs={nativeMarkdownDocumentRuns(documentFor(cell), props.skills).map((run) =>
+                      rowIndex === 0 || cell.isHeader ? { ...run, bold: true } : run,
+                    )}
+                    textStyle={props.textStyle}
+                    onLinkPress={props.onLinkPress}
+                  />
+                )}
               </View>
             ))}
           </View>
@@ -465,7 +479,7 @@ function NativeImageLabel(props: {
     <View style={{ gap: 8 }}>
       <Pressable
         accessibilityRole="link"
-        accessibilityLabel={nodeText(props.node) || href}
+        accessibilityLabel={markdownLinkLabelText(props.node) || href}
         onPress={() => props.onLinkPress?.(href)}
       >
         <View
@@ -514,7 +528,11 @@ function NativeMixedParagraph(props: {
         ) : (
           <SelectableNode
             key={nodeKey(child, index)}
-            node={child}
+            node={
+              props.node.type === "heading"
+                ? { ...child, type: "heading", level: props.node.level }
+                : child
+            }
             skills={props.skills}
             textStyle={props.textStyle}
             onLinkPress={props.onLinkPress}
@@ -705,6 +723,7 @@ export function NativeMarkdownBlock(props: {
           depth={depth}
         />
       );
+    case "heading":
     case "paragraph":
       return markdownLinkHasImage(props.node) ? (
         <NativeMixedParagraph

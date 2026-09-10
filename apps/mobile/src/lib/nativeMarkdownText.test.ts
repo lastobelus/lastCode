@@ -14,6 +14,22 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it.each([
+    [{ alt: "diagram" }, "diagram"],
+    [{ alt: "", title: "Overview" }, "Overview"],
+    [{ alt: "diagram", title: "Overview" }, "diagram"],
+  ])("includes image descriptions in accessible link text", (image, expected) => {
+    expect(
+      markdownLinkLabelText({
+        type: "link",
+        children: [
+          { type: "text", content: "See " },
+          { type: "image", href: "preview.png", ...image },
+        ],
+      }),
+    ).toBe(`See ${expected}`);
+  });
+
   it("separates linked image rendering from surrounding selectable prose", () => {
     const link: MarkdownNode = {
       type: "link",
