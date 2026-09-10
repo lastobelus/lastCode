@@ -62,8 +62,8 @@ class FakeElement {
   querySelectorAll(selector: string): FakeElement[] {
     return this.children.flatMap((child) => [
       ...((
-        selector === "[data-markdown-copy-media]"
-          ? child.hasAttribute("data-markdown-copy-media")
+        selector.startsWith("[")
+          ? child.hasAttribute(selector.slice(1, -1))
           : child.tagName === selector.toUpperCase()
       )
         ? [child]
@@ -80,6 +80,7 @@ class FakeElement {
       if (target === 'input[type="checkbox"]') {
         return element.tagName === "INPUT" && element.getAttribute("type") === "checkbox";
       }
+      if (target.startsWith("[")) return element.hasAttribute(target.slice(1, -1));
       return element.tagName === target.toUpperCase();
     };
     const search = (parent: FakeElement): FakeElement | null => {
@@ -166,9 +167,11 @@ describe("serializeRenderedMarkdownFragment", () => {
       const complete = new FakeElement("DIV").append(
         new FakeElement("A", [], attributes).append(
           new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+            new FakeElement("SPAN", [], { "data-markdown-copy-media-start": "" }),
             new FakeElement(tag, [], { alt: "diagram", src: "preview.png" }).append(
               ...(tag === "SPAN" ? [new FakeText("Image unavailable · diagram")] : []),
             ),
+            new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" }),
           ),
           new FakeText(" (example.ts)"),
         ),
@@ -178,6 +181,27 @@ describe("serializeRenderedMarkdownFragment", () => {
       );
     },
   );
+
+  it("does not restore a link when selection starts inside fallback media text", () => {
+    const fragment = new FakeElement("DIV").append(
+      new FakeElement("A", [], {
+        "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
+        "data-markdown-copy-text": " (example.ts)",
+        "data-markdown-copy-images": "1",
+      }).append(
+        new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+          new FakeElement("SPAN", [], { "data-markdown-copy": "![diagram](preview.png)" }).append(
+            new FakeText("available · diagram"),
+          ),
+          new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" }),
+        ),
+        new FakeText(" (example.ts)"),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(fragment))).toBe(
+      "available · diagram (example.ts)",
+    );
+  });
 
   beforeEach(() => {
     vi.stubGlobal("Node", { TEXT_NODE, ELEMENT_NODE });

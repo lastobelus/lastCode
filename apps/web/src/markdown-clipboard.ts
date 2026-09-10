@@ -209,6 +209,13 @@ function serializeNode(node: Node): string {
   if (element.hasAttribute("data-markdown-details")) {
     return serializeDetails(element);
   }
+  if (
+    element.hasAttribute("data-markdown-copy-media") &&
+    (!element.querySelector("[data-markdown-copy-media-start]") ||
+      !element.querySelector("[data-markdown-copy-media-end]"))
+  ) {
+    return element.textContent ?? "";
+  }
   const markdownCopy = element.getAttribute("data-markdown-copy");
   if (markdownCopy !== null) {
     // cloneContents retains metadata on partially selected wrappers. Only use
@@ -218,7 +225,13 @@ function serializeNode(node: Node): string {
     const incomplete =
       (fullText !== null && textOutsideMedia(element) !== fullText) ||
       (imageCount !== null &&
-        element.querySelectorAll("[data-markdown-copy-media]").length !== Number(imageCount));
+        [
+          "data-markdown-copy-media",
+          "data-markdown-copy-media-start",
+          "data-markdown-copy-media-end",
+        ].some(
+          (attribute) => element.querySelectorAll(`[${attribute}]`).length !== Number(imageCount),
+        ));
     return incomplete ? serializeChildren(element) : markdownCopy;
   }
   if (isSkippedElement(element)) return "";

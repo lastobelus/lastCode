@@ -647,7 +647,13 @@ function markFileLabelMedia(node: ReactNode): ReactNode {
   return React.Children.map(node, (child) => {
     if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(child)) return child;
     if (child.type === "img" || child.props.node?.tagName === "img") {
-      return <span data-markdown-copy-media>{child}</span>;
+      return (
+        <span data-markdown-copy-media>
+          <span data-markdown-copy-media-start />
+          {child}
+          <span data-markdown-copy-media-end />
+        </span>
+      );
     }
     return child.props.children === undefined
       ? child
