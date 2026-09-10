@@ -352,5 +352,8 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
     .replace(/^\.\//, "")
     .replace(/([^/:])\/+$/, "$1");
   const targetPath = target.path.replaceAll("\\", "/").replace(/([^/:])\/+$/, "$1");
-  return path === targetPath || targetPath.endsWith(`/${path}`);
+  const caseInsensitive = isWindowsAbsolutePath(target.path);
+  const pathForCompare = caseInsensitive ? path.toLowerCase() : path;
+  const targetForCompare = caseInsensitive ? targetPath.toLowerCase() : targetPath;
+  return pathForCompare === targetForCompare || targetForCompare.endsWith(`/${pathForCompare}`);
 }

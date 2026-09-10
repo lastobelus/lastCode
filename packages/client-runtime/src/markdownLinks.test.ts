@@ -172,6 +172,17 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["C:\\Repo\\src\\Example.ts", "c:\\repo\\src\\example.ts", true],
+    ["SRC/Example.ts:12", "c:/repo/src/example.ts:12", true],
+    ["Example.ts", "file:///C:/repo/example.ts", true],
+    ["Example.ts:99", "c:/repo/example.ts:12", false],
+    ["/Repo/Example.ts", "/repo/example.ts", false],
+    ["Example.ts", "/repo/example.ts", false],
+  ])("respects filesystem casing for %s against %s", (label, href, compact) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(compact);
+  });
+
+  it.each([
     ["example.ts:99", "/repo/example.ts:12", false],
     ["example.ts:12:8", "/repo/example.ts:12:4", false],
     ["example.ts:12", "/repo/example.ts", false],
