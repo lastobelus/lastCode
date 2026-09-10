@@ -5,6 +5,7 @@ import {
   markdownLinkHasImage,
   nativeMarkdownInlineGroups,
   nativeMarkdownImageLabelRuns,
+  nativeMarkdownWithInlineStyles,
   markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
@@ -15,6 +16,30 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it.each(["bold", "italic", "strikethrough"] as const)(
+    "retains enclosing %s alongside nested emphasis in image groups",
+    (style) => {
+      const node = nativeMarkdownWithInlineStyles(
+        {
+          type: "heading",
+          level: 2,
+          children: [{ type: "italic", children: [{ type: "text", content: "Read" }] }],
+        },
+        [style],
+      );
+      const runs = nativeMarkdownDocumentRuns(node);
+      expect(runs[0]).toMatchObject({ text: "Read", [style]: true, italic: true, headingLevel: 2 });
+      const linkedRuns = nativeMarkdownImageLabelRuns(node, "/repo/example.ts", 2);
+      expect(linkedRuns[0]).toMatchObject({
+        text: "Read",
+        [style]: true,
+        italic: true,
+        href: "/repo/example.ts",
+        headingLevel: 2,
+      });
+    },
+  );
+
   it.each(["https://example.com", "/repo/example.ts"])(
     "retains mixed image label styling without extra chips for %s",
     (href) => {

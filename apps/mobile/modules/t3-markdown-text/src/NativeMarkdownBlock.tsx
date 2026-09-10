@@ -10,6 +10,8 @@ import {
   markdownLinkLabelText,
   nativeMarkdownInlineGroups,
   nativeMarkdownImageLabelRuns,
+  nativeMarkdownWithInlineStyles,
+  type MarkdownInlineStyle,
   nativeMarkdownDocumentRuns,
   nativeMarkdownListItemBlocks,
 } from "./nativeMarkdownText";
@@ -65,10 +67,14 @@ function SelectableNode(props: {
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
+  readonly inlineStyles?: ReadonlyArray<MarkdownInlineStyle> | undefined;
 }) {
   return (
     <NativeMarkdownSelectableText
-      runs={nativeMarkdownDocumentRuns(documentFor(props.node), props.skills)}
+      runs={nativeMarkdownDocumentRuns(
+        documentFor(nativeMarkdownWithInlineStyles(props.node, props.inlineStyles ?? [])),
+        props.skills,
+      )}
       textStyle={props.textStyle}
       onLinkPress={props.onLinkPress}
     />
@@ -473,6 +479,7 @@ function NativeImageLabel(props: {
   readonly node: MarkdownNode;
   readonly headingLevel?: number | undefined;
   readonly linkHref?: string | undefined;
+  readonly inlineStyles?: ReadonlyArray<MarkdownInlineStyle> | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
@@ -514,11 +521,18 @@ function NativeMixedParagraph(props: {
   readonly node: MarkdownNode;
   readonly headingLevel?: number | undefined;
   readonly linkHref?: string | undefined;
+  readonly inlineStyles?: ReadonlyArray<MarkdownInlineStyle> | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
 }) {
   const headingLevel = props.node.type === "heading" ? (props.node.level ?? 1) : props.headingLevel;
+  const inlineStyles: ReadonlyArray<MarkdownInlineStyle> =
+    props.node.type === "bold" ||
+    props.node.type === "italic" ||
+    props.node.type === "strikethrough"
+      ? [...(props.inlineStyles ?? []), props.node.type]
+      : (props.inlineStyles ?? []);
   return (
     <View style={{ gap: 8 }}>
       {nativeMarkdownInlineGroups(props.node.children ?? []).map((child, index) =>
@@ -536,6 +550,7 @@ function NativeMixedParagraph(props: {
             node={child}
             headingLevel={headingLevel}
             linkHref={props.linkHref}
+            inlineStyles={inlineStyles}
             skills={props.skills}
             textStyle={props.textStyle}
             onLinkPress={props.onLinkPress}
@@ -543,13 +558,18 @@ function NativeMixedParagraph(props: {
         ) : props.linkHref ? (
           <NativeMarkdownSelectableText
             key={nodeKey(child, index)}
-            runs={nativeMarkdownImageLabelRuns(child, props.linkHref, headingLevel)}
+            runs={nativeMarkdownImageLabelRuns(
+              nativeMarkdownWithInlineStyles(child, inlineStyles),
+              props.linkHref,
+              headingLevel,
+            )}
             textStyle={props.textStyle}
             onLinkPress={props.onLinkPress}
           />
         ) : (
           <SelectableNode
             key={nodeKey(child, index)}
+            inlineStyles={inlineStyles}
             node={
               headingLevel !== undefined
                 ? { ...child, type: "heading", level: headingLevel }

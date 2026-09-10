@@ -392,6 +392,21 @@ function appendNode(
   }
 }
 
+export type MarkdownInlineStyle = "bold" | "italic" | "strikethrough";
+
+export function nativeMarkdownWithInlineStyles(
+  node: MarkdownNode,
+  styles: ReadonlyArray<MarkdownInlineStyle>,
+): MarkdownNode {
+  return {
+    ...node,
+    children: styles.reduceRight<MarkdownNode[]>(
+      (children, type) => [{ type, children }],
+      node.children ?? [],
+    ),
+  };
+}
+
 /** Text beside an image remains part of the enclosing link, without another destination chip. */
 export function nativeMarkdownImageLabelRuns(
   node: MarkdownNode,
