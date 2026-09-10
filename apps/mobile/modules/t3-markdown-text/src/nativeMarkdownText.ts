@@ -278,6 +278,25 @@ export function nodeTextContent(node: MarkdownNode): string {
   return (node.children ?? []).map(nodeTextContent).join("");
 }
 
+/** Visible link-label text, with prose entities decoded and code kept literal. */
+export function markdownLinkLabelText(node: MarkdownNode): string {
+  switch (node.type) {
+    case "text":
+    case "math_inline":
+      return textNodeContent(nodeTextContent(node));
+    case "html_inline":
+      return inlineHtmlText(nodeTextContent(node));
+    case "code_inline":
+      return nodeTextContent(node);
+    case "soft_break":
+      return " ";
+    case "line_break":
+      return "\n";
+    default:
+      return (node.children ?? []).map(markdownLinkLabelText).join("");
+  }
+}
+
 function appendNode(
   runs: NativeMarkdownTextRun[],
   node: MarkdownNode,
@@ -313,7 +332,10 @@ function appendNode(
     case "link": {
       const presentation = resolveMarkdownLinkPresentation(node.href ?? "");
       if (presentation.kind === "file") {
-        const descriptive = !isMarkdownFileLinkLabel(nodeTextContent(node), presentation.href);
+        const descriptive = !isMarkdownFileLinkLabel(
+          markdownLinkLabelText(node),
+          presentation.href,
+        );
         if (descriptive) {
           appendChildren(runs, node, { ...context, href: presentation.href });
         }

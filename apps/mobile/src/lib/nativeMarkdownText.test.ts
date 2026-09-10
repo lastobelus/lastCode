@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import {
+  markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
   nativeMarkdownDocumentRuns,
@@ -122,6 +123,36 @@ describe("nativeMarkdownTextRuns", () => {
       { text: "validates", bold: true, href },
       { text: " the input", href },
       { text: " (example.ts:12)example.ts:12", href, fileIcon: "typescript" },
+    ]);
+  });
+
+  it.each(["foo&amp;bar.ts", "foo&#38;bar.ts", "foo&#x26;bar.ts"])(
+    "keeps entity-encoded filename %s compact",
+    (content) => {
+      const href = "/repo/foo%26bar.ts";
+      const node: MarkdownNode = {
+        type: "link",
+        href,
+        children: [{ type: "bold", children: [{ type: "text", content }] }],
+      };
+      expect(markdownLinkLabelText(node)).toBe("foo&bar.ts");
+      expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+        { text: "foo&bar.ts", href, fileIcon: "typescript" },
+      ]);
+    },
+  );
+
+  it("preserves literal entities in code-formatted file labels", () => {
+    const href = "/repo/foo%26bar.ts";
+    const node: MarkdownNode = {
+      type: "link",
+      href,
+      children: [{ type: "code_inline", content: "foo&amp;bar.ts" }],
+    };
+    expect(markdownLinkLabelText(node)).toBe("foo&amp;bar.ts");
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: "foo&amp;bar.ts", code: true, href },
+      { text: " (foo&bar.ts)", href, fileIcon: "typescript" },
     ]);
   });
 
