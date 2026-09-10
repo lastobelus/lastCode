@@ -3008,11 +3008,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
       .replaceAll("]", "\\]");
     const labelStart = node?.children[0]?.position?.start.offset;
     const labelEnd = node?.children.at(-1)?.position?.end.offset;
-    const authoredImageLabel =
-      hastHasImage(node) && labelStart !== undefined && labelEnd !== undefined
+    const authoredLabel =
+      (label.trim() || hastHasImage(node)) && labelStart !== undefined && labelEnd !== undefined
         ? text.slice(labelStart, labelEnd)
         : undefined;
-    const copyMarkdown = `[${authoredImageLabel ?? escapedLabel}](${normalizedHref})`;
+    const copyMarkdown = `[${authoredLabel ?? escapedLabel}](${normalizedHref})`;
     return fileLinkChip(
       fileLinkMeta,
       copyMarkdown,

@@ -77,6 +77,8 @@ describe("ChatMarkdown file-link labels", () => {
     [String.raw`read \] here`, "read ] here"],
     [String.raw`read \[ here`, "read [ here"],
     [String.raw`read \\\] here`, String.raw`read \] here`],
+    [String.raw`read \*this\*`, "read *this*"],
+    [String.raw`read \_this\_`, "read _this_"],
   ])("round-trips copied file-link label %s", async (sourceLabel, label) => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
@@ -175,7 +177,7 @@ describe("ChatMarkdown file-link labels", () => {
         .at(0);
       expect(label).toBeDefined();
       expect(label!.props["data-markdown-copy"]).toBe(
-        "[validates the input](/repo/src/example.ts:12)",
+        "[**validates** the input](/repo/src/example.ts:12)",
       );
       expect(
         renderer!.root

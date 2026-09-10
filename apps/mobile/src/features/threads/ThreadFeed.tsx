@@ -601,6 +601,22 @@ interface ReviewCommentColors {
 
 const failedMarkdownFaviconHosts = new Set<string>();
 const MarkdownLinkLabelContext = createContext(false);
+
+function MarkdownImageLinkBoundary({ children }: { children: React.ReactNode }) {
+  const insideLink = useContext(MarkdownLinkLabelContext);
+  return insideLink ? (
+    <View
+      pointerEvents="none"
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      {children}
+    </View>
+  ) : (
+    children
+  );
+}
+
 const markdownLinkStyles = StyleSheet.create({
   inlineIcon: {
     width: 14,
@@ -1159,13 +1175,15 @@ function useMarkdownStyles(
         </View>
       ),
       image: ({ node }) =>
-        node.href
-          ? (renderImage({
+        node.href ? (
+          <MarkdownImageLinkBoundary>
+            {renderImage({
               href: node.href,
               alt: node.alt ?? null,
               title: node.title ?? null,
-            }) ?? undefined)
-          : undefined,
+            })}
+          </MarkdownImageLinkBoundary>
+        ) : undefined,
       code_inline: ({ content }) => (
         <MarkdownInlineCode
           content={content ?? ""}
