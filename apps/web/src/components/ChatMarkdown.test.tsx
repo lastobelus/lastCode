@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
+import { MediaActions } from "./media/MediaActions";
 import { setMarkdownTaskChecked } from "../markdownTaskList";
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
@@ -128,6 +129,7 @@ describe("ChatMarkdown file-link labels", () => {
           ),
         ).toHaveLength(0);
         expect(renderer!.root.findAllByType("button")).toHaveLength(1);
+        expect(renderer!.root.findAllByType(MediaActions)).toHaveLength(0);
         expect(renderer!.root.findByType("button").props["data-markdown-copy"]).toBe(
           `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`,
         );

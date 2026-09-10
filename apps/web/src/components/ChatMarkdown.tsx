@@ -1376,6 +1376,10 @@ function ChatMarkdownMediaUnavailableLabel(props: {
   );
 }
 
+function MarkdownImageActions(props: ComponentProps<typeof MediaActions>) {
+  return use(MarkdownLinkContext) ? props.children : <MediaActions {...props} />;
+}
+
 /** Inline chip for an image that sits in a line of text or can never load. */
 function ChatMarkdownImageFallback(props: {
   readonly alt: string;
@@ -1395,7 +1399,7 @@ function ChatMarkdownImageFallback(props: {
     </span>
   );
   return props.actionsSource ? (
-    <MediaActions source={props.actionsSource}>{content}</MediaActions>
+    <MarkdownImageActions source={props.actionsSource}>{content}</MarkdownImageActions>
   ) : (
     content
   );
@@ -1470,7 +1474,7 @@ function ChatMarkdownImage(props: {
 
   if (settled) {
     return (
-      <MediaActions source={props.actionsSource}>
+      <MarkdownImageActions source={props.actionsSource}>
         <img
           {...props.imageProps}
           ref={markLoadedIfComplete}
@@ -1488,7 +1492,7 @@ function ChatMarkdownImage(props: {
           {...expandableMarkdownImageProps(props.onImageExpand, props.alt)}
           {...imageEvents(src)}
         />
-      </MediaActions>
+      </MarkdownImageActions>
     );
   }
   if (!props.standalone) {
@@ -1509,7 +1513,7 @@ function ChatMarkdownImage(props: {
     );
   }
   return (
-    <MediaActions source={props.actionsSource}>
+    <MarkdownImageActions source={props.actionsSource}>
       <span
         id={props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
@@ -1539,7 +1543,7 @@ function ChatMarkdownImage(props: {
           />
         ) : null}
       </span>
-    </MediaActions>
+    </MarkdownImageActions>
   );
 }
 

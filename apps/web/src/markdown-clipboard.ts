@@ -193,6 +193,7 @@ function textOutsideMedia(node: Node): string {
     (node as Element).hasAttribute("data-markdown-copy-media")
   )
     return "";
+  if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName === "BR") return "\n";
   return [...node.childNodes].map(textOutsideMedia).join("");
 }
 

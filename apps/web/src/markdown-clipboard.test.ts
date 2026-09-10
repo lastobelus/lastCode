@@ -123,6 +123,29 @@ function renderedCodeBlock(lines: ReadonlyArray<string>): FakeElement {
 }
 
 describe("serializeRenderedMarkdownFragment", () => {
+  it.each(["A", "BUTTON"])(
+    "retains file destinations when a complete %s label has a break",
+    (tag) => {
+      const source = "[src/\\\nexample.ts](/repo/src/example.ts)";
+      const attributes = {
+        "data-markdown-copy": source,
+        "data-markdown-copy-text": "src/\nexample.ts (example.ts)",
+      };
+      const complete = new FakeElement("DIV").append(
+        new FakeElement(tag, [], attributes).append(
+          new FakeText("src/"),
+          new FakeElement("BR"),
+          new FakeText("example.ts (example.ts)"),
+        ),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(source);
+      const partial = new FakeElement("DIV").append(
+        new FakeElement(tag, [], attributes).append(new FakeText("example.ts")),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("example.ts");
+    },
+  );
+
   it.each(["A", "BUTTON"])("copies only selected descriptive label text in %s wrappers", (tag) => {
     const attributes = {
       "data-markdown-copy": "[validates the input](/repo/example.ts)",
