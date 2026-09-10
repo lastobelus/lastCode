@@ -179,6 +179,26 @@ describe("ChatMarkdown file-link labels", () => {
     }
   });
 
+  it.each(["\n", "  \n", "\\\n"])(
+    "preserves line breaks in file labels (%j)",
+    async (lineBreak) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      const text = `[src/${lineBreak}example.ts](/repo/src/example.ts)`;
+      try {
+        await act(async () => {
+          renderer = create(<ChatMarkdown cwd="/repo" text={text} lineBreaks />);
+        });
+        const link = renderer!.root.findByType("button");
+        expect(link.findAllByType("br")).toHaveLength(1);
+        expect(link.props["data-markdown-copy-text"]).toMatch(/src\/\n+example\.ts/);
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("retains descriptive prose, emphasis, destinations, and copy text", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

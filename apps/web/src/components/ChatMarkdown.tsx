@@ -631,6 +631,7 @@ function nodeToPlainText(node: ReactNode): string {
     return node.map((child) => nodeToPlainText(child)).join("");
   }
   if (isValidElement<{ children?: ReactNode }>(node)) {
+    if (node.type === "br") return "\n";
     return nodeToPlainText(node.props.children);
   }
   return "";
