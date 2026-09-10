@@ -344,7 +344,21 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!label.trim()) return true;
   const target = parseMarkdownFileLink(href);
   if (!target) return false;
+  const normalizePath = (path: string) => {
+    const normalized = path
+      .replaceAll("\\", "/")
+      .replace(/^\.\//, "")
+      .replace(/([^/:])\/+$/, "$1");
+    return isWindowsAbsolutePath(target.path) ? normalized.toLowerCase() : normalized;
+  };
+  const targetPath = normalizePath(target.path);
+  const matchesPath = (path: string) => {
+    const normalized = normalizePath(path);
+    return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
+  };
   const normalizedLabel = normalizeMarkdownLinkDestination(label);
+  // A delimiter can be part of a decoded filename rather than a URL suffix.
+  if (matchesPath(normalizedLabel)) return true;
   const hashIndex = normalizedLabel.indexOf("#");
   if (
     normalizedLabel.includes("?") ||
@@ -356,13 +370,5 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   const labelPosition = parseMarkdownFileLink(label) ?? splitFilePathPosition(label.trim());
   if (labelPosition.line !== undefined && labelPosition.line !== target.line) return false;
   if (labelPosition.column !== undefined && labelPosition.column !== target.column) return false;
-  const path = labelPosition.path
-    .replaceAll("\\", "/")
-    .replace(/^\.\//, "")
-    .replace(/([^/:])\/+$/, "$1");
-  const targetPath = target.path.replaceAll("\\", "/").replace(/([^/:])\/+$/, "$1");
-  const caseInsensitive = isWindowsAbsolutePath(target.path);
-  const pathForCompare = caseInsensitive ? path.toLowerCase() : path;
-  const targetForCompare = caseInsensitive ? targetPath.toLowerCase() : targetPath;
-  return pathForCompare === targetForCompare || targetForCompare.endsWith(`/${pathForCompare}`);
+  return matchesPath(labelPosition.path);
 }
