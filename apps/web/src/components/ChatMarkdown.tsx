@@ -1680,6 +1680,12 @@ function plainHastText(node: unknown): string | null {
   return parts.every((part) => part !== null) ? parts.join("") : null;
 }
 
+function hastHasImage(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if ("tagName" in node && node.tagName === "img") return true;
+  return "children" in node && Array.isArray(node.children) && node.children.some(hastHasImage);
+}
+
 /**
  * Whether the link carries any words of its own. An anchor that is only an image — a badge, a
  * "Fix in Cursor" button — already shows its identity, and a favicon bolted on in front of it
@@ -3005,7 +3011,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       copyMarkdown,
       props.className,
       normalizedHref,
-      isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : children,
+      !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : children,
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {

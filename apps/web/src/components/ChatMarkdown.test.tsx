@@ -103,6 +103,30 @@ describe("ChatMarkdown file-link labels", () => {
     }
   });
 
+  it.each(["diagram", "example.ts", ""])(
+    "preserves image-only file labels with alt %s",
+    async (alt) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(async () => {
+          renderer = create(
+            <ChatMarkdown
+              cwd="/repo"
+              text={`[![${alt}](https://example.com/preview.png)](/repo/example.ts)`}
+            />,
+          );
+        });
+        expect(renderer!.root.findAllByType("img").some((image) => image.props.alt === alt)).toBe(
+          true,
+        );
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it("copies the filename for a whitespace-only link label", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

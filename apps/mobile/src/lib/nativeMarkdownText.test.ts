@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import {
+  markdownLinkHasImage,
   markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
@@ -12,6 +13,17 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it.each(["diagram", "example.ts", ""])("retains image labels with alt %s", (alt) => {
+    const node: MarkdownNode = {
+      type: "link",
+      href: "/repo/example.ts",
+      children: [{ type: "image", href: "preview.png", alt }],
+    };
+    expect(markdownLinkHasImage(node)).toBe(true);
+    const runs = nativeMarkdownTextRuns({ type: "paragraph", children: [node] });
+    expect(runs.map((run) => run.text).join("")).toBe(`${alt} (example.ts)`);
+  });
+
   it("links a path-shaped code span without changing the same path in prose", () => {
     expect(
       nativeMarkdownTextRuns({

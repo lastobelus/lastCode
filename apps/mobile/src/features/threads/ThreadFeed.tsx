@@ -1,5 +1,8 @@
 import { isMarkdownFileLinkLabel } from "@t3tools/client-runtime/markdown-links";
-import { markdownLinkLabelText } from "@t3tools/mobile-markdown-text/markdown";
+import {
+  markdownLinkHasImage,
+  markdownLinkLabelText,
+} from "@t3tools/mobile-markdown-text/markdown";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
@@ -1071,7 +1074,9 @@ function useMarkdownStyles(
       link: ({ node, children, href = "" }) => {
         const presentation = resolveMarkdownLinkPresentation(href);
         if (presentation.kind === "file") {
-          const descriptive = !isMarkdownFileLinkLabel(markdownLinkLabelText(node), href);
+          const descriptive =
+            markdownLinkHasImage(node) ||
+            !isMarkdownFileLinkLabel(markdownLinkLabelText(node), href);
           return (
             <MarkdownLinkLabelContext.Provider value>
               <NativeText onPress={() => onLinkPress(href)} style={{ color: inlineTextColor }}>

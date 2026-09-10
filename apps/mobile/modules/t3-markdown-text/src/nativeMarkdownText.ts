@@ -278,6 +278,10 @@ export function nodeTextContent(node: MarkdownNode): string {
   return (node.children ?? []).map(nodeTextContent).join("");
 }
 
+export function markdownLinkHasImage(node: MarkdownNode): boolean {
+  return node.type === "image" || (node.children ?? []).some(markdownLinkHasImage);
+}
+
 /** Visible link-label text, with prose entities decoded and code kept literal. */
 export function markdownLinkLabelText(node: MarkdownNode): string {
   switch (node.type) {
@@ -332,10 +336,9 @@ function appendNode(
     case "link": {
       const presentation = resolveMarkdownLinkPresentation(node.href ?? "");
       if (presentation.kind === "file") {
-        const descriptive = !isMarkdownFileLinkLabel(
-          markdownLinkLabelText(node),
-          presentation.href,
-        );
+        const descriptive =
+          markdownLinkHasImage(node) ||
+          !isMarkdownFileLinkLabel(markdownLinkLabelText(node), presentation.href);
         if (descriptive) {
           appendChildren(runs, node, { ...context, href: presentation.href });
         }
