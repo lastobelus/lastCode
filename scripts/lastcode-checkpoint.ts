@@ -446,7 +446,12 @@ function hasInitializedRecoverySubmodules(worktree: string): boolean {
 }
 
 function trackedRecoveryPaths(worktree: string): ReadonlyArray<string> {
-  return splitNul(git(worktree, ["ls-files", "--cached", "-z"], { cwd: worktree }));
+  return splitNul(
+    git(worktree, ["ls-files", "--cached", "-z"], {
+      cwd: worktree,
+      maxBuffer: FINGERPRINT_DIFF_MAX_BUFFER,
+    }),
+  );
 }
 
 export function rebaseStateFiles(worktree: string): ReadonlyArray<string> {
@@ -520,7 +525,10 @@ export function checkpointRecoveryFingerprint(worktree: string, recoveryBranch: 
     throw new Error("Initialized recovery submodules prevent automatic retirement.");
   }
   const hiddenIndexEntry = splitNul(
-    git(worktree, ["ls-files", "-v", "-z"], { cwd: worktree }),
+    git(worktree, ["ls-files", "-v", "-z"], {
+      cwd: worktree,
+      maxBuffer: FINGERPRINT_DIFF_MAX_BUFFER,
+    }),
   ).find((entry) => entry.startsWith("S ") || /^[a-z] /u.test(entry));
   if (hiddenIndexEntry) {
     throw new Error(

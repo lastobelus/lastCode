@@ -51,6 +51,40 @@ function nightly(tag: string) {
   return value;
 }
 
+it("fingerprints tracked file lists larger than the default subprocess buffer", () => {
+  const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-large-index-"));
+  const git = (args: string[]) =>
+    NodeChildProcess.execFileSync("git", args, {
+      cwd: repo,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    }).trim();
+  try {
+    git(["init"]);
+    for (let index = 0; index < 11000; index++) {
+      NodeFS.writeFileSync(NodePath.join(repo, `${"tracked-".repeat(14)}${index}`), "");
+    }
+    git(["add", "."]);
+    git([
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "-m",
+      "large index",
+    ]);
+    assert.ok(git(["ls-files", "--cached", "-z"]).length > 1024 * 1024);
+    assert.match(checkpointRecoveryFingerprint(repo, "recovery-test"), /^[a-f0-9]{64}$/);
+  } finally {
+    NodeFS.rmSync(repo, { recursive: true, force: true });
+  }
+}, 30000);
+
 it("leaves an unpublished pinned revision available for compilation recovery", () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-pinned-resume-"));
   const repo = NodePath.join(root, "repo");
