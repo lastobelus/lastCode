@@ -200,7 +200,14 @@ function serializeNode(node: Node): string {
     return serializeDetails(element);
   }
   const markdownCopy = element.getAttribute("data-markdown-copy");
-  if (markdownCopy !== null) return markdownCopy;
+  if (markdownCopy !== null) {
+    // cloneContents retains metadata on partially selected wrappers. Only use
+    // the authored Markdown when all of the corresponding visible text remains.
+    const fullText = element.getAttribute("data-markdown-copy-text");
+    return fullText !== null && element.textContent !== fullText
+      ? serializeChildren(element)
+      : markdownCopy;
+  }
   if (isSkippedElement(element)) return "";
 
   const headingLevel = /^H([1-6])$/.exec(element.tagName)?.[1];

@@ -2115,6 +2115,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
                 className,
               )}
               data-markdown-copy={copyMarkdown}
+              data-markdown-copy-text={
+                children ? `${nodeToPlainText(children)} (${label})` : undefined
+              }
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -2144,6 +2147,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
                 className,
               )}
               data-markdown-copy={copyMarkdown}
+              data-markdown-copy-text={
+                children ? `${nodeToPlainText(children)} (${label})` : undefined
+              }
               onClick={handleContextMenu}
               onContextMenu={handleContextMenu}
             >

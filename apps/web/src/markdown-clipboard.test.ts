@@ -109,6 +109,35 @@ function renderedCodeBlock(lines: ReadonlyArray<string>): FakeElement {
 }
 
 describe("serializeRenderedMarkdownFragment", () => {
+  it.each(["A", "BUTTON"])("copies only selected descriptive label text in %s wrappers", (tag) => {
+    const attributes = {
+      "data-markdown-copy": "[validates the input](/repo/example.ts)",
+      "data-markdown-copy-text": "validates the input (example.ts)",
+    };
+    const leading = new FakeElement("DIV").append(
+      new FakeText("It "),
+      new FakeElement(tag, [], attributes).append(
+        new FakeElement("STRONG").append(new FakeText("valid")),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(leading))).toBe("It **valid**");
+
+    const trailing = new FakeElement("DIV").append(
+      new FakeElement(tag, [], attributes).append(new FakeText("input (example.ts)")),
+      new FakeText(" afterward"),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(trailing))).toBe(
+      "input (example.ts) afterward",
+    );
+
+    const complete = new FakeElement("DIV").append(
+      new FakeElement(tag, [], attributes).append(new FakeText("validates the input (example.ts)")),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
+      attributes["data-markdown-copy"],
+    );
+  });
+
   beforeEach(() => {
     vi.stubGlobal("Node", { TEXT_NODE, ELEMENT_NODE });
   });
