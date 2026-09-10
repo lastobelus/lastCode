@@ -120,6 +120,12 @@ describe("ChatMarkdown file-link labels", () => {
         expect(renderer!.root.findAllByType("img").some((image) => image.props.alt === alt)).toBe(
           true,
         );
+        expect(
+          renderer!.root.findAll(
+            (node) => typeof node.type === "string" && node.props.role === "button",
+          ),
+        ).toHaveLength(0);
+        expect(renderer!.root.findAllByType("button")).toHaveLength(1);
       } finally {
         await act(async () => renderer?.unmount());
         vi.unstubAllGlobals();

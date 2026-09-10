@@ -3011,7 +3011,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
       copyMarkdown,
       props.className,
       normalizedHref,
-      !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : children,
+      !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : (
+        <MarkdownLinkContext value>{children}</MarkdownLinkContext>
+      ),
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {
