@@ -435,7 +435,8 @@ describe("ClaudeAdapterLive", () => {
         type: "preset",
         preset: "claude_code",
         append:
-          "<runtime_info>In case you're asked: you are running in T3 Code through the Claude Code harness. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\nWhen the user asks to run a saved Project Action by name, call mcp__t3-code__list_project_actions. If exactly one Action matches that name, call mcp__t3-code__run_project_action_and_resume with its id; ask the user to clarify if multiple Actions match. End your turn immediately after launch so the automated follow-up can arrive; do not search for or reproduce the Action command.",
+          buildRuntimeInstructions({ harness: "Claude Code" }) +
+          "\n\nWhen the user asks to run a saved Project Action by name, call mcp__t3-code__list_project_actions. If exactly one Action matches that name, call mcp__t3-code__run_project_action_and_resume with its id; ask the user to clarify if multiple Actions match. End your turn immediately after launch so the automated follow-up can arrive; do not search for or reproduce the Action command.",
       });
     }).pipe(
       Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
