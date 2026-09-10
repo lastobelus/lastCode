@@ -277,6 +277,68 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("offers an externally built package for installation without rebuilding", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const version = "1.2.4-nightly.20260814.1089.1";
+    const dmgPath = "/tmp/lastcode-local-build/LastCode.dmg";
+    const dmgSha256 = "a".repeat(64);
+    let builds = 0;
+    let packagePresent = true;
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: () =>
+        Effect.succeed({
+          schemaVersion: 2,
+          status: "available",
+          checkpointTag,
+          availableVersion: version,
+          releaseNotes: {
+            lastCode: { status: "known", items: ["Test fix"], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+          build: packagePresent
+            ? {
+                schemaVersion: 1,
+                status: "built",
+                checkpointTag,
+                outputDir: "/tmp/lastcode-local-build",
+                manifestPath: "/tmp/lastcode-local-build/build-manifest.json",
+                dmgPath,
+                dmgSha256,
+              }
+            : undefined,
+        }),
+      localBuildEffect: () => {
+        builds += 1;
+        return Effect.die("Unexpected rebuild");
+      },
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const state = yield* updates.getState;
+        assert.equal(state.status, "downloaded");
+        assert.equal(state.downloadedVersion, version);
+        assert.deepEqual(state.releaseNotes[0]?.items, ["Test fix"]);
+        assert.deepEqual(harness.installEvents(), []);
+        packagePresent = false;
+        yield* updates.check("test-package-removed");
+        const missing = yield* updates.getState;
+        assert.equal(missing.status, "available");
+        assert.isNull(missing.downloadedVersion);
+        packagePresent = true;
+        yield* updates.check("test-package-restored");
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.equal(builds, 0);
+        assert.deepEqual(harness.localInstallArgs(), [
+          { dmgPath, dmgSha256, expectedVersion: version },
+        ]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("preserves typed local build diagnostics after progress", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const targetVersion = "1.2.4-nightly.20260814.1089.1";

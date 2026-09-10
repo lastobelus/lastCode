@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 
 import {
   acquireBuildLock,
@@ -690,6 +691,83 @@ describe("lastcode-local-update", () => {
     );
   });
 
+  it("detects verified external builds without hiding updates when artifacts are unusable", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-detect-build-"));
+    const repo = NodePath.join(root, "repo");
+    try {
+      NodeFS.mkdirSync(repo);
+      runGit(repo, ["init"]);
+      runGit(repo, ["config", "user.name", "LastCode Test"]);
+      runGit(repo, ["config", "user.email", "test@lastcode.invalid"]);
+      const commit = commitFile(repo, "tracked.txt", "test", "test build");
+      const nightly = "v0.0.34-nightly.20260814.1089";
+      const checkpointTag = `lastcode/checkpoint/${nightly}`;
+      const buildTag = `lastcode/build/${nightly}.1`;
+      runGit(repo, ["tag", "v0.0.34-nightly.20260813.1088", commit]);
+      runGit(repo, ["tag", nightly, commit]);
+      tagInstallable(repo, checkpointTag, commit);
+      runGit(repo, ["tag", "--annotate", buildTag, "-m", "built"]);
+      const inspect = () => inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", true);
+      const available = inspect();
+      assert.propertyVal(available, "status", "available");
+      assert.notProperty(available, "build");
+      const outputDir = NodePath.join(
+        root,
+        ".lastcode",
+        "local-updates",
+        "artifacts",
+        nightly,
+        commit.slice(0, 10),
+      );
+      NodeFS.mkdirSync(outputDir, { recursive: true });
+      const dmgSha256 = NodeCrypto.createHash("sha256").update("dmg").digest("hex");
+      const manifestPath = NodePath.join(outputDir, "build-manifest.json");
+      const dmgPath = NodePath.join(outputDir, "LastCode.dmg");
+      const manifest = {
+        schemaVersion: 1,
+        checkpointTag,
+        lastCodeCommit: commit,
+        buildTag,
+        artifacts: [{ path: "LastCode.dmg", sha256: dmgSha256 }],
+      };
+      NodeFS.writeFileSync(manifestPath, JSON.stringify(manifest));
+      for (const name of ["nightly-mac.yml", "SHA256SUMS", "LastCode.zip"]) {
+        NodeFS.writeFileSync(NodePath.join(outputDir, name), "test");
+      }
+      NodeFS.writeFileSync(dmgPath, "dmg");
+      assert.deepInclude(inspect(), {
+        build: {
+          schemaVersion: 1,
+          status: "built",
+          checkpointTag,
+          outputDir,
+          manifestPath,
+          dmgPath,
+          dmgSha256,
+        },
+      });
+      assert.notProperty(
+        inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", false),
+        "build",
+      );
+      NodeFS.writeFileSync(dmgPath, "tampered");
+      assert.deepEqual(inspect(), available);
+      NodeFS.writeFileSync(dmgPath, "dmg");
+      NodeFS.writeFileSync(
+        manifestPath,
+        JSON.stringify({ ...manifest, lastCodeCommit: "0".repeat(40) }),
+      );
+      assert.deepEqual(inspect(), available);
+      NodeFS.writeFileSync(manifestPath, JSON.stringify(manifest));
+      NodeFS.unlinkSync(NodePath.join(outputDir, "LastCode.zip"));
+      assert.deepEqual(inspect(), available);
+      NodeFS.writeFileSync(manifestPath, "invalid json");
+      assert.deepEqual(inspect(), available);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("only reuses complete matching build outputs", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-local-update-"));
     try {
@@ -721,7 +799,12 @@ describe("lastcode-local-update", () => {
           checkpointTag: checkpoint,
           lastCodeCommit: commit,
           buildTag,
-          artifacts: [{ path: "LastCode.dmg", sha256: "a".repeat(64) }],
+          artifacts: [
+            {
+              path: "LastCode.dmg",
+              sha256: NodeCrypto.createHash("sha256").update("dmg").digest("hex"),
+            },
+          ],
         }),
       );
       NodeFS.writeFileSync(NodePath.join(output, "nightly-mac.yml"), "version: test\n");
@@ -738,7 +821,7 @@ describe("lastcode-local-update", () => {
       assert.deepInclude(resolveExistingBuild(buildOptions), {
         outputDir: output,
         dmgPath: NodePath.join(output, "LastCode.dmg"),
-        dmgSha256: "a".repeat(64),
+        dmgSha256: NodeCrypto.createHash("sha256").update("dmg").digest("hex"),
       });
       NodeFS.unlinkSync(NodePath.join(output, "LastCode.zip"));
       assert.throws(() => resolveExistingBuild(buildOptions), /missing \.zip/);

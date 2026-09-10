@@ -340,10 +340,25 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
       `Existing build is incomplete at ${outputDir}; annotated tag ${manifest.buildTag} is missing or mismatched.`,
     );
   }
+  const dmgPath = NodePath.join(outputDir, dmgName);
+  const digest = NodeCrypto.createHash("sha256");
+  const descriptor = NodeFS.openSync(dmgPath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead;
+    while ((bytesRead = NodeFS.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+      digest.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    NodeFS.closeSync(descriptor);
+  }
+  if (digest.digest("hex") !== manifestArtifact.sha256) {
+    throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
+  }
   return {
     outputDir,
     manifestPath,
-    dmgPath: NodePath.join(outputDir, dmgName),
+    dmgPath,
     dmgSha256: manifestArtifact.sha256,
   };
 }
@@ -537,11 +552,24 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
       ? `${CHECKPOINT_PREFIX}${current.tag}`
       : `${REVISION_PREFIX}${current.tag}`;
   const currentInstallable = installables.find(({ tag }) => tag === currentTag);
+  let build;
+  try {
+    const existing = resolveExistingBuild({
+      repoRoot: options.repoRoot,
+      outputRoot: NodePath.join(options.home, ".lastcode", "local-updates", "artifacts"),
+      checkpointTag,
+      checkpointCommit: git(options.repoRoot, ["rev-parse", `${checkpointTag}^{commit}`]),
+    });
+    if (existing) build = { schemaVersion: 1, status: "built", checkpointTag, ...existing };
+  } catch {
+    // Incomplete or stale local packages must not hide an available update.
+  }
   return {
     schemaVersion: 2,
     status: "available",
     checkpointTag,
     availableVersion,
+    ...(build ? { build } : {}),
     releaseNotes: {
       lastCode: collectLastCodeReleaseNotes(
         options.repoRoot,

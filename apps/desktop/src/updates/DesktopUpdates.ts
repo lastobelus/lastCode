@@ -532,15 +532,28 @@ export const make = Effect.gen(function* () {
           );
         }
         const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
+        const build =
+          inspection.build?.checkpointTag === inspection.checkpointTag
+            ? inspection.build
+            : undefined;
+        const available = reduceDesktopUpdateStateOnUpdateAvailable(
+          { ...state, downloadedVersion: null },
+          inspection.availableVersion,
+          checkedAt,
+          releaseNotes,
+        );
         return Ref.set(localCheckpointTagRef, Option.some(inspection.checkpointTag)).pipe(
           Effect.andThen(
+            Ref.set(
+              localBuildRef,
+              build ? Option.some({ build, version: inspection.availableVersion }) : Option.none(),
+            ),
+          ),
+          Effect.andThen(
             setState(
-              reduceDesktopUpdateStateOnUpdateAvailable(
-                state,
-                inspection.availableVersion,
-                checkedAt,
-                releaseNotes,
-              ),
+              build
+                ? reduceDesktopUpdateStateOnDownloadComplete(available, inspection.availableVersion)
+                : available,
             ),
           ),
           Effect.as(true),
