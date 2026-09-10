@@ -4,6 +4,7 @@ import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import { CopyTextButton } from "./CopyTextButton";
 import { MarkdownTextPrimitive } from "./MarkdownTextPrimitive";
+import { resolveMarkdownLinkPresentation } from "./markdownLinks";
 import {
   markdownLinkHasImage,
   markdownLinkLabelText,
@@ -490,10 +491,12 @@ function NativeImageLabel(props: {
           {content}
         </View>
       </Pressable>
-      <SelectableNode
-        {...props}
-        node={{ type: "paragraph", children: [{ ...props.node, children: [] }] }}
-      />
+      {resolveMarkdownLinkPresentation(href).kind === "file" ? (
+        <SelectableNode
+          {...props}
+          node={{ type: "paragraph", children: [{ ...props.node, children: [] }] }}
+        />
+      ) : null}
     </View>
   ) : (
     content
