@@ -414,6 +414,7 @@ describe("ClaudeAdapterLive", () => {
       providerInstanceId: ProviderInstanceId.make("claudeAgent"),
       endpoint: "http://127.0.0.1:9876/mcp",
       authorizationHeader: "Bearer test-token",
+      preview: true,
     });
 
     return Effect.gen(function* () {

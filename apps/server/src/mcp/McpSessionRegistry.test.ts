@@ -73,7 +73,11 @@ it.effect("always grants pull-requests and gates preview on the request", () =>
         .resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""))
         .pipe(Effect.map((scope) => [...(scope?.capabilities ?? [])].sort()));
 
-    expect(yield* capabilitiesOf(withPreview)).toEqual(["preview", "pull-requests"]);
+    expect(yield* capabilitiesOf(withPreview)).toEqual([
+      "action-resume",
+      "preview",
+      "pull-requests",
+    ]);
     expect(yield* capabilitiesOf(withoutPreview)).toEqual(["pull-requests"]);
   }),
 );
@@ -96,6 +100,21 @@ it.effect("builds MCP endpoints from the bound server host", () =>
       });
       expect(issued.config.endpoint).toBe(expectedEndpoint);
     }
+  }),
+);
+
+it.effect("uses the attention-only endpoint when preview access is disabled", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-attention-only"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      preview: false,
+    });
+    expect(issued.config.endpoint).toBe("http://127.0.0.1:43123/mcp/thread");
+
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect((yield* registry.resolve(token))?.capabilities.has("preview")).toBe(false);
   }),
 );
 

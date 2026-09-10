@@ -128,7 +128,7 @@ export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatu
   }
 }
 
-export class TailscaleServePortOccupiedError extends Schema.TaggedErrorClass<TailscaleServePortOccupiedError>()(
+export class TailscaleServePortOccupiedError extends Schema.TaggedError<TailscaleServePortOccupiedError>()(
   "TailscaleServePortOccupiedError",
   { servePort: Schema.Number },
 ) {

@@ -37,6 +37,7 @@ export type RetryThreadWorktreeCleanupInput = CommandInput<"thread.worktree-clea
 export type AbandonThreadWorktreeCleanupInput = CommandInput<"thread.worktree-cleanup.abandon">;
 export type ArchiveThreadInput = CommandInput<"thread.archive">;
 export type UnarchiveThreadInput = CommandInput<"thread.unarchive">;
+export type SetThreadPersistenceInput = CommandInput<"thread.persistence.set">;
 export type SettleThreadInput = CommandInput<"thread.settle">;
 export type UnsettleThreadInput = CommandInput<"thread.unsettle">;
 export type SnoozeThreadInput = CommandInput<"thread.snooze">;
@@ -45,6 +46,9 @@ export type PinThreadInput = CommandInput<"thread.pin">;
 export type UnpinThreadInput = CommandInput<"thread.unpin">;
 export type ReorderPinnedThreadInput = CommandInput<"thread.pin.reorder">;
 export type ReorderActiveThreadInput = CommandInput<"thread.active.reorder">;
+export type UpsertThreadAnnotationInput = CommandInput<"thread.annotation.upsert">;
+export type ResolveThreadAnnotationInput = CommandInput<"thread.annotation.resolve">;
+export type ReopenThreadAnnotationInput = CommandInput<"thread.annotation.reopen">;
 export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type LinkThreadPullRequestInput = CommandInput<"thread.pull-request.link">;
 export type UnlinkThreadPullRequestInput = CommandInput<"thread.pull-request.unlink">;
@@ -187,6 +191,16 @@ export const unarchiveThread: (input: UnarchiveThreadInput) => CommandEffect = E
   });
 });
 
+export const setThreadPersistence: (input: SetThreadPersistenceInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.setThreadPersistence",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.persistence.set",
+    commandId: yield* commandId(input),
+  });
+});
+
 export const settleThread: (input: SettleThreadInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.settleThread",
 )(function* (input) {
@@ -266,6 +280,33 @@ export const reorderActiveThread: (input: ReorderActiveThreadInput) => CommandEf
     commandId: yield* commandId(input),
   });
 });
+
+export const upsertThreadAnnotation: (input: UpsertThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.upsertThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.upsert",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const resolveThreadAnnotation: (input: ResolveThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.resolveThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.resolve",
+      commandId: yield* commandId(input),
+    });
+  });
+
+export const reopenThreadAnnotation: (input: ReopenThreadAnnotationInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.reopenThreadAnnotation")(function* (input) {
+    return yield* dispatch({
+      ...input,
+      type: "thread.annotation.reopen",
+      commandId: yield* commandId(input),
+    });
+  });
 
 export const updateThreadMetadata: (input: UpdateThreadMetadataInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.updateThreadMetadata",
