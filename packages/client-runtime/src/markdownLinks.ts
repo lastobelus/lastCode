@@ -365,6 +365,20 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
       (literalPosition.column === undefined || literalPosition.column === target.column)
     );
   }
+  const lastHashIndex = normalizedLabel.lastIndexOf("#");
+  const trailingHash = safeDecodeURIComponent(normalizedLabel.slice(lastHashIndex));
+  if (lastHashIndex >= 0 && POSITION_HASH_PATTERN.test(trailingHash)) {
+    const anchoredPosition = splitFilePathPosition(
+      normalizedLabel.slice(0, lastHashIndex),
+      trailingHash,
+    );
+    if (matchesPath(anchoredPosition.path)) {
+      return (
+        anchoredPosition.line === target.line &&
+        (anchoredPosition.column === undefined || anchoredPosition.column === target.column)
+      );
+    }
+  }
   const hashIndex = normalizedLabel.indexOf("#");
   if (
     normalizedLabel.includes("?") ||
