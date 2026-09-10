@@ -207,10 +207,8 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
         const failed = command === control.failCommand;
         if (!failed && command === "loginctl enable-linger --no-ask-password 501")
           control.linger = "yes";
-        if (!failed && command === "systemctl --user enable t3code.service")
-          control.enabled = true;
-        if (!failed && command === "systemctl --user restart t3code.service")
-          control.active = true;
+        if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
+        if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
         if (
           control.stateAfterStop !== undefined &&
           (command === "systemctl --user stop t3code.service" ||
@@ -478,7 +476,8 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           platform === "linux"
             ? ["systemctl --user stop t3code.service", "systemctl --user restart t3code.service"]
             : [
-                "launchctl bootout --wait gui/501/com.t3tools.t3code.service",
+                "launchctl bootout gui/501/com.t3tools.t3code.service",
+                "launchctl print gui/501/com.t3tools.t3code.service",
                 `launchctl bootstrap gui/501 ${plan.unitPath}`,
               ],
         );
@@ -709,7 +708,8 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         processResult({ code: 125, stderr: "Could not find domain for user gui: 501" }),
       );
 
-      expect(yield* service.uninstall()).toBe(true);
+      const uninstalled = yield* service.uninstall;
+      expect(uninstalled).toBe(true);
       expect(yield* fs.exists(plan.unitPath)).toBe(false);
     }),
   );
@@ -734,7 +734,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("waits for a draining launch agent before bootstrap", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness("darwin");
-      yield* service.install;
+      yield* service.install();
       commands.length = 0;
       control.callCounts.clear();
       const firstPrint = yield* Deferred.make<void>();
@@ -748,7 +748,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
             }),
       );
 
-      const installFiber = yield* service.install.pipe(Effect.forkChild);
+      const installFiber = yield* service.install().pipe(Effect.forkChild);
       yield* Deferred.await(firstPrint);
       yield* Effect.yieldNow;
       yield* TestClock.adjust(Duration.millis(100));
@@ -766,14 +766,14 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("times out instead of bootstrapping while a launch agent remains loaded", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness("darwin");
-      yield* service.install;
+      yield* service.install();
       commands.length = 0;
       control.callCounts.clear();
       const firstPrint = yield* Deferred.make<void>();
       control.signals.set(`launchctl print ${launchdServiceTarget}`, firstPrint);
       control.fixtures.set(`launchctl print ${launchdServiceTarget}`, () => processResult());
 
-      const installFiber = yield* service.install.pipe(Effect.forkChild);
+      const installFiber = yield* service.install().pipe(Effect.forkChild);
       yield* Deferred.await(firstPrint);
       yield* Effect.yieldNow;
       yield* TestClock.adjust(Duration.seconds(120));
@@ -788,13 +788,13 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("surfaces bootout permission failures while the launch agent remains loaded", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness("darwin");
-      yield* service.install;
+      yield* service.install();
       commands.length = 0;
       control.fixtures.set("launchctl bootout gui/501/com.t3tools.t3code.service", () =>
         processResult({ code: 1, stderr: "Boot-out failed: 1: Operation not permitted\n" }),
       );
 
-      const error = yield* service.install.pipe(Effect.flip);
+      const error = yield* service.install().pipe(Effect.flip);
 
       expect(error._tag).toBe("BootServiceCommandError");
       expect(error._tag === "BootServiceCommandError" ? error.step : undefined).toBe(
@@ -807,13 +807,13 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("surfaces launchd domain failures during stop verification", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness("darwin");
-      yield* service.install;
+      yield* service.install();
       commands.length = 0;
       control.fixtures.set(`launchctl print ${launchdServiceTarget}`, () =>
         processResult({ code: 125, stderr: "Could not find domain for user gui: 501" }),
       );
 
-      const error = yield* service.install.pipe(Effect.flip);
+      const error = yield* service.install().pipe(Effect.flip);
 
       expect(error._tag).toBe("BootServiceCommandError");
       expect(error._tag === "BootServiceCommandError" ? error.step : undefined).toBe(
@@ -830,7 +830,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         processResult({ code: 1, stderr: "Enable failed: 1: Operation not permitted\n" }),
       );
 
-      const error = yield* service.install.pipe(Effect.flip);
+      const error = yield* service.install().pipe(Effect.flip);
 
       expect(error._tag).toBe("BootServiceCommandError");
       expect(error._tag === "BootServiceCommandError" ? error.step : undefined).toBe(
