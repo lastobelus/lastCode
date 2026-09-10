@@ -241,6 +241,21 @@ describe("nativeMarkdownTextRuns", () => {
     },
   );
 
+  it.each([
+    ["caf&eacute;.ts", "café.ts"],
+    ["&Aacute;&aacute;.ts", "Áá.ts"],
+    ["&NotEqualTilde;.ts", "≂̸.ts"],
+    ["&unknownEntity;.ts", "&unknownEntity;.ts"],
+  ])("decodes complete named references in %s", (content, decoded) => {
+    const href = `/tmp/${encodeURIComponent(decoded)}`;
+    const node: MarkdownNode = { type: "link", href, children: [{ type: "text", content }] };
+    expect(markdownLinkLabelText(node)).toBe(decoded);
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: decoded, href, fileIcon: "typescript" },
+    ]);
+    expect(markdownLinkLabelText({ type: "code_inline", content })).toBe(content);
+  });
+
   it("preserves literal entities in code-formatted file labels", () => {
     const href = "/repo/foo%26bar.ts";
     const node: MarkdownNode = {

@@ -1,4 +1,5 @@
 import { isMarkdownFileLinkLabel } from "@t3tools/client-runtime/markdown-links";
+import { characterEntities } from "character-entities";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import type { SelectableMarkdownSkill } from "./SelectableMarkdownText.types";
@@ -84,30 +85,20 @@ function decodeCodePoint(codePoint: number, entity: string): string {
 
 function decodeHtmlEntitiesOnce(value: string): string {
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|amp|apos|gt|lt|nbsp|quot);/gi,
-    (entity, decimal: string | undefined, hexadecimal: string | undefined) => {
+    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]+));/g,
+    (
+      entity,
+      decimal: string | undefined,
+      hexadecimal: string | undefined,
+      named: string | undefined,
+    ) => {
       if (decimal) {
         return decodeCodePoint(Number.parseInt(decimal, 10), entity);
       }
       if (hexadecimal) {
         return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
       }
-      switch (entity.toLowerCase()) {
-        case "&amp;":
-          return "&";
-        case "&apos;":
-          return "'";
-        case "&gt;":
-          return ">";
-        case "&lt;":
-          return "<";
-        case "&nbsp;":
-          return "\u00a0";
-        case "&quot;":
-          return '"';
-        default:
-          return entity;
-      }
+      return named && Object.hasOwn(characterEntities, named) ? characterEntities[named]! : entity;
     },
   );
 }
