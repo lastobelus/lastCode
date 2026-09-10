@@ -357,6 +357,7 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
     return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
   };
   const normalizedLabel = normalizeMarkdownLinkDestination(label);
+  if (matchesPath(normalizedLabel)) return true;
   const suffix = normalizedLabel.match(POSITION_SUFFIX_CAPTURE_PATTERN);
   const anchor = normalizedLabel
     .slice(normalizedLabel.lastIndexOf("#"))

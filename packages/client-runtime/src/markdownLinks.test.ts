@@ -172,6 +172,14 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["README.md#L0", "/tmp/README.md%23L0", true],
+    ["README.md#L0", "/tmp/README.md#L0", false],
+    ["README.md#L12C0", "/tmp/README.md%23L12C0", true],
+  ])("distinguishes literal zero anchors in %s", (label, href, compact) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(compact);
+  });
+
+  it.each([
     "example.ts:0",
     "example.ts:12:0",
     "example.ts#L0",

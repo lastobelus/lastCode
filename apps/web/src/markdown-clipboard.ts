@@ -186,6 +186,16 @@ function serializeChildren(node: Node): string {
   return out;
 }
 
+function textOutsideMedia(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (
+    node.nodeType === Node.ELEMENT_NODE &&
+    (node as Element).hasAttribute("data-markdown-copy-media")
+  )
+    return "";
+  return [...node.childNodes].map(textOutsideMedia).join("");
+}
+
 function serializeNode(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
     const text = node.textContent ?? "";
@@ -206,7 +216,7 @@ function serializeNode(node: Node): string {
     const fullText = element.getAttribute("data-markdown-copy-text");
     const imageCount = element.getAttribute("data-markdown-copy-images");
     const incomplete =
-      (fullText !== null && element.textContent !== fullText) ||
+      (fullText !== null && textOutsideMedia(element) !== fullText) ||
       (imageCount !== null &&
         element.querySelectorAll("[data-markdown-copy-media]").length !== Number(imageCount));
     return incomplete ? serializeChildren(element) : markdownCopy;

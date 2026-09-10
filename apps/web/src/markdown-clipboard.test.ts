@@ -166,7 +166,9 @@ describe("serializeRenderedMarkdownFragment", () => {
       const complete = new FakeElement("DIV").append(
         new FakeElement("A", [], attributes).append(
           new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
-            new FakeElement(tag, [], { alt: "diagram", src: "preview.png" }),
+            new FakeElement(tag, [], { alt: "diagram", src: "preview.png" }).append(
+              ...(tag === "SPAN" ? [new FakeText("Image unavailable · diagram")] : []),
+            ),
           ),
           new FakeText(" (example.ts)"),
         ),
