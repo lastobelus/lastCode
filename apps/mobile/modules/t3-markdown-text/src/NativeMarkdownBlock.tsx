@@ -470,6 +470,7 @@ function NativeMarkdownImage(props: {
 
 function NativeImageLabel(props: {
   readonly node: MarkdownNode;
+  readonly headingLevel?: number | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
@@ -494,7 +495,11 @@ function NativeImageLabel(props: {
       {resolveMarkdownLinkPresentation(href).kind === "file" ? (
         <SelectableNode
           {...props}
-          node={{ type: "paragraph", children: [{ ...props.node, children: [] }] }}
+          node={{
+            type: props.headingLevel === undefined ? "paragraph" : "heading",
+            level: props.headingLevel,
+            children: [{ ...props.node, children: [] }],
+          }}
         />
       ) : null}
     </View>
@@ -505,10 +510,12 @@ function NativeImageLabel(props: {
 
 function NativeMixedParagraph(props: {
   readonly node: MarkdownNode;
+  readonly headingLevel?: number | undefined;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
 }) {
+  const headingLevel = props.node.type === "heading" ? (props.node.level ?? 1) : props.headingLevel;
   return (
     <View style={{ gap: 8 }}>
       {nativeMarkdownInlineGroups(props.node.children ?? []).map((child, index) =>
@@ -524,6 +531,7 @@ function NativeMixedParagraph(props: {
           <NativeImageLabel
             key={nodeKey(child, index)}
             node={child}
+            headingLevel={headingLevel}
             skills={props.skills}
             textStyle={props.textStyle}
             onLinkPress={props.onLinkPress}
@@ -532,8 +540,8 @@ function NativeMixedParagraph(props: {
           <SelectableNode
             key={nodeKey(child, index)}
             node={
-              props.node.type === "heading"
-                ? { ...child, type: "heading", level: props.node.level }
+              headingLevel !== undefined
+                ? { ...child, type: "heading", level: headingLevel }
                 : child
             }
             skills={props.skills}
