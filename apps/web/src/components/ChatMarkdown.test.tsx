@@ -126,6 +126,9 @@ describe("ChatMarkdown file-link labels", () => {
           ),
         ).toHaveLength(0);
         expect(renderer!.root.findAllByType("button")).toHaveLength(1);
+        expect(renderer!.root.findByType("button").props["data-markdown-copy"]).toBe(
+          `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`,
+        );
       } finally {
         await act(async () => renderer?.unmount());
         vi.unstubAllGlobals();

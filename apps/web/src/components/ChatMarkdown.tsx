@@ -2760,6 +2760,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
   },
   a: function MarkdownAnchor({ node, href, children, title: _title, ...props }) {
     const {
+      text,
       cwd,
       environmentId,
       imageBaseDir,
@@ -3005,7 +3006,13 @@ const CHAT_MARKDOWN_COMPONENTS = {
       .replaceAll("\\", "\\\\")
       .replaceAll("[", "\\[")
       .replaceAll("]", "\\]");
-    const copyMarkdown = `[${escapedLabel}](${normalizedHref})`;
+    const labelStart = node?.children[0]?.position?.start.offset;
+    const labelEnd = node?.children.at(-1)?.position?.end.offset;
+    const authoredImageLabel =
+      hastHasImage(node) && labelStart !== undefined && labelEnd !== undefined
+        ? text.slice(labelStart, labelEnd)
+        : undefined;
+    const copyMarkdown = `[${authoredImageLabel ?? escapedLabel}](${normalizedHref})`;
     return fileLinkChip(
       fileLinkMeta,
       copyMarkdown,
