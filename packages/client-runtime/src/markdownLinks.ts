@@ -344,6 +344,15 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!label.trim()) return true;
   const target = parseMarkdownFileLink(href);
   if (!target) return false;
+  const normalizedLabel = normalizeMarkdownLinkDestination(label);
+  const hashIndex = normalizedLabel.indexOf("#");
+  if (
+    normalizedLabel.includes("?") ||
+    (hashIndex >= 0 &&
+      !POSITION_HASH_PATTERN.test(safeDecodeURIComponent(normalizedLabel.slice(hashIndex))))
+  ) {
+    return false;
+  }
   const labelPosition = parseMarkdownFileLink(label) ?? splitFilePathPosition(label.trim());
   if (labelPosition.line !== undefined && labelPosition.line !== target.line) return false;
   if (labelPosition.column !== undefined && labelPosition.column !== target.column) return false;

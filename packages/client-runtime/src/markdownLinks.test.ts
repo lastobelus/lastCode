@@ -172,6 +172,17 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["README.md#installation", "/repo/README.md"],
+    ["README.md?mode=raw", "/repo/README.md"],
+    ["README.md?mode=raw#L12", "/repo/README.md:12"],
+    ["file:///repo/README.md#installation", "/repo/README.md"],
+    ["README.md#installation", "/repo/README.md#installation"],
+    ["README.md#", "/repo/README.md"],
+  ])("preserves non-position suffixes in %s", (label, href) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(false);
+  });
+
+  it.each([
     ["C:\\Repo\\src\\Example.ts", "c:\\repo\\src\\example.ts", true],
     ["SRC/Example.ts:12", "c:/repo/src/example.ts:12", true],
     ["Example.ts", "file:///C:/repo/example.ts", true],
