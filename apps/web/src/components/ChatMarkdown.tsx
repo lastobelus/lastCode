@@ -636,6 +636,13 @@ function nodeToPlainText(node: ReactNode): string {
   return "";
 }
 
+function nodeImageCount(node: ReactNode): number {
+  if (Array.isArray(node)) return node.reduce((count, child) => count + nodeImageCount(child), 0);
+  if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(node)) return 0;
+  if (node.type === "img" || node.props.node?.tagName === "img") return 1;
+  return nodeImageCount(node.props.children);
+}
+
 function extractCodeBlock(
   children: ReactNode,
 ): { className: string | undefined; code: string } | null {
@@ -2121,6 +2128,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
                 className,
               )}
               data-markdown-copy={copyMarkdown}
+              data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
               data-markdown-copy-text={
                 children ? `${nodeToPlainText(children)} (${label})` : undefined
               }
@@ -2153,6 +2161,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
                 className,
               )}
               data-markdown-copy={copyMarkdown}
+              data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
               data-markdown-copy-text={
                 children ? `${nodeToPlainText(children)} (${label})` : undefined
               }

@@ -59,6 +59,13 @@ class FakeElement {
     return null;
   }
 
+  querySelectorAll(selector: string): FakeElement[] {
+    return this.children.flatMap((child) => [
+      ...(child.tagName === selector.toUpperCase() ? [child] : []),
+      ...child.querySelectorAll(selector),
+    ]);
+  }
+
   /** Supports only the selectors markdown-clipboard actually asks for. */
   querySelector(selector: string): FakeElement | null {
     const childOnly = selector.startsWith(":scope > ");
@@ -132,6 +139,27 @@ describe("serializeRenderedMarkdownFragment", () => {
 
     const complete = new FakeElement("DIV").append(
       new FakeElement(tag, [], attributes).append(new FakeText("validates the input (example.ts)")),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
+      attributes["data-markdown-copy"],
+    );
+  });
+
+  it("does not restore an unselected image when only the complete chip is selected", () => {
+    const attributes = {
+      "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
+      "data-markdown-copy-text": " (example.ts)",
+      "data-markdown-copy-images": "1",
+    };
+    const partial = new FakeElement("DIV").append(
+      new FakeElement("A", [], attributes).append(new FakeText(" (example.ts)")),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("(example.ts)");
+    const complete = new FakeElement("DIV").append(
+      new FakeElement("A", [], attributes).append(
+        new FakeElement("IMG", [], { alt: "diagram", src: "preview.png" }),
+        new FakeText(" (example.ts)"),
+      ),
     );
     expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
       attributes["data-markdown-copy"],

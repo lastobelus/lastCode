@@ -204,9 +204,11 @@ function serializeNode(node: Node): string {
     // cloneContents retains metadata on partially selected wrappers. Only use
     // the authored Markdown when all of the corresponding visible text remains.
     const fullText = element.getAttribute("data-markdown-copy-text");
-    return fullText !== null && element.textContent !== fullText
-      ? serializeChildren(element)
-      : markdownCopy;
+    const imageCount = element.getAttribute("data-markdown-copy-images");
+    const incomplete =
+      (fullText !== null && element.textContent !== fullText) ||
+      (imageCount !== null && element.querySelectorAll("img").length !== Number(imageCount));
+    return incomplete ? serializeChildren(element) : markdownCopy;
   }
   if (isSkippedElement(element)) return "";
 

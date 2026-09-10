@@ -357,6 +357,17 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
     return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
   };
   const normalizedLabel = normalizeMarkdownLinkDestination(label);
+  const suffix = normalizedLabel.match(POSITION_SUFFIX_CAPTURE_PATTERN);
+  const anchor = normalizedLabel
+    .slice(normalizedLabel.lastIndexOf("#"))
+    .match(POSITION_HASH_PATTERN);
+  if (
+    [suffix, anchor].some((match) =>
+      match?.slice(1).some((part) => part !== undefined && Number(part) === 0),
+    )
+  ) {
+    return false;
+  }
   // A delimiter can be part of a decoded filename rather than a URL suffix.
   const literalPosition = splitFilePathPosition(normalizedLabel);
   if (matchesPath(literalPosition.path)) {

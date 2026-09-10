@@ -172,6 +172,16 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    "example.ts:0",
+    "example.ts:12:0",
+    "example.ts#L0",
+    "example.ts#L12C0",
+    "example.ts:00",
+  ])("preserves invalid explicit position in %s", (label) =>
+    expect(isMarkdownFileLinkLabel(label, "/repo/example.ts:12")).toBe(false),
+  );
+
+  it.each([
     ["clip#one.mp4#L12", "/tmp/clip%23one.mp4#L12", true],
     ["clip?one.mp4#L12C4", "/tmp/clip%3Fone.mp4:12:4", true],
     ["clip#one.mp4#L12", "/tmp/clip%23one.mp4:99", false],
