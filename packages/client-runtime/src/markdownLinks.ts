@@ -358,7 +358,13 @@ export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   };
   const normalizedLabel = normalizeMarkdownLinkDestination(label);
   // A delimiter can be part of a decoded filename rather than a URL suffix.
-  if (matchesPath(normalizedLabel)) return true;
+  const literalPosition = splitFilePathPosition(normalizedLabel);
+  if (matchesPath(literalPosition.path)) {
+    return (
+      (literalPosition.line === undefined || literalPosition.line === target.line) &&
+      (literalPosition.column === undefined || literalPosition.column === target.column)
+    );
+  }
   const hashIndex = normalizedLabel.indexOf("#");
   if (
     normalizedLabel.includes("?") ||

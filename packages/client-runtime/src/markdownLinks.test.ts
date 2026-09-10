@@ -172,6 +172,17 @@ describe("workspaceRelativeFilePath", () => {
 
 describe("isMarkdownFileLinkLabel", () => {
   it.each([
+    ["clip#one.mp4:12", "/tmp/clip%23one.mp4:12", true],
+    ["clip?one.mp4:12:4", "/tmp/clip%3Fone.mp4:12:4", true],
+    ["clip#one.mp4:12", "/tmp/clip%23one.mp4:99", false],
+    ["clip?one.mp4:12:4", "/tmp/clip%3Fone.mp4:12:8", false],
+    ["clip#one.mp4:12", "/tmp/clip%23one.mp4", false],
+    ["CLIP#ONE.mp4:12", "C:/clips/clip%23one.mp4:12", true],
+  ])("matches positions on literal filename %s", (label, href, compact) => {
+    expect(isMarkdownFileLinkLabel(label, href)).toBe(compact);
+  });
+
+  it.each([
     ["clip#one.mp4", "/tmp/clip%23one.mp4#t=2"],
     ["clip?one.mp4", "/tmp/clip%3Fone.mp4"],
     ["./clips/clip#one.mp4", "/tmp/clips/clip%23one.mp4"],
