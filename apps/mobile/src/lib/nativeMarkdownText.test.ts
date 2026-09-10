@@ -3,6 +3,7 @@ import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import {
   markdownLinkHasImage,
+  nativeMarkdownInlineGroups,
   markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
@@ -13,6 +14,25 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it("separates linked image rendering from surrounding selectable prose", () => {
+    const link: MarkdownNode = {
+      type: "link",
+      href: "/repo/example.ts",
+      children: [{ type: "image", href: "preview.png", alt: "diagram" }],
+    };
+    expect(
+      nativeMarkdownInlineGroups([
+        { type: "text", content: "Before " },
+        link,
+        { type: "text", content: " after" },
+      ]),
+    ).toEqual([
+      { type: "paragraph", children: [{ type: "text", content: "Before " }] },
+      link,
+      { type: "paragraph", children: [{ type: "text", content: " after" }] },
+    ]);
+  });
+
   it.each(["diagram", "example.ts", ""])("retains image labels with alt %s", (alt) => {
     const node: MarkdownNode = {
       type: "link",

@@ -278,6 +278,29 @@ export function nodeTextContent(node: MarkdownNode): string {
   return (node.children ?? []).map(nodeTextContent).join("");
 }
 
+export function nativeMarkdownInlineGroups(nodes: ReadonlyArray<MarkdownNode>): MarkdownNode[] {
+  const groups: MarkdownNode[] = [];
+  let inline: MarkdownNode[] = [];
+  const flush = () => {
+    if (inline.length === 0) {
+      return;
+    }
+    groups.push({ type: "paragraph", children: inline });
+    inline = [];
+  };
+
+  for (const node of nodes) {
+    if (markdownLinkHasImage(node)) {
+      flush();
+      groups.push(node);
+    } else {
+      inline.push(node);
+    }
+  }
+  flush();
+  return groups;
+}
+
 export function markdownLinkHasImage(node: MarkdownNode): boolean {
   return node.type === "image" || (node.children ?? []).some(markdownLinkHasImage);
 }

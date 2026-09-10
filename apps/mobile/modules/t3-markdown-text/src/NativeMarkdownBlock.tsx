@@ -1,10 +1,15 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { Image, Platform, ScrollView, Text, useColorScheme, View } from "react-native";
+import { Image, Platform, Pressable, ScrollView, Text, useColorScheme, View } from "react-native";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import { CopyTextButton } from "./CopyTextButton";
 import { MarkdownTextPrimitive } from "./MarkdownTextPrimitive";
-import { nativeMarkdownDocumentRuns, nativeMarkdownListItemBlocks } from "./nativeMarkdownText";
+import {
+  markdownLinkHasImage,
+  nativeMarkdownInlineGroups,
+  nativeMarkdownDocumentRuns,
+  nativeMarkdownListItemBlocks,
+} from "./nativeMarkdownText";
 import { NativeMarkdownSelectableText } from "./NativeMarkdownSelectableText";
 import type {
   MarkdownCodeHighlighter,
@@ -448,27 +453,37 @@ function NativeMarkdownImage(props: {
   );
 }
 
-function inlineGroups(nodes: ReadonlyArray<MarkdownNode>): MarkdownNode[] {
-  const groups: MarkdownNode[] = [];
-  let inline: MarkdownNode[] = [];
-  const flush = () => {
-    if (inline.length === 0) {
-      return;
-    }
-    groups.push({ type: "paragraph", children: inline });
-    inline = [];
-  };
-
-  for (const node of nodes) {
-    if (node.type === "image") {
-      flush();
-      groups.push(node);
-    } else {
-      inline.push(node);
-    }
-  }
-  flush();
-  return groups;
+function NativeImageLabel(props: {
+  readonly node: MarkdownNode;
+  readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
+  readonly textStyle: NativeMarkdownTextStyle;
+  readonly onLinkPress?: (href: string) => void;
+}) {
+  const href = props.node.type === "link" ? props.node.href : undefined;
+  const content = <NativeMixedParagraph {...props} />;
+  return href ? (
+    <View style={{ gap: 8 }}>
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel={nodeText(props.node) || href}
+        onPress={() => props.onLinkPress?.(href)}
+      >
+        <View
+          pointerEvents="none"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {content}
+        </View>
+      </Pressable>
+      <SelectableNode
+        {...props}
+        node={{ type: "paragraph", children: [{ ...props.node, children: [] }] }}
+      />
+    </View>
+  ) : (
+    content
+  );
 }
 
 function NativeMixedParagraph(props: {
@@ -479,9 +494,17 @@ function NativeMixedParagraph(props: {
 }) {
   return (
     <View style={{ gap: 8 }}>
-      {inlineGroups(props.node.children ?? []).map((child, index) =>
+      {nativeMarkdownInlineGroups(props.node.children ?? []).map((child, index) =>
         child.type === "image" ? (
           <NativeMarkdownImage
+            key={nodeKey(child, index)}
+            node={child}
+            skills={props.skills}
+            textStyle={props.textStyle}
+            onLinkPress={props.onLinkPress}
+          />
+        ) : markdownLinkHasImage(child) ? (
+          <NativeImageLabel
             key={nodeKey(child, index)}
             node={child}
             skills={props.skills}
@@ -683,7 +706,7 @@ export function NativeMarkdownBlock(props: {
         />
       );
     case "paragraph":
-      return (props.node.children ?? []).some((child) => child.type === "image") ? (
+      return markdownLinkHasImage(props.node) ? (
         <NativeMixedParagraph
           node={props.node}
           skills={props.skills}
