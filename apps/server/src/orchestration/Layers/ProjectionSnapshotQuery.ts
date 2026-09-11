@@ -31,6 +31,7 @@ import {
   ThreadId,
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
+  ThreadWorktreeCleanup,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { legacyLinkedPullRequestOf } from "@t3tools/shared/threadPullRequests";
@@ -128,6 +129,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    worktreeCleanup: Schema.optional(Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup))),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -570,6 +572,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -610,14 +613,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           deleted_at AS "deletedAt"
         FROM projection_threads
-        WHERE deleted_at IS NULL
-          AND archived_at IS NULL
+        WHERE (deleted_at IS NULL AND archived_at IS NULL)
+          OR worktree_cleanup_json IS NOT NULL
         ORDER BY project_id ASC, created_at ASC, thread_id ASC
       `,
   });
@@ -652,6 +656,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1211,6 +1216,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -1218,8 +1224,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE thread_id = ${threadId}
-          AND deleted_at IS NULL
-          AND archived_at IS NULL
+          AND ((deleted_at IS NULL AND archived_at IS NULL)
+            OR worktree_cleanup_json IS NOT NULL)
         LIMIT 1
       `,
   });
@@ -2243,6 +2249,7 @@ pending_approval_requests AS (
                 pinOrderKey: row.pinOrderKey ?? null,
                 activeOrderKey: row.activeOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2487,6 +2494,7 @@ pending_approval_requests AS (
                   pinOrderKey: row.pinOrderKey ?? null,
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2613,7 +2621,7 @@ pending_approval_requests AS (
                     : Result.failVoid,
                 ),
                 threads: Arr.filterMap(threadRows, (row) =>
-                  row.deletedAt === null
+                  row.deletedAt === null || row.worktreeCleanup != null
                     ? Result.succeed({
                         id: row.threadId,
                         projectId: row.projectId,
@@ -2642,6 +2650,7 @@ pending_approval_requests AS (
                         pinOrderKey: row.pinOrderKey ?? null,
                         activeOrderKey: row.activeOrderKey ?? null,
                         titleRegeneration: mapTitleRegeneration(row),
+                        ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                         session: sessionByThread.get(row.threadId) ?? null,
                         latestUserMessageAt: row.latestUserMessageAt,
                         hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2804,6 +2813,7 @@ pending_approval_requests AS (
                   pinOrderKey: row.pinOrderKey ?? null,
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...(row.worktreeCleanup != null ? { worktreeCleanup: row.worktreeCleanup } : {}),
                   session: sessionByThread.get(row.threadId) ?? null,
                   latestUserMessageAt: row.latestUserMessageAt,
                   hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -3140,6 +3150,9 @@ pending_approval_requests AS (
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        ...(threadRow.value.worktreeCleanup != null
+          ? { worktreeCleanup: threadRow.value.worktreeCleanup }
+          : {}),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -3402,7 +3415,7 @@ pending_approval_requests AS (
         ),
       ]);
 
-      if (Option.isNone(threadRow)) {
+      if (Option.isNone(threadRow) || threadRow.value.deletedAt !== null) {
         return Option.none<OrchestrationThread>();
       }
 

@@ -131,6 +131,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       version-skew contract as threadSettlement. */
   threadPullRequests: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
+  /** Server durably owns thread worktree cleanup after deletion and understands
+      deleteWorktree plus cleanup retry/abandon commands. */
+  threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on
       servers that must be relaunched manually (dev checkouts, Windows
       foreground runs, pre-update servers). */
