@@ -1,3 +1,5 @@
+import { Window } from "happy-dom";
+import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import { EnvironmentId } from "@t3tools/contracts";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -165,16 +167,45 @@ describe("ChatMarkdown file-link labels", () => {
     }
   });
 
-  it("copies the filename for a whitespace-only link label", async () => {
+  it("copies the filename for a whitespace-only link label", () => {
+    const window = new Window();
+    vi.stubGlobal("Node", window.Node);
+    vi.stubGlobal("document", window.document);
+    try {
+      window.document.body.innerHTML = renderToStaticMarkup(
+        <ChatMarkdown cwd="/repo" text="[   ](/repo/example.ts:12)" />,
+      );
+      const range = window.document.createRange();
+      range.selectNodeContents(window.document.body);
+      const selection = window.getSelection()!;
+      selection.addRange(range);
+      expect(chatMarkdownClipboardPayload(selection as unknown as Selection)?.text).toBe(
+        "[example.ts](/repo/example.ts:12)",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+
+  it.each([false, true])("matches soft-break filenames with lineBreaks=%s", async (lineBreaks) => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
     try {
       await act(async () => {
-        renderer = create(<ChatMarkdown cwd="/repo" text="[   ](/repo/example.ts:12)" />);
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text={"[my\nfile.ts](/repo/my%20file.ts)"}
+            lineBreaks={lineBreaks}
+          />,
+        );
       });
-      expect(renderer!.root.findByType("button").props["data-markdown-copy"]).toBe(
-        "[example.ts](/repo/example.ts:12)",
-      );
+      const link = renderer!.root.findByType("button");
+      const text = (node: ReactTestRenderer["root"]): string =>
+        node.children.map((child) => (typeof child === "string" ? child : text(child))).join("");
+      expect(text(link)).toBe(lineBreaks ? "my\nfile.ts (my file.ts)" : "my file.ts");
+      expect(link.findAllByType("br")).toHaveLength(lineBreaks ? 1 : 0);
     } finally {
       await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();

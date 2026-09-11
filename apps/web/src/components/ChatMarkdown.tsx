@@ -623,16 +623,16 @@ function remarkNormalizeLinksAndTagInlineCode() {
   };
 }
 
-function nodeToPlainText(node: ReactNode): string {
+function nodeToPlainText(node: ReactNode, normalizeSoftBreaks = false): string {
   if (typeof node === "string" || typeof node === "number") {
-    return String(node);
+    return normalizeSoftBreaks ? String(node).replace(/\r?\n/g, " ") : String(node);
   }
   if (Array.isArray(node)) {
-    return node.map((child) => nodeToPlainText(child)).join("");
+    return node.map((child) => nodeToPlainText(child, normalizeSoftBreaks)).join("");
   }
   if (isValidElement<{ children?: ReactNode }>(node)) {
     if (node.type === "br") return "\n";
-    return nodeToPlainText(node.props.children);
+    return nodeToPlainText(node.props.children, normalizeSoftBreaks);
   }
   return "";
 }
@@ -3054,7 +3054,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       );
     }
 
-    const label = nodeToPlainText(children);
+    const label = nodeToPlainText(children, true);
     const escapedLabel = (label.trim() ? label : fileLinkMeta.basename)
       .replaceAll("\\", "\\\\")
       .replaceAll("[", "\\[")
