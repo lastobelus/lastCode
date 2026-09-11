@@ -71,6 +71,13 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_HANDOFFS_MENU_LIMIT = 1;
+export const MAX_HANDOFFS_MENU_LIMIT = 50;
+export const HandoffsMenuLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_HANDOFFS_MENU_LIMIT, maximum: MAX_HANDOFFS_MENU_LIMIT }),
+);
+export type HandoffsMenuLimit = typeof HandoffsMenuLimit.Type;
+export const DEFAULT_HANDOFFS_MENU_LIMIT: HandoffsMenuLimit = 7;
 export const MIN_LEGACY_SIDEBAR_SCALE = 50;
 export const MAX_LEGACY_SIDEBAR_SCALE = 100;
 export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
@@ -486,6 +493,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   sidebarThreadPreviewCount: SidebarThreadPreviewCount.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT)),
+  ),
+  handoffsMenuLimit: HandoffsMenuLimit.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFFS_MENU_LIMIT)),
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
@@ -1393,6 +1403,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
   showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
+  handoffsMenuLimit: Schema.optionalKey(HandoffsMenuLimit),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),

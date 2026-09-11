@@ -69,6 +69,9 @@ import {
 import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
+import { describeHandoff } from "../handoffs/handoffMenu";
+import { readThreadHandoffs } from "../handoffs/handoffsStore";
+import { useOpenHandoff } from "../handoffs/useOpenHandoff";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -2239,6 +2242,8 @@ export default function Sidebar() {
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+  const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
+  const openHandoff = useOpenHandoff();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
@@ -4169,6 +4174,8 @@ export default function Sidebar() {
         const isPinned = thread.pinnedAt != null;
         // Presets resolve at menu-open time (same as the popover).
         const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
+        const handoffs = readThreadHandoffs(threadRef);
+        const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -4192,11 +4199,31 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
+              handoffs: handoffDescriptors,
+              handoffsOverflow: handoffs.length > handoffDescriptors.length,
             }),
             position,
           ),
         );
         if (clicked._tag === "Failure") return;
+        if (clicked.value === "handoff-show-all") {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          useRightPanelStore.getState().open(threadRef, "handoffs");
+          return;
+        }
+        if (clicked.value?.startsWith("handoff:")) {
+          const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === clicked.value);
+          if (!entry) return;
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          await openHandoff(threadRef, entry);
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset = snoozePresets.find(
             (candidate) => `snooze:${candidate.id}` === clicked.value,
@@ -4402,8 +4429,10 @@ export default function Sidebar() {
       copyThreadIdToClipboard,
       deleteThread,
       handleMultiSelectContextMenu,
+      handoffsMenuLimit,
       markThreadUnread,
       openProjectSettings,
+      openHandoff,
       projectByKey,
       setThreadPersistence,
       serverConfigs,

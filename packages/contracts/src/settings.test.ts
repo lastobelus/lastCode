@@ -10,6 +10,9 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  DEFAULT_HANDOFFS_MENU_LIMIT,
+  MAX_HANDOFFS_MENU_LIMIT,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -19,6 +22,26 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("handoffs menu setting", () => {
+  it("defaults to seven and accepts the inclusive bounds", () => {
+    expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MIN_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(1);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MAX_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(50);
+    expect(decodeClientSettingsPatch({ handoffsMenuLimit: 12 }).handoffsMenuLimit).toBe(12);
+  });
+
+  it("rejects non-integers and values outside the bounds", () => {
+    for (const value of [0, 51, 1.5, "7"]) {
+      expect(() => decodeClientSettings({ handoffsMenuLimit: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ handoffsMenuLimit: value })).toThrow();
+    }
+  });
+});
 
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };

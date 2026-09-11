@@ -165,6 +165,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["long lines code blocks tables diffs file previews"],
   },
   {
+    id: "handoffs-menu-limit",
+    title: "Handoffs shown in menus",
+    to: "/settings/lastcode",
+    searchTerms: ["handoffs history recent links files menu count"],
+  },
+  {
     id: "project-grouping",
     title: "Project grouping",
     to: "/settings/general",

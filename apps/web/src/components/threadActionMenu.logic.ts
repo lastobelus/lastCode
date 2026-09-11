@@ -1,5 +1,6 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import type { HandoffMenuDescriptor } from "../handoffs/handoffMenu";
 
 /**
  * Ids for the per-thread action menu. Snooze presets are dispatched as
@@ -26,6 +27,10 @@ export type ThreadActionMenuId =
   | "copy-path"
   | "copy-branch"
   | "copy-thread-id"
+  | `handoff:${string}`
+  | "handoff-show-all"
+  | "handoffs-heading"
+  | "handoffs-empty"
   | "archive"
   | "delete";
 
@@ -48,6 +53,8 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  readonly handoffs?: ReadonlyArray<HandoffMenuDescriptor>;
+  readonly handoffsOverflow?: boolean;
 }
 
 /**
@@ -145,6 +152,17 @@ export function buildThreadActionMenuItems(
       ],
     },
     { id: "project-settings", label: "Project settings", icon: "settings" },
+    { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
+    ...(state.handoffs?.length
+      ? state.handoffs.map(({ entry, label }) => ({
+          id: `handoff:${entry.id}` as const,
+          label,
+          icon: "external-link",
+        }))
+      : [{ id: "handoffs-empty" as const, label: "No handoffs yet", disabled: true }]),
+    ...(state.handoffsOverflow
+      ? [{ id: "handoff-show-all" as const, label: "Show all…", icon: "list" }]
+      : []),
     // Archive removes the thread from the sidebar while keeping its
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
@@ -155,7 +173,7 @@ export function buildThreadActionMenuItems(
       label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
       disabled: state.isRunning || state.isPersistent,
-      separatorBefore: true,
+      separatorBefore: false,
     },
     {
       id: "delete",

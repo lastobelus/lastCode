@@ -153,7 +153,12 @@ import { readLocalApi } from "../localApi";
 import { useAssetUrlRefresh, useAssetUrlState } from "../assets/assetUrls";
 import { cn } from "../lib/utils";
 import { useRemoteOpenResolution, type RemoteOpenMode } from "../remoteOpen";
-import { useRightPanelStore } from "../rightPanelStore";
+import { useRightPanelStore, selectSelectedRightPanelSurface } from "../rightPanelStore";
+import {
+  recordHandoff,
+  resolveHandoffFilePath,
+  rememberHandoffBrowser,
+} from "../handoffs/handoffsStore";
 import { readThreadShell, useProjects } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { shellEnvironment } from "../state/shell";
@@ -1150,7 +1155,7 @@ interface MarkdownFileLinkProps {
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
-  onOpenInPanel: (panelPath: string, line: number | undefined) => void;
+  onOpenInPanel: (panelPath: string, line: number | undefined, label?: string) => void;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   onOpenMedia?: (() => void) | undefined;
@@ -1927,7 +1932,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
 
   const handleOpenInFilePreview = useCallback(() => {
     if (threadRef && panelPath) {
-      onOpenInPanel(panelPath, line);
+      const authoredLabel = children ? nodeToPlainText(children).trim() : "";
+      onOpenInPanel(panelPath, line, authoredLabel || undefined);
       return;
     }
     if (onOpenMedia) {
@@ -1935,7 +1941,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       return;
     }
     handleOpenInEditor();
-  }, [handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
+  }, [children, handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -2463,7 +2469,7 @@ function useChatMarkdownState({
     [linkedThreadPullRequestFor, pullRequestLinking, threadRef],
   );
   const openExternalLinkInPreview = useCallback(
-    (url: string) => {
+    (url: string, label?: string) => {
       if (!threadRef) {
         return Promise.resolve(
           AsyncResult.failure<void, BrowserPreviewUnavailableError>(
@@ -2475,9 +2481,16 @@ function useChatMarkdownState({
           ),
         );
       }
-      return openUrlInPreview({ threadRef, url, openPreview }).then((result) => {
-        if (result._tag === "Success") recordVisitForThread(threadRef, url);
-        else if (!isAtomCommandInterrupted(result)) {
+      return openUrlInPreview({
+        threadRef,
+        url,
+        openPreview,
+        onOpened: (tabId) => rememberHandoffBrowser(threadRef, tabId, { kind: "url", url }, url),
+      }).then((result) => {
+        if (result._tag === "Success") {
+          recordVisitForThread(threadRef, url);
+          recordHandoff(threadRef, { kind: "url", url }, label ? { label } : {});
+        } else if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           if (error instanceof BrowserSettingsReadError) {
             toastManager.add(
@@ -2495,7 +2508,7 @@ function useChatMarkdownState({
     [openPreview, threadRef],
   );
   const openMarkdownFileInPreview = useCallback(
-    (path: string) => {
+    (path: string, label?: string) => {
       if (!threadRef || preparedConnection._tag === "None") {
         return Promise.resolve(
           AsyncResult.failure<void, BrowserPreviewUnavailableError>(
@@ -2514,6 +2527,15 @@ function useChatMarkdownState({
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
         createAssetUrl,
         openPreview,
+      }).then((result) => {
+        if (result._tag === "Success") {
+          recordHandoff(
+            threadRef,
+            { kind: "file", path: resolveHandoffFilePath(path, cwd ?? undefined) ?? path },
+            label ? { label } : {},
+          );
+        }
+        return result;
       });
     },
     [createAssetUrl, cwd, openPreview, preparedConnection, threadRef],
@@ -2541,13 +2563,21 @@ function useChatMarkdownState({
   // A bare filename resolves to the workspace root, which is rarely where the
   // file is, so ask the index before opening. Absolute host paths open as-is.
   const openFileInPanel = useCallback(
-    (panelPath: string, line: number | undefined) => {
+    (panelPath: string, line: number | undefined, label?: string) => {
       if (!threadRef) return;
       // Claimed on every open so a synchronous one supersedes a lookup already
       // in flight.
       const isLatestLookup = claimWorkspaceBasenameLookup();
-      const openAt = (path: string) =>
+      const openAt = (path: string) => {
         useRightPanelStore.getState().openFile(threadRef, path, line);
+        const absolutePath = resolveHandoffFilePath(path, cwd ?? undefined);
+        if (absolutePath)
+          recordHandoff(
+            threadRef,
+            { kind: "file", path: absolutePath, ...(line === undefined ? {} : { line }) },
+            label ? { label } : {},
+          );
+      };
       if (!cwd || !needsWorkspaceBasenameLookup(panelPath)) {
         openAt(panelPath);
         return;
@@ -2632,7 +2662,11 @@ function useChatMarkdownState({
             threadRef &&
             isPreviewSupportedInRuntime() &&
             isBrowserPreviewFile(fileLinkMeta.filePath)
-              ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
+              ? () =>
+                  openMarkdownFileInPreview(
+                    fileLinkMeta.filePath,
+                    children ? nodeToPlainText(children).trim() || undefined : undefined,
+                  )
               : undefined
           }
           className={className}
@@ -2729,6 +2763,20 @@ const ChatMarkdownRendererContext = React.createContext<
 >(null!);
 
 // Keep component types stable when streaming changes the message state.
+function recordOpenedPullRequestHandoff(
+  threadRef: ScopedThreadRef | undefined,
+  label: string | null,
+) {
+  if (!threadRef) return;
+  const opened = selectSelectedRightPanelSurface(
+    useRightPanelStore.getState().byThreadKey,
+    threadRef,
+  );
+  if (opened?.kind !== "pull-request") return;
+  const { id: _surfaceId, ...target } = opened;
+  recordHandoff(threadRef, target, label?.trim() ? { label: label.trim() } : {});
+}
+
 const CHAT_MARKDOWN_COMPONENTS = {
   div: function MarkdownDiv({ node, children, ...props }) {
     const { onUseArtifactTemplate } = use(ChatMarkdownRendererContext);
@@ -2920,12 +2968,14 @@ const CHAT_MARKDOWN_COMPONENTS = {
             // A link to a change request in a workspace project opens beside the
             // conversation instead of in a browser: it is the thing being talked about, and
             // the panel it opens offers the browser as one of its actions.
-            if (
-              !href ||
-              openChangeRequestLink(event, href, undefined, environmentId ?? undefined)
-            ) {
+            const openedPullRequest = href
+              ? openChangeRequestLink(event, href, undefined, environmentId ?? undefined)
+              : false;
+            if (openedPullRequest) {
+              recordOpenedPullRequestHandoff(threadRef, plainHastText(node));
               return;
             }
+            if (!href) return;
             // Anything else follows the "Open links in" setting. The system browser
             // keeps the `_blank` the shell already handles; the in-app browser needs
             // the click intercepted here. A modifier click is the way out of the
@@ -2944,15 +2994,17 @@ const CHAT_MARKDOWN_COMPONENTS = {
             event.preventDefault();
             event.stopPropagation();
             // Keep the link here if saved settings could not be read.
-            void openExternalLinkInPreview(href).then((result) => {
-              if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
-              reportMarkdownActionFailure(
-                { operation: "open-link-in-preview", target: href },
-                result.cause,
-              );
-              if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
-              void readLocalApi()?.shell.openExternal(href);
-            });
+            void openExternalLinkInPreview(href, plainHastText(node) ?? undefined).then(
+              (result) => {
+                if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+                reportMarkdownActionFailure(
+                  { operation: "open-link-in-preview", target: href },
+                  result.cause,
+                );
+                if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
+                void readLocalApi()?.shell.openExternal(href);
+              },
+            );
           }}
           onContextMenu={(event) => {
             if (!href || !faviconHost) return;
@@ -2973,7 +3025,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
               position: { x: event.clientX, y: event.clientY },
               showContextMenu: (items, position) => api.contextMenu.show(items, position),
               openInPreview: async (target) => {
-                const result = await openExternalLinkInPreview(target);
+                const result = await openExternalLinkInPreview(
+                  target,
+                  plainHastText(node) ?? undefined,
+                );
                 if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
                   reportMarkdownActionFailure(
                     { operation: "open-link-in-preview", target },
@@ -3024,8 +3079,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
             originalUrl={href}
             target={pullRequestPreviewTarget}
             confirmBeforeOpen={confirmBeforeOpen}
-            onOpenPullRequest={(targetUrl) =>
-              openChangeRequestLink(
+            onOpenPullRequest={(targetUrl) => {
+              const opened = openChangeRequestLink(
                 {
                   metaKey: false,
                   ctrlKey: false,
@@ -3035,8 +3090,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
                 targetUrl,
                 undefined,
                 environmentId ?? undefined,
-              )
-            }
+              );
+              if (opened) recordOpenedPullRequestHandoff(threadRef, plainHastText(node));
+              return opened;
+            }}
             onOpenFallback={openDeferredMarkdownLink}
           />
         );

@@ -11,9 +11,11 @@ import {
   MAX_LEGACY_SIDEBAR_SCALE,
   MAX_SCROLLBAR_MARGIN,
   MAX_SCROLLBAR_WIDTH,
+  MAX_HANDOFFS_MENU_LIMIT,
   MIN_LEGACY_SIDEBAR_SCALE,
   MIN_SCROLLBAR_MARGIN,
   MIN_SCROLLBAR_WIDTH,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
 import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
@@ -238,6 +240,30 @@ export function LastCodeSettingsPanel() {
         />
       </SettingsSection>
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("handoffs-menu-limit")}
+          description="Choose how many recently opened handoffs appear in thread menus."
+          control={
+            <input
+              aria-label="Handoffs shown in menus"
+              className="w-16 rounded-md border bg-background px-2 py-1 text-center"
+              max={MAX_HANDOFFS_MENU_LIMIT}
+              min={MIN_HANDOFFS_MENU_LIMIT}
+              onChange={(event) => {
+                const value = Number(event.currentTarget.value);
+                if (
+                  Number.isInteger(value) &&
+                  value >= MIN_HANDOFFS_MENU_LIMIT &&
+                  value <= MAX_HANDOFFS_MENU_LIMIT
+                ) {
+                  void updateClientSettings({ handoffsMenuLimit: value });
+                }
+              }}
+              type="number"
+              value={clientSettings.handoffsMenuLimit}
+            />
+          }
+        />
         <SettingsRow
           {...searchableSetting("larger-scrollbars")}
           description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."

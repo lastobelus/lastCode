@@ -1,11 +1,13 @@
 import { Window } from "happy-dom";
 import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { readThreadHandoffs, useHandoffsStore } from "../handoffs/handoffsStore";
+import { useRightPanelStore, selectThreadRightPanelState } from "../rightPanelStore";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
@@ -55,10 +57,11 @@ vi.mock("../editorPreferences", () => ({
   useOpenInPreferredEditor: () => vi.fn(),
   usePreferredEditor: () => [null, vi.fn()],
 }));
+const handoffPrMocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("~/lib/openPullRequestLink", () => ({
   findProjectOnChangeRequestHost: () => undefined,
   parseChangeRequestUrl: () => null,
-  useOpenChangeRequestLink: () => vi.fn(),
+  useOpenChangeRequestLink: () => handoffPrMocks.open,
 }));
 
 import ChatMarkdown, {
@@ -983,5 +986,102 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+describe("chat file handoffs", () => {
+  it("captures the actual PR surface, retaining host and reusing its tab", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const ref = {
+      environmentId: EnvironmentId.make("pr-env"),
+      threadId: ThreadId.make("pr-thread"),
+    };
+    useHandoffsStore.setState({ byThreadKey: {} });
+    const target = {
+      projectId: "host-fallback-project",
+      host: "github.example",
+      repository: "other/repo",
+      number: 8,
+      url: "https://github.example/other/repo/pull/8",
+    };
+    handoffPrMocks.open.mockImplementationOnce(() => {
+      useRightPanelStore.getState().openPullRequest(ref, target);
+      return true;
+    });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/repo" threadRef={ref} text={`[Review this PR](${target.url})`} />,
+        );
+      });
+      const link = renderer!.root
+        .findAllByType("a")
+        .find((item) => item.props.href === target.url)!;
+      await act(async () =>
+        link.props.onClick({
+          preventDefault() {},
+          stopPropagation() {},
+          metaKey: false,
+          ctrlKey: false,
+        }),
+      );
+      expect(readThreadHandoffs(ref)[0]).toMatchObject({
+        markdownLabel: "Review this PR",
+        target: { kind: "pull-request", ...target },
+      });
+      expect(readThreadHandoffs(ref)[0]?.target).not.toHaveProperty("environmentId");
+    } finally {
+      handoffPrMocks.open.mockReset();
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("records the authored label and resolved path, preserving it on a bare reopen", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const ref = {
+      environmentId: EnvironmentId.make("test-env"),
+      threadId: ThreadId.make("handoff-thread"),
+    };
+    useHandoffsStore.setState({ byThreadKey: {} });
+    let renderer: ReactTestRenderer | undefined;
+    const renderLink = async (text: string) => {
+      await act(async () => {
+        if (renderer) renderer.update(<ChatMarkdown cwd="/repo" threadRef={ref} text={text} />);
+        else renderer = create(<ChatMarkdown cwd="/repo" threadRef={ref} text={text} />);
+      });
+      const link = renderer!.root
+        .findAllByType("a")
+        .find((item) => item.props.href === "/repo/docs/report.md")!;
+      await act(async () =>
+        link.props.onClick({
+          preventDefault() {},
+          stopPropagation() {},
+          metaKey: false,
+          ctrlKey: false,
+          altKey: false,
+          shiftKey: false,
+        }),
+      );
+    };
+    try {
+      await renderLink("[Final report](/repo/docs/report.md)");
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+      expect(readThreadHandoffs(ref)[0]).toMatchObject({
+        markdownLabel: "Final report",
+        target: { kind: "file", path: "/repo/docs/report.md" },
+      });
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+      ).toBe("file:docs/report.md");
+      await renderLink("[report.md](/repo/docs/report.md)");
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+      expect(readThreadHandoffs(ref)[0]?.markdownLabel).toBe("Final report");
+      expect(readThreadHandoffs(ref)[0]?.sequence).toBe(2);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 });
