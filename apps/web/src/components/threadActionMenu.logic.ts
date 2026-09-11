@@ -173,7 +173,7 @@ export function buildThreadActionMenuItems(
       label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
       disabled: state.isRunning || state.isPersistent,
-      separatorBefore: false,
+      separatorBefore: true,
     },
     {
       id: "delete",

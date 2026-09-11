@@ -125,7 +125,7 @@ describe("buildThreadActionMenuItems", () => {
     const archiveItem = items.at(-2);
     expect(archiveItem?.id).toBe("archive");
     expect(archiveItem?.icon).toBe("archive");
-    expect(archiveItem?.separatorBefore).toBe(false);
+    expect(archiveItem?.separatorBefore).toBe(true);
     expect(archiveItem?.destructive).toBeFalsy();
     expect(items.at(-1)?.id).toBe("delete");
   });
