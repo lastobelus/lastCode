@@ -6,9 +6,10 @@ import type {
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import type { MenuAction } from "@react-native-menu/menu";
+import * as Cause from "effect/Cause";
 import { SymbolView } from "../../components/AppSymbol";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
-import { Platform, Pressable, useWindowDimensions, View } from "react-native";
+import { Alert, Platform, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import Svg, { Circle, Path } from "react-native-svg";
@@ -23,12 +24,15 @@ import { relativeTime } from "../../lib/time";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { terminalEnvironment } from "../../state/terminal";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr, type ThreadPrPresentation } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { QueuedMessageIcon } from "./queued-message-icon";
-import { resolveThreadStatus } from "./threadPresentation";
+import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -493,13 +497,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
   } = props;
+  const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
+  const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status?.kind ?? null);
   const threadAccessibilityLabel = [
     thread.title,
+    showActionWaitingIndicator && runningAction
+      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
+      : null,
     pr?.accessibilityLabel,
     props.hasQueuedMessages ? "messages queued to send" : null,
   ]
@@ -538,6 +548,20 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
+  const handleCancelAction = useCallback(async () => {
+    if (runningAction === null) return;
+    const result = await closeTerminal({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id, terminalId: runningAction.terminalId },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not cancel Action",
+        error instanceof Error ? error.message : "The Project Action could not be cancelled.",
+      );
+    }
+  }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
   const menuActions = useMemo<MenuAction[]>(
     () => [
       ...(thread.branch
@@ -555,9 +579,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
+      ...(runningAction === null
+        ? []
+        : [
+            {
+              id: "cancel-action",
+              title: `Cancel ${runningAction.actionName}`,
+              image: "stop.fill",
+              attributes: { destructive: true },
+            } satisfies MenuAction,
+          ]),
       THREAD_ROW_MENU_ACTIONS[1]!,
     ],
-    [props.titleRegenerationSupported, thread.branch, thread.titleRegeneration],
+    [props.titleRegenerationSupported, runningAction, thread.branch, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
     () => ({
@@ -573,9 +607,10 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "archive") handleArchive();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
+      if (nativeEvent.event === "cancel-action") void handleCancelAction();
       if (nativeEvent.event === "delete") handleDelete();
     },
-    [handleArchive, handleDelete, handleRegenerateTitle, onNewThreadOnBranch, thread],
+    [handleArchive, handleCancelAction, handleDelete, handleRegenerateTitle, onNewThreadOnBranch, thread],
   );
 
   const statusPill = effectiveStatus ? (
@@ -585,6 +620,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       </Text>
     </View>
   ) : null;
+  const actionStatusIndicator =
+    showActionWaitingIndicator && runningAction ? (
+      <View
+        accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
+        className="size-3 items-center justify-center"
+      >
+        <View className="size-1.5 rounded-full bg-adaptive-yellow-500-300" />
+      </View>
+    ) : null;
 
   const subtitleRow =
     subtitleParts.length > 0 || pr !== null ? (
@@ -703,6 +747,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
                 {props.hasQueuedMessages ? (
                   <QueuedMessageIcon selected={visuallySelected && !materialYouStyleLayoutActive} />
                 ) : null}
+                {actionStatusIndicator}
                 {statusPill}
                 <Text
                   className={cn(
@@ -781,6 +826,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               {props.hasQueuedMessages ? (
                 <QueuedMessageIcon selected={visuallySelected && !materialYouStyleLayoutActive} />
               ) : null}
+              {actionStatusIndicator}
               {statusPill}
               <Text
                 className={cn(
