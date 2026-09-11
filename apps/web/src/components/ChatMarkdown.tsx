@@ -1368,10 +1368,11 @@ function ChatMarkdownMediaUnavailableLabel(props: {
   readonly kind?: "image" | "video" | undefined;
 }) {
   const label = props.kind === "video" ? "Video unavailable" : "Image unavailable";
+  const text = props.alt.length > 0 ? `${label} · ${props.alt}` : label;
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <span className="inline-flex items-center gap-1.5" data-markdown-copy-media-text={text}>
       <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0" />
-      {props.alt.length > 0 ? `${label} · ${props.alt}` : label}
+      {text}
     </span>
   );
 }
@@ -1573,7 +1574,9 @@ function ChatMarkdownVideo(props: {
         style={props.style}
       />
     ) : (
-      <span data-markdown-copy={props.copyMarkdown}>{props.alt}</span>
+      <span data-markdown-copy={props.copyMarkdown} data-markdown-copy-media-text={props.alt}>
+        {props.alt}
+      </span>
     );
   }
   return (

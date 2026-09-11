@@ -205,6 +205,40 @@ describe("serializeRenderedMarkdownFragment", () => {
     },
   );
 
+  it.each(["start", "end", "both"])(
+    "accepts complete fallback text without %s markers",
+    (missing) => {
+      const text = "Image unavailable · diagram";
+      const source = "[![diagram](preview.png)](/repo/example.ts)";
+      const makeFragment = (selected: string) =>
+        new FakeElement("DIV").append(
+          new FakeElement("A", [], {
+            "data-markdown-copy": source,
+            "data-markdown-copy-text": " (example.ts)",
+            "data-markdown-copy-images": "1",
+          }).append(
+            new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+              ...(missing === "end"
+                ? [new FakeElement("SPAN", [], { "data-markdown-copy-media-start": "" })]
+                : []),
+              new FakeElement("SPAN", [], {
+                "data-markdown-copy-media-text": text,
+                "data-markdown-copy": "![diagram](preview.png)",
+              }).append(new FakeText(selected)),
+              ...(missing === "start"
+                ? [new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" })]
+                : []),
+            ),
+            new FakeText(" (example.ts)"),
+          ),
+        );
+      expect(serializeRenderedMarkdownFragment(asNode(makeFragment(text)))).toBe(source);
+      expect(serializeRenderedMarkdownFragment(asNode(makeFragment("available · diagram")))).toBe(
+        "available · diagram (example.ts)",
+      );
+    },
+  );
+
   it("does not restore a link when selection starts inside fallback media text", () => {
     const fragment = new FakeElement("DIV").append(
       new FakeElement("A", [], {

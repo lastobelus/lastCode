@@ -197,6 +197,19 @@ function textOutsideMedia(node: Node): string {
   return [...node.childNodes].map(textOutsideMedia).join("");
 }
 
+function hasCompleteMediaSelection(element: Element): boolean {
+  if (
+    element.querySelector("[data-markdown-copy-media-start]") &&
+    element.querySelector("[data-markdown-copy-media-end]")
+  )
+    return true;
+  const fallback = element.querySelector("[data-markdown-copy-media-text]");
+  const fullText = fallback?.getAttribute("data-markdown-copy-media-text");
+  return Boolean(
+    fullText && fallback?.textContent === fullText && element.textContent === fullText,
+  );
+}
+
 function serializeNode(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
     const text = node.textContent ?? "";
@@ -210,11 +223,7 @@ function serializeNode(node: Node): string {
   if (element.hasAttribute("data-markdown-details")) {
     return serializeDetails(element);
   }
-  if (
-    element.hasAttribute("data-markdown-copy-media") &&
-    (!element.querySelector("[data-markdown-copy-media-start]") ||
-      !element.querySelector("[data-markdown-copy-media-end]"))
-  ) {
+  if (element.hasAttribute("data-markdown-copy-media") && !hasCompleteMediaSelection(element)) {
     return element.textContent ?? "";
   }
   const markdownCopy = element.getAttribute("data-markdown-copy");
@@ -226,13 +235,10 @@ function serializeNode(node: Node): string {
     const incomplete =
       (fullText !== null && textOutsideMedia(element) !== fullText) ||
       (imageCount !== null &&
-        [
-          "data-markdown-copy-media",
-          "data-markdown-copy-media-start",
-          "data-markdown-copy-media-end",
-        ].some(
-          (attribute) => element.querySelectorAll(`[${attribute}]`).length !== Number(imageCount),
-        ));
+        (element.querySelectorAll("[data-markdown-copy-media]").length !== Number(imageCount) ||
+          [...element.querySelectorAll("[data-markdown-copy-media]")].some(
+            (media) => !hasCompleteMediaSelection(media),
+          )));
     return incomplete ? serializeChildren(element) : markdownCopy;
   }
   if (isSkippedElement(element)) return "";
