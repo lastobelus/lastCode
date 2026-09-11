@@ -1,8 +1,23 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useClientSettings } from "~/hooks/useSettings";
-import { useThreadHandoffs, handoffDestination, handoffTitle } from "~/handoffs/handoffsStore";
+import { useThreadHandoffs, handoffTitle, type HandoffEntry } from "~/handoffs/handoffsStore";
 import { useOpenHandoff } from "~/handoffs/useOpenHandoff";
 import { MenuItem, MenuSeparator } from "~/components/ui/menu";
+
+function handoffFilename({ target }: HandoffEntry): string {
+  switch (target.kind) {
+    case "file":
+      return target.path.split(/[\\/]/).at(-1) ?? "";
+    case "attachment":
+      return target.attachment.name;
+    case "url": {
+      const url = new URL(target.url);
+      return url.pathname.replace(/\/+$/, "").split("/").at(-1) || url.hostname;
+    }
+    case "pull-request":
+      return `${target.repository}#${target.number}`;
+  }
+}
 
 export function HandoffsMenu({
   threadRef,
@@ -24,11 +39,11 @@ export function HandoffsMenu({
       ) : (
         visible.map((entry) => (
           <MenuItem key={entry.id} onClick={() => void openHandoff(threadRef, entry)}>
-            <span className="min-w-0">
-              <span className="block truncate">{handoffTitle(entry)}</span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {handoffDestination(entry)}
-              </span>
+            <span className="min-w-0 truncate">
+              {handoffTitle(entry)}
+              {handoffFilename(entry) !== handoffTitle(entry) ? (
+                <span className="text-muted-foreground"> — {handoffFilename(entry)}</span>
+              ) : null}
             </span>
           </MenuItem>
         ))
