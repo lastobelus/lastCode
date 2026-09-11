@@ -171,6 +171,11 @@ describe("workspaceRelativeFilePath", () => {
 });
 
 describe("isMarkdownFileLinkLabel", () => {
+  it.each(["README.md ", " README.md", "\nREADME.md", "README.md\u00a0"])(
+    "preserves surrounding label whitespace in %j",
+    (label) => expect(isMarkdownFileLinkLabel(label, "/repo/README.md")).toBe(false),
+  );
+
   it.each([
     ["<example.ts>", "/repo/example.ts", false],
     ["<example.ts:12>", "/repo/example.ts:12", false],

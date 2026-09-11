@@ -342,6 +342,7 @@ export function workspaceRelativeFilePath(
 
 export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
   if (!label.trim()) return true;
+  if (label !== label.trim()) return false;
   const target = parseMarkdownFileLink(href);
   if (!target) return false;
   const normalizePath = (path: string) => {
