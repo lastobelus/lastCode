@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Host-side disposable fixtures.
 import { describe, expect, it, onTestFinished } from "vite-plus/test";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -128,7 +129,7 @@ describe("local build package action", () => {
     NodeFS.writeFileSync(NodePath.join(output, "SHA256SUMS"), "fixture\n");
     NodeFS.writeFileSync(NodePath.join(output, "LastCode.dmg"), "dmg\n");
     NodeFS.writeFileSync(NodePath.join(output, "LastCode.zip"), "zip\n");
-    const sha = "b".repeat(64);
+    const sha = NodeCrypto.createHash("sha256").update("dmg\n").digest("hex");
     NodeFS.writeFileSync(
       NodePath.join(output, "build-manifest.json"),
       JSON.stringify({

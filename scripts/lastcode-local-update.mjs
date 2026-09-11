@@ -294,7 +294,13 @@ export function parseOptions(argv) {
   return { command, repoRoot, home, currentVersion, checkpointTag, releaseNotesFormat };
 }
 
-export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
+export function resolveExistingBuild({
+  repoRoot,
+  outputRoot,
+  checkpointTag,
+  checkpointCommit,
+  cacheVerification = false,
+}) {
   const nightlyTag = `v${versionFromInstallableTag(checkpointTag)}`;
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
@@ -340,10 +346,63 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
       `Existing build is incomplete at ${outputDir}; annotated tag ${manifest.buildTag} is missing or mismatched.`,
     );
   }
+  const dmgPath = NodePath.join(outputDir, dmgName);
+  const fingerprint = () => {
+    const stat = NodeFS.statSync(dmgPath, { bigint: true });
+    return [
+      checkpointCommit,
+      manifestArtifact.sha256,
+      dmgName,
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ].join(":");
+  };
+  const before = fingerprint();
+  const cachePath = NodePath.join(outputDir, ".dmg-verification.json");
+  let cached;
+  if (cacheVerification) {
+    try {
+      cached = readJson(cachePath);
+    } catch {
+      /* Verify when no usable cache exists. */
+    }
+  }
+  let valid =
+    cached?.fingerprint === before && typeof cached.valid === "boolean" ? cached.valid : undefined;
+  if (valid === undefined) {
+    const digest = NodeCrypto.createHash("sha256");
+    const descriptor = NodeFS.openSync(dmgPath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      let bytesRead;
+      while ((bytesRead = NodeFS.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+        digest.update(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      NodeFS.closeSync(descriptor);
+    }
+    valid = digest.digest("hex") === manifestArtifact.sha256;
+    if (fingerprint() !== before) {
+      throw new Error(`Existing build DMG changed during verification: ${dmgPath}`);
+    }
+    if (cacheVerification) {
+      try {
+        NodeFS.writeFileSync(cachePath, JSON.stringify({ fingerprint: before, valid }));
+      } catch {
+        /* A read-only artifact can still be verified without caching. */
+      }
+    }
+  }
+  if (!valid) {
+    throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
+  }
   return {
     outputDir,
     manifestPath,
-    dmgPath: NodePath.join(outputDir, dmgName),
+    dmgPath,
     dmgSha256: manifestArtifact.sha256,
   };
 }
@@ -537,11 +596,26 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
       ? `${CHECKPOINT_PREFIX}${current.tag}`
       : `${REVISION_PREFIX}${current.tag}`;
   const currentInstallable = installables.find(({ tag }) => tag === currentTag);
+  let build;
+  try {
+    const existing = resolveExistingBuild({
+      repoRoot: options.repoRoot,
+      outputRoot: NodePath.join(options.home, ".lastcode", "local-updates", "artifacts"),
+      checkpointTag,
+      checkpointCommit: git(options.repoRoot, ["rev-parse", `${checkpointTag}^{commit}`]),
+      // Rehash only when file identity, timestamps, or the expected digest change.
+      cacheVerification: true,
+    });
+    if (existing) build = { schemaVersion: 1, status: "built", checkpointTag, ...existing };
+  } catch {
+    // Incomplete or stale local packages must not hide an available update.
+  }
   return {
     schemaVersion: 2,
     status: "available",
     checkpointTag,
     availableVersion,
+    ...(build ? { build } : {}),
     releaseNotes: {
       lastCode: collectLastCodeReleaseNotes(
         options.repoRoot,

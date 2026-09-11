@@ -226,6 +226,17 @@ const UpstreamReleaseNotes = Schema.Struct({
   omittedGroups: Schema.Number,
 });
 
+const BuildResult = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  status: Schema.Literal("built"),
+  checkpointTag: Schema.String,
+  outputDir: Schema.String,
+  manifestPath: Schema.String,
+  dmgPath: Schema.String,
+  dmgSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export type LastCodeLocalUpdateBuild = typeof BuildResult.Type;
+
 const InspectionResult = Schema.Union([
   Schema.Struct({
     schemaVersion: Schema.Literal(2),
@@ -238,6 +249,7 @@ const InspectionResult = Schema.Union([
     status: Schema.Literal("available"),
     checkpointTag: Schema.String,
     availableVersion: Schema.String,
+    build: Schema.optional(BuildResult),
     releaseNotes: Schema.Struct({
       lastCode: LastCodeReleaseNotes,
       upstream: UpstreamReleaseNotes,
@@ -245,17 +257,6 @@ const InspectionResult = Schema.Union([
   }),
 ]);
 export type LastCodeLocalUpdateInspection = typeof InspectionResult.Type;
-
-const BuildResult = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
-  status: Schema.Literal("built"),
-  checkpointTag: Schema.String,
-  outputDir: Schema.String,
-  manifestPath: Schema.String,
-  dmgPath: Schema.String,
-  dmgSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
-});
-export type LastCodeLocalUpdateBuild = typeof BuildResult.Type;
 
 const InstallReadyResult = Schema.Struct({
   schemaVersion: Schema.Literal(1),
