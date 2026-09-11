@@ -133,9 +133,25 @@ describe("ChatMarkdown file-link labels", () => {
         ).toHaveLength(0);
         expect(renderer!.root.findAllByType("button")).toHaveLength(1);
         expect(renderer!.root.findAllByType(MediaActions)).toHaveLength(0);
-        expect(renderer!.root.findByType("button").props["data-markdown-copy"]).toBe(
-          `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`,
-        );
+        const window = new Window();
+        vi.stubGlobal("Node", window.Node);
+        vi.stubGlobal("document", window.document);
+        try {
+          const source = `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`;
+          window.document.body.innerHTML = renderToStaticMarkup(
+            <ChatMarkdown cwd="/repo" text={source} />,
+          );
+          const link = window.document.querySelector("button")!;
+          const range = window.document.createRange();
+          range.selectNode(link);
+          const selection = window.getSelection()!;
+          selection.addRange(range);
+          expect(chatMarkdownClipboardPayload(selection as unknown as Selection)?.text).toBe(
+            source,
+          );
+        } finally {
+          window.close();
+        }
       } finally {
         await act(async () => renderer?.unmount());
         vi.unstubAllGlobals();
