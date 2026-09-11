@@ -70,6 +70,19 @@ If dragging is unavailable for one environment, update the T3 Code server runnin
 environment. Pinned and active reordering require server support. Threads from older servers keep
 their default order until the server is updated.
 
+## Questions from agents
+
+Agents can mark a thread when their latest response contains a question that blocks further work.
+The sidebar shows a violet `?`, or **Question** when long status labels are enabled, so the thread
+does not get lost among other conversations. Sending a reply clears the marker automatically.
+Settling the thread yourself also dismisses it; automatic settlement waits until the question has
+been answered or cleared.
+
+This marker is separate from a provider's structured approval and input prompts. Those keep their
+existing, higher-priority status. The agent can currently raise only the `question` attention kind;
+the stored attention record is typed so future user-actionable kinds can be added without treating
+terminal output as an API.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list
@@ -120,8 +133,10 @@ legacy sidebar, open a thread's context menu and choose **Annotate thread…**. 
 adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
 the note without opening the thread.
 
-Opening an annotated thread shows the active note as a pale-yellow card above the composer. You
-can dismiss the card for the current visit without deleting or resolving the note. The
+Opening an annotated thread shows a compact yellow note above the composer, with its first line
+and edit timestamp. Expand it to read the full Markdown; your expanded or collapsed choice is
+remembered for that thread across navigation and reloads. Choose **Edit** to open the existing
+Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it. The
 conversation minimap marks the message that was newest when the annotation was created or last
 changed. Editing, resolving, or reopening the annotation moves that marker to the newest message.
 Resolved annotations disappear from the sidebar and composer but remain available from their

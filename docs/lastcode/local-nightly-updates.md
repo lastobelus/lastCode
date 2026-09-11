@@ -19,8 +19,10 @@ Code's state.
 Before enabling it, install the checkpoint service and dashboard:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 pnpm run lastcode:build -- --install
 pnpm run lastcode:install -- --install
@@ -140,8 +142,8 @@ lastcode/revision/v0.0.34-nightly.20260816.1105.1
 The guarded PR merge command requests an immediate daemon run. If that request
 is missed because the service is unavailable, a later managed run repairs it.
 The daemon replays only the newly merged LastCode commits onto the newest
-checkpoint, smoke-tests the result, publishes the revision, and promotes it when
-the PR queue permits. The running app then discovers version
+checkpoint, smoke-tests the result, publishes the revision, and promotes it
+independently of open PRs when main still matches the incorporated source. The running app then discovers version
 `0.0.34-nightly.20260816.1105.1` through the same button and builds it only after
 the first click. A later upstream `1106` still sorts after every `1105.N`
 revision.

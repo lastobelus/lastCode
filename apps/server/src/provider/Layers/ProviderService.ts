@@ -501,7 +501,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
   let turnAnalyticsRequestId = 0;
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-
   const finishTurnAnalytics = (
     state: TurnAnalyticsState,
     input: {
