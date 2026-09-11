@@ -59,6 +59,19 @@ class FakeElement {
     return null;
   }
 
+  querySelectorAll(selector: string): FakeElement[] {
+    return this.children.flatMap((child) => [
+      ...((
+        selector.startsWith("[")
+          ? child.hasAttribute(selector.slice(1, -1))
+          : child.tagName === selector.toUpperCase()
+      )
+        ? [child]
+        : []),
+      ...child.querySelectorAll(selector),
+    ]);
+  }
+
   /** Supports only the selectors markdown-clipboard actually asks for. */
   querySelector(selector: string): FakeElement | null {
     const childOnly = selector.startsWith(":scope > ");
@@ -67,6 +80,7 @@ class FakeElement {
       if (target === 'input[type="checkbox"]') {
         return element.tagName === "INPUT" && element.getAttribute("type") === "checkbox";
       }
+      if (target.startsWith("[")) return element.hasAttribute(target.slice(1, -1));
       return element.tagName === target.toUpperCase();
     };
     const search = (parent: FakeElement): FakeElement | null => {
@@ -109,6 +123,143 @@ function renderedCodeBlock(lines: ReadonlyArray<string>): FakeElement {
 }
 
 describe("serializeRenderedMarkdownFragment", () => {
+  it.each(["A", "BUTTON"])(
+    "retains file destinations when a complete %s label has a break",
+    (tag) => {
+      const source = "[src/\\\nexample.ts](/repo/src/example.ts)";
+      const attributes = {
+        "data-markdown-copy": source,
+        "data-markdown-copy-text": "src/\nexample.ts (example.ts)",
+      };
+      const complete = new FakeElement("DIV").append(
+        new FakeElement(tag, [], attributes).append(
+          new FakeText("src/"),
+          new FakeElement("BR"),
+          new FakeText("example.ts (example.ts)"),
+        ),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(source);
+      const partial = new FakeElement("DIV").append(
+        new FakeElement(tag, [], attributes).append(new FakeText("example.ts")),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("example.ts");
+    },
+  );
+
+  it.each(["A", "BUTTON"])("copies only selected descriptive label text in %s wrappers", (tag) => {
+    const attributes = {
+      "data-markdown-copy": "[validates the input](/repo/example.ts)",
+      "data-markdown-copy-text": "validates the input (example.ts)",
+    };
+    const leading = new FakeElement("DIV").append(
+      new FakeText("It "),
+      new FakeElement(tag, [], attributes).append(
+        new FakeElement("STRONG").append(new FakeText("valid")),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(leading))).toBe("It **valid**");
+
+    const trailing = new FakeElement("DIV").append(
+      new FakeElement(tag, [], attributes).append(new FakeText("input (example.ts)")),
+      new FakeText(" afterward"),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(trailing))).toBe(
+      "input (example.ts) afterward",
+    );
+
+    const complete = new FakeElement("DIV").append(
+      new FakeElement(tag, [], attributes).append(new FakeText("validates the input (example.ts)")),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
+      attributes["data-markdown-copy"],
+    );
+  });
+
+  it.each(["IMG", "VIDEO", "SPAN"])(
+    "validates partial and complete selections with rendered %s media",
+    (tag) => {
+      const attributes = {
+        "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
+        "data-markdown-copy-text": " (example.ts)",
+        "data-markdown-copy-images": "1",
+      };
+      const partial = new FakeElement("DIV").append(
+        new FakeElement("A", [], attributes).append(new FakeText(" (example.ts)")),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(partial))).toBe("(example.ts)");
+      const complete = new FakeElement("DIV").append(
+        new FakeElement("A", [], attributes).append(
+          new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+            new FakeElement("SPAN", [], { "data-markdown-copy-media-start": "" }),
+            new FakeElement(tag, [], { alt: "diagram", src: "preview.png" }).append(
+              ...(tag === "SPAN" ? [new FakeText("Image unavailable · diagram")] : []),
+            ),
+            new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" }),
+          ),
+          new FakeText(" (example.ts)"),
+        ),
+      );
+      expect(serializeRenderedMarkdownFragment(asNode(complete))).toBe(
+        attributes["data-markdown-copy"],
+      );
+    },
+  );
+
+  it.each(["start", "end", "both"])(
+    "accepts complete fallback text without %s markers",
+    (missing) => {
+      const text = "Image unavailable · diagram";
+      const source = "[![diagram](preview.png)](/repo/example.ts)";
+      const makeFragment = (selected: string) =>
+        new FakeElement("DIV").append(
+          new FakeElement("A", [], {
+            "data-markdown-copy": source,
+            "data-markdown-copy-text": " (example.ts)",
+            "data-markdown-copy-images": "1",
+          }).append(
+            new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+              ...(missing === "end"
+                ? [new FakeElement("SPAN", [], { "data-markdown-copy-media-start": "" })]
+                : []),
+              new FakeElement("SPAN", [], {
+                "data-markdown-copy-media-text": text,
+                "data-markdown-copy": "![diagram](preview.png)",
+              }).append(new FakeText(selected)),
+              ...(missing === "start"
+                ? [new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" })]
+                : []),
+            ),
+            new FakeText(" (example.ts)"),
+          ),
+        );
+      expect(serializeRenderedMarkdownFragment(asNode(makeFragment(text)))).toBe(source);
+      expect(serializeRenderedMarkdownFragment(asNode(makeFragment("available · diagram")))).toBe(
+        "available · diagram (example.ts)",
+      );
+    },
+  );
+
+  it("does not restore a link when selection starts inside fallback media text", () => {
+    const fragment = new FakeElement("DIV").append(
+      new FakeElement("A", [], {
+        "data-markdown-copy": "[![diagram](preview.png)](/repo/example.ts)",
+        "data-markdown-copy-text": " (example.ts)",
+        "data-markdown-copy-images": "1",
+      }).append(
+        new FakeElement("SPAN", [], { "data-markdown-copy-media": "" }).append(
+          new FakeElement("SPAN", [], { "data-markdown-copy": "![diagram](preview.png)" }).append(
+            new FakeText("available · diagram"),
+          ),
+          new FakeElement("SPAN", [], { "data-markdown-copy-media-end": "" }),
+        ),
+        new FakeText(" (example.ts)"),
+      ),
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(fragment))).toBe(
+      "available · diagram (example.ts)",
+    );
+  });
+
   beforeEach(() => {
     vi.stubGlobal("Node", { TEXT_NODE, ELEMENT_NODE });
   });

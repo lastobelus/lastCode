@@ -2,6 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 
 import {
+  markdownLinkHasImage,
+  nativeMarkdownInlineGroups,
+  nativeMarkdownImageLabelRuns,
+  nativeMarkdownWithInlineStyles,
+  markdownLinkLabelText,
   nativeMarkdownChunkSpacing,
   nativeMarkdownDocumentChunks,
   nativeMarkdownDocumentRuns,
@@ -11,6 +16,101 @@ import {
 } from "@t3tools/mobile-markdown-text/markdown";
 
 describe("nativeMarkdownTextRuns", () => {
+  it.each(["bold", "italic", "strikethrough"] as const)(
+    "retains enclosing %s alongside nested emphasis in image groups",
+    (style) => {
+      const node = nativeMarkdownWithInlineStyles(
+        {
+          type: "heading",
+          level: 2,
+          children: [{ type: "italic", children: [{ type: "text", content: "Read" }] }],
+        },
+        [style],
+      );
+      const runs = nativeMarkdownDocumentRuns(node);
+      expect(runs[0]).toMatchObject({ text: "Read", [style]: true, italic: true, headingLevel: 2 });
+      const linkedRuns = nativeMarkdownImageLabelRuns(node, "/repo/example.ts", 2);
+      expect(linkedRuns[0]).toMatchObject({
+        text: "Read",
+        [style]: true,
+        italic: true,
+        href: "/repo/example.ts",
+        headingLevel: 2,
+      });
+    },
+  );
+
+  it.each(["https://example.com", "/repo/example.ts"])(
+    "retains mixed image label styling without extra chips for %s",
+    (href) => {
+      const runs = nativeMarkdownImageLabelRuns(
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", content: "Read " },
+            { type: "bold", children: [{ type: "text", content: "this" }] },
+            { type: "code_inline", content: "example.ts" },
+          ],
+        },
+        href,
+        2,
+      );
+      expect(runs.map((run) => run.text).join("")).toBe("Read thisexample.ts");
+      expect(
+        runs.every((run) => run.href === href && run.role === "heading" && run.headingLevel === 2),
+      ).toBe(true);
+      expect(runs.every((run) => run.fileIcon === undefined)).toBe(true);
+      expect(runs[1]?.bold).toBe(true);
+      expect(runs[2]?.code).toBe(true);
+    },
+  );
+
+  it.each([
+    [{ alt: "diagram" }, "diagram"],
+    [{ alt: "", title: "Overview" }, "Overview"],
+    [{ alt: "diagram", title: "Overview" }, "diagram"],
+  ])("includes image descriptions in accessible link text", (image, expected) => {
+    expect(
+      markdownLinkLabelText({
+        type: "link",
+        children: [
+          { type: "text", content: "See " },
+          { type: "image", href: "preview.png", ...image },
+        ],
+      }),
+    ).toBe(`See ${expected}`);
+  });
+
+  it("separates linked image rendering from surrounding selectable prose", () => {
+    const link: MarkdownNode = {
+      type: "link",
+      href: "/repo/example.ts",
+      children: [{ type: "image", href: "preview.png", alt: "diagram" }],
+    };
+    expect(
+      nativeMarkdownInlineGroups([
+        { type: "text", content: "Before " },
+        link,
+        { type: "text", content: " after" },
+      ]),
+    ).toEqual([
+      { type: "paragraph", children: [{ type: "text", content: "Before " }] },
+      link,
+      { type: "paragraph", children: [{ type: "text", content: " after" }] },
+    ]);
+  });
+
+  it.each(["diagram", "example.ts", ""])("retains image labels with alt %s", (alt) => {
+    const node: MarkdownNode = {
+      type: "link",
+      href: "/repo/example.ts",
+      children: [{ type: "image", href: "preview.png", alt }],
+    };
+    expect(markdownLinkHasImage(node)).toBe(true);
+    const runs = nativeMarkdownTextRuns({ type: "paragraph", children: [node] });
+    expect(runs.map((run) => run.text).join("")).toBe(`${alt} (example.ts)`);
+  });
+
   it("links a path-shaped code span without changing the same path in prose", () => {
     expect(
       nativeMarkdownTextRuns({
@@ -92,11 +192,94 @@ describe("nativeMarkdownTextRuns", () => {
         externalHost: "example.com",
       },
       { text: " " },
+      { text: "ignored label", href: "file:///repo/README.md#L12" },
       {
-        text: "README.md:12",
+        text: " (README.md:12)",
         href: "file:///repo/README.md#L12",
         fileIcon: "readme",
       },
+    ]);
+  });
+
+  it("preserves descriptive file-link formatting and keeps filename links compact", () => {
+    const href = "/repo/src/example.ts:12";
+    expect(
+      nativeMarkdownTextRuns({
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            href,
+            children: [
+              { type: "bold", children: [{ type: "text", content: "validates" }] },
+              { type: "text", content: " the input" },
+            ],
+          },
+          { type: "link", href, children: [{ type: "code_inline", content: "src/example.ts:12" }] },
+        ],
+      }),
+    ).toEqual([
+      { text: "validates", bold: true, href },
+      { text: " the input", href },
+      { text: " (example.ts:12)example.ts:12", href, fileIcon: "typescript" },
+    ]);
+  });
+
+  it.each(["foo&amp;bar.ts", "foo&#38;bar.ts", "foo&#x26;bar.ts"])(
+    "keeps entity-encoded filename %s compact",
+    (content) => {
+      const href = "/repo/foo%26bar.ts";
+      const node: MarkdownNode = {
+        type: "link",
+        href,
+        children: [{ type: "bold", children: [{ type: "text", content }] }],
+      };
+      expect(markdownLinkLabelText(node)).toBe("foo&bar.ts");
+      expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+        { text: "foo&bar.ts", href, fileIcon: "typescript" },
+      ]);
+    },
+  );
+
+  it.each([
+    ["caf&eacute;.ts", "café.ts"],
+    ["&Aacute;&aacute;.ts", "Áá.ts"],
+    ["&NotEqualTilde;.ts", "≂̸.ts"],
+    ["&unknownEntity;.ts", "&unknownEntity;.ts"],
+  ])("decodes complete named references in %s", (content, decoded) => {
+    const href = `/tmp/${encodeURIComponent(decoded)}`;
+    const node: MarkdownNode = { type: "link", href, children: [{ type: "text", content }] };
+    expect(markdownLinkLabelText(node)).toBe(decoded);
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: decoded, href, fileIcon: "typescript" },
+    ]);
+    expect(markdownLinkLabelText({ type: "code_inline", content })).toBe(content);
+  });
+
+  it.each([
+    ["caf&amp;eacute;.ts", "caf&eacute;.ts"],
+    ["caf&amp;#233;.ts", "caf&#233;.ts"],
+    ["caf&amp;#xe9;.ts", "caf&#xe9;.ts"],
+  ])("decodes escaped reference %s only once", (content, decoded) => {
+    const href = `/tmp/${encodeURIComponent(decoded)}`;
+    const node: MarkdownNode = { type: "link", href, children: [{ type: "text", content }] };
+    expect(markdownLinkLabelText(node)).toBe(decoded);
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: decoded, href, fileIcon: "typescript" },
+    ]);
+  });
+
+  it("preserves literal entities in code-formatted file labels", () => {
+    const href = "/repo/foo%26bar.ts";
+    const node: MarkdownNode = {
+      type: "link",
+      href,
+      children: [{ type: "code_inline", content: "foo&amp;bar.ts" }],
+    };
+    expect(markdownLinkLabelText(node)).toBe("foo&amp;bar.ts");
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: "foo&amp;bar.ts", code: true, href },
+      { text: " (foo&bar.ts)", href, fileIcon: "typescript" },
     ]);
   });
 
@@ -146,7 +329,7 @@ describe("nativeMarkdownTextRuns", () => {
     expect(nativeMarkdownTextRuns(node)).toEqual([{ text: "Less than: < ⌘\nhighlighted" }]);
   });
 
-  it("normalizes double-encoded entities and inline tags emitted as text", () => {
+  it("decodes entities once and normalizes inline tags emitted as text", () => {
     const node: MarkdownNode = {
       type: "paragraph",
       children: [
@@ -159,7 +342,7 @@ describe("nativeMarkdownTextRuns", () => {
     };
 
     expect(nativeMarkdownTextRuns(node)).toEqual([
-      { text: "Keyboard: ⌘ + K; Less than: <; Greater than: >" },
+      { text: "Keyboard: ⌘ + K; Less than: &lt;; Greater than: &gt;" },
     ]);
   });
 

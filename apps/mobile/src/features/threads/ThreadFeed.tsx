@@ -1,3 +1,8 @@
+import { isMarkdownFileLinkLabel } from "@t3tools/client-runtime/markdown-links";
+import {
+  markdownLinkHasImage,
+  markdownLinkLabelText,
+} from "@t3tools/mobile-markdown-text/markdown";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
@@ -596,6 +601,22 @@ interface ReviewCommentColors {
 
 const failedMarkdownFaviconHosts = new Set<string>();
 const MarkdownLinkLabelContext = createContext(false);
+
+function MarkdownImageLinkBoundary({ children }: { children: React.ReactNode }) {
+  const insideLink = useContext(MarkdownLinkLabelContext);
+  return insideLink ? (
+    <View
+      pointerEvents="none"
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      {children}
+    </View>
+  ) : (
+    children
+  );
+}
+
 const markdownLinkStyles = StyleSheet.create({
   inlineIcon: {
     width: 14,
@@ -1066,21 +1087,68 @@ function useMarkdownStyles(
       preserveSoftBreaks: boolean,
       highlightCode: boolean,
     ): CustomRenderers => ({
-      link: ({ children, href = "" }) => {
+      link: ({ node, children, href = "" }) => {
         const presentation = resolveMarkdownLinkPresentation(href);
-        if (presentation.kind === "file") {
+        if (markdownLinkHasImage(node)) {
+          const linkHref = presentation.href;
           return (
-            <NativeText
-              className="font-t3-bold"
-              onPress={() => onLinkPress(href)}
-              style={{ color: inlineTextColor }}
-            >
-              <Image
-                source={markdownFileIconSource(presentation.icon)}
-                style={markdownLinkStyles.inlineIcon}
-              />
-              {presentation.label}
-            </NativeText>
+            <MarkdownLinkLabelContext.Provider value>
+              <Pressable
+                accessibilityRole="link"
+                accessibilityLabel={markdownLinkLabelText(node) || linkHref || href}
+                onPress={
+                  presentation.kind === "file"
+                    ? () => onLinkPress(href)
+                    : presentation.kind === "external"
+                      ? () => onLinkPress(presentation.href)
+                      : linkHref
+                        ? () => {
+                            void tryOpenExternalUrl(linkHref, "markdown-link");
+                          }
+                        : undefined
+                }
+              >
+                <View
+                  pointerEvents="none"
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  style={{ gap: 8 }}
+                >
+                  {children}
+                  {presentation.kind === "file" ? (
+                    <NativeText style={{ color: inlineTextColor }}>
+                      {"("}
+                      <NativeText className="font-t3-bold">
+                        <Image
+                          source={markdownFileIconSource(presentation.icon)}
+                          style={markdownLinkStyles.inlineIcon}
+                        />
+                        {presentation.label}
+                      </NativeText>
+                      {")"}
+                    </NativeText>
+                  ) : null}
+                </View>
+              </Pressable>
+            </MarkdownLinkLabelContext.Provider>
+          );
+        }
+        if (presentation.kind === "file") {
+          const descriptive = !isMarkdownFileLinkLabel(markdownLinkLabelText(node), href);
+          return (
+            <MarkdownLinkLabelContext.Provider value>
+              <NativeText onPress={() => onLinkPress(href)} style={{ color: inlineTextColor }}>
+                {descriptive ? <>{children} (</> : null}
+                <NativeText className="font-t3-bold">
+                  <Image
+                    source={markdownFileIconSource(presentation.icon)}
+                    style={markdownLinkStyles.inlineIcon}
+                  />
+                  {presentation.label}
+                </NativeText>
+                {descriptive ? ")" : null}
+              </NativeText>
+            </MarkdownLinkLabelContext.Provider>
           );
         }
         if (presentation.kind === "external") {
@@ -1149,13 +1217,15 @@ function useMarkdownStyles(
         </View>
       ),
       image: ({ node }) =>
-        node.href
-          ? (renderImage({
+        node.href ? (
+          <MarkdownImageLinkBoundary>
+            {renderImage({
               href: node.href,
               alt: node.alt ?? null,
               title: node.title ?? null,
-            }) ?? undefined)
-          : undefined,
+            })}
+          </MarkdownImageLinkBoundary>
+        ) : undefined,
       code_inline: ({ content }) => (
         <MarkdownInlineCode
           content={content ?? ""}

@@ -1,3 +1,5 @@
+import { Window } from "happy-dom";
+import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import { EnvironmentId } from "@t3tools/contracts";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -7,6 +9,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
+import { MediaActions } from "./media/MediaActions";
 import { setMarkdownTaskChecked } from "../markdownTaskList";
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
@@ -71,6 +74,217 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   if (!button) throw new Error(`Missing code button: ${label}`);
   return button.props as ComponentProps<typeof Button>;
 }
+
+describe("ChatMarkdown file-link labels", () => {
+  it.each([
+    [String.raw`read \] here`, "read ] here"],
+    [String.raw`read \[ here`, "read [ here"],
+    [String.raw`read \\\] here`, String.raw`read \] here`],
+    [String.raw`read \*this\*`, "read *this*"],
+    [String.raw`read \_this\_`, "read _this_"],
+  ])("round-trips copied file-link label %s", (sourceLabel, label) => {
+    const window = new Window();
+    vi.stubGlobal("Node", window.Node);
+    vi.stubGlobal("document", window.document);
+    try {
+      const source = `[${sourceLabel}](/repo/example.ts:12)`;
+      const copy = (text: string) => {
+        window.document.body.innerHTML = renderToStaticMarkup(
+          <ChatMarkdown cwd="/repo" text={text} />,
+        );
+        expect(window.document.body.textContent).toContain(label);
+        const range = window.document.createRange();
+        range.selectNodeContents(window.document.body);
+        const selection = window.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return chatMarkdownClipboardPayload(selection as unknown as Selection)?.text;
+      };
+      const copied = copy(source);
+      expect(copied).toBe(source);
+      expect(copy(copied!)).toBe(source);
+    } finally {
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+
+  it.each(["diagram", "example.ts", ""])(
+    "preserves image-only file labels with alt %s",
+    async (alt) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(async () => {
+          renderer = create(
+            <ChatMarkdown
+              cwd="/repo"
+              text={`[![${alt}](https://example.com/preview.png)](/repo/example.ts)`}
+            />,
+          );
+        });
+        expect(renderer!.root.findAllByType("img").some((image) => image.props.alt === alt)).toBe(
+          true,
+        );
+        expect(
+          renderer!.root.findAll(
+            (node) => typeof node.type === "string" && node.props.role === "button",
+          ),
+        ).toHaveLength(0);
+        expect(renderer!.root.findAllByType("button")).toHaveLength(1);
+        expect(renderer!.root.findAllByType(MediaActions)).toHaveLength(0);
+        const window = new Window();
+        vi.stubGlobal("Node", window.Node);
+        vi.stubGlobal("document", window.document);
+        try {
+          const source = `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`;
+          window.document.body.innerHTML = renderToStaticMarkup(
+            <ChatMarkdown cwd="/repo" text={source} />,
+          );
+          const link = window.document.querySelector("button")!;
+          const range = window.document.createRange();
+          range.selectNode(link);
+          const selection = window.getSelection()!;
+          selection.addRange(range);
+          expect(chatMarkdownClipboardPayload(selection as unknown as Selection)?.text).toBe(
+            source,
+          );
+        } finally {
+          window.close();
+        }
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("keeps video labels non-interactive and marks their selection structure", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text="[![clip](https://example.com/preview.mp4)](/repo/example.ts)"
+          />,
+        );
+      });
+      expect(renderer!.root.findByType("video").props.controls).toBe(false);
+      expect(renderer!.root.findAllByType("button")).toHaveLength(1);
+      expect(
+        renderer!.root.findAll(
+          (node) => node.type === "span" && node.props["data-markdown-copy-media"] !== undefined,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("copies the filename for a whitespace-only link label", () => {
+    const window = new Window();
+    vi.stubGlobal("Node", window.Node);
+    vi.stubGlobal("document", window.document);
+    try {
+      window.document.body.innerHTML = renderToStaticMarkup(
+        <ChatMarkdown cwd="/repo" text="[   ](/repo/example.ts:12)" />,
+      );
+      const range = window.document.createRange();
+      range.selectNodeContents(window.document.body);
+      const selection = window.getSelection()!;
+      selection.addRange(range);
+      expect(chatMarkdownClipboardPayload(selection as unknown as Selection)?.text).toBe(
+        "[example.ts](/repo/example.ts:12)",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+
+  it.each([false, true])("matches soft-break filenames with lineBreaks=%s", async (lineBreaks) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text={"[my\nfile.ts](/repo/my%20file.ts)"}
+            lineBreaks={lineBreaks}
+          />,
+        );
+      });
+      const link = renderer!.root.findByType("button");
+      const text = (node: ReactTestRenderer["root"]): string =>
+        node.children.map((child) => (typeof child === "string" ? child : text(child))).join("");
+      expect(text(link)).toBe(lineBreaks ? "my\nfile.ts (my file.ts)" : "my file.ts");
+      expect(link.findAllByType("br")).toHaveLength(lineBreaks ? 1 : 0);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["\n", "  \n", "\\\n"])(
+    "preserves line breaks in file labels (%j)",
+    async (lineBreak) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      const text = `[src/${lineBreak}example.ts](/repo/src/example.ts)`;
+      try {
+        await act(async () => {
+          renderer = create(<ChatMarkdown cwd="/repo" text={text} lineBreaks />);
+        });
+        const link = renderer!.root.findByType("button");
+        expect(link.findAllByType("br")).toHaveLength(1);
+        expect(link.props["data-markdown-copy-text"]).toMatch(/src\/\n+example\.ts/);
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("retains descriptive prose, emphasis, destinations, and copy text", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/repo"
+            text="This function [**validates** the input](/repo/src/example.ts:12)."
+          />,
+        );
+      });
+      expect(renderer!.root.findByType("strong").children).toEqual(["validates"]);
+      expect(
+        renderer!.root
+          .findAllByType("button")
+          .some((button) => button.findAllByType("strong").length > 0),
+      ).toBe(true);
+      const label = renderer!.root
+        .findAll((node) => typeof node.type === "string" && node.children.includes(" the input"))
+        .at(0);
+      expect(label).toBeDefined();
+      expect(label!.props["data-markdown-copy"]).toBe(
+        "[**validates** the input](/repo/src/example.ts:12)",
+      );
+      expect(
+        renderer!.root
+          .findAllByType("span")
+          .some((node) => node.children.includes("example.ts · L12")),
+      ).toBe(true);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("ChatMarkdown favicon privacy", () => {
   it("suppresses private link images while preserving public links across updates", async () => {
