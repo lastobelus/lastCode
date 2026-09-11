@@ -299,7 +299,7 @@ export function resolveExistingBuild({
   outputRoot,
   checkpointTag,
   checkpointCommit,
-  verifyChecksum = true,
+  cacheVerification = false,
 }) {
   const nightlyTag = `v${versionFromInstallableTag(checkpointTag)}`;
   const shortCommit = checkpointCommit.slice(0, 10);
@@ -347,7 +347,32 @@ export function resolveExistingBuild({
     );
   }
   const dmgPath = NodePath.join(outputDir, dmgName);
-  if (verifyChecksum) {
+  const fingerprint = () => {
+    const stat = NodeFS.statSync(dmgPath, { bigint: true });
+    return [
+      checkpointCommit,
+      manifestArtifact.sha256,
+      dmgName,
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ].join(":");
+  };
+  const before = fingerprint();
+  const cachePath = NodePath.join(outputDir, ".dmg-verification.json");
+  let cached;
+  if (cacheVerification) {
+    try {
+      cached = readJson(cachePath);
+    } catch {
+      /* Verify when no usable cache exists. */
+    }
+  }
+  let valid =
+    cached?.fingerprint === before && typeof cached.valid === "boolean" ? cached.valid : undefined;
+  if (valid === undefined) {
     const digest = NodeCrypto.createHash("sha256");
     const descriptor = NodeFS.openSync(dmgPath, "r");
     try {
@@ -359,9 +384,20 @@ export function resolveExistingBuild({
     } finally {
       NodeFS.closeSync(descriptor);
     }
-    if (digest.digest("hex") !== manifestArtifact.sha256) {
-      throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
+    valid = digest.digest("hex") === manifestArtifact.sha256;
+    if (fingerprint() !== before) {
+      throw new Error(`Existing build DMG changed during verification: ${dmgPath}`);
     }
+    if (cacheVerification) {
+      try {
+        NodeFS.writeFileSync(cachePath, JSON.stringify({ fingerprint: before, valid }));
+      } catch {
+        /* A read-only artifact can still be verified without caching. */
+      }
+    }
+  }
+  if (!valid) {
+    throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
   }
   return {
     outputDir,
@@ -567,8 +603,8 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
       outputRoot: NodePath.join(options.home, ".lastcode", "local-updates", "artifacts"),
       checkpointTag,
       checkpointCommit: git(options.repoRoot, ["rev-parse", `${checkpointTag}^{commit}`]),
-      // Polls inspect metadata only; build reuse and install verify the complete DMG.
-      verifyChecksum: false,
+      // Rehash only when file identity, timestamps, or the expected digest change.
+      cacheVerification: true,
     });
     if (existing) build = { schemaVersion: 1, status: "built", checkpointTag, ...existing };
   } catch {

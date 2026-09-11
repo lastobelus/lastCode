@@ -750,8 +750,14 @@ describe("lastcode-local-update", () => {
         inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", false),
         "build",
       );
-      NodeFS.writeFileSync(dmgPath, "tampered");
+      const cachePath = NodePath.join(outputDir, ".dmg-verification.json");
+      const verifiedCache = NodeFS.readFileSync(cachePath, "utf8");
+      const cacheMtime = NodeFS.statSync(cachePath, { bigint: true }).mtimeNs;
       assert.property(inspect(), "build");
+      assert.equal(NodeFS.statSync(cachePath, { bigint: true }).mtimeNs, cacheMtime);
+      NodeFS.writeFileSync(dmgPath, "bad");
+      assert.deepEqual(inspect(), available);
+      assert.notEqual(NodeFS.readFileSync(cachePath, "utf8"), verifiedCache);
       assert.throws(
         () =>
           resolveExistingBuild({
@@ -763,6 +769,7 @@ describe("lastcode-local-update", () => {
         /checksum does not match/,
       );
       NodeFS.writeFileSync(dmgPath, "dmg");
+      assert.property(inspect(), "build");
       NodeFS.writeFileSync(
         manifestPath,
         JSON.stringify({ ...manifest, lastCodeCommit: "0".repeat(40) }),
