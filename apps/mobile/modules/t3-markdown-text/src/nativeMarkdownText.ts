@@ -83,7 +83,7 @@ function decodeCodePoint(codePoint: number, entity: string): string {
   return String.fromCodePoint(codePoint);
 }
 
-function decodeHtmlEntitiesOnce(value: string): string {
+function decodeHtmlEntities(value: string): string {
   return value.replace(
     /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]+));/g,
     (
@@ -101,18 +101,6 @@ function decodeHtmlEntitiesOnce(value: string): string {
       return named && Object.hasOwn(characterEntities, named) ? characterEntities[named]! : entity;
     },
   );
-}
-
-function decodeHtmlEntities(value: string): string {
-  let decoded = value;
-  for (let pass = 0; pass < 2; pass += 1) {
-    const next = decodeHtmlEntitiesOnce(decoded);
-    if (next === decoded) {
-      break;
-    }
-    decoded = next;
-  }
-  return decoded;
 }
 
 function textNodeContent(value: string): string {

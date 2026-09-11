@@ -256,6 +256,19 @@ describe("nativeMarkdownTextRuns", () => {
     expect(markdownLinkLabelText({ type: "code_inline", content })).toBe(content);
   });
 
+  it.each([
+    ["caf&amp;eacute;.ts", "caf&eacute;.ts"],
+    ["caf&amp;#233;.ts", "caf&#233;.ts"],
+    ["caf&amp;#xe9;.ts", "caf&#xe9;.ts"],
+  ])("decodes escaped reference %s only once", (content, decoded) => {
+    const href = `/tmp/${encodeURIComponent(decoded)}`;
+    const node: MarkdownNode = { type: "link", href, children: [{ type: "text", content }] };
+    expect(markdownLinkLabelText(node)).toBe(decoded);
+    expect(nativeMarkdownTextRuns({ type: "paragraph", children: [node] })).toEqual([
+      { text: decoded, href, fileIcon: "typescript" },
+    ]);
+  });
+
   it("preserves literal entities in code-formatted file labels", () => {
     const href = "/repo/foo%26bar.ts";
     const node: MarkdownNode = {
@@ -316,7 +329,7 @@ describe("nativeMarkdownTextRuns", () => {
     expect(nativeMarkdownTextRuns(node)).toEqual([{ text: "Less than: < ⌘\nhighlighted" }]);
   });
 
-  it("normalizes double-encoded entities and inline tags emitted as text", () => {
+  it("decodes entities once and normalizes inline tags emitted as text", () => {
     const node: MarkdownNode = {
       type: "paragraph",
       children: [
@@ -329,7 +342,7 @@ describe("nativeMarkdownTextRuns", () => {
     };
 
     expect(nativeMarkdownTextRuns(node)).toEqual([
-      { text: "Keyboard: ⌘ + K; Less than: <; Greater than: >" },
+      { text: "Keyboard: ⌘ + K; Less than: &lt;; Greater than: &gt;" },
     ]);
   });
 
