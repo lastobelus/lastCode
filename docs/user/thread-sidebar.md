@@ -213,3 +213,18 @@ On web and desktop, use **Agents** to follow work delegated to subagents.
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.
+
+## Reopen handoffs in LastCode
+
+LastCode remembers links and file chips you explicitly open from chat into the right pane,
+and destinations opened there by an agent. Find them under **Handoffs** in the thread menu
+or the right-pane **+** menu. Each entry keeps its Markdown label and reopens in its usual
+file, browser, or pull-request tab. Files opened from the Files navigator are not added.
+
+The menus show seven entries by default. Change **Handoffs shown in menus** in
+**Settings → LastCode** to show 1–50. When more entries exist, **Show all…** opens a
+searchable list; the menu limit does not delete older entries.
+
+History stays on this client and survives closing tabs or archiving threads. Known local HTML
+files receive fresh preview authorization when reopened. A saved URL still needs its original
+server, and moved or deleted files must be restored before they can open again.

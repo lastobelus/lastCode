@@ -55,6 +55,11 @@ import { useEnvironments } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { useAtomCommand } from "~/state/use-atom-command";
+import {
+  recordHandoff,
+  resolveKnownHandoffUrl,
+  rememberHandoffBrowser,
+} from "~/handoffs/handoffsStore";
 
 import { previewBridge } from "./previewBridge";
 import {
@@ -522,6 +527,18 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             if (reusedExistingTab && resolvedInputUrl && previewBridge) {
               assertPreviewRuntimeCurrent(threadRef, activeTabId, activeRuntimeTabId, request);
               await previewBridge.navigate(activeRuntimeTabId, resolvedInputUrl);
+            }
+            // Capture accepted navigation even if loading subsequently fails, so
+            // the user can retry it. A rejected native navigation adds no history.
+            if (shouldPresentPreview && resolvedInputUrl) {
+              const target = resolveKnownHandoffUrl(threadRef, resolvedInputUrl) ?? {
+                kind: "url" as const,
+                url: resolvedInputUrl,
+              };
+              recordHandoff(threadRef, target);
+              rememberHandoffBrowser(threadRef, activeTabId, target, resolvedInputUrl);
+            }
+            if (reusedExistingTab && resolvedInputUrl && previewBridge) {
               await waitForNavigationReadiness(
                 threadRef,
                 request.requestId,
@@ -532,7 +549,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 request.timeoutMs,
               );
             }
-            return await currentStatus(threadRef, activeTabId);
+            const openedStatus = await currentStatus(threadRef, activeTabId);
+            return openedStatus;
           }
           case "navigate": {
             const ready = await requireReadyTab();

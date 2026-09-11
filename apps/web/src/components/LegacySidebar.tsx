@@ -1,3 +1,7 @@
+import { describeHandoff } from "../handoffs/handoffMenu";
+import { readThreadHandoffs } from "../handoffs/handoffsStore";
+import { useOpenHandoff } from "../handoffs/useOpenHandoff";
+import { useRightPanelStore } from "../rightPanelStore";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { GitPullRequestIcon } from "lucide-react";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -1546,6 +1550,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
+  const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
+  const openHandoff = useOpenHandoff();
   const threadSortOrder = useClientSettings<SidebarThreadSortOrder>(
     (settings) => settings.sidebarThreadSortOrder,
   );
@@ -2806,6 +2812,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         persistent: thread.persistent === true,
         supported: supportsPersistence,
       });
+      const handoffs = readThreadHandoffs(threadRef);
+      const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
           [
@@ -2821,8 +2829,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
             { id: "project-settings", label: "Project settings" },
+            { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
+            ...(handoffDescriptors.length
+              ? handoffDescriptors.map(({ entry, label }) => ({ id: `handoff:${entry.id}`, label }))
+              : [{ id: "handoffs-empty", label: "No handoffs yet", disabled: true }]),
+            ...(handoffs.length > handoffDescriptors.length
+              ? [{ id: "handoff-show-all", label: "Show all…" }]
+              : []),
             {
               id: "delete",
+              separatorBefore: true,
               label: "Delete",
               destructive: true,
               icon: "trash",
@@ -2832,6 +2848,21 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         ),
         position,
       );
+
+      if (clicked === "handoff-show-all" || clicked?.startsWith("handoff:")) {
+        if (isMobile) setOpenMobile(false);
+        await router.navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: thread.environmentId, threadId: thread.id },
+        });
+        if (clicked === "handoff-show-all")
+          useRightPanelStore.getState().open(threadRef, "handoffs");
+        else {
+          const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === clicked);
+          if (entry) await openHandoff(threadRef, entry);
+        }
+        return;
+      }
 
       if (clicked === "project-settings") {
         if (isMobile) setOpenMobile(false);
@@ -2949,6 +2980,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [
       appSettingsConfirmThreadDelete,
+      handoffsMenuLimit,
+      openHandoff,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
