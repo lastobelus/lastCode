@@ -751,7 +751,17 @@ describe("lastcode-local-update", () => {
         "build",
       );
       NodeFS.writeFileSync(dmgPath, "tampered");
-      assert.deepEqual(inspect(), available);
+      assert.property(inspect(), "build");
+      assert.throws(
+        () =>
+          resolveExistingBuild({
+            repoRoot: repo,
+            outputRoot: NodePath.join(root, ".lastcode", "local-updates", "artifacts"),
+            checkpointTag,
+            checkpointCommit: commit,
+          }),
+        /checksum does not match/,
+      );
       NodeFS.writeFileSync(dmgPath, "dmg");
       NodeFS.writeFileSync(
         manifestPath,

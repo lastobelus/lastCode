@@ -294,7 +294,13 @@ export function parseOptions(argv) {
   return { command, repoRoot, home, currentVersion, checkpointTag, releaseNotesFormat };
 }
 
-export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, checkpointCommit }) {
+export function resolveExistingBuild({
+  repoRoot,
+  outputRoot,
+  checkpointTag,
+  checkpointCommit,
+  verifyChecksum = true,
+}) {
   const nightlyTag = `v${versionFromInstallableTag(checkpointTag)}`;
   const shortCommit = checkpointCommit.slice(0, 10);
   const outputDir = NodePath.join(outputRoot, nightlyTag, shortCommit);
@@ -341,19 +347,21 @@ export function resolveExistingBuild({ repoRoot, outputRoot, checkpointTag, chec
     );
   }
   const dmgPath = NodePath.join(outputDir, dmgName);
-  const digest = NodeCrypto.createHash("sha256");
-  const descriptor = NodeFS.openSync(dmgPath, "r");
-  try {
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    let bytesRead;
-    while ((bytesRead = NodeFS.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
-      digest.update(buffer.subarray(0, bytesRead));
+  if (verifyChecksum) {
+    const digest = NodeCrypto.createHash("sha256");
+    const descriptor = NodeFS.openSync(dmgPath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      let bytesRead;
+      while ((bytesRead = NodeFS.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+        digest.update(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      NodeFS.closeSync(descriptor);
     }
-  } finally {
-    NodeFS.closeSync(descriptor);
-  }
-  if (digest.digest("hex") !== manifestArtifact.sha256) {
-    throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
+    if (digest.digest("hex") !== manifestArtifact.sha256) {
+      throw new Error(`Existing build DMG checksum does not match: ${dmgPath}`);
+    }
   }
   return {
     outputDir,
@@ -559,6 +567,8 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
       outputRoot: NodePath.join(options.home, ".lastcode", "local-updates", "artifacts"),
       checkpointTag,
       checkpointCommit: git(options.repoRoot, ["rev-parse", `${checkpointTag}^{commit}`]),
+      // Polls inspect metadata only; build reuse and install verify the complete DMG.
+      verifyChecksum: false,
     });
     if (existing) build = { schemaVersion: 1, status: "built", checkpointTag, ...existing };
   } catch {
