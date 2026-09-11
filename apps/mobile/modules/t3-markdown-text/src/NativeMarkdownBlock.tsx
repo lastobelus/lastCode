@@ -484,7 +484,9 @@ function NativeImageLabel(props: {
   readonly textStyle: NativeMarkdownTextStyle;
   readonly onLinkPress?: (href: string) => void;
 }) {
-  const href = props.node.type === "link" ? props.node.href : undefined;
+  const presentation =
+    props.node.type === "link" ? resolveMarkdownLinkPresentation(props.node.href ?? "") : undefined;
+  const href = presentation?.href;
   const content = <NativeMixedParagraph {...props} linkHref={href ?? props.linkHref} />;
   return href ? (
     <View style={{ gap: 8 }}>
@@ -501,7 +503,7 @@ function NativeImageLabel(props: {
           {content}
         </View>
       </Pressable>
-      {resolveMarkdownLinkPresentation(href).kind === "file" ? (
+      {presentation?.kind === "file" ? (
         <SelectableNode
           {...props}
           node={{

@@ -82,29 +82,30 @@ describe("ChatMarkdown file-link labels", () => {
     [String.raw`read \\\] here`, String.raw`read \] here`],
     [String.raw`read \*this\*`, "read *this*"],
     [String.raw`read \_this\_`, "read _this_"],
-  ])("round-trips copied file-link label %s", async (sourceLabel, label) => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let renderer: ReactTestRenderer | undefined;
+  ])("round-trips copied file-link label %s", (sourceLabel, label) => {
+    const window = new Window();
+    vi.stubGlobal("Node", window.Node);
+    vi.stubGlobal("document", window.document);
     try {
-      await act(async () => {
-        renderer = create(
-          <ChatMarkdown cwd="/repo" text={`[${sourceLabel}](/repo/example.ts:12)`} />,
+      const source = `[${sourceLabel}](/repo/example.ts:12)`;
+      const copy = (text: string) => {
+        window.document.body.innerHTML = renderToStaticMarkup(
+          <ChatMarkdown cwd="/repo" text={text} />,
         );
-      });
-      const authoredLabel = () =>
-        renderer!.root
-          .findAll((node) => typeof node.type === "string" && node.children.includes(label))
-          .at(0);
-      expect(authoredLabel()).toBeDefined();
-      const copied = authoredLabel()!.props["data-markdown-copy"];
-      await act(async () => {
-        renderer!.update(<ChatMarkdown cwd="/repo" text={copied} />);
-      });
-      expect(authoredLabel()).toBeDefined();
-      expect(authoredLabel()!.props["data-markdown-copy"]).toBe(copied);
+        expect(window.document.body.textContent).toContain(label);
+        const range = window.document.createRange();
+        range.selectNodeContents(window.document.body);
+        const selection = window.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return chatMarkdownClipboardPayload(selection as unknown as Selection)?.text;
+      };
+      const copied = copy(source);
+      expect(copied).toBe(source);
+      expect(copy(copied!)).toBe(source);
     } finally {
-      await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
+      window.close();
     }
   });
 
