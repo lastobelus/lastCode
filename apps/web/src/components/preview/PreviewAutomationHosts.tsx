@@ -524,6 +524,12 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               // operation failure.
               await waitForPreviewPresentation(activeRuntimeTabId);
             }
+            if (reusedExistingTab && resolvedInputUrl && previewBridge) {
+              assertPreviewRuntimeCurrent(threadRef, activeTabId, activeRuntimeTabId, request);
+              await previewBridge.navigate(activeRuntimeTabId, resolvedInputUrl);
+            }
+            // Capture accepted navigation even if loading subsequently fails, so
+            // the user can retry it. A rejected native navigation adds no history.
             if (shouldPresentPreview && resolvedInputUrl) {
               const target = resolveKnownHandoffUrl(threadRef, resolvedInputUrl) ?? {
                 kind: "url" as const,
@@ -533,8 +539,6 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               rememberHandoffBrowser(threadRef, activeTabId, target, resolvedInputUrl);
             }
             if (reusedExistingTab && resolvedInputUrl && previewBridge) {
-              assertPreviewRuntimeCurrent(threadRef, activeTabId, activeRuntimeTabId, request);
-              await previewBridge.navigate(activeRuntimeTabId, resolvedInputUrl);
               await waitForNavigationReadiness(
                 threadRef,
                 request.requestId,

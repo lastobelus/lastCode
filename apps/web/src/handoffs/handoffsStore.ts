@@ -308,26 +308,40 @@ export function recordKnownFileHandoff(ref: ScopedThreadRef, path: string): void
 }
 
 // Only URLs issued by our own file opener acquire provenance. Do not decode tokens.
-const browserTargets = new Map<string, { target: HandoffTarget; url: string }>();
-const browserKey = (ref: ScopedThreadRef, tabId: string) => `${scopedThreadKey(ref)}:${tabId}`;
+const browserTargets = new Map<string, { threadKey: string; target: HandoffTarget; url: string }>();
+const browserKey = (ref: ScopedThreadRef, tabId: string) =>
+  JSON.stringify([scopedThreadKey(ref), tabId]);
 export function rememberHandoffBrowser(
   ref: ScopedThreadRef,
   tabId: string,
   target: HandoffTarget,
   url: string,
 ): void {
-  browserTargets.set(browserKey(ref, tabId), { target, url });
+  browserTargets.set(browserKey(ref, tabId), { threadKey: scopedThreadKey(ref), target, url });
 }
 export function handoffBrowserTarget(ref: ScopedThreadRef, tabId: string) {
-  return browserTargets.get(browserKey(ref, tabId));
+  const binding = browserTargets.get(browserKey(ref, tabId));
+  return binding ? { target: binding.target, url: binding.url } : undefined;
+}
+export function purgeThreadHandoffs(ref: ScopedThreadRef): void {
+  const key = scopedThreadKey(ref);
+  useHandoffsStore.setState((state) => {
+    if (!(key in state.byThreadKey)) return state;
+    const { [key]: _deleted, ...byThreadKey } = state.byThreadKey;
+    return { byThreadKey };
+  });
+
+  for (const [targetKey, binding] of browserTargets) {
+    if (binding.threadKey === key) browserTargets.delete(targetKey);
+  }
 }
 export function resolveKnownHandoffUrl(
   ref: ScopedThreadRef,
   url: string,
 ): HandoffTarget | undefined {
-  const prefix = `${scopedThreadKey(ref)}:`;
-  for (const [key, value] of browserTargets)
-    if (key.startsWith(prefix) && handoffUrlsEqual(value.url, url)) return value.target;
+  const threadKey = scopedThreadKey(ref);
+  for (const value of browserTargets.values())
+    if (value.threadKey === threadKey && handoffUrlsEqual(value.url, url)) return value.target;
   return undefined;
 }
 export function updateHandoffBrowserTitle(

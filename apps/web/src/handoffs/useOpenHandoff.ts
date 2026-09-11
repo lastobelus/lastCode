@@ -39,7 +39,7 @@ import {
 } from "./handoffsStore";
 
 /** A browser tab that navigated away must not be hijacked when reopening a handoff. */
-export function findHandoffBrowser(ref: ScopedThreadRef, entry: HandoffEntry): string | undefined {
+function findHandoffBrowser(ref: ScopedThreadRef, entry: HandoffEntry): string | undefined {
   const state = readThreadPreviewState(ref);
   for (const snapshot of Object.values(state.sessions)) {
     if (snapshot.navStatus._tag === "Idle") continue;

@@ -3,7 +3,9 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   handoffTargetKey,
   handoffTitle,
+  handoffBrowserTarget,
   hasFileHandoff,
+  purgeThreadHandoffs,
   readThreadHandoffs,
   recordHandoff,
   recordKnownFileHandoff,
@@ -89,6 +91,31 @@ describe("handoff persistence and provenance", () => {
     expect(
       readThreadHandoffs({ ...ref, environmentId: EnvironmentId.make("environment-b") }),
     ).toEqual([]);
+  });
+  it("purges persisted handoffs and browser provenance only for the deleted thread", () => {
+    const siblingThread = { ...ref, threadId: ThreadId.make("thread-a:child") };
+    const siblingEnvironment = {
+      ...ref,
+      environmentId: EnvironmentId.make("environment-b"),
+    };
+    const refs = [ref, siblingThread, siblingEnvironment];
+
+    for (const currentRef of refs) {
+      recordHandoff(currentRef, file);
+      rememberHandoffBrowser(currentRef, "tab", file, "https://example.com/asset");
+    }
+
+    purgeThreadHandoffs(ref);
+
+    expect(readThreadHandoffs(ref)).toEqual([]);
+    expect(handoffBrowserTarget(ref, "tab")).toBeUndefined();
+    for (const currentRef of [siblingThread, siblingEnvironment]) {
+      expect(readThreadHandoffs(currentRef)).toHaveLength(1);
+      expect(handoffBrowserTarget(currentRef, "tab")).toEqual({
+        target: file,
+        url: "https://example.com/asset",
+      });
+    }
   });
   it("does not create entries for an unrecorded globe or provenance alone", () => {
     rememberHandoffBrowser(ref, "tab", file, "https://example.com/asset");

@@ -25,6 +25,7 @@ import {
   refreshArchivedThreadsForEnvironment,
 } from "../lib/archivedThreadsState";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 import { readLocalApi } from "../localApi";
 import {
   readEnvironmentSupportsPinning,
@@ -400,6 +401,7 @@ export function useThreadActions() {
           input: { threadId: target.threadId },
         });
         if (result._tag === "Success") {
+          purgeThreadHandoffs(target);
           refreshArchivedThreadsForEnvironment(target.environmentId);
         }
         return result;
@@ -504,6 +506,7 @@ export function useThreadActions() {
       if (deleteResult._tag === "Failure") {
         return deleteResult;
       }
+      purgeThreadHandoffs(threadRef);
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);

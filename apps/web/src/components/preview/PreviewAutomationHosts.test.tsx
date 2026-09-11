@@ -34,6 +34,8 @@ const mocks = vi.hoisted(() => ({
       (target: { environmentId: EnvironmentId; input: PreviewAutomationResponse }) => Promise<void>
     >(),
   focus: vi.fn(async () => undefined),
+  navigate: vi.fn(async () => undefined),
+  navigationStatus: vi.fn(),
 }));
 
 vi.mock("~/localApi", () => ({
@@ -65,7 +67,9 @@ vi.mock("./previewAutomationHostBudget", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./previewAutomationHostBudget")>()),
   waitForHostReadiness: async () => true,
 }));
-vi.mock("./previewBridge", () => ({ previewBridge: { automation: {} } }));
+vi.mock("./previewBridge", () => ({
+  previewBridge: { automation: { status: mocks.navigationStatus }, navigate: mocks.navigate },
+}));
 
 const environmentId = EnvironmentId.make("automation-environment");
 const threadId = ThreadId.make("automation-thread");
@@ -87,7 +91,11 @@ const snapshot: PreviewSessionSnapshot = {
   profileId: "work",
   updatedAt: "2026-09-05T00:00:00.000Z",
 };
-const emptyList = { sessions: [], serverEpoch: "test-server", revision: 0 };
+const emptyList = {
+  sessions: [] as PreviewSessionSnapshot[],
+  serverEpoch: "test-server",
+  revision: 0,
+};
 const listAtom = Atom.make(AsyncResult.success(emptyList));
 const requestsAtom = Atom.make<AsyncResult.AsyncResult<PreviewAutomationStreamEvent, Error>>(
   AsyncResult.initial(false),
@@ -178,6 +186,29 @@ describe("PreviewAutomationHosts open", () => {
     expect(readThreadHandoffs(threadRef)[0]?.target).toEqual({
       kind: "url",
       url: "https://example.test/handoff",
+    });
+  });
+
+  it("does not record a reused tab destination when native navigation rejects", async () => {
+    await runOpen({ open: true }, "initial-open");
+    mocks.list.mockResolvedValueOnce(AsyncResult.success({ ...emptyList, sessions: [snapshot] }));
+    mocks.navigate.mockRejectedValueOnce(new Error("Native navigation rejected"));
+    const response = await runOpen({ open: true, url: "https://example.test/rejected" });
+    expect(response).toMatchObject({ ok: false });
+    expect(mocks.navigate).toHaveBeenCalledOnce();
+    expect(readThreadHandoffs(threadRef)).toHaveLength(0);
+  });
+
+  it("keeps accepted navigation available to retry when readiness fails", async () => {
+    await runOpen({ open: true }, "initial-open");
+    mocks.list.mockResolvedValueOnce(AsyncResult.success({ ...emptyList, sessions: [snapshot] }));
+    mocks.navigationStatus.mockRejectedValueOnce(new Error("Page load failed"));
+    const response = await runOpen({ open: true, url: "https://example.test/retry" });
+    expect(response).toMatchObject({ ok: false });
+    expect(mocks.navigate).toHaveBeenCalledOnce();
+    expect(readThreadHandoffs(threadRef)[0]?.target).toEqual({
+      kind: "url",
+      url: "https://example.test/retry",
     });
   });
 
