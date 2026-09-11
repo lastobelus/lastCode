@@ -99,6 +99,21 @@ describe("handoff persistence and provenance", () => {
       useHandoffsStore.getState().byThreadKey,
     );
   });
+  it.each([
+    ["localhost:5173/app", "http://localhost:5173/app"],
+    ["127.0.0.1:8080/report.html?q=1#part", "http://127.0.0.1:8080/report.html?q=1#part"],
+    ["example.com/report.html", "https://example.com/report.html"],
+  ])("canonicalizes browser-supported schemeless URL %s", (url, expected) => {
+    const entry = recordHandoff(ref, { kind: "url", url });
+    expect(entry.target).toEqual({ kind: "url", url: expected });
+    expect(new URL(entry.target.kind === "url" ? entry.target.url : "").href).toBe(expected);
+    const saved = JSON.stringify(useHandoffsStore.getState());
+    expect(sanitizeHandoffsState(JSON.parse(saved))).toEqual(
+      useHandoffsStore.getState().byThreadKey,
+    );
+    recordHandoff(ref, { kind: "url", url: expected });
+    expect(readThreadHandoffs(ref)).toHaveLength(1);
+  });
   it("isolates threads and environments", () => {
     recordHandoff(ref, file);
     expect(readThreadHandoffs(ref)).toHaveLength(1);

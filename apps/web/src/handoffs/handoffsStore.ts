@@ -1,6 +1,7 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { ChatFileAttachment, type ScopedThreadRef } from "@t3tools/contracts";
 import { isWindowsAbsolutePath, normalizeProjectPathForComparison } from "@t3tools/shared/path";
+import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -58,7 +59,7 @@ export function resolveHandoffFilePath(path: string, cwd?: string): string | nul
 
 function normalizedUrl(raw: string): string | undefined {
   try {
-    const url = new URL(raw);
+    const url = new URL(normalizePreviewUrl(raw));
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
     url.username = url.password = "";
     return url.href;
