@@ -84,6 +84,21 @@ describe("handoff persistence and provenance", () => {
       unc,
     });
   });
+  it("scrubs URL userinfo before storing and preserves the same target after reload", () => {
+    const entry = recordHandoff(ref, {
+      kind: "url",
+      url: "https://user:password@example.com/report.html?q=1#section",
+    });
+    expect(entry.target).toEqual({
+      kind: "url",
+      url: "https://example.com/report.html?q=1#section",
+    });
+    const saved = JSON.stringify(useHandoffsStore.getState());
+    expect(saved).not.toContain("password");
+    expect(sanitizeHandoffsState(JSON.parse(saved))).toEqual(
+      useHandoffsStore.getState().byThreadKey,
+    );
+  });
   it("isolates threads and environments", () => {
     recordHandoff(ref, file);
     expect(readThreadHandoffs(ref)).toHaveLength(1);

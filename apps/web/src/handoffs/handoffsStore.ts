@@ -113,6 +113,9 @@ export function upsertHandoff(
   target: HandoffTarget,
   options: { label?: string; title?: string; at?: number } = {},
 ): HandoffEntry[] {
+  if ((target.kind === "url" || target.kind === "pull-request") && target.url) {
+    target = { ...target, url: normalizedUrl(target.url) ?? target.url };
+  }
   const id = handoffTargetKey(target);
   const existing = entries.find((entry) => entry.id === id);
   const entry: HandoffEntry = {
