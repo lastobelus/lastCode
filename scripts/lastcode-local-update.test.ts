@@ -54,6 +54,7 @@ function inspectRepository(
   root: string,
   currentVersion: string,
   grouped: boolean,
+  requestCheckpoint = false,
 ): unknown {
   const output = NodeChildProcess.execFileSync(
     process.execPath,
@@ -67,6 +68,7 @@ function inspectRepository(
       "--current-version",
       currentVersion,
       ...(grouped ? ["--release-notes-format", "grouped-v1"] : []),
+      ...(requestCheckpoint ? ["--request-checkpoint"] : []),
     ],
     { encoding: "utf8" },
   );
@@ -645,6 +647,30 @@ describe("lastcode-local-update", () => {
     }
   });
 
+  it("limits checkpoint requests to explicit inspections", () => {
+    const inspection = [
+      "inspect",
+      "--repo",
+      "/repo",
+      "--current-version",
+      "1.2.3-nightly.20260814.1",
+    ];
+    assert.isFalse(parseOptions(inspection).requestCheckpoint);
+    assert.isTrue(parseOptions([...inspection, "--request-checkpoint"]).requestCheckpoint);
+    assert.throws(
+      () =>
+        parseOptions([
+          "build",
+          "--repo",
+          "/repo",
+          "--checkpoint",
+          "lastcode/checkpoint/v1.2.3-nightly.20260814.1",
+          "--request-checkpoint",
+        ]),
+      /only valid for inspect/,
+    );
+  });
+
   it("parses explicit inspect and build inputs", () => {
     assert.deepInclude(
       parseOptions(["inspect", "--repo", "/repo", "--current-version", "1.2.3-nightly.20260814.1"]),
@@ -707,7 +733,8 @@ describe("lastcode-local-update", () => {
       runGit(repo, ["tag", nightly, commit]);
       tagInstallable(repo, checkpointTag, commit);
       runGit(repo, ["tag", "--annotate", buildTag, "-m", "built"]);
-      const inspect = () => inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", true);
+      const inspect = () =>
+        inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", true, true);
       const available = inspect();
       assert.propertyVal(available, "status", "available");
       assert.notProperty(available, "build");

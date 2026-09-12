@@ -9,10 +9,16 @@ import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
-const LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
+import {
+  checkpointServiceRunNowArguments,
+  isDailyCheckpointLaunchAgent,
+  LASTCODE_CHECKPOINT_SERVICE_LABEL,
+  requestCheckpointServiceRunNow,
+} from "./lib/lastcode-checkpoint-service-run-now.mjs";
+
+const LABEL = LASTCODE_CHECKPOINT_SERVICE_LABEL;
 const SCHEDULE_FILE = "checkpoint-schedule.json";
 const SCHEDULE_HELPER_FILE = "lastcode-checkpoint-schedule.mjs";
-const SCHEDULE_REQUEST_FILE = "checkpoint-schedule-run-now.request";
 const SUPERVISOR_FILE = "lastcode-checkpoint-supervisor.mjs";
 
 export type CheckpointSchedule =
@@ -283,7 +289,7 @@ export function nextCheckpointSupervisorConfig(
 }
 
 export function runNowArguments(service: string): ReadonlyArray<string> {
-  return ["kickstart", service];
+  return checkpointServiceRunNowArguments(service);
 }
 
 export function clearNightlyServiceState(logDirectory: string): void {
@@ -307,7 +313,7 @@ export function shouldRunNightlyServiceCommand(
 }
 
 export function isDailyLaunchAgent(plist: string): boolean {
-  return plist.includes(SCHEDULE_HELPER_FILE);
+  return isDailyCheckpointLaunchAgent(plist);
 }
 
 export function shouldDeferAutomaticRunNow(ifInstalled: boolean, plist: string | null): boolean {
@@ -386,7 +392,6 @@ function main(argv: ReadonlyArray<string>): void {
   const plistPath = NodePath.join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
   const supervisorDirectory = NodePath.join(logDirectory, "bin");
   const scheduleHelperPath = NodePath.join(supervisorDirectory, SCHEDULE_HELPER_FILE);
-  const scheduleRequestPath = NodePath.join(logDirectory, SCHEDULE_REQUEST_FILE);
   const scheduleStatePath = NodePath.join(logDirectory, "checkpoint-schedule-state.json");
   const supervisorPath = NodePath.join(supervisorDirectory, SUPERVISOR_FILE);
   const supervisorConfigPath = NodePath.join(logDirectory, "checkpoint-supervisor.json");
@@ -400,18 +405,20 @@ function main(argv: ReadonlyArray<string>): void {
     return;
   }
   if (command === "run-now") {
-    const plistExists = NodeFS.existsSync(plistPath);
-    if (!shouldRequestRunNow(ifInstalled === true, plistExists)) return;
-    const plist = plistExists ? NodeFS.readFileSync(plistPath, "utf8") : null;
-    const dailySchedule = plist !== null && isDailyLaunchAgent(plist);
-    if (shouldDeferAutomaticRunNow(ifInstalled === true, plist)) {
+    const result = requestCheckpointServiceRunNow({
+      homeDirectory: home,
+      uid: getuid(),
+      deferDaily: ifInstalled === true,
+    });
+    if (result.status === "not-installed" && !ifInstalled) {
+      throw new Error("The managed checkpoint service is not installed.");
+    }
+    if (result.status === "deferred") {
       console.log("[lastcode:service] Daily checkpoint schedule retained after merge.");
       return;
     }
-    if (dailySchedule)
-      writeJsonAtomic(scheduleRequestPath, { requestedAt: new Date().toISOString() });
-    run("launchctl", runNowArguments(service));
-    console.log("[lastcode:service] Requested an immediate installable-revision check.");
+    if (result.status === "requested")
+      console.log("[lastcode:service] Requested an immediate installable-revision check.");
     return;
   }
   if (command === "uninstall") {
@@ -422,6 +429,7 @@ function main(argv: ReadonlyArray<string>): void {
       console.log(`[lastcode:service] Disabled plist retained at ${backupPath}.`);
     }
     if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
+    const scheduleRequestPath = NodePath.join(logDirectory, "checkpoint-schedule-run-now.request");
     if (NodeFS.existsSync(scheduleRequestPath)) NodeFS.rmSync(scheduleRequestPath);
     if (NodeFS.existsSync(scheduleStatePath)) NodeFS.rmSync(scheduleStatePath);
     clearNightlyServiceState(logDirectory);
