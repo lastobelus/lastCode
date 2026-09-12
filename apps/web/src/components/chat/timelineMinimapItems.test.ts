@@ -39,6 +39,10 @@ describe("timeline minimap previews", () => {
     ]);
     const items = deriveTimelineMinimapItems(source);
     expect(items).toHaveLength(2);
+    expect(items.map((item) => item.messageId)).toEqual([
+      MessageId.make("message-0"),
+      MessageId.make("message-3"),
+    ]);
     expect(resolveTimelineMinimapPreview(items[0]!)).toEqual({
       ...items[0],
       userText: "Inspect this",

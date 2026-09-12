@@ -38,7 +38,9 @@ import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { cn } from "~/lib/utils";
+import { setMarkdownTaskChecked } from "~/markdownTaskList";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
+import { hasFileHandoff, recordKnownFileHandoff } from "~/handoffs/handoffsStore";
 import { isAbsolutePath, resolvePathLinkTarget } from "~/terminal-links";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -79,11 +81,7 @@ import SourceFilePreview from "./ReadOnlySourcePreview";
 import { resolveCenteredFileLineScrollTop } from "./fileLineReveal";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { projectFileCacheKey, projectFileEditorCacheKey } from "./fileContentRevision";
-import {
-  isMarkdownPreviewFile,
-  setMarkdownTaskChecked,
-  shouldShowFileExplorer,
-} from "./filePreviewMode";
+import { isMarkdownPreviewFile, shouldShowFileExplorer } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
   getOptimisticProjectFileQueryData,
@@ -1062,6 +1060,11 @@ export default function FilePreviewPanel({
         openPreview,
       });
       if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+        if (result._tag === "Success" && hasFileHandoff(threadRef, absolutePath)) {
+          recordKnownFileHandoff(threadRef, absolutePath);
+          // The preview opener owns the tab id; the store association is filled
+          // by the browser opener when a tab is available.
+        }
         return;
       }
       const error = squashAtomCommandFailure(result);

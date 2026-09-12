@@ -21,6 +21,7 @@ import { terminalEnvironment } from "../state/terminal";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsPinning,
+  readEnvironmentSupportsPersistence,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
@@ -40,6 +41,10 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+import { describeHandoff } from "../handoffs/handoffMenu";
+import { useThreadHandoffs } from "../handoffs/handoffsStore";
+import { useOpenHandoff } from "../handoffs/useOpenHandoff";
+import { useRightPanelStore } from "../rightPanelStore";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -88,6 +93,7 @@ export function useThreadActionMenu(input: {
     unsnoozeThread,
     pinThread,
     confirmAndUnpinThread,
+    setThreadPersistence,
     archiveThread,
     deleteThread,
   } = useThreadActions();
@@ -100,6 +106,9 @@ export function useThreadActionMenu(input: {
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+  const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
+  const handoffs = useThreadHandoffs(threadRef);
+  const openHandoff = useOpenHandoff();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({ type: "success", title: "Path copied", description: path });
@@ -135,13 +144,16 @@ export function useThreadActionMenu(input: {
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
+          persistence: readEnvironmentSupportsPersistence(threadRef.environmentId),
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+        const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const items = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
           isPinned: thread.pinnedAt != null,
+          isPersistent: thread.persistent === true,
           isSettled: supports.settlement && thread.settledOverride === "settled",
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
@@ -150,10 +162,21 @@ export function useThreadActionMenu(input: {
           hasRunningAction: thread.actionResume?.outcome === "running",
           supports,
           snoozePresets,
+          handoffs: handoffDescriptors,
+          handoffsOverflow: handoffs.length > handoffDescriptors.length,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
         if (clicked._tag === "Failure" || clicked.value === null) return;
         const action: ThreadActionMenuId = clicked.value;
+        if (action === "handoff-show-all") {
+          useRightPanelStore.getState().open(threadRef, "handoffs");
+          return;
+        }
+        if (action.startsWith("handoff:")) {
+          const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === action);
+          if (entry) await openHandoff(threadRef, entry);
+          return;
+        }
         if (action.startsWith("snooze:")) {
           const preset = snoozePresets.find((candidate) => `snooze:${candidate.id}` === action);
           if (!preset) return;
@@ -241,6 +264,16 @@ export function useThreadActionMenu(input: {
             await reportFailure("Failed to unpin thread", () => confirmAndUnpinThread(threadRef));
             return;
           }
+          case "mark-persistent":
+            await reportFailure("Failed to mark persistent thread", () =>
+              setThreadPersistence(threadRef, true),
+            );
+            return;
+          case "disable-persistence":
+            await reportFailure("Failed to disable persistent thread", () =>
+              setThreadPersistence(threadRef, false),
+            );
+            return;
           case "rename":
             onStartRename();
             return;
@@ -353,15 +386,19 @@ export function useThreadActionMenu(input: {
       copyThreadIdToClipboard,
       deleteThread,
       handleNewThread,
+      handoffs,
+      handoffsMenuLimit,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,
+      openHandoff,
       pinThread,
       projectCwd,
       projectGroupingSettings,
       projects,
       router,
       settleThread,
+      setThreadPersistence,
       snoozeThread,
       threadRef,
       timestampFormat,

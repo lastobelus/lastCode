@@ -1,5 +1,6 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import type { HandoffMenuDescriptor } from "../handoffs/handoffMenu";
 
 /**
  * Ids for the per-thread action menu. Snooze presets are dispatched as
@@ -11,6 +12,8 @@ export type ThreadActionMenuId =
   | "project-settings"
   | "pin"
   | "unpin"
+  | "mark-persistent"
+  | "disable-persistence"
   | "settle"
   | "unsettle"
   | "snooze"
@@ -24,12 +27,17 @@ export type ThreadActionMenuId =
   | "copy-path"
   | "copy-branch"
   | "copy-thread-id"
+  | `handoff:${string}`
+  | "handoff-show-all"
+  | "handoffs-heading"
+  | "handoffs-empty"
   | "archive"
   | "delete";
 
 export interface ThreadActionMenuState {
   readonly branch: string | null;
   readonly isPinned: boolean;
+  readonly isPersistent: boolean;
   readonly isSettled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
@@ -41,9 +49,12 @@ export interface ThreadActionMenuState {
     readonly settlement: boolean;
     readonly snooze: boolean;
     readonly pinning: boolean;
+    readonly persistence: boolean;
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  readonly handoffs?: ReadonlyArray<HandoffMenuDescriptor>;
+  readonly handoffsOverflow?: boolean;
 }
 
 /**
@@ -69,6 +80,21 @@ export function buildThreadActionMenuItems(
           state.isPinned
             ? { id: "unpin" as const, label: "Unpin thread", icon: "pin-off" }
             : { id: "pin" as const, label: "Pin thread", icon: "pin" },
+        ]
+      : []),
+    ...(state.supports.persistence
+      ? [
+          state.isPersistent
+            ? {
+                id: "disable-persistence" as const,
+                label: "Disable persistent thread",
+                icon: "message-square-lock",
+              }
+            : {
+                id: "mark-persistent" as const,
+                label: "Mark as persistent thread",
+                icon: "message-square-lock",
+              },
         ]
       : []),
     // Both lifecycle actions stay available on pinned threads: settling
@@ -126,6 +152,17 @@ export function buildThreadActionMenuItems(
       ],
     },
     { id: "project-settings", label: "Project settings", icon: "settings" },
+    { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
+    ...(state.handoffs?.length
+      ? state.handoffs.map(({ entry, label }) => ({
+          id: `handoff:${entry.id}` as const,
+          label,
+          icon: "external-link",
+        }))
+      : [{ id: "handoffs-empty" as const, label: "No handoffs yet", disabled: true }]),
+    ...(state.handoffsOverflow
+      ? [{ id: "handoff-show-all" as const, label: "Show all…", icon: "list" }]
+      : []),
     // Archive removes the thread from the sidebar while keeping its
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
@@ -133,16 +170,17 @@ export function buildThreadActionMenuItems(
     // styling.
     {
       id: "archive",
-      label: "Archive thread",
+      label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
-      disabled: state.isRunning,
+      disabled: state.isRunning || state.isPersistent,
       separatorBefore: true,
     },
     {
       id: "delete",
-      label: "Delete",
+      label: state.isPersistent ? "Delete (disable persistence first)" : "Delete",
       destructive: true,
       icon: "trash",
+      disabled: state.isPersistent,
     },
   ];
 }

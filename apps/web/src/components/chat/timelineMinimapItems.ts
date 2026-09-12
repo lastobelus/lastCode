@@ -1,7 +1,9 @@
+import type { MessageId } from "@t3tools/contracts";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 
 export interface TimelineMinimapItem {
   readonly id: string;
+  readonly messageId: MessageId;
   readonly rowIndex: number;
   readonly userText: string | null;
   readonly assistantText: string | null;
@@ -20,6 +22,7 @@ export function deriveTimelineMinimapItems(
 
     items.push({
       id: row.id,
+      messageId: row.message.id,
       rowIndex: index,
       userText: row.message.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),

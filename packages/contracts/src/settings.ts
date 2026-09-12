@@ -76,6 +76,13 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_HANDOFFS_MENU_LIMIT = 1;
+export const MAX_HANDOFFS_MENU_LIMIT = 50;
+export const HandoffsMenuLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_HANDOFFS_MENU_LIMIT, maximum: MAX_HANDOFFS_MENU_LIMIT }),
+);
+export type HandoffsMenuLimit = typeof HandoffsMenuLimit.Type;
+export const DEFAULT_HANDOFFS_MENU_LIMIT: HandoffsMenuLimit = 7;
 export const MIN_LEGACY_SIDEBAR_SCALE = 50;
 export const MAX_LEGACY_SIDEBAR_SCALE = 100;
 export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
@@ -115,6 +122,22 @@ export const AppearanceContrast = Schema.Int.check(
 );
 export type AppearanceContrast = typeof AppearanceContrast.Type;
 const DEFAULT_APPEARANCE_CONTRAST: AppearanceContrast = 100;
+export const MIN_SCROLLBAR_WIDTH = 1;
+export const MAX_SCROLLBAR_WIDTH = 12;
+export const ScrollbarWidth = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_WIDTH, maximum: MAX_SCROLLBAR_WIDTH }),
+);
+export type ScrollbarWidth = typeof ScrollbarWidth.Type;
+export const DEFAULT_SCROLLBAR_WIDTH: ScrollbarWidth = 10;
+export const MIN_SCROLLBAR_MARGIN = 0;
+export const MAX_SCROLLBAR_MARGIN = 6;
+export const ScrollbarMargin = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_MARGIN, maximum: MAX_SCROLLBAR_MARGIN }),
+);
+export type ScrollbarMargin = typeof ScrollbarMargin.Type;
+// The inline preview resize handle reaches four pixels into its neighboring
+// pane, so this default keeps the whole scrollbar thumb clear of that target.
+export const DEFAULT_SCROLLBAR_MARGIN: ScrollbarMargin = 4;
 export const MIN_PANEL_ANIMATION_DURATION_MS = 0;
 export const MAX_PANEL_ANIMATION_DURATION_MS = 400;
 export const PanelAnimationDurationMs = Schema.Int.check(
@@ -463,6 +486,13 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  scrollbarWidth: ScrollbarWidth.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
+  ),
+  scrollbarMargin: ScrollbarMargin.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_MARGIN)),
+  ),
   roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
@@ -480,6 +510,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   sidebarThreadPreviewCount: SidebarThreadPreviewCount.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT)),
+  ),
+  handoffsMenuLimit: HandoffsMenuLimit.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFFS_MENU_LIMIT)),
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
@@ -1477,6 +1510,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffFilesCollapsed: Schema.optionalKey(Schema.Boolean),
   compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
   showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
+  handoffsMenuLimit: Schema.optionalKey(HandoffsMenuLimit),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
@@ -1523,6 +1557,9 @@ export const ClientSettingsPatch = Schema.Struct({
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
+  scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
+  scrollbarMargin: Schema.optionalKey(ScrollbarMargin),
   roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
   showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
