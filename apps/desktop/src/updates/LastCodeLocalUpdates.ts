@@ -291,6 +291,7 @@ export class LastCodeLocalUpdates extends Context.Service<
     readonly buildLogPath: string;
     readonly inspect: (
       currentVersion: string,
+      requestCheckpoint?: boolean,
     ) => Effect.Effect<LastCodeLocalUpdateInspection, LastCodeLocalUpdateError>;
     readonly build: (
       checkpointTag: string,
@@ -319,8 +320,17 @@ export function usesDetachedHelperProcessGroup(platform: NodeJS.Platform): boole
   return platform !== "win32";
 }
 
-export function groupedInspectionArgs(currentVersion: string): ReadonlyArray<string> {
-  return ["--current-version", currentVersion, "--release-notes-format", "grouped-v1"];
+export function groupedInspectionArgs(
+  currentVersion: string,
+  requestCheckpoint = false,
+): ReadonlyArray<string> {
+  return [
+    "--current-version",
+    currentVersion,
+    "--release-notes-format",
+    "grouped-v1",
+    ...(requestCheckpoint ? ["--request-checkpoint"] : []),
+  ];
 }
 
 export function terminateHelperProcess(
@@ -640,8 +650,8 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
       environment.platform === "darwin" &&
       environment.runtimeInfo.hostArch === "arm64",
     buildLogPath,
-    inspect: (currentVersion) =>
-      runHelper("inspect", groupedInspectionArgs(currentVersion)).pipe(
+    inspect: (currentVersion, requestCheckpoint) =>
+      runHelper("inspect", groupedInspectionArgs(currentVersion, requestCheckpoint)).pipe(
         Effect.flatMap((result) =>
           Effect.try({
             try: () => decodeInspectionResult(result),

@@ -523,7 +523,8 @@ export const make = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     const checkedAt = yield* currentIsoTimestamp;
     yield* setState(reduceDesktopUpdateStateOnCheckStart(state, checkedAt));
-    return yield* localUpdates.inspect(environment.appVersion).pipe(
+    const requestCheckpoint = reason === "web-ui" || reason === "menu";
+    return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(

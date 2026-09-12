@@ -20,6 +20,80 @@ import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it.effect("requests checkpoints only for explicit local checks", () => {
+    const requests: boolean[] = [];
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.sync(() => {
+          requests.push(requestCheckpoint ?? false);
+          return {
+            schemaVersion: 2 as const,
+            status: "up-to-date" as const,
+            checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+            availableVersion: "1.2.3-nightly.20260814.1089",
+          };
+        }),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.ok(requests.length > 0);
+        assert.isTrue(requests.every((requested) => !requested));
+        requests.length = 0;
+        for (const reason of [
+          "web-ui",
+          "menu",
+          "poll",
+          "startup",
+          "remote-update",
+          "channel-change",
+        ]) {
+          const result = yield* updates.check(reason);
+          assert.isTrue(result.checked);
+        }
+        assert.deepEqual(requests, [true, true, false, false, false, false]);
+        yield* updates.setShowAndInstallLocalNightlies(false);
+        requests.length = 0;
+        yield* updates.check("web-ui");
+        assert.deepEqual(requests, []);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("reports checkpoint request failures as retryable check errors", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        requestCheckpoint
+          ? Effect.fail(
+              new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "inspect",
+                message: "Could not request checkpoint.",
+              }),
+            )
+          : Effect.succeed({
+              schemaVersion: 2,
+              status: "up-to-date",
+              checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+              availableVersion: "1.2.3-nightly.20260814.1089",
+            }),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const result = yield* updates.check("web-ui");
+        assert.equal(result.state.status, "error");
+        assert.equal(result.state.errorContext, "check");
+        assert.include(result.state.message ?? "", "Could not request checkpoint.");
+        const retry = yield* updates.check("poll");
+        assert.notEqual(retry.state.status, "error");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it("maps local sections, unavailable provenance, and overflow summaries", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({

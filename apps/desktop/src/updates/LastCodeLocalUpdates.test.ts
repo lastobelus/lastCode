@@ -39,6 +39,17 @@ describe("LastCodeLocalUpdates", () => {
     ]);
   });
 
+  it("requests a checkpoint only when explicitly asked", () => {
+    assert.deepEqual(groupedInspectionArgs("1.2.3-nightly.4", true), [
+      "--current-version",
+      "1.2.3-nightly.4",
+      "--release-notes-format",
+      "grouped-v1",
+      "--request-checkpoint",
+    ]);
+    assert.notInclude(groupedInspectionArgs("1.2.3-nightly.4"), "--request-checkpoint");
+  });
+
   it("parses the helper's final structured result", () => {
     assert.deepEqual(
       parseHelperResult(
