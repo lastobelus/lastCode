@@ -20,6 +20,38 @@ import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it.effect("keeps an available local build actionable during a menu checkpoint request", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed(
+          requestCheckpoint
+            ? { schemaVersion: 2, status: "checkpoint-requested" }
+            : {
+                schemaVersion: 2,
+                status: "available",
+                checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+                availableVersion: "1.2.4-nightly.20260814.1090",
+                releaseNotes: {
+                  lastCode: { status: "known", items: ["An available change"], omittedItems: 0 },
+                  upstream: { groups: [], omittedGroups: 0 },
+                },
+              },
+        ),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const available = yield* updates.getState;
+        const requested = yield* updates.check("menu");
+        assert.equal(requested.state.status, "available");
+        assert.equal(requested.state.availableVersion, available.availableVersion);
+        assert.deepEqual(requested.state.releaseNotes, available.releaseNotes);
+        assert.include(requested.state.message ?? "", "Checkpoint requested");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
   it.effect("keeps requested checkpoints pending until a later inspection", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
