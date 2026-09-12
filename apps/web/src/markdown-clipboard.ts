@@ -186,6 +186,30 @@ function serializeChildren(node: Node): string {
   return out;
 }
 
+function textOutsideMedia(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (
+    node.nodeType === Node.ELEMENT_NODE &&
+    (node as Element).hasAttribute("data-markdown-copy-media")
+  )
+    return "";
+  if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName === "BR") return "\n";
+  return [...node.childNodes].map(textOutsideMedia).join("");
+}
+
+function hasCompleteMediaSelection(element: Element): boolean {
+  if (
+    element.querySelector("[data-markdown-copy-media-start]") &&
+    element.querySelector("[data-markdown-copy-media-end]")
+  )
+    return true;
+  const fallback = element.querySelector("[data-markdown-copy-media-text]");
+  const fullText = fallback?.getAttribute("data-markdown-copy-media-text");
+  return Boolean(
+    fullText && fallback?.textContent === fullText && element.textContent === fullText,
+  );
+}
+
 function serializeNode(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
     const text = node.textContent ?? "";
@@ -199,8 +223,24 @@ function serializeNode(node: Node): string {
   if (element.hasAttribute("data-markdown-details")) {
     return serializeDetails(element);
   }
+  if (element.hasAttribute("data-markdown-copy-media") && !hasCompleteMediaSelection(element)) {
+    return element.textContent ?? "";
+  }
   const markdownCopy = element.getAttribute("data-markdown-copy");
-  if (markdownCopy !== null) return markdownCopy;
+  if (markdownCopy !== null) {
+    // cloneContents retains metadata on partially selected wrappers. Only use
+    // the authored Markdown when all of the corresponding visible text remains.
+    const fullText = element.getAttribute("data-markdown-copy-text");
+    const imageCount = element.getAttribute("data-markdown-copy-images");
+    const incomplete =
+      (fullText !== null && textOutsideMedia(element) !== fullText) ||
+      (imageCount !== null &&
+        (element.querySelectorAll("[data-markdown-copy-media]").length !== Number(imageCount) ||
+          [...element.querySelectorAll("[data-markdown-copy-media]")].some(
+            (media) => !hasCompleteMediaSelection(media),
+          )));
+    return incomplete ? serializeChildren(element) : markdownCopy;
+  }
   if (isSkippedElement(element)) return "";
 
   const headingLevel = /^H([1-6])$/.exec(element.tagName)?.[1];

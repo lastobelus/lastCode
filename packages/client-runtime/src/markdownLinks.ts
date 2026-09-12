@@ -339,3 +339,71 @@ export function workspaceRelativeFilePath(
   if (!pathForCompare.startsWith(`${rootForCompare}/`)) return null;
   return normalizedPath.slice(normalizedRoot.length + 1);
 }
+
+export function isMarkdownFileLinkLabel(label: string, href: string): boolean {
+  if (!label.trim()) return true;
+  if (label !== label.trim()) return false;
+  const target = parseMarkdownFileLink(href);
+  if (!target) return false;
+  const normalizePath = (path: string) => {
+    const normalized = path
+      .replaceAll("\\", "/")
+      .replace(/^\.\//, "")
+      .replace(/([^/:])\/+$/, "$1");
+    return isWindowsAbsolutePath(target.path) ? normalized.toLowerCase() : normalized;
+  };
+  const targetPath = normalizePath(target.path);
+  const matchesPath = (path: string) => {
+    const normalized = normalizePath(path);
+    return normalized === targetPath || targetPath.endsWith(`/${normalized}`);
+  };
+  const normalizedLabel = label.trim();
+  if (matchesPath(normalizedLabel)) return true;
+  const suffix = normalizedLabel.match(POSITION_SUFFIX_CAPTURE_PATTERN);
+  const anchor = normalizedLabel
+    .slice(normalizedLabel.lastIndexOf("#"))
+    .match(POSITION_HASH_PATTERN);
+  if (
+    [suffix, anchor].some((match) =>
+      match?.slice(1).some((part) => part !== undefined && Number(part) === 0),
+    )
+  ) {
+    return false;
+  }
+  // A delimiter can be part of a decoded filename rather than a URL suffix.
+  const literalPosition = splitFilePathPosition(normalizedLabel);
+  if (matchesPath(literalPosition.path)) {
+    return (
+      (literalPosition.line === undefined || literalPosition.line === target.line) &&
+      (literalPosition.column === undefined || literalPosition.column === target.column)
+    );
+  }
+  const lastHashIndex = normalizedLabel.lastIndexOf("#");
+  const trailingHash = safeDecodeURIComponent(normalizedLabel.slice(lastHashIndex));
+  if (lastHashIndex >= 0 && POSITION_HASH_PATTERN.test(trailingHash)) {
+    const anchoredPosition = splitFilePathPosition(
+      normalizedLabel.slice(0, lastHashIndex),
+      trailingHash,
+    );
+    if (matchesPath(anchoredPosition.path)) {
+      return (
+        anchoredPosition.line === target.line &&
+        (anchoredPosition.column === undefined || anchoredPosition.column === target.column)
+      );
+    }
+  }
+  const hashIndex = normalizedLabel.indexOf("#");
+  if (
+    normalizedLabel.includes("?") ||
+    (hashIndex >= 0 &&
+      !POSITION_HASH_PATTERN.test(safeDecodeURIComponent(normalizedLabel.slice(hashIndex))))
+  ) {
+    return false;
+  }
+  // Angle brackets wrap Markdown destinations, but are literal in rendered labels.
+  if (normalizedLabel.startsWith("<") && normalizedLabel.endsWith(">")) return false;
+  const labelPosition = parseMarkdownFileLink(normalizedLabel) ?? literalPosition;
+  if (labelPosition.line !== undefined && labelPosition.line !== target.line) return false;
+  if (labelPosition.column !== undefined && labelPosition.column !== target.column) return false;
+  return matchesPath(labelPosition.path);
+}
