@@ -115,7 +115,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       downloadCount += 1;
       if (options.localNightliesEnabled) {
         for (const listener of listeners.get("update-downloaded") ?? []) {
-          listener({ version: options.localInspection?.availableVersion });
+          listener({
+            version:
+              options.localInspection?.status === "available"
+                ? options.localInspection.availableVersion
+                : undefined,
+          });
         }
       }
     }).pipe(Effect.andThen(options.downloadUpdate ?? Effect.void)),

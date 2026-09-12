@@ -62,7 +62,18 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   const result = yield* updates.check("menu");
   const updateState = result.state;
 
-  if (updateState.status === "up-to-date") {
+  if (
+    updateState.source === "lastcode-local" &&
+    updateState.status === "idle" &&
+    updateState.message
+  ) {
+    yield* electronDialog.showMessageBox({
+      type: "info",
+      title: "Checkpoint requested",
+      message: updateState.message,
+      buttons: ["OK"],
+    });
+  } else if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: "You're up to date!",

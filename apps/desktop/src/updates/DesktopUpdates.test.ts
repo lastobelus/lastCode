@@ -20,6 +20,34 @@ import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it.effect("keeps requested checkpoints pending until a later inspection", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed(
+          requestCheckpoint
+            ? { schemaVersion: 2, status: "checkpoint-requested" }
+            : {
+                schemaVersion: 2,
+                status: "up-to-date",
+                checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+                availableVersion: "1.2.3-nightly.20260814.1089",
+              },
+        ),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const requested = yield* updates.check("menu");
+        assert.equal(requested.state.status, "idle");
+        assert.include(requested.state.message ?? "", "Checkpoint requested");
+        const inspected = yield* updates.check("poll");
+        assert.equal(inspected.state.status, "up-to-date");
+        assert.isNull(inspected.state.message);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
   it.effect("requests checkpoints only for explicit local checks", () => {
     const requests: boolean[] = [];
     const harness = makeHarness({

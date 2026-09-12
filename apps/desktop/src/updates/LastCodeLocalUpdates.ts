@@ -240,6 +240,10 @@ export type LastCodeLocalUpdateBuild = typeof BuildResult.Type;
 const InspectionResult = Schema.Union([
   Schema.Struct({
     schemaVersion: Schema.Literal(2),
+    status: Schema.Literal("checkpoint-requested"),
+  }),
+  Schema.Struct({
+    schemaVersion: Schema.Literal(2),
     status: Schema.Literal("up-to-date"),
     checkpointTag: Schema.String,
     availableVersion: Schema.String,

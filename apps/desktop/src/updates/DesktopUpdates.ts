@@ -526,6 +526,14 @@ export const make = Effect.gen(function* () {
     const requestCheckpoint = reason === "web-ui" || reason === "menu";
     return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
+        if (inspection.status === "checkpoint-requested") {
+          const pending = reduceDesktopUpdateStateOnNoUpdate(state, checkedAt);
+          return setState({
+            ...pending,
+            status: pending.downloadedVersion ? "downloaded" : "idle",
+            message: "Checkpoint requested. A later update check will pick up the result.",
+          }).pipe(Effect.as(true));
+        }
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(
             Effect.andThen(setState(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt))),
