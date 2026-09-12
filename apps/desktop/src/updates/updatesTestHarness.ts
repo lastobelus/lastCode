@@ -40,9 +40,7 @@ export interface UpdatesHarnessOptions {
   readonly env?: Record<string, string | undefined>;
   readonly localNightliesEnabled?: boolean;
   readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
-  readonly localInspect?: (
-    currentVersion: string,
-  ) => Effect.Effect<LastCodeLocalUpdates.LastCodeLocalUpdateInspection>;
+  readonly localInspect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["inspect"];
   readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
   readonly localBuildEffect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["build"];
   readonly localPrepareInstall?: (
@@ -117,7 +115,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       downloadCount += 1;
       if (options.localNightliesEnabled) {
         for (const listener of listeners.get("update-downloaded") ?? []) {
-          listener({ version: options.localInspection?.availableVersion });
+          listener({
+            version:
+              options.localInspection?.status === "available"
+                ? options.localInspection.availableVersion
+                : undefined,
+          });
         }
       }
     }).pipe(Effect.andThen(options.downloadUpdate ?? Effect.void)),
@@ -268,9 +271,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   const localUpdatesLayer = LastCodeLocalUpdates.layerTest({
     supported: options.localNightliesEnabled ?? false,
     buildLogPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
-    inspect: (currentVersion) =>
+    inspect: (currentVersion, requestCheckpoint) =>
       options.localInspect
-        ? options.localInspect(currentVersion)
+        ? options.localInspect(currentVersion, requestCheckpoint)
         : options.localInspection
           ? Effect.succeed(options.localInspection)
           : Effect.die("unexpected local update inspection"),

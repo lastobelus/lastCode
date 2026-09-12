@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -141,6 +142,7 @@ describe("LastCode userland build command", () => {
       ".lastcode/bin/lastcode-build.mjs",
       ".lastcode/bin/lastcode-local-update.mjs",
       ".lastcode/bin/lib/lastcode-build-progress.ts",
+      ".lastcode/bin/lib/lastcode-checkpoint-service-run-now.mjs",
       ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-build",
       ".local/bin/lastcode-build",
@@ -159,6 +161,7 @@ describe("LastCode userland build command", () => {
           ".lastcode/bin/lastcode-build.mjs",
           ".lastcode/bin/lastcode-local-update.mjs",
           ".lastcode/bin/lib/lastcode-build-progress.ts",
+          ".lastcode/bin/lib/lastcode-checkpoint-service-run-now.mjs",
           ".lastcode/bin/lastcode-lock.mjs",
           ".lastcode/bin/lastcode-build",
         ]) {
@@ -192,7 +195,7 @@ describe("LastCode userland build command", () => {
     }
   });
 
-  it("installs the shared progress model beside the userland command", () => {
+  it("installs shared helper modules beside the userland command", () => {
     const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-assets-"));
     try {
       installCommandAssets("/tmp/lastcode-automation", home);
@@ -207,9 +210,32 @@ describe("LastCode userland build command", () => {
       expect(NodeFS.readFileSync(progressModel, "utf8")).toContain(
         "LastCode managed module: local-build-progress",
       );
+      const installedHelper = NodePath.join(home, ".lastcode", "bin", "lastcode-local-update.mjs");
+      const invocation = NodeChildProcess.spawnSync(process.execPath, [installedHelper], {
+        encoding: "utf8",
+      });
+      expect(invocation.status).toBe(1);
+      expect(invocation.stderr).toContain("Expected 'inspect' or 'build'.");
+      expect(invocation.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
+      const checkpointRunNow = NodePath.join(
+        home,
+        ".lastcode",
+        "bin",
+        "lib",
+        "lastcode-checkpoint-service-run-now.mjs",
+      );
+      expect(NodeFS.readFileSync(checkpointRunNow, "utf8")).toContain(
+        "LastCode managed module: checkpoint-service-run-now",
+      );
       expect(
         NodeFS.readFileSync(NodePath.join(home, ".lastcode", "bin", "lastcode-build.mjs"), "utf8"),
       ).toContain("./lib/lastcode-build-progress.ts");
+      expect(
+        NodeFS.readFileSync(
+          NodePath.join(home, ".lastcode", "bin", "lastcode-local-update.mjs"),
+          "utf8",
+        ),
+      ).toContain("./lib/lastcode-checkpoint-service-run-now.mjs");
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
     }

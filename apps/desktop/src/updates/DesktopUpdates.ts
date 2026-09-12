@@ -523,8 +523,20 @@ export const make = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     const checkedAt = yield* currentIsoTimestamp;
     yield* setState(reduceDesktopUpdateStateOnCheckStart(state, checkedAt));
-    return yield* localUpdates.inspect(environment.appVersion).pipe(
+    const requestCheckpoint = reason === "web-ui" || reason === "menu";
+    return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
+        if (inspection.status === "checkpoint-requested") {
+          return setState({
+            ...state,
+            status: state.status === "up-to-date" ? "idle" : state.status,
+            checkedAt,
+            message:
+              state.status === "error"
+                ? state.message
+                : "Checkpoint requested. A later update check will pick up the result.",
+          }).pipe(Effect.as(true));
+        }
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(
             Effect.andThen(setState(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt))),

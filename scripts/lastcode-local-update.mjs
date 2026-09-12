@@ -11,6 +11,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import { requestCheckpointServiceRunNow } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
@@ -263,9 +265,14 @@ export function parseOptions(argv) {
   let currentVersion;
   let checkpointTag;
   let releaseNotesFormat;
+  let requestCheckpoint = false;
   let home = NodeOS.homedir();
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === "--request-checkpoint") {
+      requestCheckpoint = true;
+      continue;
+    }
     if (
       !["--repo", "--current-version", "--checkpoint", "--home", "--release-notes-format"].includes(
         arg,
@@ -285,13 +292,24 @@ export function parseOptions(argv) {
   if (!repoRoot) throw new Error("Missing --repo.");
   if (command === "inspect" && !currentVersion) throw new Error("Missing --current-version.");
   if (command === "build" && !checkpointTag) throw new Error("Missing --checkpoint.");
+  if (command === "build" && requestCheckpoint) {
+    throw new Error("--request-checkpoint is only valid for inspect.");
+  }
   if (command === "build" && releaseNotesFormat !== undefined) {
     throw new Error("--release-notes-format is only valid for inspect.");
   }
   if (releaseNotesFormat !== undefined && releaseNotesFormat !== GROUPED_RELEASE_NOTES_FORMAT) {
     throw new Error(`Unsupported release notes format '${releaseNotesFormat}'.`);
   }
-  return { command, repoRoot, home, currentVersion, checkpointTag, releaseNotesFormat };
+  return {
+    command,
+    repoRoot,
+    home,
+    currentVersion,
+    checkpointTag,
+    releaseNotesFormat,
+    requestCheckpoint,
+  };
 }
 
 export function resolveExistingBuild({
@@ -631,6 +649,14 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
 function inspect(options) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
+  }
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- This dependency-free helper runs in Electron bundled Node and cannot import workspace services.
+  if (options.requestCheckpoint && process.platform === "darwin") {
+    const request = requestCheckpointServiceRunNow({
+      homeDirectory: options.home,
+      uid: process.getuid(),
+    });
+    if (request.status === "requested") return { schemaVersion: 2, status: "checkpoint-requested" };
   }
   const installableTags = splitLines(
     git(options.repoRoot, [

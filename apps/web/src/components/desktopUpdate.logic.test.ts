@@ -41,6 +41,12 @@ const baseState: DesktopUpdateState = {
 };
 
 describe("desktop update button state", () => {
+  it("shows a pending checkpoint instead of claiming to be up to date", () => {
+    const message = "Checkpoint requested. A later update check will pick up the result.";
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, source: "lastcode-local", message })).toBe(
+      message,
+    );
+  });
   it("shows a download action when an update is available", () => {
     const state: DesktopUpdateState = {
       ...baseState,
