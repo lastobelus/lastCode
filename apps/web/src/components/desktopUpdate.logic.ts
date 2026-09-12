@@ -184,6 +184,7 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
     }
     return state.message ?? "Update failed";
   }
+  if (isLocal && state.status === "idle" && state.message) return state.message;
   return "Up to date";
 }
 

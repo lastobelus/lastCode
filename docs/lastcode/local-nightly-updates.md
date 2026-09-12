@@ -62,7 +62,8 @@ picker.
    when the sidebar update button is clicked. A manual check from the sidebar,
    Settings, or application menu also requests an immediate checkpoint when the
    checkpoint service is installed on this Mac, including on a daily schedule.
-   The service runs in the background; a later update check picks up its result.
+   The app reports that a checkpoint was requested while the service runs in the
+   background; a later update check picks up its result.
    Startup and periodic checks only inspect existing tags. Without the service,
    manual checks continue to inspect existing tags.
 2. If a checkpoint or revision is newer than the installed LastCode version,

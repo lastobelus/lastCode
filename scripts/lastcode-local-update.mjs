@@ -652,7 +652,11 @@ function inspect(options) {
   }
   // oxlint-disable-next-line t3code/no-global-process-runtime -- This dependency-free helper runs in Electron bundled Node and cannot import workspace services.
   if (options.requestCheckpoint && process.platform === "darwin") {
-    requestCheckpointServiceRunNow({ homeDirectory: options.home, uid: process.getuid() });
+    const request = requestCheckpointServiceRunNow({
+      homeDirectory: options.home,
+      uid: process.getuid(),
+    });
+    if (request.status === "requested") return { schemaVersion: 2, status: "checkpoint-requested" };
   }
   const installableTags = splitLines(
     git(options.repoRoot, [
