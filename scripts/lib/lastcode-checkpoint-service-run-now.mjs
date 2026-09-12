@@ -1,3 +1,5 @@
+// LastCode managed module: checkpoint-service-run-now
+
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";

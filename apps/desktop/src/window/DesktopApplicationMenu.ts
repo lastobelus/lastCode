@@ -64,7 +64,7 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
 
   if (
     updateState.source === "lastcode-local" &&
-    updateState.status === "idle" &&
+    updateState.status !== "error" &&
     updateState.message
   ) {
     yield* electronDialog.showMessageBox({

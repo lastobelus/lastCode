@@ -1,3 +1,5 @@
+import type { DesktopUpdateCheckResult } from "@t3tools/contracts";
+import { createInitialDesktopUpdateState } from "../updates/updateMachine.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -51,34 +53,41 @@ const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
   on: () => Effect.void,
 } satisfies ElectronApp.ElectronApp["Service"]);
 
-const electronDialogLayer = Layer.succeed(ElectronDialog.ElectronDialog, {
-  pickFolder: () => Effect.succeed(Option.none()),
-  pickFiles: () => Effect.succeed([]),
-  showMessageBox: () => Effect.succeed({ response: 0, checkboxChecked: false }),
-  showErrorBox: () => Effect.void,
-} satisfies ElectronDialog.ElectronDialog["Service"]);
+const makeElectronDialogLayer = (
+  onMessage?: (options: Electron.MessageBoxOptions) => Effect.Effect<void>,
+) =>
+  Layer.succeed(ElectronDialog.ElectronDialog, {
+    pickFolder: () => Effect.succeed(Option.none()),
+    pickFiles: () => Effect.succeed([]),
+    showMessageBox: (options) =>
+      (onMessage?.(options) ?? Effect.void).pipe(
+        Effect.as({ response: 0, checkboxChecked: false }),
+      ),
+    showErrorBox: () => Effect.void,
+  } satisfies ElectronDialog.ElectronDialog["Service"]);
 
-const desktopUpdatesLayer = Layer.succeed(DesktopUpdates.DesktopUpdates, {
-  getState: Effect.die("unexpected getState"),
-  isActionActive: Effect.succeed(false),
-  isInstallActive: Effect.succeed(false),
-  subscribe: Effect.die("unexpected subscribe"),
-  getLastCodeSettings: Effect.die("unexpected getLastCodeSettings"),
-  setShowAndInstallLocalNightlies: () => Effect.die("unexpected local nightly toggle"),
-  emitState: Effect.void,
-  disabledReason: Effect.succeed(Option.none()),
-  configure: Effect.void,
-  setChannel: () => Effect.die("unexpected setChannel"),
-  check: () => Effect.die("unexpected check"),
-  download: Effect.die("unexpected download"),
-  install: Effect.die("unexpected install"),
-  installPrepared: () => Effect.die("unexpected installPrepared"),
-} satisfies DesktopUpdates.DesktopUpdates["Service"]);
+const makeDesktopUpdatesLayer = (checkResult?: DesktopUpdateCheckResult) =>
+  Layer.succeed(DesktopUpdates.DesktopUpdates, {
+    getState: Effect.die("unexpected getState"),
+    isActionActive: Effect.succeed(false),
+    isInstallActive: Effect.succeed(false),
+    subscribe: Effect.die("unexpected subscribe"),
+    getLastCodeSettings: Effect.die("unexpected getLastCodeSettings"),
+    setShowAndInstallLocalNightlies: () => Effect.die("unexpected local nightly toggle"),
+    emitState: Effect.void,
+    disabledReason: Effect.succeed(Option.none()),
+    configure: Effect.void,
+    setChannel: () => Effect.die("unexpected setChannel"),
+    check: () => (checkResult ? Effect.succeed(checkResult) : Effect.die("unexpected check")),
+    download: Effect.die("unexpected download"),
+    install: Effect.die("unexpected install"),
+    installPrepared: () => Effect.die("unexpected installPrepared"),
+  } satisfies DesktopUpdates.DesktopUpdates["Service"]);
 
 const makeDesktopWindowLayer = (selectedAction: Deferred.Deferred<string>) =>
   Layer.succeed(DesktopWindow.DesktopWindow, {
     createMain: Effect.die("unexpected createMain"),
-    ensureMain: Effect.die("unexpected ensureMain"),
+    ensureMain: Effect.succeed({} as Electron.BrowserWindow),
     revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
     activate: Effect.void,
     createMainIfBackendReady: Effect.void,
@@ -111,6 +120,8 @@ const makeElectronMenuLayer = (
 const configureMenu = (
   selectedAction: Deferred.Deferred<string>,
   applicationMenuTemplate: Deferred.Deferred<readonly Electron.MenuItemConstructorOptions[]>,
+  checkResult?: DesktopUpdateCheckResult,
+  onMessage?: (options: Electron.MessageBoxOptions) => Effect.Effect<void>,
 ) =>
   Effect.gen(function* () {
     const menu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
@@ -120,8 +131,8 @@ const configureMenu = (
       DesktopApplicationMenu.layer.pipe(
         Layer.provideMerge(makeElectronMenuLayer(applicationMenuTemplate)),
         Layer.provideMerge(makeDesktopWindowLayer(selectedAction)),
-        Layer.provideMerge(desktopUpdatesLayer),
-        Layer.provideMerge(electronDialogLayer),
+        Layer.provideMerge(makeDesktopUpdatesLayer(checkResult)),
+        Layer.provideMerge(makeElectronDialogLayer(onMessage)),
         Layer.provideMerge(electronAppLayer),
         Layer.provideMerge(
           DesktopEnvironment.layer(environmentInput).pipe(
@@ -133,6 +144,45 @@ const configureMenu = (
   );
 
 describe("DesktopApplicationMenu", () => {
+  for (const status of ["idle", "available", "downloaded"] as const) {
+    it.effect(`confirms a checkpoint request while preserving ${status} updates`, () =>
+      Effect.gen(function* () {
+        const selectedAction = yield* Deferred.make<string>();
+        const templateReady =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+        const messageReady = yield* Deferred.make<Electron.MessageBoxOptions>();
+        const state = {
+          ...createInitialDesktopUpdateState(
+            "1.2.3",
+            {
+              hostArch: "arm64",
+              appArch: "arm64",
+              runningUnderArm64Translation: false,
+            },
+            "nightly",
+          ),
+          enabled: true,
+          source: "lastcode-local" as const,
+          status,
+          message: "Checkpoint requested. A later update check will pick up the result.",
+        };
+        yield* configureMenu(selectedAction, templateReady, { checked: true, state }, (options) =>
+          Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
+        );
+        const template = yield* Deferred.await(templateReady);
+        const check = template
+          .flatMap((item) => (Array.isArray(item.submenu) ? item.submenu : []))
+          .find((item) => item.label === "Check for Updates...");
+        assert.isDefined(check);
+        assert.isFunction(check.click);
+        check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+        const dialog = yield* Deferred.await(messageReady);
+        assert.equal(dialog.title, "Checkpoint requested");
+        assert.equal(dialog.message, state.message);
+      }),
+    );
+  }
+
   it.effect("installs the native menu and routes Settings through DesktopWindow", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
