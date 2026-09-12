@@ -239,7 +239,9 @@ function SidebarUpdateControl() {
       : "Update available"
     : showCheckIcon
       ? "Checking for updates…"
-      : "Check for updates";
+      : state?.source === "lastcode-local" && state.status === "idle" && state.message
+        ? getDesktopUpdateButtonTooltip(state)
+        : "Check for updates";
   const disabled = showCheckIcon
     ? true
     : showUpdateDetails
