@@ -527,15 +527,14 @@ export const make = Effect.gen(function* () {
     return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
         if (inspection.status === "checkpoint-requested") {
-          const pending =
-            state.status === "available"
-              ? { ...state, checkedAt }
-              : reduceDesktopUpdateStateOnNoUpdate(state, checkedAt);
           return setState({
-            ...pending,
-            status:
-              pending.status === "available" || pending.downloadedVersion ? pending.status : "idle",
-            message: "Checkpoint requested. A later update check will pick up the result.",
+            ...state,
+            status: state.status === "up-to-date" ? "idle" : state.status,
+            checkedAt,
+            message:
+              state.status === "error"
+                ? state.message
+                : "Checkpoint requested. A later update check will pick up the result.",
           }).pipe(Effect.as(true));
         }
         if (inspection.status === "up-to-date") {

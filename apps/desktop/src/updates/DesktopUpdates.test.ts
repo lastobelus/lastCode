@@ -480,16 +480,21 @@ describe("DesktopUpdates", () => {
     let buildAttempts = 0;
     const harness = makeHarness({
       localNightliesEnabled: true,
-      localInspection: {
-        schemaVersion: 2,
-        status: "available",
-        checkpointTag,
-        availableVersion: targetVersion,
-        releaseNotes: {
-          lastCode: { status: "known", items: [], omittedItems: 0 },
-          upstream: { groups: [], omittedGroups: 0 },
-        },
-      },
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed(
+          requestCheckpoint
+            ? { schemaVersion: 2, status: "checkpoint-requested" }
+            : {
+                schemaVersion: 2,
+                status: "available",
+                checkpointTag,
+                availableVersion: targetVersion,
+                releaseNotes: {
+                  lastCode: { status: "known", items: [], omittedItems: 0 },
+                  upstream: { groups: [], omittedGroups: 0 },
+                },
+              },
+        ),
       localBuildEffect: (_checkpointTag, onProgress) =>
         Effect.gen(function* () {
           buildAttempts += 1;
@@ -528,6 +533,9 @@ describe("DesktopUpdates", () => {
         assert.equal(failed.message, buildError);
         assert.equal(failed.localBuildProgress?.phase, "Building DMG");
         assert.equal(failed.localBuildFailure?.errorKind, "packaging");
+
+        const requested = yield* updates.check("menu");
+        assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
 
         const retry = yield* updates.download;
         assert.isTrue(retry.accepted);
