@@ -1,0 +1,197 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import { describe, expect, it } from "vite-plus/test";
+import { parse } from "yaml";
+
+const workflow = NodeFS.readFileSync(
+  NodePath.resolve(import.meta.dirname, "../.github/workflows/ci.yml"),
+  "utf8",
+);
+
+const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+
+const standardHostedRunners = new Set(["ubuntu-24.04", "macos-26"]);
+
+const hasNonstandardRunnerConfiguration = (source: string): boolean => {
+  const document: unknown = parse(source);
+  const jobs = asRecord(asRecord(document)?.jobs);
+  if (jobs === undefined) return true;
+
+  for (const value of Object.values(jobs)) {
+    const job = asRecord(value);
+    if (job === undefined) return true;
+    const runsOn = job["runs-on"];
+    const runners = typeof runsOn === "string" ? [runsOn] : Array.isArray(runsOn) ? runsOn : [];
+    if (runners.length === 0 || runners.some((runner) => !standardHostedRunners.has(runner)))
+      return true;
+  }
+  return false;
+};
+
+const gateBlock = /^  ci_gate:\n(?<body>[\s\S]*)$/mu.exec(workflow)?.groups?.body;
+if (!gateBlock) throw new Error("CI workflow is missing the ci_gate job.");
+
+const checkBlock = /^  check:\n(?<body>[\s\S]*?)(?=^  \S)/mu.exec(workflow)?.groups?.body;
+if (!checkBlock) throw new Error("CI workflow is missing the check job.");
+
+const gateScriptBody = /        run: \|\n(?<body>(?:          .*\n?)*)$/u.exec(gateBlock)?.groups
+  ?.body;
+if (!gateScriptBody) throw new Error("CI workflow is missing the CI Gate decision script.");
+
+const gateScript = gateScriptBody
+  .split("\n")
+  .map((line) => line.replace(/^ {10}/u, ""))
+  .join("\n");
+
+const successfulGateEnvironment = {
+  CHECK_RESULT: "success",
+  TEST_RESULT: "success",
+  TEST_SERVER_RESULT: "success",
+  RUST_RESULT: "success",
+  MOBILE_CHANGES_RESULT: "success",
+  MOBILE_CHANGED: "false",
+  MOBILE_STATIC_RESULT: "skipped",
+  RELEASE_SMOKE_RESULT: "success",
+};
+
+const runGate = (overrides: Readonly<Record<string, string>> = {}): number | null =>
+  NodeChildProcess.spawnSync("bash", ["-c", gateScript], {
+    env: { ...process.env, ...successfulGateEnvironment, ...overrides },
+    stdio: "ignore",
+  }).status;
+
+describe("LastCode GitHub CI workflow", () => {
+  it("targets the downstream branch on standard GitHub runners", () => {
+    expect(workflow).toContain(
+      'run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"',
+    );
+    expect(workflow).toContain("pull_request:\n    branches:\n      - lastcode/main");
+    expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
+    expect(workflow).toContain("permissions:\n  contents: read");
+    expect(checkBlock).toContain(
+      "# Carry validation inspects every commit in the exact PR range.\n          fetch-depth: 0",
+    );
+    expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
+    expect(checkBlock).toContain("- name: Validate carry group assignments");
+    expect(checkBlock).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(checkBlock).toContain("HEAD_SHA: ${{ github.event.pull_request.head.sha }}");
+    expect(checkBlock).toContain("PR_NUMBER: ${{ github.event.pull_request.number }}");
+    expect(checkBlock).toContain("run: node scripts/lastcode-carry-ci.ts");
+    expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
+    expect(workflow).toContain("runs-on: ubuntu-24.04");
+    expect(workflow).toContain("runs-on: macos-26");
+  });
+
+  it("rejects nonstandard and dynamic runners without matching comments or mirror files", () => {
+    expect(
+      hasNonstandardRunnerConfiguration(
+        'jobs:\n  test:\n    runs-on: "blacksmith-8vcpu-ubuntu-2404"',
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix['runner'] }}\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: blacksmith-8vcpu-ubuntu-2404 }",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: { group: hosted-runners, labels: '${{ matrix.runner }}' }\n    strategy:\n      matrix:\n        runner: [blacksmith-8vcpu-ubuntu-2404]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.target.runner }}\n    strategy:\n      matrix:\n        target: [{ runner: blacksmith-8vcpu-ubuntu-2404 }]",
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    name: don't migrate runners # blacksmith-8vcpu-ubuntu-2404\n    runs-on: ubuntu-24.04",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        'jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        include: [{ note: "keep\n          # temporarily", runner: blacksmith-8vcpu-ubuntu-2404 }]',
+      ),
+    ).toBe(true);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cat /etc/apt/blacksmith-cache.txt",
+      ),
+    ).toBe(false);
+    expect(
+      hasNonstandardRunnerConfiguration(
+        "jobs:\n  test:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}",
+      ),
+    ).toBe(true);
+  });
+
+  it("makes the stable gate depend on every validation job", () => {
+    for (const job of [
+      "check",
+      "test",
+      "test_server",
+      "rust",
+      "mobile_native_changes",
+      "mobile_native_static_analysis",
+      "release_smoke",
+    ]) {
+      expect(gateBlock).toContain(`      - ${job}`);
+    }
+    expect(gateBlock).toContain("name: CI Gate");
+    expect(gateBlock).toContain("if: ${{ always() }}");
+  });
+
+  it("passes when mandatory jobs succeed and irrelevant mobile analysis is skipped", () => {
+    expect(runGate()).toBe(0);
+  });
+
+  it("passes when required mobile analysis succeeds", () => {
+    expect(runGate({ MOBILE_CHANGED: "true", MOBILE_STATIC_RESULT: "success" })).toBe(0);
+  });
+
+  it("fails closed for every unsuccessful mandatory result", () => {
+    for (const variable of [
+      "CHECK_RESULT",
+      "TEST_RESULT",
+      "TEST_SERVER_RESULT",
+      "RUST_RESULT",
+      "MOBILE_CHANGES_RESULT",
+      "RELEASE_SMOKE_RESULT",
+    ]) {
+      expect(runGate({ [variable]: "failure" })).not.toBe(0);
+      expect(runGate({ [variable]: "cancelled" })).not.toBe(0);
+      expect(runGate({ [variable]: "skipped" })).not.toBe(0);
+    }
+  });
+
+  it("accepts a skipped mobile job only after an explicit no-change result", () => {
+    expect(runGate({ MOBILE_CHANGED: "", MOBILE_STATIC_RESULT: "skipped" })).not.toBe(0);
+    expect(runGate({ MOBILE_CHANGED: "true", MOBILE_STATIC_RESULT: "skipped" })).not.toBe(0);
+    expect(runGate({ MOBILE_CHANGED: "false", MOBILE_STATIC_RESULT: "success" })).not.toBe(0);
+  });
+});
