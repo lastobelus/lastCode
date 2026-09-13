@@ -183,6 +183,10 @@ share** and **Open in file viewer**. Pictures, videos and PDFs keep their native
 other document formats such as Word or Pages open in the device's own viewer when it has one.
 If nothing on the device can show a format, save or share it to open it elsewhere.
 
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
+
 ## Images and videos in messages
 
 Select an image or video attachment or link to preview it. Playback support depends

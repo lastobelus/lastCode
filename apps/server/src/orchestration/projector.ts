@@ -1,4 +1,5 @@
 import type {
+  MessageId,
   OrchestrationEvent,
   OrchestrationProject,
   OrchestrationReadModel,
@@ -31,7 +32,10 @@ import {
   ProjectDeletedPayload,
   ProjectMetaUpdatedPayload,
   ThreadActivityAppendedPayload,
+  ThreadAttentionClearedPayload,
+  ThreadAttentionSetPayload,
   ThreadArchivedPayload,
+  ThreadPersistenceChangedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadWorktreeCleanupUpdatedPayload,
@@ -45,6 +49,7 @@ import {
   ThreadPullRequestLinkedPayload,
   ThreadPullRequestSyncedPayload,
   ThreadPullRequestUnlinkedPayload,
+  ThreadAnnotationChangedPayload,
   ThreadSnoozedPayload,
   ThreadUnpinnedPayload,
   ThreadUnarchivedPayload,
@@ -271,6 +276,17 @@ function retainThreadMessagesAfterRevert(
   return messages.filter((message) => retainedMessageIds.has(message.id));
 }
 
+function latestUserMessageId(messages: ReadonlyArray<OrchestrationMessage>): MessageId | null {
+  return (
+    messages
+      .filter((message) => message.role === "user")
+      .toSorted(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+      )[0]?.id ?? null
+  );
+}
+
 function retainThreadActivitiesAfterRevert(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
   retainedTurnIds: ReadonlySet<string>,
@@ -436,7 +452,10 @@ export function projectEvent(
             activeOrderKey: null,
             snoozedUntil: null,
             snoozedAt: null,
+            persistent: false,
+            annotation: null,
             worktreeCleanup: null,
+            attention: null,
             deletedAt: null,
             messages: [],
             activities: [],
@@ -503,6 +522,27 @@ export function projectEvent(
             archivedAt: null,
             updatedAt: payload.updatedAt,
           }),
+        })),
+      );
+
+    case "thread.persistence-changed":
+      return decodeForEvent(
+        ThreadPersistenceChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: nextBase.threads.map((thread) =>
+            thread.id === payload.threadId || thread.id === payload.replacedThreadId
+              ? {
+                  ...thread,
+                  persistent: thread.id === payload.persistentThreadId,
+                  updatedAt: payload.updatedAt,
+                }
+              : thread,
+          ),
         })),
       );
 
@@ -598,6 +638,50 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             pinOrderKey: payload.orderKey,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+      return decodeForEvent(
+        ThreadAnnotationChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            annotation: payload.annotation,
+          }),
+        })),
+      );
+
+    case "thread.attention-set":
+      return decodeForEvent(ThreadAttentionSetPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            attention: payload.attention,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.attention-cleared":
+      return decodeForEvent(
+        ThreadAttentionClearedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            attention: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -778,6 +862,9 @@ export function projectEvent(
             text: payload.text,
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
             ...(payload.context !== undefined ? { context: payload.context } : {}),
+            ...(payload.sourceThreadId !== undefined
+              ? { sourceThreadId: payload.sourceThreadId }
+              : {}),
             turnId: payload.turnId,
             streaming: payload.streaming,
             createdAt: payload.createdAt,
@@ -815,6 +902,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             messages: cappedMessages,
+            latestUserMessageId: latestUserMessageId(cappedMessages),
             updatedAt: event.occurredAt,
           }),
         };
@@ -1036,6 +1124,7 @@ export function projectEvent(
             threads: updateThread(nextBase.threads, payload.threadId, {
               checkpoints,
               messages,
+              latestUserMessageId: latestUserMessageId(messages),
               proposedPlans,
               activities,
               latestTurn,

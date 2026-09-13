@@ -123,6 +123,7 @@ interface MakeInstanceInput {
   readonly backendOutputLog?: Partial<DesktopObservability.DesktopBackendOutputLogShape>;
   readonly onReady?: Effect.Effect<void>;
   readonly onShutdown?: Effect.Effect<void>;
+  readonly onStartupFailure?: (reason: string) => Effect.Effect<void>;
   readonly onPreflightFailed?: (
     failure: DesktopBackendManager.PreflightFailure,
   ) => Effect.Effect<boolean>;
@@ -186,6 +187,7 @@ function makeTestInstance(input: MakeInstanceInput) {
     configResolve: input.configResolve ?? Effect.succeed(input.config ?? baseConfig),
     ...(input.onReady ? { onReady: () => input.onReady! } : {}),
     ...(input.onShutdown ? { onShutdown: () => input.onShutdown! } : {}),
+    ...(input.onStartupFailure ? { onStartupFailure: input.onStartupFailure } : {}),
     ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
   });
 
@@ -654,6 +656,46 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
+  it.effect(
+    "does not report startup failure when a non-ready backend is deliberately stopped",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          const exited = yield* Deferred.make<void>();
+          const notifications: string[] = [];
+          const instance = yield* makeTestInstance({
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.gen(function* () {
+                  yield* Effect.addFinalizer(() =>
+                    Deferred.succeed(exited, void 0).pipe(Effect.asVoid),
+                  );
+                  yield* Deferred.succeed(started, void 0);
+                  return makeProcess({
+                    exitCode: Deferred.await(exited).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                    kill: () => Deferred.succeed(exited, void 0).pipe(Effect.asVoid),
+                  });
+                }),
+              ),
+            ),
+            httpClientLayer: httpClientLayer(() => Effect.never),
+            onStartupFailure: (reason) =>
+              Effect.sync(() => {
+                notifications.push(reason);
+              }),
+          });
+          yield* instance.start;
+          yield* Deferred.await(started);
+          yield* instance.stop();
+          assert.deepEqual(notifications, []);
+        }),
+      ),
+  );
+
   it.effect("retries HTTP readiness before reporting the backend ready", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -661,6 +703,7 @@ describe("DesktopBackendManager", () => {
         const prunedRuntimes: Array<[string | null, string]> = [];
         const statuses = [503, 200];
         let readyCount = 0;
+        const startupFailures: string[] = [];
         const firstRequest = yield* Deferred.make<void>();
         const backendReady = yield* Deferred.make<void>();
         const processExit = yield* Deferred.make<void>();
@@ -682,6 +725,10 @@ describe("DesktopBackendManager", () => {
 
         const instance = yield* makeTestInstance({
           spawnerLayer,
+          onStartupFailure: (reason) =>
+            Effect.sync(() => {
+              startupFailures.push(reason);
+            }),
           config: {
             ...baseConfig,
             runningDistro: "Ubuntu",
@@ -721,6 +768,8 @@ describe("DesktopBackendManager", () => {
         yield* Deferred.succeed(processExit, void 0);
         yield* Queue.take(exited);
 
+        yield* TestClock.adjust(Duration.millis(1));
+        assert.deepEqual(startupFailures, []);
         assert.equal(readyCount, 1);
         assert.deepEqual(prunedRuntimes, [["Ubuntu", "1.2.3-x64"]]);
         assert.deepEqual(requestUrls, [
@@ -1159,51 +1208,65 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
-  it.effect("restarts an unexpectedly exited backend with the Effect clock", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const starts = yield* Queue.unbounded<number>();
-        const failures = yield* Queue.unbounded<string>();
-        let startCount = 0;
+  it.effect(
+    "reports the first early exit after saving diagnostics and deduplicates restart failures",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const starts = yield* Queue.unbounded<number>();
+          const failures = yield* Queue.unbounded<string>();
+          let startCount = 0;
+          const notifications: string[] = [];
+          let persisted = false;
 
-        const spawnerLayer = Layer.succeed(
-          ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make(() =>
-            Effect.sync(() => {
-              startCount += 1;
-              return makeProcess({
-                exitCode: Queue.offer(starts, startCount).pipe(
-                  Effect.as(ChildProcessSpawner.ExitCode(1)),
-                ),
-              });
-            }),
-          ),
-        );
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.sync(() => {
+                startCount += 1;
+                return makeProcess({
+                  exitCode: Queue.offer(starts, startCount).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(1)),
+                  ),
+                });
+              }),
+            ),
+          );
 
-        const instance = yield* makeTestInstance({
-          spawnerLayer,
-          httpClientLayer: httpClientLayer(() => Effect.never),
-          backendOutputLog: {
-            persistFailure: ({ details }) => Queue.offer(failures, details).pipe(Effect.asVoid),
-          },
-        });
+          const instance = yield* makeTestInstance({
+            spawnerLayer,
+            httpClientLayer: httpClientLayer(() => Effect.never),
+            onStartupFailure: (reason) =>
+              Effect.sync(() => {
+                assert.isTrue(persisted);
+                notifications.push(reason);
+              }),
+            backendOutputLog: {
+              persistFailure: ({ details }) =>
+                Effect.sync(() => {
+                  persisted = true;
+                }).pipe(Effect.andThen(Queue.offer(failures, details)), Effect.asVoid),
+            },
+          });
 
-        yield* instance.start;
+          yield* instance.start;
 
-        assert.equal(yield* Queue.take(starts), 1);
-        assert.equal(yield* Queue.take(failures), "pid=123 code=1");
+          assert.equal(yield* Queue.take(starts), 1);
+          assert.equal(yield* Queue.take(failures), "pid=123 code=1");
 
-        yield* TestClock.adjust(Duration.millis(499));
-        assert.equal(yield* Queue.size(starts), 0);
-        yield* TestClock.adjust(Duration.millis(1));
-        assert.equal(yield* Queue.take(starts), 2);
+          yield* TestClock.adjust(Duration.millis(499));
+          assert.equal(yield* Queue.size(starts), 0);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.equal(yield* Queue.take(starts), 2);
 
-        yield* TestClock.adjust(Duration.millis(999));
-        assert.equal(yield* Queue.size(starts), 0);
-        yield* TestClock.adjust(Duration.millis(1));
-        assert.equal(yield* Queue.take(starts), 3);
-      }).pipe(Effect.provide(TestClock.layer())),
-    ),
+          yield* TestClock.adjust(Duration.millis(999));
+          assert.equal(yield* Queue.size(starts), 0);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.equal(yield* Queue.take(starts), 3);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.deepEqual(notifications, ["code=1"]);
+        }).pipe(Effect.provide(TestClock.layer())),
+      ),
   );
 
   it.effect("does not notify shutdown when a scheduled restart starts from non-ready state", () =>

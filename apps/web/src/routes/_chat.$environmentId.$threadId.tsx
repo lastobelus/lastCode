@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 import ChatView from "../components/ChatView";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
@@ -57,6 +58,11 @@ function ChatThreadRouteView() {
   });
   const serverThreadStarted = threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
+
+  useEffect(() => {
+    // Only the detail stream confirms deletion; shell removal can mean archive.
+    if (threadRef && serverThreadStatus === "deleted") purgeThreadHandoffs(threadRef);
+  }, [serverThreadStatus, threadRef]);
 
   useEffect(() => {
     if (!threadRef || !bootstrapComplete) {

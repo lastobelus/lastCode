@@ -42,3 +42,32 @@ it.layer(NodeSqliteClient.layerMemory())("049_ProjectionThreadsActiveOrderKey", 
     }),
   );
 });
+
+const upgradeLayer = it.layer(NodeSqliteClient.layerMemory());
+
+upgradeLayer("049_ProjectionThreadsActiveOrderKey upstream upgrade", (it) => {
+  it.effect("upgrades an upstream database whose migration ledger ends at 47", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 47 });
+
+      const before = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_threads)
+      `;
+      assert.isFalse(before.some((column) => column.name === "branch_pull_request_json"));
+      assert.isFalse(before.some((column) => column.name === "active_order_key"));
+
+      const executed = yield* runMigrations({ toMigrationInclusive: 49 });
+      assert.deepEqual(executed, [
+        [48, "ProjectionThreadBranchPullRequest"],
+        [49, "ProjectionThreadsActiveOrderKey"],
+      ]);
+
+      const after = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_threads)
+      `;
+      assert.equal(after.filter((column) => column.name === "branch_pull_request_json").length, 1);
+      assert.equal(after.filter((column) => column.name === "active_order_key").length, 1);
+    }),
+  );
+});
