@@ -143,8 +143,9 @@ Include:
 - focused and integrated validation; and
 - durable GitHub-hosted visual evidence for UI changes.
 
-Before merge, refresh the PR snapshot and require the same exact head across the
-clean Codex result, zero unresolved threads, full-CI stamp, and merge command.
+Before merge, refresh the PR snapshot and require the same exact head and base
+across the clean Codex result, zero unresolved threads, successful GitHub CI
+run, aggregate `CI Gate`, and guarded merge command.
 
 After a squash merge, verify stable patch equivalence:
 

@@ -116,6 +116,8 @@ export default function ProjectScriptsControl({
       keybinding: null,
       previewUrl: fileScript.previewUrl ?? null,
       autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
+      // Checked-in Actions are never silently granted agent execution.
+      allowAgentResume: false,
     };
     const result = await onAddScript(payload);
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
