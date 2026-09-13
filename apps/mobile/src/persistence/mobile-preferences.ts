@@ -46,6 +46,8 @@ export interface Preferences {
   /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
+  /** Device-local counterpart of web's `roundedProjectIcons` appearance preference. */
+  readonly roundedProjectIcons?: boolean;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -106,6 +108,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     planModeEnabled?: boolean;
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
+    roundedProjectIcons?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -181,6 +184,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
+  }
+  if (typeof parsed.roundedProjectIcons === "boolean") {
+    preferences.roundedProjectIcons = parsed.roundedProjectIcons;
   }
   return preferences;
 }
