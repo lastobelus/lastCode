@@ -111,13 +111,13 @@ export class TailscaleCommandTimeoutError extends Schema.TaggedError<TailscaleCo
   }
 }
 
-export const TailscaleCommandError = Schema.Union([
+const TailscaleCommandError = Schema.Union([
   TailscaleCommandSpawnError,
   TailscaleCommandOutputError,
   TailscaleCommandExitError,
   TailscaleCommandTimeoutError,
 ]);
-export type TailscaleCommandError = typeof TailscaleCommandError.Type;
+type TailscaleCommandError = typeof TailscaleCommandError.Type;
 
 export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatusParseError>()(
   "TailscaleStatusParseError",

@@ -4,7 +4,7 @@ LastCode is a personal downstream of T3 Code that rebases its complete fork-only
 [downstream carry set](glossary.md#downstream-carry-set) onto upstream nightly releases. Tracking an upstream nightly and
 building an application are deliberately separate operations: every nightly can
 be checkpointed, merged LastCode work can become an ordered revision, and only
-selected checkpoints need full local CI and a build.
+selected installable tags need full local CI and a build.
 
 The workflow is described in terms of independent capabilities: GUI/controller
 nodes, server nodes, architecture-specific DMG builders, artifact consumers,
@@ -30,6 +30,12 @@ directories.
 - [Contribution and fork conventions](fork-conventions.md): the two workstreams,
   contribution bases, paired upstream/LastCode changes, remotes, branches, and
   evaluation tags.
+- [Local nightly updates](local-nightly-updates.md): the opt-in in-app
+  checkpoint build, staging, installation, safety boundaries, and logs.
+- [Packaged server runtime foundation](packaged-server-runtime.md): immutable
+  LastCode runtime validation and the headless LaunchAgent activation boundary.
+- [Remote update activation helper](update-activation-helper.md): the dormant,
+  one-owner crash-safe app, plist, and database selection transaction.
 
 ## Command Summary
 
@@ -55,10 +61,11 @@ lastcode-checkpoints
 lastcode-checkpoints -n 20
 lastcode-checkpoints --verbose
 
-# Validate and build one explicit checkpoint.
+# Validate and build one explicit checkpoint or LastCode revision.
 pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 pnpm run lastcode:build:mac:arm64 -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-None of the checkpoint commands builds an application. No build is uploaded or
-published unless a separate explicit release operation is added later.
+None of the checkpoint commands builds an application. An opted-in packaged
+desktop app can build a selected checkpoint or LastCode revision locally from
+its sidebar update button; no build is uploaded or published.

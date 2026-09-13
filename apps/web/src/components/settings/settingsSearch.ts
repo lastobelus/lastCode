@@ -18,6 +18,7 @@ export type SettingsPath =
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/lastcode"
   | "/settings/archived";
 
 /**
@@ -81,6 +82,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
+  "/settings/lastcode": "LastCode",
   "/settings/archived": "Archive",
 };
 
@@ -711,6 +713,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "GitHub sharing",
     to: "/settings/connections",
     searchTerms: ["pull request trusted environments shared credentials permissions read actions"],
+  },
+  {
+    id: "local-nightlies",
+    title: "Show and install local nightlies",
+    to: "/settings/lastcode",
   },
   {
     id: "archive",
