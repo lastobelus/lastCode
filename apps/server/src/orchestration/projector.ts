@@ -35,6 +35,7 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
+  ThreadWorktreeCleanupUpdatedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
@@ -442,6 +443,7 @@ export function projectEvent(
             activeOrderKey: null,
             snoozedUntil: null,
             snoozedAt: null,
+            worktreeCleanup: null,
             deletedAt: null,
             messages: [],
             activities: [],
@@ -466,7 +468,24 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             deletedAt: payload.deletedAt,
+            worktreeCleanup: payload.worktreeCleanup ?? null,
             updatedAt: payload.deletedAt,
+          }),
+        })),
+      );
+
+    case "thread.worktree-cleanup-updated":
+      return decodeForEvent(
+        ThreadWorktreeCleanupUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            worktreeCleanup: payload.cleanup,
+            updatedAt: payload.updatedAt,
           }),
         })),
       );
