@@ -29,6 +29,7 @@ function thread(
   | "updatedAt"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
+  | "attention"
 > {
   return {
     id: "thread-1" as ThreadId,
@@ -39,6 +40,7 @@ function thread(
     updatedAt: NOW,
     hasPendingApprovals: false,
     hasPendingUserInput: false,
+    attention: null,
     ...overrides,
   };
 }
@@ -100,6 +102,19 @@ describe("projectThreadAwareness", () => {
       modelTitle: "gpt-5.4",
       deepLink: "/threads/env-1/thread-1",
     });
+  });
+
+  it("projects question attention as waiting for input", () => {
+    const state = projectThreadAwareness({
+      environmentId: "env-1" as EnvironmentId,
+      project,
+      thread: thread({
+        attention: { kind: "question", raisedAt: NOW },
+      }),
+    });
+
+    expect(state?.phase).toBe("waiting_for_input");
+    expect(state?.headline).toBe("Waiting for input");
   });
 
   it("projects completed turns as completed even when teardown settled them as interrupted", () => {

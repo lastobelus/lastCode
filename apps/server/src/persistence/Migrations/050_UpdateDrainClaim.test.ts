@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
@@ -12,7 +13,8 @@ layer("050_UpdateDrainClaim", (it) => {
   it.effect("preserves drain history and accepts one claimed transition", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 49 });
+      yield* runMigrations();
+      yield* runLastCodeMigrations({ toMigrationInclusive: 2 });
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status
@@ -21,7 +23,7 @@ layer("050_UpdateDrainClaim", (it) => {
           '2026-08-21T00:00:00.000Z', 'request-1', '1.2.3', 'draining'
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 50 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 3 });
       yield* sql`
         INSERT INTO update_drain_events (
           event_id, event_type, command_id, occurred_at, request_id, target_version, status

@@ -334,6 +334,8 @@ describe("DesktopLifecycle", () => {
         handleBackendNotReady: Effect.void,
         flushMainWindowBounds: Effect.void,
         dispatchMenuAction: () => Effect.void,
+        prepareCaptureReveal: Effect.die("unexpected capture reveal"),
+        dispatchSnapShotEvent: () => Effect.void,
         zoomMain: () => Effect.void,
         runningActionCount: Effect.succeed(3),
         reportRunningActionCount: () => Effect.void,
