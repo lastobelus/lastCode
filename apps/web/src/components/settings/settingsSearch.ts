@@ -207,6 +207,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["long lines code blocks tables diffs file previews"],
   },
   {
+    id: "handoffs-menu-limit",
+    title: "Handoffs shown in menus",
+    to: "/settings/lastcode",
+    searchTerms: ["handoffs history recent links files menu count"],
+  },
+  {
     id: "project-grouping",
     title: "Project grouping",
     to: "/settings/general",
@@ -702,6 +708,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
     id: "scale-legacy-sidebar",
     title: "Scale legacy sidebar",
     to: "/settings/lastcode",
@@ -727,6 +739,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "import-t3-settings",
+    title: "Import settings from T3 Code",
+    to: "/settings/lastcode",
+  },
+  {
     id: "archive",
     title: "Archived threads",
     to: "/settings/archived",
@@ -741,6 +758,7 @@ const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id,
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
   "/settings/projects": "project",
   "/settings/general": null,
+  "/settings/lastcode": null,
   "/settings/appearance": null,
   "/settings/snap-shot": null,
   // Keybindings fan out to the selection; Providers shows the representative

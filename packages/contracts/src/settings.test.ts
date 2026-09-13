@@ -10,6 +10,9 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  DEFAULT_HANDOFFS_MENU_LIMIT,
+  MAX_HANDOFFS_MENU_LIMIT,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -49,6 +52,25 @@ describe("ServerSettings default permissions", () => {
   });
 });
 
+describe("handoffs menu setting", () => {
+  it("defaults to seven and accepts the inclusive bounds", () => {
+    expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MIN_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(1);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MAX_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(50);
+    expect(decodeClientSettingsPatch({ handoffsMenuLimit: 12 }).handoffsMenuLimit).toBe(12);
+  });
+
+  it("rejects non-integers and values outside the bounds", () => {
+    for (const value of [0, 51, 1.5, "7"]) {
+      expect(() => decodeClientSettings({ handoffsMenuLimit: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ handoffsMenuLimit: value })).toThrow();
+    }
+  });
+});
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 
@@ -343,6 +365,26 @@ describe("ClientSettings proactive panels", () => {
     expect(decodeClientSettingsPatch({ proactivePanelsEnabled: true }).proactivePanelsEnabled).toBe(
       true,
     );
+  });
+});
+
+describe("ClientSettings larger scrollbars", () => {
+  it("is opt-in with defaults that clear the pane resize target", () => {
+    const settings = decodeClientSettings({});
+
+    expect(settings.largerScrollbarsEnabled).toBe(false);
+    expect(settings.scrollbarWidth).toBe(10);
+    expect(settings.scrollbarMargin).toBe(4);
+  });
+
+  it.each([
+    ["scrollbarWidth", 1, 12],
+    ["scrollbarMargin", 0, 6],
+  ] as const)("accepts the inclusive %s range", (key, minimum, maximum) => {
+    expect(decodeClientSettingsPatch({ [key]: minimum })).toEqual({ [key]: minimum });
+    expect(decodeClientSettingsPatch({ [key]: maximum })).toEqual({ [key]: maximum });
+    expect(() => decodeClientSettingsPatch({ [key]: minimum - 1 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ [key]: maximum + 1 })).toThrow();
   });
 });
 

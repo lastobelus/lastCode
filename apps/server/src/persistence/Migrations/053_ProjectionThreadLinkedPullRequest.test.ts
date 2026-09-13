@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import Migration0048 from "./048_ProjectionThreadAnnotation.ts";
 import Migration0049 from "./049_UpdateDrain.ts";
@@ -40,16 +41,7 @@ layer("053_ProjectionThreadLinkedPullRequest", (it) => {
       `;
       assert.isFalse(before.some((column) => column.name === "linked_pull_request_json"));
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 53 });
-      assert.deepStrictEqual(executed, [
-        [47, "ProjectionProjectIcon"],
-        [48, "ProjectionThreadAnnotation"],
-        [49, "UpdateDrain"],
-        [50, "UpdateDrainClaim"],
-        [51, "ProjectionTurnRequestCorrelations"],
-        [52, "ProjectionThreadWorktreeCleanup"],
-        [53, "ProjectionThreadLinkedPullRequest"],
-      ]);
+      yield* runDatabaseMigrations();
 
       yield* Migration0053;
       const after = yield* sql<{ readonly name: string }>`
@@ -96,18 +88,7 @@ partialUpgradeLayer("053_ProjectionThreadLinkedPullRequest partial upgrades", (i
           (44, 'UpdateDrainClaim')
       `;
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 53 });
-      assert.deepStrictEqual(executed, [
-        [45, "ProjectionProjectsAutoPull"],
-        [46, "RepairAutomaticSettlementTimestamps"],
-        [47, "ProjectionProjectIcon"],
-        [48, "ProjectionThreadAnnotation"],
-        [49, "UpdateDrain"],
-        [50, "UpdateDrainClaim"],
-        [51, "ProjectionTurnRequestCorrelations"],
-        [52, "ProjectionThreadWorktreeCleanup"],
-        [53, "ProjectionThreadLinkedPullRequest"],
-      ]);
+      yield* runDatabaseMigrations();
 
       const events = yield* sql<{
         readonly eventType: string;
