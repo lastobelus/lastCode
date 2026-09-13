@@ -13,6 +13,7 @@ packages/*/dist
 build/
 .logs/
 release/
+release-lastcode/
 release-mock/
 .t3
 .idea/
@@ -26,6 +27,7 @@ squashfs-root/
 .vercel
 .gstack/
 .plans/
+/tmp/
 dist-electron/
 .electron-runtime/
 .showcase/

@@ -9,6 +9,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EnvironmentMetadataHttpApi,
   EnvironmentOrchestrationHttpApi,
   ProviderInstanceId,
   ThreadId,
@@ -19,6 +20,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -68,7 +70,19 @@ const DisconnectedLauncherChildLayer = Layer.mergeAll(
     off: () => undefined,
   }),
 );
-class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
+const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const ProjectActionReconcileCliResult = Schema.Struct({
+  mode: Schema.String,
+  projectCreated: Schema.Boolean,
+  scriptsChanged: Schema.Boolean,
+  created: Schema.optional(Schema.Array(Schema.String)),
+});
+const decodeProjectActionReconcileCliResult = Schema.decodeSync(
+  Schema.fromJsonString(ProjectActionReconcileCliResult),
+);
+class ProjectCliHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentMetadataHttpApi)
+  .add(EnvironmentOrchestrationHttpApi) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
 const noConnectCli = makeCli({ cloudEnabled: false });
@@ -360,8 +374,36 @@ it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) 
 const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
+    const metadataLayer = HttpApiBuilder.group(ProjectCliHttpApi, "metadata", (handlers) =>
+      Effect.succeed(
+        handlers.handle("descriptor", () =>
+          Effect.succeed({
+            environmentId: EnvironmentId.make("env-thread-live"),
+            label: "CLI integration",
+            platform: { os: "linux" as const, arch: "x64" as const },
+            serverVersion: "test",
+            capabilities: { repositoryIdentity: true },
+          }),
+        ),
+      ),
+    );
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-      Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(
+        Layer.mergeAll(orchestrationHttpApiLayer, metadataLayer).pipe(
+          Layer.provide(
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(EnvironmentId.make("env-thread-live")),
+              getDescriptor: Effect.succeed({
+                environmentId: EnvironmentId.make("env-thread-live"),
+                label: "CLI integration",
+                platform: { os: "linux" as const, arch: "x64" as const },
+                serverVersion: "test",
+                capabilities: { repositoryIdentity: true },
+              }),
+            }),
+          ),
+        ),
+      ),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
@@ -852,4 +894,141 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.equal(optionError.option, "--dev-url");
     }),
   );
+  it.effect("reconciles checked-in Project Actions through the offline event store", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-project-actions-offline-test-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-project-actions-offline-workspace-"),
+      );
+      const sourceFile = NodePath.join(workspaceRoot, "t3.json");
+      const stateFile = NodePath.join(baseDir, "userdata", "lastcode", "project-actions.json");
+      NodeFS.writeFileSync(
+        sourceFile,
+        encodeUnknownJson({
+          scripts: [
+            { name: "Setup Worktree", command: "vp i", runOnWorktreeCreate: true },
+            {
+              id: "lc-wait-for-pr",
+              name: "Wait for PR",
+              command: "node scripts/lastcode-wait-for-pr.ts",
+              icon: "test",
+            },
+          ],
+        }),
+      );
+
+      const { output } = yield* captureStdout(
+        runCli([
+          "project",
+          "reconcile-actions",
+          workspaceRoot,
+          "--source-file",
+          sourceFile,
+          "--state-file",
+          stateFile,
+          "--create-if-missing",
+          "--base-dir",
+          baseDir,
+        ]),
+      );
+      const result = decodeProjectActionReconcileCliResult(output);
+      assert.equal(result.mode, "offline");
+      assert.isTrue(result.projectCreated);
+      assert.deepEqual(result.created, ["lc-wait-for-pr"]);
+
+      const { output: repeatedOutput } = yield* captureStdout(
+        runCli([
+          "project",
+          "reconcile-actions",
+          workspaceRoot,
+          "--source-file",
+          sourceFile,
+          "--state-file",
+          stateFile,
+          "--create-if-missing",
+          "--base-dir",
+          baseDir,
+        ]),
+      );
+      const repeated = decodeProjectActionReconcileCliResult(repeatedOutput);
+      assert.isFalse(repeated.projectCreated);
+      assert.isFalse(repeated.scriptsChanged);
+      assert.deepEqual(repeated.created, []);
+
+      const snapshot = yield* readPersistedSnapshot(baseDir);
+      const project = snapshot.projects.find(
+        (entry) => entry.workspaceRoot === workspaceRoot && entry.deletedAt === null,
+      );
+      assert.deepEqual(project?.scripts, [
+        {
+          id: "lc-wait-for-pr",
+          name: "Wait for PR",
+          command: "node scripts/lastcode-wait-for-pr.ts",
+          icon: "test",
+          runOnWorktreeCreate: false,
+        },
+      ]);
+      assert.isTrue(NodeFS.existsSync(stateFile));
+    }),
+  );
+
+  it.effect("reconciles checked-in Project Actions through a running server", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-project-actions-live-test-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-project-actions-live-workspace-"),
+      );
+      const sourceFile = NodePath.join(workspaceRoot, "t3.json");
+      const stateFile = NodePath.join(baseDir, "userdata", "lastcode", "project-actions.json");
+      NodeFS.writeFileSync(
+        sourceFile,
+        encodeUnknownJson({
+          scripts: [
+            {
+              id: "lc-local-ci",
+              name: "Run Quick CI",
+              command: "node scripts/lastcode-local-ci.ts --quick",
+              icon: "test",
+            },
+          ],
+        }),
+      );
+
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          const { output } = yield* captureStdout(
+            runCli([
+              "project",
+              "reconcile-actions",
+              workspaceRoot,
+              "--source-file",
+              sourceFile,
+              "--state-file",
+              stateFile,
+              "--create-if-missing",
+              "--trusted-source-ids",
+              "lc-local-ci",
+              "--base-dir",
+              baseDir,
+            ]),
+          );
+          const result = decodeProjectActionReconcileCliResult(output);
+          assert.equal(result.mode, "live");
+          assert.isTrue(result.projectCreated);
+
+          const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const snapshot = yield* query.getSnapshot();
+          const project = snapshot.projects.find(
+            (entry) => entry.workspaceRoot === workspaceRoot && entry.deletedAt === null,
+          );
+          assert.isTrue(project?.scripts[0]?.allowAgentResume);
+        }),
+      );
+    }),
+  );
+
 });
