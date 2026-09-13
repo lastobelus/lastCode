@@ -45,6 +45,7 @@ jobs:
   # have already run. Scheduled runs also decide here whether a nightly is due.
   resolve_commit:
     name: Resolve release commit
+    if: github.repository == 'pingdotgg/t3code'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
@@ -85,6 +86,7 @@ jobs:
     name: Preflight
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -237,6 +239,7 @@ jobs:
     # runs alongside preflight instead of after it. The condition mirrors preflight's.
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -337,6 +340,7 @@ jobs:
     # this runs alongside preflight. See the condition comment there.
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
