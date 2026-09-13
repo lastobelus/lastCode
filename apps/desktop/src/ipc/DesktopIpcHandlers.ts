@@ -28,9 +28,11 @@ import {
 import {
   checkForUpdate,
   downloadUpdate,
+  getLastCodeSettings,
   getUpdateState,
   installUpdate,
   setUpdateChannel,
+  setShowAndInstallLocalNightlies,
 } from "./methods/updates.ts";
 import {
   getAppBranding,
@@ -130,6 +132,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(pasteAsText);
   yield* ipc.handle(probeRemoteEditors);
   yield* ipc.handle(getUpdateState);
+  yield* ipc.handle(getLastCodeSettings);
+  yield* ipc.handle(setShowAndInstallLocalNightlies);
   yield* ipc.handle(setUpdateChannel);
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
