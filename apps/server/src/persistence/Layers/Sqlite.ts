@@ -5,7 +5,7 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
 import { ServerConfig } from "../../config.ts";
 
 const setup = Layer.effectDiscard(
@@ -15,7 +15,7 @@ const setup = Layer.effectDiscard(
     yield* sql`PRAGMA busy_timeout = 5000;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
-    yield* runMigrations();
+    yield* runDatabaseMigrations();
   }),
 );
 
@@ -38,6 +38,20 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
+const makeSqlitePersistenceReadOnly = Effect.fn("makeSqlitePersistenceReadOnly")(function* (
+  dbPath: string,
+) {
+  const path = yield* Path.Path;
+  return NodeSqliteClient.layer({
+    filename: dbPath,
+    readonly: true,
+    spanAttributes: {
+      "db.name": path.basename(dbPath),
+      "service.name": "t3-server",
+    },
+  });
+}, Layer.unwrap);
+
 export const SqlitePersistenceMemory = Layer.provideMerge(
   setup,
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -47,5 +61,12 @@ export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     return makeSqlitePersistenceLive(dbPath);
+  }),
+);
+
+export const layerReadOnlyConfig = Layer.unwrap(
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    return makeSqlitePersistenceReadOnly(dbPath);
   }),
 );

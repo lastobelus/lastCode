@@ -917,4 +917,27 @@ describe("rightPanelStore", () => {
       ),
     ).toEqual(["terminal:term-1", "browser:tab-b", "browser:tab-c"]);
   });
+
+  it("keeps the Handoffs tab when opening a file", () => {
+    const store = useRightPanelStore.getState();
+    store.open(refA, "handoffs");
+    store.openFile(refA, "src/index.ts");
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces.map((surface) => surface.kind)).toEqual(["handoffs", "file"]);
+    expect(state.activeSurfaceId).toBe("file:src/index.ts");
+  });
+
+  it("reuses the persisted Handoffs surface after closing another tab", () => {
+    const store = useRightPanelStore.getState();
+    store.open(refA, "handoffs");
+    store.openFile(refA, "src/index.ts");
+    store.closeSurface(refA, "file:src/index.ts");
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)?.id).toBe(
+      "handoffs",
+    );
+    store.open(refA, "handoffs");
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces).toEqual([{ id: "handoffs", kind: "handoffs" }]);
+    expect(state.activeSurfaceId).toBe("handoffs");
+  });
 });
