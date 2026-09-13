@@ -1380,6 +1380,7 @@ export interface ChatComposerProps {
    * effect, so it is current before the chat view measures the overlay.
    */
   onRestingChange: (resting: boolean) => void;
+  threadAnnotationsSupported: boolean;
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
@@ -1424,6 +1425,7 @@ export interface ChatComposerProps {
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
+  onOpenThreadAnnotation: () => void;
 }
 
 // --------------------------------------------------------------------------
@@ -1493,6 +1495,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     timelineOverflows,
     onComposerOverlayHeightChange,
     onRestingChange,
+    threadAnnotationsSupported,
     promptRef,
     composerRef,
     composerImagesRef,
@@ -1522,6 +1525,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setThreadError,
     onExpandImage,
     onFileOpen,
+    onOpenThreadAnnotation,
   } = props;
   const activeTasksProgress = props.threadSyncPhase === null ? props.activeTasksProgress : null;
   const activeTaskSteps = props.threadSyncPhase === null ? props.activeTaskSteps : null;
@@ -2297,6 +2301,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(threadAnnotationsSupported
+          ? ([
+              {
+                id: "slash:annotate",
+                type: "slash-command",
+                command: "annotate",
+                label: "/annotate",
+                description: "Add or edit this thread's annotation",
+              },
+            ] as const)
+          : []),
         ...(planModeUiEnabled
           ? ([
               {
@@ -2431,6 +2446,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderSlashCommands,
     selectedProviderStatus,
     settings.showSkillsInSlashMenu,
+    threadAnnotationsSupported,
     workspaceEntries.entries,
   ]);
 
@@ -3547,6 +3563,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
+        if (item.command === "annotate") {
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            focusEditorAfterReplace: false,
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            onOpenThreadAnnotation();
+          }
+          return;
+        }
         if (!planModeUiEnabled) return;
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
@@ -3640,6 +3667,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       applyPromptReplacement,
       composerDraftTarget,
       handleInteractionModeChange,
+      onOpenThreadAnnotation,
       planModeUiEnabled,
       onUsageLimitsCommand,
       resolveActiveComposerTrigger,
