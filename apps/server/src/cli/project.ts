@@ -167,7 +167,7 @@ export class ProjectAlreadyExistsError extends Schema.TaggedError<ProjectAlready
   }
 }
 
-export class ProjectActionReconcileFileError extends Schema.TaggedErrorClass<ProjectActionReconcileFileError>()(
+export class ProjectActionReconcileFileError extends Schema.TaggedError<ProjectActionReconcileFileError>()(
   "ProjectActionReconcileFileError",
   {
     operation: Schema.Literals([

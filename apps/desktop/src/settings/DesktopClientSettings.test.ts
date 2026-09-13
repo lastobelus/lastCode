@@ -73,6 +73,9 @@ const clientSettings: ClientSettings = {
   loadBalancingWeights: { "environment-1": 75, "environment-2": 0 },
   pullRequestMergeMethodOverrides: {},
   legacySidebarScale: 100,
+  largerScrollbarsEnabled: true,
+  scrollbarWidth: 10,
+  scrollbarMargin: 4,
   timestampFormat: "24-hour",
   wordWrap: true,
 };

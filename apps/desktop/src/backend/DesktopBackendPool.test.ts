@@ -1,4 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Sink from "effect/Sink";
+import * as Path from "effect/Path";
+import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -43,18 +48,25 @@ function makeStubInstance(
 
 function makePoolLayer(
   labelRef: Ref.Ref<string>,
+  options?: {
+    readonly spawn: ChildProcessSpawner.ChildProcessSpawner["Service"];
+    readonly config: DesktopBackendStartConfig;
+    readonly showErrorBox: ElectronDialog.ElectronDialog["Service"]["showErrorBox"];
+    readonly persistFailure: Effect.Effect<void>;
+  },
 ): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
-        FileSystem.layerNoop({}),
+        FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
+          options?.spawn ??
+            ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
         ),
         Layer.succeed(
           HttpClient.HttpClient,
-          HttpClient.make(() => Effect.die("unexpected HTTP request")),
+          HttpClient.make(() => Effect.never),
         ),
         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
           forInstance: () =>
@@ -62,7 +74,7 @@ function makePoolLayer(
               beginSession: () => Effect.void,
               writeOutputChunk: () => Effect.void,
               persistFailureSnapshot: () => Effect.void,
-              persistFailure: () => Effect.void,
+              persistFailure: () => options?.persistFailure ?? Effect.void,
               discardSession: Effect.void,
             } satisfies DesktopObservability.DesktopBackendOutputLogShape),
         } satisfies DesktopObservability.DesktopBackendOutputLogFactory["Service"]),
@@ -79,13 +91,32 @@ function makePoolLayer(
           updateCancellations: Stream.empty,
         }),
         Layer.succeed(DesktopBackendConfiguration.DesktopBackendConfiguration, {
-          resolvePrimary: Effect.die("unexpected primary config resolve"),
+          resolvePrimary: options
+            ? Effect.succeed(options.config)
+            : Effect.die("unexpected primary config resolve"),
           resolvePrimaryLabel: Ref.get(labelRef),
           resolveWsl: () => Effect.die("unexpected WSL config resolve"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
+        DesktopEnvironment.layer({
+          dirname: "/repo/apps/desktop/src",
+          homeDirectory: "/home/example",
+          platform: "darwin",
+          processArch: "arm64",
+          appVersion: "1.2.3",
+          appPath: "/repo",
+          isPackaged: true,
+          resourcesPath: "/resources",
+          runningUnderArm64Translation: false,
+        }).pipe(
+          Layer.provide(Layer.mergeAll(Path.layer, DesktopConfig.layerTest({}))),
+          Layer.orDie,
+        ),
         DesktopAppSettings.layerTest(),
         DesktopWslEnvironment.layerTest(),
-        ElectronDialog.layer,
+        Layer.succeed(ElectronDialog.ElectronDialog, {
+          ...ElectronDialog.make,
+          showErrorBox: options?.showErrorBox ?? ElectronDialog.make.showErrorBox,
+        }),
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
           ensureMain: Effect.die("unexpected window ensure"),
@@ -112,6 +143,76 @@ function makePoolLayer(
 }
 
 describe("DesktopBackendPool", () => {
+  it.effect("shows the saved diagnostic log when the primary exits before readiness", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const label = yield* Ref.make("Local");
+        const notification = yield* Deferred.make<{ title: string; content: string }>();
+        let persisted = false;
+        const poolLayer = makePoolLayer(label, {
+          config: {
+            executablePath: "/electron",
+            args: ["/server/bin.mjs"],
+            entryPath: "/server/bin.mjs",
+            cwd: "/server",
+            env: {},
+            extendEnv: true,
+            captureOutput: true,
+            httpBaseUrl: new URL("http://127.0.0.1:3773"),
+            preflightFailure: Option.none(),
+            bootstrapDelivery: "fd3",
+            bootstrap: {
+              mode: "desktop",
+              noBrowser: true,
+              port: 3773,
+              t3Home: "/home/example/.lastcode",
+              host: "127.0.0.1",
+              desktopBootstrapToken: "test-token",
+              tailscaleServeEnabled: false,
+              tailscaleServePort: 443,
+            },
+          },
+          spawn: ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              ChildProcessSpawner.makeHandle({
+                pid: ChildProcessSpawner.ProcessId(123),
+                stdout: Stream.empty,
+                stderr: Stream.empty,
+                all: Stream.empty,
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+                isRunning: Effect.succeed(false),
+                kill: () => Effect.void,
+                stdin: Sink.drain,
+                getInputFd: () => Sink.drain,
+                getOutputFd: () => Stream.empty,
+                unref: Effect.succeed(Effect.void),
+              }),
+            ),
+          ),
+          persistFailure: Effect.sync(() => {
+            persisted = true;
+          }),
+          showErrorBox: (title, content) =>
+            Effect.gen(function* () {
+              assert.isTrue(persisted);
+              yield* Deferred.succeed(notification, { title, content });
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const pool = yield* DesktopBackendPool.DesktopBackendPool;
+          const primary = yield* pool.primary;
+          yield* primary.start;
+          const dialog = yield* Deferred.await(notification);
+          assert.include(dialog.title, "could not start");
+          assert.include(dialog.content, "code=1");
+          assert.include(dialog.content, "server-child.log");
+          assert.include(dialog.content, "/home/example/");
+          assert.include(dialog.content, "quit and reopen");
+        }).pipe(Effect.provide(poolLayer));
+      }),
+    ),
+  );
+
   it.effect("layerTest exposes registered instances by id", () =>
     Effect.gen(function* () {
       const pool = yield* DesktopBackendPool.DesktopBackendPool;

@@ -229,6 +229,7 @@ export const make = Effect.gen(function* () {
       usageLimitSources: true,
       usagePriceOverrides: true,
       threadPinning: true,
+      threadPersistence: true,
       threadPinReorder: true,
       threadActiveReorder: true,
       threadTitleRegeneration: true,
@@ -236,6 +237,7 @@ export const make = Effect.gen(function* () {
       pullRequestStackActions: true,
       threadPullRequestLinking: true,
       environmentIcon: true,
+      threadAnnotations: true,
       threadWorktreeCleanup: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
