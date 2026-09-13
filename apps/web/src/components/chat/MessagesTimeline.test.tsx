@@ -590,7 +590,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Working");
     expect(markup).not.toContain("animate-status-pulse");
     expect(markup).toContain('aria-label="Open source thread: Mobile Reconnect Issue"');
-    expect(markup).toContain('aria-label="Revert to this message"');
+    expect(markup).toContain('aria-label="Edit from here"');
     expect(markup).toContain('download="handoff.pdf"');
   });
 
