@@ -9,6 +9,7 @@ import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -509,12 +510,16 @@ export function buildBulkUnpinContextMenuItem(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Waiting"
     | "Monitoring"
     | "Connecting"
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Deleting"
+    | "Deleting (Queued)"
+    | "Cleanup failed";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -528,9 +533,13 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Awaiting Input": 5,
   Working: 4,
   Connecting: 4,
+  Waiting: 3,
   "Plan Ready": 3,
   Monitoring: 2,
   Completed: 1,
+  Deleting: 7,
+  "Deleting (Queued)": 7,
+  "Cleanup failed": 8,
 };
 
 type ThreadStatusInput = Pick<
@@ -542,6 +551,8 @@ type ThreadStatusInput = Pick<
   | "latestTurn"
   | "session"
   | "backgroundLiveness"
+  | "actionResume"
+  | "worktreeCleanup"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -812,8 +823,12 @@ export type SidebarThreadStatus =
   | "approval"
   | "input"
   | "working"
+  | "waiting"
   | "monitoring"
   | "failed"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -833,10 +848,18 @@ export function shouldRecedeSidebarThread(input: {
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "session"
+  | "backgroundLiveness"
+  | "actionResume"
+  | "worktreeCleanup"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
+  if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
+  if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
   if (thread.hasPendingApprovals) {
     return "approval";
   }
@@ -858,6 +881,9 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.backgroundLiveness === "monitoring") {
     return "monitoring";
+  }
+  if (thread.actionResume?.outcome === "running") {
+    return actionRunningPresentation(thread.actionResume).state;
   }
   return "ready";
 }
@@ -987,6 +1013,33 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      label: "Cleanup failed",
+      colorClass: "text-red-700 dark:text-red-300",
+      dotClass: "bg-red-600 dark:bg-red-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "queued") {
+    return {
+      label: "Deleting (Queued)",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      label: "Deleting",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
   if (thread.hasPendingApprovals) {
     return {
       label: "Pending Approval",
@@ -1061,6 +1114,22 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
+  if (thread.actionResume?.outcome === "running") {
+    const action = actionRunningPresentation(thread.actionResume);
+    return {
+      label: action.label,
+      colorClass:
+        action.state === "working"
+          ? "text-sky-600 dark:text-sky-300/80"
+          : "text-yellow-700 dark:text-yellow-300/90",
+      dotClass:
+        action.state === "working"
+          ? "bg-sky-500 dark:bg-sky-300/80"
+          : "bg-yellow-500 dark:bg-yellow-300/90",
+      pulse: false,
+    };
+  }
+
   if (hasUnseenCompletion(thread)) {
     return {
       label: "Completed",
@@ -1092,7 +1161,8 @@ export function resolveProjectStatusIndicator(
 }
 
 export function getFallbackThreadIdAfterDelete<
-  T extends Pick<Thread, "id" | "projectId" | "createdAt" | "updatedAt"> & ThreadSortInput,
+  T extends Pick<Thread, "id" | "projectId" | "createdAt" | "updatedAt"> &
+    ThreadSortInput & { readonly worktreeCleanup?: unknown },
 >(input: {
   threads: readonly T[];
   deletedThreadId: T["id"];
@@ -1111,6 +1181,7 @@ export function getFallbackThreadIdAfterDelete<
         (thread) =>
           thread.projectId === deletedThread.projectId &&
           thread.id !== deletedThreadId &&
+          thread.worktreeCleanup == null &&
           !deletedThreadIds?.has(thread.id),
       ),
       sortOrder,
