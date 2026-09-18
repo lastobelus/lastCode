@@ -18,6 +18,7 @@ import {
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { threadEnvironment } from "../state/threads";
+import { terminalEnvironment } from "../state/terminal";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsPinning,
@@ -94,6 +95,7 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
@@ -146,6 +148,7 @@ export function useThreadActionMenu(input: {
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
+          hasRunningAction: thread.actionResume?.outcome === "running",
           supports,
           snoozePresets,
         });
@@ -254,6 +257,17 @@ export function useThreadActionMenu(input: {
               }),
             );
             return;
+          case "cancel-action": {
+            const actionState = thread.actionResume;
+            if (actionState?.outcome !== "running") return;
+            await reportFailure("Failed to cancel Project Action", () =>
+              closeTerminal({
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, terminalId: actionState.terminalId },
+              }),
+            );
+            return;
+          }
           case "mark-unread":
             markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
             return;
@@ -334,6 +348,7 @@ export function useThreadActionMenu(input: {
     },
     [
       archiveThread,
+      closeTerminal,
       confirmThreadArchive,
       confirmThreadDelete,
       confirmAndUnpinThread,
