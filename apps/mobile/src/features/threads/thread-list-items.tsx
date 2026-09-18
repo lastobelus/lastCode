@@ -24,6 +24,7 @@ import { relativeTime } from "../../lib/time";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { terminalEnvironment } from "../../state/terminal";
+import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr, type ThreadPrPresentation } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
@@ -33,6 +34,11 @@ import { QueuedMessageIcon } from "./queued-message-icon";
 import { resolveThreadStatus, shouldShowActionWaitingIndicator } from "./threadPresentation";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
 
 /**
  * Shared presentation for the thread lists: the compact (phone) Home list and
@@ -445,6 +451,11 @@ const THREAD_ROW_MENU_ACTIONS: MenuAction[] = [
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
 ];
 
+const FAILED_CLEANUP_MENU_ACTIONS: MenuAction[] = [
+  { id: "retry-worktree-cleanup", title: "Retry", image: "arrow.clockwise" },
+  { id: "keep-worktree", title: "Keep worktree", image: "externaldrive" },
+];
+
 export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly variant: ThreadListVariant;
   readonly thread: EnvironmentThreadShell;
@@ -466,6 +477,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly titleRegenerationSupported: boolean;
+  readonly persistenceSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<
@@ -494,8 +506,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
   } = props;
+  const cleanupFailed = thread.worktreeCleanup?.status === "failed";
+  const cleanupPending = thread.worktreeCleanup != null && !cleanupFailed;
   const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
+  const retryWorktreeCleanup = useAtomCommand(threadEnvironment.retryWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
+    reportFailure: false,
+  });
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread);
   const timestamp = relativeTime(
@@ -543,6 +566,22 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
+  );
   const handleCancelAction = useCallback(async () => {
     if (runningAction === null) return;
     const result = await closeTerminal({
@@ -557,37 +596,93 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       );
     }
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
+  const handleRetryWorktreeCleanup = useCallback(async () => {
+    const result = await retryWorktreeCleanup({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not retry worktree cleanup",
+        error instanceof Error ? error.message : "The worktree cleanup could not be retried.",
+      );
+    }
+  }, [retryWorktreeCleanup, thread.environmentId, thread.id]);
+  const handleKeepWorktree = useCallback(() => {
+    Alert.alert(
+      "Keep worktree?",
+      "LastCode will stop trying to remove this worktree. You can remove it manually later.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Keep worktree",
+          style: "destructive",
+          onPress: () => {
+            void abandonWorktreeCleanup({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id },
+            }).then((result) => {
+              if (result._tag === "Failure") {
+                const error = Cause.squash(result.cause);
+                Alert.alert(
+                  "Could not keep worktree",
+                  error instanceof Error
+                    ? error.message
+                    : "The worktree cleanup could not be dismissed.",
+                );
+              }
+            });
+          },
+        },
+      ],
+    );
+  }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
   const menuActions = useMemo<MenuAction[]>(
-    () => [
-      ...(thread.branch
-        ? [
-            {
-              id: "new-thread-on-branch",
-              title:
-                Platform.OS === "ios" ? "New thread on branch" : `New thread on ${thread.branch}`,
-              image: "square.and.pencil",
-            },
-          ]
-        : []),
-      THREAD_ROW_MENU_ACTIONS[0]!,
-      THREAD_ROW_MENU_ACTIONS[1]!,
-      ...buildThreadTitleRegenerationMenuItems({
-        supported: props.titleRegenerationSupported,
-        isRegenerating: thread.titleRegeneration != null,
+    () =>
+      buildThreadPersistenceMenuItems({
+        persistent: thread.persistent === true,
+        supported: props.persistenceSupported,
+        actions: [
+          ...(thread.branch
+            ? [
+                {
+                  id: "new-thread-on-branch",
+                  title:
+                    Platform.OS === "ios"
+                      ? "New thread on branch"
+                      : `New thread on ${thread.branch}`,
+                  image: "square.and.pencil",
+                },
+              ]
+            : []),
+          THREAD_ROW_MENU_ACTIONS[0]!,
+          THREAD_ROW_MENU_ACTIONS[1]!,
+          ...buildThreadTitleRegenerationMenuItems({
+            supported: props.titleRegenerationSupported,
+            isRegenerating: thread.titleRegeneration != null,
+          }),
+          ...(runningAction === null
+            ? []
+            : [
+                {
+                  id: "cancel-action",
+                  title: `Cancel ${runningAction.actionName}`,
+                  image: "stop.fill",
+                  attributes: { destructive: true },
+                } satisfies MenuAction,
+              ]),
+          THREAD_ROW_MENU_ACTIONS[2]!,
+        ],
       }),
-      ...(runningAction === null
-        ? []
-        : [
-            {
-              id: "cancel-action",
-              title: `Cancel ${runningAction.actionName}`,
-              image: "stop.fill",
-              attributes: { destructive: true },
-            } satisfies MenuAction,
-          ]),
-      THREAD_ROW_MENU_ACTIONS[2]!,
+    [
+      props.persistenceSupported,
+      props.titleRegenerationSupported,
+      runningAction,
+      thread.branch,
+      thread.persistent,
+      thread.titleRegeneration,
     ],
-    [props.titleRegenerationSupported, runningAction, thread.branch, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
     () => ({
@@ -605,16 +700,23 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "cancel-action") void handleCancelAction();
+      if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
+      if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
     },
     [
+      onNewThreadOnBranch,
+      thread,
       handleArchive,
       handleCancelAction,
       handleDelete,
+      handleKeepWorktree,
+      handlePersistence,
       handleRegenerateTitle,
       handleRename,
-      onNewThreadOnBranch,
-      thread,
+      handleRetryWorktreeCleanup,
     ],
   );
 
@@ -723,9 +825,16 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               : "bg-user-bubble-foreground"
             : "bg-primary"
         }
-        accessibilityHint="Swipe left for archive and delete actions"
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : thread.persistent === true
+              ? "Persistent thread. Long-press to disable persistence"
+              : "Swipe left for archive and delete actions"
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
+        accessibilityState={{ disabled: cleanupPending }}
         className="bg-screen"
         style={
           Platform.OS === "android"
@@ -735,7 +844,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               }
             : undefined
         }
+        disabled={cleanupPending}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}
@@ -748,19 +859,25 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             )}
           >
             <View className="flex-row items-center justify-between gap-2">
-              <Text
-                className={cn(
-                  "flex-1 text-lg font-t3-bold",
-                  visuallySelected
-                    ? Platform.OS === "android"
-                      ? "text-thread-selected-foreground"
-                      : "text-user-bubble-foreground"
-                    : "text-foreground",
-                )}
-                numberOfLines={1}
-              >
-                {thread.title}
-              </Text>
+              <View className="flex-1 flex-row items-center gap-1.5">
+                {thread.persistent === true ? (
+                  <PersistentThreadIcon color={String(theme["--color-foreground"])} size={15} />
+                ) : null}
+                <Text
+                  className={cn(
+                    "flex-1 text-lg font-t3-bold",
+                    visuallySelected
+                      ? Platform.OS === "android"
+                        ? "text-thread-selected-foreground"
+                        : "text-user-bubble-foreground"
+                      : "text-foreground",
+                    thread.persistent === true && "italic",
+                  )}
+                  numberOfLines={1}
+                >
+                  {thread.title}
+                </Text>
+              </View>
               <View className="flex-row items-center gap-2">
                 {props.hasQueuedMessages ? (
                   <QueuedMessageIcon selected={visuallySelected && Platform.OS !== "android"} />
@@ -809,11 +926,17 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               : "bg-user-bubble-foreground"
             : "bg-primary"
         }
-        accessibilityHint="Opens the thread"
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : "Opens the thread"
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}
@@ -828,19 +951,27 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       >
         <View className="gap-[3px]">
           <View className="flex-row items-center justify-between gap-2">
-            <Text
-              className={cn(
-                "flex-1 text-base font-t3-medium",
-                visuallySelected
-                  ? Platform.OS === "android"
-                    ? "text-thread-selected-foreground"
-                    : "text-user-bubble-foreground"
-                  : "text-foreground",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-1 flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base font-t3-medium",
+                  visuallySelected
+                    ? Platform.OS === "android"
+                      ? "text-thread-selected-foreground"
+                      : "text-user-bubble-foreground"
+                    : "text-foreground",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             <View className="flex-row items-center gap-2">
               {props.hasQueuedMessages ? (
                 <QueuedMessageIcon selected={visuallySelected && Platform.OS !== "android"} />
@@ -878,6 +1009,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     <ThreadSwipeable
       threadKey={`${thread.environmentId}:${thread.id}`}
       backgroundColor={backgroundColor}
+      enabled={!cleanupPending && !cleanupFailed && thread.persistent !== true}
       containerStyle={
         Platform.OS === "android"
           ? { borderRadius: 20, overflow: "hidden", marginHorizontal: 8, marginVertical: 2 }
@@ -905,9 +1037,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
         // ControlPillMenu injects onLongPress into the row and anchors the
         // token-styled dropdown to it; taps and swipes are untouched.
         <ControlPillMenu
-          actions={menuActions}
+          actions={cleanupFailed ? FAILED_CLEANUP_MENU_ACTIONS : cleanupPending ? [] : menuActions}
           onPressAction={handleMenuAction}
-          shouldOpenOnLongPress
+          shouldOpenOnLongPress={cleanupFailed || !cleanupPending}
         >
           {rowContent(close)}
         </ControlPillMenu>

@@ -565,7 +565,7 @@ const ActionProtocolEventFields = Schema.Union([
     report: ActionReport,
   }),
 ]);
-export const ACTION_PROTOCOL_EVENT_MAX_JSON_CHARS = 10_000;
+const ACTION_PROTOCOL_EVENT_MAX_JSON_CHARS = 10_000;
 export const ActionProtocolEvent = ActionProtocolEventFields.check(
   Schema.makeFilter(
     (event) =>
@@ -614,7 +614,7 @@ export const ActionRunInspection = Schema.Struct({
 });
 export type ActionRunInspection = typeof ActionRunInspection.Type;
 
-export class ActionResumeError extends Schema.TaggedErrorClass<ActionResumeError>()(
+export class ActionResumeError extends Schema.TaggedError<ActionResumeError>()(
   "ActionResumeError",
   {
     reason: Schema.Literals([
@@ -765,6 +765,7 @@ export const OrchestrationMessage = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   context: Schema.optional(OrchestrationMessageContext),
+  sourceThreadId: Schema.optional(ThreadId),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
@@ -809,6 +810,7 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  providerThreadId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -890,6 +892,14 @@ export const ThreadTitleRegeneration = Schema.Struct({
   startedAt: IsoDateTime,
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
+
+/** Agent-managed attention raised on a thread. Add new kinds here as the UI
+ * gains distinct, user-actionable statuses. */
+export const ThreadAttention = Schema.Struct({
+  kind: Schema.Literal("question"),
+  raisedAt: IsoDateTime,
+});
+export type ThreadAttention = typeof ThreadAttention.Type;
 
 /**
  * Legacy single-PR link. Still emitted as the thread's derived current pull
@@ -978,6 +988,26 @@ export const ThreadPullRequestLink = Schema.Struct({
 });
 export type ThreadPullRequestLink = typeof ThreadPullRequestLink.Type;
 
+export const THREAD_ANNOTATION_MAX_BODY_CHARS = 20_000;
+
+/**
+ * A user-authored Markdown note attached to one thread. The anchor is the
+ * user-message marker that was newest when the note was last changed;
+ * subsequent messages do not move it. Resolution is retained so the minimap
+ * can keep showing completed notes while other surfaces hide them.
+ */
+export const ThreadAnnotation = Schema.Struct({
+  body: Schema.String.check(
+    Schema.isMaxLength(THREAD_ANNOTATION_MAX_BODY_CHARS),
+    Schema.makeFilter((value) => value.trim().length > 0 || "annotation body cannot be empty"),
+  ),
+  anchorMessageId: MessageId,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  resolvedAt: Schema.NullOr(IsoDateTime),
+});
+export type ThreadAnnotation = typeof ThreadAnnotation.Type;
+
 const ThreadWorktreeCleanupBase = {
   repositoryRoot: TrimmedNonEmptyString,
   /**
@@ -1051,6 +1081,8 @@ export const OrchestrationThread = Schema.Struct({
   // threads remain in their respective shelves even when pinned.
   // Optional so payloads from pre-pinning servers still decode.
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  // Optional on the wire so pre-safeguard clients and cached snapshots decode it as false.
+  persistent: Schema.optional(Schema.Boolean),
   // Fractional index for user-arranged pinned order. Keyed threads sort by
   // string comparison ahead of keyless ones (which keep creation order), so
   // servers never need each other's threads to agree on the merged list.
@@ -1062,7 +1094,15 @@ export const OrchestrationThread = Schema.Struct({
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
+  // Optional on the wire so pre-annotation clients and cached snapshots keep
+  // decoding during rollout. A missing value is equivalent to null.
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  // Command decisions use this projected marker to anchor annotations without
+  // hydrating message bodies and attachments for every thread.
+  latestUserMessageId: Schema.optional(Schema.NullOr(MessageId)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  // Optional on the wire so cached snapshots from older servers still decode.
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -1128,11 +1168,14 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  persistent: Schema.optional(Schema.Boolean),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -1190,11 +1233,13 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("thread-upserted"),
     sequence: NonNegativeInt,
     thread: OrchestrationThreadShell,
+    relatedThreads: Schema.optional(Schema.Array(OrchestrationThreadShell)),
   }),
   Schema.Struct({
     kind: Schema.Literal("thread-removed"),
     sequence: NonNegativeInt,
     threadId: ThreadId,
+    relatedThreads: Schema.optional(Schema.Array(OrchestrationThreadShell)),
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
@@ -1400,6 +1445,13 @@ const ThreadUnarchiveCommand = Schema.Struct({
   threadId: ThreadId,
 });
 
+const ThreadPersistenceSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.persistence.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  persistent: Schema.Boolean,
+});
+
 const ThreadSettleCommand = Schema.Struct({
   type: Schema.Literal("thread.settle"),
   commandId: CommandId,
@@ -1477,6 +1529,25 @@ const ThreadActiveReorderCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   orderKey: TrimmedNonEmptyString,
+});
+
+const ThreadAnnotationUpsertCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.upsert"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  body: ThreadAnnotation.fields.body,
+});
+
+const ThreadAnnotationResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadAnnotationReopenCommand = Schema.Struct({
+  type: Schema.Literal("thread.annotation.reopen"),
+  commandId: CommandId,
+  threadId: ThreadId,
 });
 
 const ThreadMetaUpdateCommand = Schema.Struct({
@@ -1577,7 +1648,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
+  sourceThreadId: Schema.optional(ThreadId),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1597,7 +1670,9 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
+  sourceThreadId: Schema.optional(ThreadId),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1678,6 +1753,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
+  ThreadPersistenceSetCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
@@ -1686,6 +1762,9 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
   ThreadActiveReorderCommand,
+  ThreadAnnotationUpsertCommand,
+  ThreadAnnotationResolveCommand,
+  ThreadAnnotationReopenCommand,
   ThreadMetaUpdateCommand,
   ThreadPullRequestLinkCommand,
   ThreadPullRequestUnlinkCommand,
@@ -1714,6 +1793,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadWorktreeCleanupAbandonCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
+  ThreadPersistenceSetCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadSnoozeCommand,
@@ -1722,6 +1802,9 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
   ThreadActiveReorderCommand,
+  ThreadAnnotationUpsertCommand,
+  ThreadAnnotationResolveCommand,
+  ThreadAnnotationReopenCommand,
   ThreadMetaUpdateCommand,
   ThreadPullRequestLinkCommand,
   ThreadPullRequestUnlinkCommand,
@@ -1846,6 +1929,21 @@ const ThreadActivityAppendCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadAttentionSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.attention.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  attention: ThreadAttention,
+  createdAt: IsoDateTime,
+});
+
+const ThreadAttentionClearCommand = Schema.Struct({
+  type: Schema.Literal("thread.attention.clear"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadRevertCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.revert.complete"),
   commandId: CommandId,
@@ -1905,6 +2003,33 @@ const ThreadPullRequestLinkSyncCommand = Schema.Struct({
   stack: Schema.NullOr(ThreadPullRequestStack),
 });
 
+export const ThreadTurnRequestOutcome = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("started"), turnId: TurnId }),
+  Schema.Struct({
+    kind: Schema.Literal("terminal"),
+    state: Schema.Literals(["error", "interrupted"]),
+    completedAt: IsoDateTime,
+  }),
+]);
+export type ThreadTurnRequestOutcome = typeof ThreadTurnRequestOutcome.Type;
+
+const ThreadTurnRequestResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-request.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  outcome: ThreadTurnRequestOutcome,
+  createdAt: IsoDateTime,
+});
+
+const ThreadTurnAssistantFinalizeCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-assistant.finalize"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  turnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadWorktreeCleanupUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.worktree-cleanup.update"),
   commandId: CommandId,
@@ -1926,12 +2051,16 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
+  ThreadAttentionSetCommand,
+  ThreadAttentionClearCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
   ThreadTitleGenerateCompleteCommand,
   ThreadTitleRefineCommand,
   ThreadPullRequestSyncCommand,
   ThreadPullRequestLinkSyncCommand,
+  ThreadTurnRequestResolveCommand,
+  ThreadTurnAssistantFinalizeCommand,
   ThreadWorktreeCleanupUpdateCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
@@ -1951,6 +2080,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.worktree-cleanup-updated",
   "thread.archived",
   "thread.unarchived",
+  "thread.persistence-changed",
   "thread.settled",
   "thread.unsettled",
   "thread.snoozed",
@@ -1958,6 +2088,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.pinned",
   "thread.unpinned",
   "thread.pin-reordered",
+  "thread.annotation-upserted",
+  "thread.annotation-resolved",
+  "thread.annotation-reopened",
   "thread.meta-updated",
   "thread.pull-request-linked",
   "thread.pull-request-unlinked",
@@ -1966,6 +2099,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.interaction-mode-set",
   "thread.message-sent",
   "thread.turn-start-requested",
+  "thread.turn-request-resolved",
+  "thread.turn-assistant-finalized",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
@@ -1976,6 +2111,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
+  "thread.attention-set",
+  "thread.attention-cleared",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
@@ -2054,6 +2191,13 @@ export const ThreadUnarchivedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadPersistenceChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  persistentThreadId: Schema.NullOr(ThreadId),
+  replacedThreadId: Schema.NullOr(ThreadId),
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadSettledPayload = Schema.Struct({
   threadId: ThreadId,
   settledAt: IsoDateTime,
@@ -2101,6 +2245,11 @@ export const ThreadPinReorderedPayload = Schema.Struct({
   threadId: ThreadId,
   orderKey: TrimmedNonEmptyString,
   updatedAt: IsoDateTime,
+});
+
+export const ThreadAnnotationChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  annotation: ThreadAnnotation,
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
@@ -2171,6 +2320,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   context: Schema.optional(OrchestrationMessageContext),
+  sourceThreadId: Schema.optional(ThreadId),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
@@ -2187,7 +2337,20 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  trackRequestCorrelation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
+});
+
+export const ThreadTurnRequestResolvedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  outcome: ThreadTurnRequestOutcome,
+});
+
+export const ThreadTurnAssistantFinalizedPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  finalizedAt: IsoDateTime,
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
@@ -2252,6 +2415,17 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
 export const ThreadActivityAppendedPayload = Schema.Struct({
   threadId: ThreadId,
   activity: OrchestrationThreadActivity,
+});
+
+export const ThreadAttentionSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  attention: ThreadAttention,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadAttentionClearedPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
 });
 
 /**
@@ -2338,6 +2512,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.persistence-changed"),
+    payload: ThreadPersistenceChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.settled"),
     payload: ThreadSettledPayload,
   }),
@@ -2370,6 +2549,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pin-reordered"),
     payload: ThreadPinReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-upserted"),
+    payload: ThreadAnnotationChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-resolved"),
+    payload: ThreadAnnotationChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.annotation-reopened"),
+    payload: ThreadAnnotationChangedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -2410,6 +2604,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.turn-start-requested"),
     payload: ThreadTurnStartRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-request-resolved"),
+    payload: ThreadTurnRequestResolvedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-assistant-finalized"),
+    payload: ThreadTurnAssistantFinalizedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -2460,6 +2664,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.attention-set"),
+    payload: ThreadAttentionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.attention-cleared"),
+    payload: ThreadAttentionClearedPayload,
   }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;
@@ -2687,6 +2901,13 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedError<Orches
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
     bootstrapThreadDisposition: Schema.optional(Schema.Literals(["deleted", "not-created"])),
+  },
+) {}
+
+export class ThreadAttentionToolError extends Schema.TaggedError<ThreadAttentionToolError>()(
+  "ThreadAttentionToolError",
+  {
+    message: TrimmedNonEmptyString,
   },
 ) {}
 
