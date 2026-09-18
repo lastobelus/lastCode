@@ -427,6 +427,7 @@ describe("DesktopTelemetryPublisher", () => {
           outcome: "up-to-date",
           state: {
             enabled: true,
+            source: "hosted",
             status: "up-to-date",
             channel: "latest",
             currentVersion: "1.2.3",
@@ -442,6 +443,8 @@ describe("DesktopTelemetryPublisher", () => {
             errorContext: null,
             canRetry: false,
             omittedReleaseCount: 0,
+            localBuildProgress: null,
+            localBuildFailure: null,
           },
         } as const;
         yield* publisher.publishUpdateReport(report);
