@@ -30,19 +30,31 @@ import { relativeTime } from "../../lib/time";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { terminalEnvironment } from "../../state/terminal";
+import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   resolveThreadListV2SnoozeMenuSelection,
+  resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
+import { PersistentThreadIcon } from "./PersistentThreadIcon";
+import {
+  buildThreadPersistenceMenuItems,
+  persistenceIntentForMenuEvent,
+} from "./thread-persistence-menu";
+import {
+  resolveWorktreeCleanupStatus,
+  shouldShowActionWaitingIndicator,
+} from "./threadPresentation";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -64,11 +76,12 @@ const MONO_FONT = Platform.select({
 const STATUS_LABEL_BY_STATUS: Partial<
   Record<ThreadListV2Status, { label: string; className: string }>
 > = {
-  approval: { label: "Approval", className: "text-warning-foreground" },
-  input: { label: "Input", className: "text-foreground-secondary" },
+  approval: { label: "Approval", className: "text-adaptive-amber-700-300" },
+  input: { label: "Input", className: "text-adaptive-indigo-600-300" },
+  question: { label: "? Question", className: "text-adaptive-violet-700-300" },
   working: { label: "Working", className: "text-adaptive-sky-600-400" },
-  waiting: { label: "Action", className: "text-warning-foreground" },
-  failed: { label: "Failed", className: "text-danger-foreground" },
+  waiting: { label: "Waiting", className: "text-adaptive-amber-700-300" },
+  failed: { label: "Failed", className: "text-adaptive-red-700-300" },
 };
 
 function threadTimeLabel(thread: EnvironmentThreadShell): string {
@@ -98,8 +111,15 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
 ];
 
+const FAILED_CLEANUP_MENU_ACTIONS: MenuAction[] = [
+  { id: "retry-worktree-cleanup", title: "Retry", image: "arrow.clockwise" },
+  { id: "keep-worktree", title: "Keep worktree", image: "externaldrive" },
+];
+
 /** Rounded-row radius shared with the v1 sidebar rows. */
 const SIDEBAR_V2_ROW_RADIUS = 12;
+const SNOOZE_ACCENT_LIGHT = "#2563eb";
+const SNOOZE_ACCENT_DARK = "#60a5fa";
 
 function ThreadListV2Section(props: {
   readonly label: string;
@@ -113,6 +133,7 @@ function ThreadListV2Section(props: {
     readonly accessibilityHint: string;
   };
 }) {
+  const { themeAppearance: colorScheme } = useAppearancePreferences();
   const snoozed = props.tone === "snoozed";
   const className = cn(
     "mb-1.5 mt-4 flex-row items-center gap-2.5",
@@ -123,17 +144,29 @@ function ThreadListV2Section(props: {
       <Text
         className={cn(
           "text-xs font-t3-medium",
-          snoozed ? "text-foreground-secondary" : "text-foreground-tertiary",
+          snoozed ? "text-adaptive-blue-600-400" : "text-foreground-tertiary",
         )}
       >
         {props.label}
       </Text>
-      <View className={cn("h-px flex-1", snoozed ? "bg-primary/20" : "bg-border")} />
+      <View
+        className={cn(
+          "h-px flex-1",
+          snoozed ? "bg-adaptive-blue-500-a20-blue-400-a15" : "bg-border",
+        )}
+      />
       {props.disclosure ? (
         <SymbolView
           name="chevron.down"
           size={10}
-          tintColorClassName={snoozed ? "accent-icon-muted" : "accent-foreground-muted"}
+          tintColorClassName={snoozed ? undefined : "accent-foreground-muted"}
+          tintColor={
+            snoozed
+              ? colorScheme === "dark"
+                ? SNOOZE_ACCENT_DARK
+                : SNOOZE_ACCENT_LIGHT
+              : undefined
+          }
           type="monochrome"
           style={{ transform: [{ rotate: props.disclosure.expanded ? "180deg" : "0deg" }] }}
         />
@@ -439,6 +472,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly pinningSupported: boolean;
   /** False on servers that predate thread title regeneration. */
   readonly titleRegenerationSupported: boolean;
+  /** False on servers that predate thread.persistence.set. */
+  readonly persistenceSupported: boolean;
   /** Server supports reordering this card's section. */
   readonly reorderSupported?: boolean;
   readonly onMoveThread?: (
@@ -477,9 +512,19 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   } = props;
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
+  const cleanupFailed = resolveThreadListV2CleanupActions(thread.worktreeCleanup).length > 0;
+  const cleanupPending = thread.worktreeCleanup != null && !cleanupFailed;
   const runningAction = thread.actionResume?.outcome === "running" ? thread.actionResume : null;
-  const actionPresentation = runningAction ? actionRunningPresentation(runningAction) : null;
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
+  const retryWorktreeCleanup = useAtomCommand(threadEnvironment.retryWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
+    reportFailure: false,
+  });
+  const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
+    reportFailure: false,
+  });
 
   const pr = useThreadPr(thread);
 
@@ -488,6 +533,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const drawerColor = theme["--color-drawer"];
   const selectedBackgroundColor =
     theme[Platform.OS === "android" ? "--color-thread-selected" : "--color-user-bubble"];
+  const selectedForegroundColor =
+    theme[
+      Platform.OS === "android"
+        ? "--color-thread-selected-foreground"
+        : "--color-user-bubble-foreground"
+    ];
   const sidebarPane = props.pane === "sidebar";
   const selected = props.selected === true;
   // The provider badge's border blends into the row's own surface, which
@@ -503,7 +554,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     : screenColor;
 
   const status = resolveThreadListV2Status(thread);
-  const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status);
+  const cleanupStatus = resolveWorktreeCleanupStatus(thread);
+  const statusLabel = cleanupStatus
+    ? { label: cleanupStatus.label, className: cleanupStatus.textClassName }
+    : STATUS_LABEL_BY_STATUS[status];
   // Settled rows label by the same stamp they sort by, so order and label
   // can't disagree. updatedAt is always present, so the resolver never
   // returns null here.
@@ -511,6 +566,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "slim" && !snoozedRow ? resolveSettledThreadTimestamp(thread) : null;
   const timeLabel =
     settledTimestamp !== null ? relativeTime(settledTimestamp) : threadTimeLabel(thread);
+  const threadAccessibilityLabel = [
+    thread.title,
+    showActionWaitingIndicator && runningAction
+      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
+      : null,
+    props.hasQueuedMessages ? "messages queued to send" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
@@ -531,6 +595,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleMoveUp = useCallback(() => onMoveThread?.(thread, "up"), [onMoveThread, thread]);
   const handleMoveDown = useCallback(() => onMoveThread?.(thread, "down"), [onMoveThread, thread]);
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handlePersistence = useCallback(
+    async (persistent: boolean) => {
+      const result = await setThreadPersistence({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, persistent },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update persistent thread",
+          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+        );
+      }
+    },
+    [setThreadPersistence, thread.environmentId, thread.id],
+  );
   const handleCancelAction = useCallback(async () => {
     if (runningAction === null) return;
     const result = await closeTerminal({
@@ -545,6 +625,48 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       );
     }
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
+  const handleRetryWorktreeCleanup = useCallback(async () => {
+    const result = await retryWorktreeCleanup({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id },
+    });
+    if (result._tag === "Failure") {
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not retry worktree cleanup",
+        error instanceof Error ? error.message : "The worktree cleanup could not be retried.",
+      );
+    }
+  }, [retryWorktreeCleanup, thread.environmentId, thread.id]);
+  const handleKeepWorktree = useCallback(() => {
+    Alert.alert(
+      "Keep worktree?",
+      "LastCode will stop trying to remove this worktree. You can remove it manually later.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Keep worktree",
+          style: "destructive",
+          onPress: () => {
+            void abandonWorktreeCleanup({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id },
+            }).then((result) => {
+              if (result._tag === "Failure") {
+                const error = Cause.squash(result.cause);
+                Alert.alert(
+                  "Could not keep worktree",
+                  error instanceof Error
+                    ? error.message
+                    : "The worktree cleanup could not be dismissed.",
+                );
+              }
+            });
+          },
+        },
+      ],
+    );
+  }, [abandonWorktreeCleanup, thread.environmentId, thread.id]);
 
   // Swipe: the v2 primary action is the lifecycle transition. Un-settling a
   // settled row keeps it active until new activity clears the user override.
@@ -644,62 +766,76 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           ],
     [runningAction],
   );
+  const withPersistence = useCallback(
+    (actions: ReadonlyArray<MenuAction>) =>
+      buildThreadPersistenceMenuItems({
+        actions,
+        persistent: thread.persistent === true,
+        supported: props.persistenceSupported,
+      }),
+    [props.persistenceSupported, thread.persistent],
+  );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
-    () => [
-      { id: "settle", title: "Settle", image: "checkmark" },
-      {
-        id: "snooze",
-        title: "Snooze",
-        image: "clock",
-        subactions: snoozePresetActions,
-      },
-      ...arrangementMenuItems,
-      ...titleMenuItems,
-      ...actionMenuItems,
-      { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
-    ],
-    [actionMenuItems, arrangementMenuItems, snoozePresetActions, titleMenuItems],
+    () =>
+      withPersistence([
+        { id: "settle", title: "Settle", image: "checkmark" },
+        {
+          id: "snooze",
+          title: "Snooze",
+          image: "clock",
+          subactions: snoozePresetActions,
+        },
+        ...arrangementMenuItems,
+        ...titleMenuItems,
+        ...actionMenuItems,
+        { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
+      ]),
+    [actionMenuItems, arrangementMenuItems, snoozePresetActions, titleMenuItems, withPersistence],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
-    () => [
-      CARD_MENU_ACTIONS[0]!,
-      ...arrangementMenuItems,
-      ...titleMenuItems,
-      ...actionMenuItems,
-      ...CARD_MENU_ACTIONS.slice(1),
-    ],
-    [actionMenuItems, arrangementMenuItems, titleMenuItems],
+    () =>
+      withPersistence([
+        CARD_MENU_ACTIONS[0]!,
+        ...arrangementMenuItems,
+        ...titleMenuItems,
+        ...actionMenuItems,
+        ...CARD_MENU_ACTIONS.slice(1),
+      ]),
+    [actionMenuItems, arrangementMenuItems, titleMenuItems, withPersistence],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
-    () => [
-      SLIM_MENU_ACTIONS[0]!,
-      ...arrangementMenuItems.filter(
-        (action) => action.id !== "move-up" && action.id !== "move-down",
-      ),
-      ...titleMenuItems,
-      ...actionMenuItems,
-      SLIM_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, arrangementMenuItems, titleMenuItems],
+    () =>
+      withPersistence([
+        SLIM_MENU_ACTIONS[0]!,
+        ...arrangementMenuItems.filter(
+          (action) => action.id !== "move-up" && action.id !== "move-down",
+        ),
+        ...titleMenuItems,
+        ...actionMenuItems,
+        SLIM_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, arrangementMenuItems, titleMenuItems, withPersistence],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
-    () => [
-      SNOOZED_MENU_ACTIONS[0]!,
-      ...titleMenuItems,
-      ...actionMenuItems,
-      SNOOZED_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, titleMenuItems],
+    () =>
+      withPersistence([
+        SNOOZED_MENU_ACTIONS[0]!,
+        ...titleMenuItems,
+        ...actionMenuItems,
+        SNOOZED_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, titleMenuItems, withPersistence],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
-    () => [
-      LEGACY_MENU_ACTIONS[0]!,
-      ...arrangementMenuItems,
-      ...titleMenuItems,
-      ...actionMenuItems,
-      LEGACY_MENU_ACTIONS[1]!,
-    ],
-    [actionMenuItems, arrangementMenuItems, titleMenuItems],
+    () =>
+      withPersistence([
+        LEGACY_MENU_ACTIONS[0]!,
+        ...arrangementMenuItems,
+        ...titleMenuItems,
+        ...actionMenuItems,
+        LEGACY_MENU_ACTIONS[1]!,
+      ]),
+    [actionMenuItems, arrangementMenuItems, titleMenuItems, withPersistence],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -716,11 +852,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "cancel-action") void handleCancelAction();
+      if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
+      if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       if (nativeEvent.event === "delete") handleDelete();
       if (nativeEvent.event === "snooze:custom") {
         setCustomSnoozeOpen(true);
         return;
       }
+      const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
+      if (persistenceIntent !== null) void handlePersistence(persistenceIntent);
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
         event: nativeEvent.event,
         displayedPresets: snoozePresets,
@@ -738,6 +878,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleArchive,
       handleCancelAction,
       handleDelete,
+      handleKeepWorktree,
+      handlePersistence,
+      handleRetryWorktreeCleanup,
       handleRegenerateTitle,
       handleRename,
       handleMoveDown,
@@ -748,6 +891,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleUnpin,
       handleUnsettle,
       handleUnsnooze,
+      setCustomSnoozeOpen,
       snoozePresets,
     ],
   );
@@ -813,16 +957,6 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     secondaryAction === null
       ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
       : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
-  const threadAccessibilityLabel = [
-    thread.title,
-    actionPresentation?.state === "waiting" && runningAction
-      ? `Waiting for ${runningAction.actionName}. ${actionPresentation.summary}`
-      : null,
-    props.hasQueuedMessages ? "messages queued to send" : null,
-  ]
-    .filter(Boolean)
-    .join(", ");
-
   // The sidebar pane fills selected rows with the theme's message surface, so
   // every piece of row text must use that surface's paired foreground.
   const cardContent = (
@@ -859,32 +993,51 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             type="monochrome"
           />
         ) : null}
+        <View className="flex-row items-center gap-1">
+          {showActionWaitingIndicator && runningAction ? (
+            <SymbolView
+              accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
+              name="clock.arrow.circlepath"
+              size={12}
+              tintColor={selected ? String(selectedForegroundColor) : "#eab308"}
+              type="monochrome"
+            />
+          ) : null}
+          <Text
+            className={cn(
+              "text-xs tabular-nums",
+              selected
+                ? "text-user-bubble-foreground"
+                : (statusLabel?.className ?? "text-foreground-tertiary"),
+            )}
+          >
+            {statusLabel?.label ?? timeLabel}
+          </Text>
+        </View>
+      </View>
+      <View className="mt-1 flex-row items-start gap-1.5">
+        {thread.persistent === true ? (
+          <View className="pt-1">
+            <PersistentThreadIcon
+              color={String(selected ? selectedForegroundColor : theme["--color-foreground"])}
+            />
+          </View>
+        ) : null}
         <Text
           className={cn(
-            "text-xs tabular-nums",
+            "flex-1 text-base font-t3-medium",
             selected
               ? Platform.OS === "android"
                 ? "text-thread-selected-foreground"
                 : "text-user-bubble-foreground"
-              : (statusLabel?.className ?? "text-foreground-tertiary"),
+              : "text-foreground",
+            thread.persistent === true && "italic",
           )}
+          numberOfLines={2}
         >
-          {statusLabel?.label ?? timeLabel}
+          {thread.title}
         </Text>
       </View>
-      <Text
-        className={cn(
-          "mt-1 text-base font-t3-medium",
-          selected
-            ? Platform.OS === "android"
-              ? "text-thread-selected-foreground"
-              : "text-user-bubble-foreground"
-            : "text-foreground",
-        )}
-        numberOfLines={2}
-      >
-        {thread.title}
-      </Text>
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -1039,11 +1192,19 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             : "bg-primary"
         }
         className={sidebarPane || Platform.OS === "android" ? undefined : "bg-screen"}
-        accessibilityHint={swipeAccessibilityHint}
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : thread.persistent === true
+              ? "Persistent thread. Long-press to disable persistence"
+              : swipeAccessibilityHint
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}
@@ -1088,12 +1249,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               : "bg-user-bubble-foreground"
             : "bg-primary"
         }
-        accessibilityHint={swipeAccessibilityHint}
+        accessibilityHint={
+          cleanupFailed
+            ? "Thread unavailable. Long-press for worktree recovery actions"
+            : swipeAccessibilityHint
+        }
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        accessibilityState={{ selected }}
+        accessibilityState={{ disabled: cleanupPending, selected }}
+        disabled={cleanupPending}
         className={sidebarPane || Platform.OS === "android" ? undefined : "bg-screen"}
         onPress={() => {
+          if (cleanupFailed) return;
           close();
           onSelectThread(thread);
         }}
@@ -1129,19 +1296,29 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </View>
           ) : null}
           <View className="min-w-0 flex-1">
-            <Text
-              className={cn(
-                "text-base",
-                selected
-                  ? Platform.OS === "android"
-                    ? "text-thread-selected-foreground"
-                    : "text-user-bubble-foreground"
-                  : "text-foreground-muted",
-              )}
-              numberOfLines={1}
-            >
-              {thread.title}
-            </Text>
+            <View className="flex-row items-center gap-1.5">
+              {thread.persistent === true ? (
+                <PersistentThreadIcon
+                  color={String(
+                    selected ? selectedForegroundColor : theme["--color-foreground-muted"],
+                  )}
+                />
+              ) : null}
+              <Text
+                className={cn(
+                  "flex-1 text-base",
+                  selected
+                    ? Platform.OS === "android"
+                      ? "text-thread-selected-foreground"
+                      : "text-user-bubble-foreground"
+                    : "text-foreground-muted",
+                  thread.persistent === true && "italic",
+                )}
+                numberOfLines={1}
+              >
+                {thread.title}
+              </Text>
+            </View>
             {props.searchMatch ? (
               <ThreadSearchMatchExcerpt
                 match={props.searchMatch}
@@ -1159,7 +1336,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   ? "text-thread-selected-foreground-muted"
                   : "text-user-bubble-foreground-muted"
                 : snoozedRow
-                  ? "text-foreground-secondary"
+                  ? "text-adaptive-blue-600-400"
                   : "text-foreground-tertiary",
             )}
             style={{ fontFamily: MONO_FONT }}
@@ -1181,6 +1358,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         threadKey={`${thread.environmentId}:${thread.id}`}
         backgroundColor={sidebarPane && Platform.OS !== "android" ? drawerColor : screenColor}
         compactActions={variant === "slim"}
+        enabled={
+          !cleanupPending &&
+          !cleanupFailed &&
+          !(thread.persistent === true && swipeActions.primary === "archive")
+        }
         containerStyle={
           Platform.OS === "android"
             ? { borderRadius: 20, overflow: "hidden", marginHorizontal: 8, marginVertical: 2 }
@@ -1204,31 +1386,37 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       >
         {(close) => (
           <ControlPillMenu
-            actions={[
-              ...(thread.branch
-                ? [
-                    {
-                      id: "new-thread-on-branch",
-                      title:
-                        Platform.OS === "ios"
-                          ? "New thread on branch"
-                          : `New thread on ${thread.branch}`,
-                      image: "square.and.pencil",
-                    },
-                  ]
-                : []),
-              ...(snoozedRow
-                ? snoozedMenuActions
-                : !props.settlementSupported
-                  ? legacyMenuActions
-                  : canUnsettle
-                    ? slimMenuActions
-                    : swipeActions.secondary === "snooze"
-                      ? snoozableCardMenuActions
-                      : cardMenuActions),
-            ]}
+            actions={
+              cleanupFailed
+                ? FAILED_CLEANUP_MENU_ACTIONS
+                : cleanupPending
+                  ? []
+                  : [
+                      ...(thread.branch
+                        ? [
+                            {
+                              id: "new-thread-on-branch",
+                              title:
+                                Platform.OS === "ios"
+                                  ? "New thread on branch"
+                                  : `New thread on ${thread.branch}`,
+                              image: "square.and.pencil",
+                            },
+                          ]
+                        : []),
+                      ...(snoozedRow
+                        ? snoozedMenuActions
+                        : !props.settlementSupported
+                          ? legacyMenuActions
+                          : canUnsettle
+                            ? slimMenuActions
+                            : swipeActions.secondary === "snooze"
+                              ? snoozableCardMenuActions
+                              : cardMenuActions),
+                    ]
+            }
             onPressAction={handleMenuAction}
-            shouldOpenOnLongPress
+            shouldOpenOnLongPress={cleanupFailed || !cleanupPending}
           >
             {rowContent(close)}
           </ControlPillMenu>

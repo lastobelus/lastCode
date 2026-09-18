@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runLastCodeMigrations } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
@@ -12,9 +13,10 @@ layer("049_UpdateDrain", (it) => {
   it.effect("creates a narrow event stream and durable command receipts", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
 
-      yield* runMigrations({ toMigrationInclusive: 48 });
-      yield* runMigrations({ toMigrationInclusive: 49 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 1 });
+      yield* runLastCodeMigrations({ toMigrationInclusive: 2 });
 
       const eventColumns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(update_drain_events)

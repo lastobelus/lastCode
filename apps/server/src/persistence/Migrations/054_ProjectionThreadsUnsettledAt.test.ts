@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import Migration0048 from "./048_ProjectionThreadAnnotation.ts";
 import Migration0049 from "./049_UpdateDrain.ts";
@@ -43,15 +44,7 @@ layer("054_ProjectionThreadsUnsettledAt", (it) => {
       `;
       assert.isFalse(before.some((column) => column.name === "unsettled_at"));
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 54 });
-      assert.deepStrictEqual(executed, [
-        [49, "UpdateDrain"],
-        [50, "UpdateDrainClaim"],
-        [51, "ProjectionTurnRequestCorrelations"],
-        [52, "ProjectionThreadWorktreeCleanup"],
-        [53, "ProjectionThreadLinkedPullRequest"],
-        [54, "ProjectionThreadsUnsettledAt"],
-      ]);
+      yield* runDatabaseMigrations();
 
       const after = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_threads)
