@@ -10,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "./config.ts";
-import { makeServerLayer } from "./server.ts";
+import { runServer } from "./server.ts";
 import {
   acquireServerOwnerLease,
   getServerOwnerLeaseLockPath,
@@ -38,7 +38,10 @@ const makeServerConfig = (baseDir: string) => {
     traceMaxBytes: 10 * 1024 * 1024,
     traceMaxFiles: 10,
     otlpTracesUrl: undefined,
+    otlpHeaders: {},
+    otlpProtocol: "http/json",
     otlpMetricsUrl: undefined,
+    otlpLogsUrl: undefined,
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "t3-server",
     mode: "web",
@@ -54,6 +57,7 @@ const makeServerConfig = (baseDir: string) => {
     providerStatusCacheDir: NodePath.join(baseDir, "caches"),
     worktreesDir: NodePath.join(baseDir, "worktrees"),
     attachmentsDir: NodePath.join(stateDir, "attachments"),
+    browserArtifactsDir: NodePath.join(stateDir, "browser-artifacts"),
     logsDir,
     serverLogPath: NodePath.join(logsDir, "server.log"),
     serverTracePath: NodePath.join(logsDir, "server.trace.ndjson"),
@@ -189,7 +193,7 @@ it.effect("fails before the server can construct persistence or listen", () => {
       if (process.platform !== "darwin") return;
       const config = makeServerConfig(home);
       yield* acquireScopedLease(config.stateDir);
-      const error = yield* Layer.build(makeServerLayer).pipe(
+      const error = yield* runServer.pipe(
         Effect.provide(Layer.mergeAll(ServerConfig.layer(config), NodeServices.layer)),
         Effect.flip,
       );
