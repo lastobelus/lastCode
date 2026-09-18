@@ -16,6 +16,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadTitleState,
+  ThreadWorktreeCleanup,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -52,6 +53,7 @@ export const ProjectionThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
@@ -73,6 +75,13 @@ export type DeleteProjectionThreadInput = typeof DeleteProjectionThreadInput.Typ
 export const ListProjectionThreadsByProjectInput = Schema.Struct({
   projectId: ProjectId,
 });
+export const ListPendingWorktreeCleanupThreadsInput = Schema.Void;
+export const ListActiveWorktreeOwnerThreadsInput = Schema.Void;
+export const ActiveWorktreeOwner = Schema.Struct({
+  threadId: ThreadId,
+  worktreePath: Schema.String,
+});
+export type ActiveWorktreeOwner = typeof ActiveWorktreeOwner.Type;
 export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
 /**
@@ -101,6 +110,16 @@ export interface ProjectionThreadRepositoryShape {
   readonly listByProjectId: (
     input: ListProjectionThreadsByProjectInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThread>, ProjectionRepositoryError>;
+
+  readonly listPendingWorktreeCleanup: () => Effect.Effect<
+    ReadonlyArray<ProjectionThread>,
+    ProjectionRepositoryError
+  >;
+
+  readonly listActiveWorktreeOwners: () => Effect.Effect<
+    ReadonlyArray<ActiveWorktreeOwner>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Soft-delete a projected thread row by id.
