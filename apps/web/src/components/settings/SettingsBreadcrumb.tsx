@@ -1,12 +1,15 @@
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { LayersIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { cn } from "../../lib/utils";
+import { useArchivedProjectModel } from "../../lib/archivedThreadsState";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { ProjectScopeBreadcrumb } from "../ProjectScopeBreadcrumb";
 import {
   Menu,
   MenuPopup,
@@ -65,6 +68,15 @@ export function SettingsBreadcrumb({
   pathname: string;
   scope?: SettingsScopeBreadcrumbProps | undefined;
 }) {
+  const archiveProjectKey = useSearch({
+    from: "/settings/archived",
+    shouldThrow: false,
+    select: (search) => search.project ?? null,
+  });
+  const normalizedPathname = pathname.replace(/\/+$/, "") || "/";
+  if (normalizedPathname === "/settings/archived" && archiveProjectKey !== undefined) {
+    return <ArchivedThreadsBreadcrumb projectKey={archiveProjectKey} />;
+  }
   const sectionLabel = settingsBreadcrumbLabel(pathname);
 
   return (
@@ -93,7 +105,6 @@ export function SettingsBreadcrumb({
     </WorkspaceBreadcrumb>
   );
 }
-
 function ScopeMenu({
   ariaLabel,
   icon,
@@ -231,5 +242,28 @@ function ProjectScopeMenu({ value, groups, onChange }: SettingsScopeBreadcrumbPr
         ))}
       </MenuRadioGroup>
     </ScopeMenu>
+  );
+}
+
+function ArchivedThreadsBreadcrumb({ projectKey }: { projectKey: string | null }) {
+  const navigate = useNavigate({ from: "/settings/archived" });
+  const { isLoading, projectGroups } = useArchivedProjectModel();
+
+  return (
+    <ProjectScopeBreadcrumb
+      allLabel="All"
+      ariaLabel="Archive breadcrumb"
+      items={projectGroups.map((group) => ({ id: group.projectKey, label: group.displayName }))}
+      onSelect={(projectKey) => {
+        void navigate({
+          search: projectKey === null ? {} : { project: projectKey },
+          replace: true,
+          hashScrollIntoView: false,
+        });
+      }}
+      rootLabel="Archive"
+      selectedKey={projectKey}
+      unavailableLabel={isLoading ? "Loading project" : "Unavailable project"}
+    />
   );
 }
