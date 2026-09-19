@@ -90,6 +90,7 @@ const run = (activities: ReadonlyArray<ReturnType<typeof recordedSetup>>) =>
         readEvents: () => Stream.empty,
         readThreadEvents: () => Stream.empty,
         getThreadReplayStats: () => Effect.die("unused"),
+        getTurnRequestWaitState: () => Effect.die("unused"),
         dispatch: (command) =>
           Effect.sync(() => {
             dispatched.push(command);

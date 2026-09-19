@@ -4,8 +4,8 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
-export const ACTION_PROTOCOL_VERSION = 1;
-export const ACTION_PROTOCOL_OSC = "777;T3ActionEvent";
+const ACTION_PROTOCOL_VERSION = 1;
+const ACTION_PROTOCOL_OSC = "777;T3ActionEvent";
 export const ACTION_RUN_ID_ENV = "T3CODE_ACTION_RUN_ID";
 export const ACTION_EVENT_TOKEN_ENV = "T3CODE_ACTION_EVENT_TOKEN";
 

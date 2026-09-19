@@ -13,7 +13,11 @@ import {
   AutocompleteItem,
   AutocompleteList,
 } from "~/components/ui/autocomplete";
-import { DIALOG_BACKDROP_CLASS, DIALOG_POPUP_CLASS } from "~/components/ui/dialog-styles";
+import {
+  DIALOG_BACKDROP_CLASS,
+  DIALOG_POPUP_CLASS,
+  resolveDialogBackdropStyle,
+} from "~/components/ui/dialog-styles";
 import { Button } from "~/components/ui/button";
 
 const CommandDialog = CommandDialogPrimitive.Root;
@@ -24,11 +28,18 @@ function CommandDialogTrigger(props: CommandDialogPrimitive.Trigger.Props) {
   return <CommandDialogPrimitive.Trigger data-slot="command-dialog-trigger" {...props} />;
 }
 
-function CommandDialogBackdrop({ className, ...props }: CommandDialogPrimitive.Backdrop.Props) {
+function CommandDialogBackdrop({
+  className,
+  style,
+  ...props
+}: CommandDialogPrimitive.Backdrop.Props) {
   return (
     <CommandDialogPrimitive.Backdrop
       className={cn(DIALOG_BACKDROP_CLASS, className)}
       data-slot="command-dialog-backdrop"
+      style={(state) =>
+        resolveDialogBackdropStyle(state.open, typeof style === "function" ? style(state) : style)
+      }
       {...props}
     />
   );
