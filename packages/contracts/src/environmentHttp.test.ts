@@ -64,7 +64,9 @@ describe("environment HTTP errors", () => {
 });
 
 it("decodes strict compact wait handles", () => {
-  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ThreadWaitHandle));
+  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ThreadWaitHandle), {
+    onExcessProperty: "error",
+  });
   const value = decode(
     '{"kind":"wait-handle","environmentId":"env-1","threadId":"thread-1","messageId":"message-1"}',
   );

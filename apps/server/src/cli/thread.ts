@@ -177,6 +177,7 @@ const decodeThreadWaitTimeoutMs = Schema.decodeUnknownEffect(
 const decodeThreadWaitDuration = Schema.decodeUnknownEffect(DurationFromString);
 const decodeThreadWaitHandleString = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ThreadWaitHandle),
+  { onExcessProperty: "error" },
 );
 
 const isAuthoritativeWaitFailure = (cause: unknown) => {
