@@ -2,3 +2,47 @@
 	path = .repos/alchemy-effect/.vendor/alchemy
 	url = https://github.com/alchemy-run/alchemy.git
 	update = none
+[submodule ".repos/alchemy-effect/.vendor/astro"]
+	path = .repos/alchemy-effect/.vendor/astro
+	url = https://github.com/withastro/astro.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/floci"]
+	path = .repos/alchemy-effect/.vendor/floci
+	url = https://github.com/alchemy-run/floci.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/next.js"]
+	path = .repos/alchemy-effect/.vendor/next.js
+	url = https://github.com/vercel/next.js.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/nitro"]
+	path = .repos/alchemy-effect/.vendor/nitro
+	url = https://github.com/nitrojs/nitro.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/nitro-cloudflare-dev"]
+	path = .repos/alchemy-effect/.vendor/nitro-cloudflare-dev
+	url = https://github.com/nitrojs/nitro-cloudflare-dev.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/nuxt"]
+	path = .repos/alchemy-effect/.vendor/nuxt
+	url = https://github.com/nuxt/nuxt.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/opennextjs-cloudflare"]
+	path = .repos/alchemy-effect/.vendor/opennextjs-cloudflare
+	url = https://github.com/opennextjs/opennextjs-cloudflare.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/sveltekit"]
+	path = .repos/alchemy-effect/.vendor/sveltekit
+	url = https://github.com/sveltejs/kit.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/waku"]
+	path = .repos/alchemy-effect/.vendor/waku
+	url = https://github.com/wakujs/waku.git
+	update = none
+[submodule ".repos/alchemy-effect/.vendor/workers-sdk"]
+	path = .repos/alchemy-effect/.vendor/workers-sdk
+	url = https://github.com/cloudflare/workers-sdk.git
+	update = none
+[submodule ".repos/alchemy-effect/distilled"]
+	path = .repos/alchemy-effect/distilled
+	url = https://github.com/alchemy-run/distilled.git
+	update = none
