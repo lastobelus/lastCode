@@ -517,7 +517,7 @@ export const ThreadWaitHandle = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
   messageId: MessageId,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
+});
 export type ThreadWaitHandle = typeof ThreadWaitHandle.Type;
 
 export const ThreadWaitResult = Schema.Union([
