@@ -31,6 +31,7 @@
   "peerDependencies": {
     "@t3tools/client-runtime": "*",
     "@t3tools/shared": "*",
+    "character-entities": "^2.0.2",
     "expo": "*",
     "expo-asset": "*",
     "expo-clipboard": "*",
