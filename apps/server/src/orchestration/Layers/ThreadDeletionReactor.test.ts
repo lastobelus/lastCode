@@ -31,7 +31,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import { ProviderAdapterProcessError } from "../../provider/Errors.ts";
-import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProjectionThreadRepository,
   type ProjectionThread,
@@ -139,8 +139,8 @@ describe("ThreadDeletionReactor drain", () => {
               listPendingWorktreeCleanup: () => Effect.succeed([]),
               listActiveWorktreeOwners: () => Effect.succeed([]),
             }),
-            Layer.mock(ProjectionProjectRepository)({
-              listAll: () => Effect.succeed([]),
+            Layer.mock(ProjectionSnapshotQuery)({
+              getProjectShells: () => Effect.succeed([]),
             }),
             Layer.mock(GitWorkflowService)({
               removeWorktree: () => Effect.void,
@@ -201,6 +201,7 @@ function cleanupRow(
     annotation: null,
     worktreeCleanup: cleanup,
     latestUserMessageId: null,
+    attention: null,
     latestUserMessageAt: null,
     pendingApprovalCount: 0,
     pendingUserInputCount: 0,
@@ -328,8 +329,8 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
         }),
-        Layer.mock(ProjectionProjectRepository)({
-          listAll: () => Effect.succeed([]),
+        Layer.mock(ProjectionSnapshotQuery)({
+          getProjectShells: () => Effect.succeed([]),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>
@@ -451,8 +452,8 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
         }),
-        Layer.mock(ProjectionProjectRepository)({
-          listAll: () => Effect.succeed([]),
+        Layer.mock(ProjectionSnapshotQuery)({
+          getProjectShells: () => Effect.succeed([]),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: () => Effect.sync(() => operations.push("remove-worktree")),
@@ -567,8 +568,8 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([]),
           listActiveWorktreeOwners: () => Effect.succeed([]),
         }),
-        Layer.mock(ProjectionProjectRepository)({
-          listAll: () => Effect.succeed([]),
+        Layer.mock(ProjectionSnapshotQuery)({
+          getProjectShells: () => Effect.succeed([]),
         }),
         Layer.mock(GitWorkflowService)({
           removeWorktree: ({ path }) =>
@@ -726,11 +727,11 @@ describe("durable worktree cleanup", () => {
           listPendingWorktreeCleanup: () => Effect.succeed([first, second, third, fourth, fifth]),
           listActiveWorktreeOwners: () => Effect.succeed([activeOwner]),
         }),
-        Layer.mock(ProjectionProjectRepository)({
-          listAll: () =>
+        Layer.mock(ProjectionSnapshotQuery)({
+          getProjectShells: () =>
             Effect.succeed([
               {
-                projectId: ProjectId.make("active-project"),
+                id: ProjectId.make("active-project"),
                 title: "Active project",
                 workspaceRoot: activeProjectRoot,
                 autoPull: false,
@@ -739,7 +740,6 @@ describe("durable worktree cleanup", () => {
                 scripts: [],
                 createdAt: "2026-08-23T00:00:00.000Z",
                 updatedAt: "2026-08-23T00:00:00.000Z",
-                deletedAt: null,
               },
             ]),
         }),
