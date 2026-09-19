@@ -5,12 +5,13 @@ import { XIcon } from "lucide-react";
 import type { CSSProperties } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
+import { resolveDialogBackdropStyle } from "~/components/ui/dialog-styles";
 
 const Sheet = SheetPrimitive.Root;
 
 const SheetPortal = SheetPrimitive.Portal;
 
-function SheetBackdrop({ className, ...props }: SheetPrimitive.Backdrop.Props) {
+function SheetBackdrop({ className, style, ...props }: SheetPrimitive.Backdrop.Props) {
   return (
     <SheetPrimitive.Backdrop
       className={cn(
@@ -18,6 +19,9 @@ function SheetBackdrop({ className, ...props }: SheetPrimitive.Backdrop.Props) {
         className,
       )}
       data-slot="sheet-backdrop"
+      style={(state) =>
+        resolveDialogBackdropStyle(state.open, typeof style === "function" ? style(state) : style)
+      }
       {...props}
     />
   );

@@ -36,6 +36,8 @@ directories.
   LastCode runtime validation and the headless LaunchAgent activation boundary.
 - [Remote update activation helper](update-activation-helper.md): the dormant,
   one-owner crash-safe app, plist, and database selection transaction.
+- [Settings import](settings-import.md): the one-time, selective migration from
+  T3 Code into an independent LastCode profile, including exclusions and backups.
 
 ## Command Summary
 
@@ -48,8 +50,8 @@ pnpm run lastcode:setup -- \
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
 
-# Checkpoint every missing nightly and push immutable tags.
-pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
+# Checkpoint the newest available nightly and push immutable tags.
+pnpm run lastcode:checkpoint -- --push-tags --promote
 
 # Enable managed background checkpointing.
 pnpm lastcode:checkpoint:service install \
