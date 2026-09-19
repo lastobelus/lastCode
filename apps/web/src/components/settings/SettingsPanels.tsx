@@ -94,8 +94,7 @@ import {
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
-import { useArchivedProjectModel } from "../../lib/archivedThreadsState";
-import { filterArchivedProjectGroups } from "../../archiveProjectFiltering";
+import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
   AlertDialog,
@@ -3240,23 +3239,70 @@ export function GeneralSettingsPanel() {
   );
 }
 
-export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null }) {
+export function ArchivedThreadsPanel() {
+  const { scope, connectedEnvironments } = useSettingsScope();
+  const environmentIds = useMemo(
+    () => connectedEnvironments.map((environment) => environment.environmentId),
+    [connectedEnvironments],
+  );
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {
-    archivedGroups,
+    snapshots: archivedSnapshots,
     error: archiveError,
     isLoading: isLoadingArchive,
-    projectGroups,
     refresh: refreshArchivedThreads,
-  } = useArchivedProjectModel();
-  const selectedProject =
-    projectKey === null
-      ? null
-      : (projectGroups.find((group) => group.projectKey === projectKey) ?? null);
-  const visibleArchivedGroups = useMemo(
-    () => filterArchivedProjectGroups(archivedGroups, projectKey),
-    [archivedGroups, projectKey],
-  );
+  } = useArchivedThreadSnapshots(environmentIds);
+
+  const archivedGroups = useMemo(() => {
+    const selectedProjectKeys =
+      scope.kind === "project" || scope.kind === "checkout"
+        ? new Set(scope.members.map((member) => `${member.environmentId}:${member.id}`))
+        : null;
+    const projectsByEnvironmentAndId = new Map(
+      archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
+        snapshot.projects
+          .filter(
+            (project) =>
+              selectedProjectKeys === null ||
+              selectedProjectKeys.has(`${environmentId}:${project.id}`),
+          )
+          .map(
+            (project) => [`${environmentId}:${project.id}`, { ...project, environmentId }] as const,
+          ),
+      ),
+    );
+    const threads = archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
+      snapshot.threads.map((thread) => ({
+        ...thread,
+        environmentId,
+      })),
+    );
+
+    const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
+    const groups: Array<{
+      readonly project: (typeof archivedProjects)[number];
+      readonly threads: Array<(typeof threads)[number]>;
+    }> = [];
+    for (const project of archivedProjects) {
+      const projectThreads: Array<(typeof threads)[number]> = [];
+      for (const thread of threads) {
+        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
+          projectThreads.push(thread);
+        }
+      }
+      if (projectThreads.length > 0) {
+        groups.push({
+          project,
+          threads: projectThreads.toSorted((left, right) => {
+            const leftKey = left.archivedAt ?? left.createdAt;
+            const rightKey = right.archivedAt ?? right.createdAt;
+            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
+          }),
+        });
+      }
+    }
+    return groups;
+  }, [archivedSnapshots, scope]);
 
   const handleArchivedThreadContextMenu = useCallback(
     async (thread: EnvironmentThreadShell, position: { x: number; y: number }) => {
@@ -3289,9 +3335,11 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
       }
 
       if (clicked === "delete") {
-        const archivedThreads = archivedGroups
-          .filter((group) => group.project.environmentId === thread.environmentId)
-          .flatMap((group) => group.threads);
+        const archivedThreads = archivedSnapshots
+          .filter((entry) => entry.environmentId === thread.environmentId)
+          .flatMap(({ environmentId, snapshot }) =>
+            snapshot.threads.map((archivedThread) => ({ ...archivedThread, environmentId })),
+          );
         const result = await confirmAndDeleteThread(threadRef, { archivedThreads });
         if (result._tag === "Success") {
           refreshArchivedThreads();
@@ -3307,12 +3355,12 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
         }
       }
     },
-    [archivedGroups, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [archivedSnapshots, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
   );
 
   return (
     <SettingsPageContainer>
-      {visibleArchivedGroups.length === 0 ? (
+      {archivedGroups.length === 0 ? (
         <SettingsSection
           id={isLoadingArchive ? undefined : searchableSetting("archive").id}
           title={searchableSetting("archive").title}
@@ -3329,23 +3377,18 @@ export function ArchivedThreadsPanel({ projectKey }: { projectKey: string | null
                   ? "Loading archived threads"
                   : archiveError
                     ? "Could not load archived threads"
-                    : projectKey === null
-                      ? "No archived threads"
-                      : `No archived threads for ${selectedProject?.displayName ?? "the selected project"}`}
+                    : "No archived threads"}
               </span>
             }
             description={
               isLoadingArchive
                 ? "Checking connected environments."
-                : (archiveError ??
-                  (projectKey === null
-                    ? "Archived threads will appear here."
-                    : "Choose another project or All."))
+                : (archiveError ?? "Archived threads will appear here.")
             }
           />
         </SettingsSection>
       ) : (
-        visibleArchivedGroups.map(({ project, threads: projectThreads }, index) => (
+        archivedGroups.map(({ project, threads: projectThreads }, index) => (
           <SettingsSection
             key={`${project.environmentId}:${project.id}`}
             id={index === 0 ? searchableSetting("archive").id : undefined}
