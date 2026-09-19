@@ -48,6 +48,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "autoOpenPreview",
       "command",
       "icon",
+      "id",
       "name",
       "previewUrl",
       "runOnWorktreeCreate",

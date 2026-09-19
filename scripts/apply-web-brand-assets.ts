@@ -9,10 +9,10 @@ import * as Path from "effect/Path";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import {
   resolveWebAssetBrandForChannel,
-  resolveWebIconOverrides,
   WEB_ASSET_CHANNELS,
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
+import { resolveLastCodeWebIconOverrides } from "./lib/lastcode-brand-assets.ts";
 
 const WEB_ASSET_BRANDS = [
   "development",
@@ -29,7 +29,7 @@ export const applyWebBrandAssets = Effect.fn("applyWebBrandAssets")(function* (
   const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
 
   yield* Effect.forEach(
-    resolveWebIconOverrides(brand, targetDirectory),
+    resolveLastCodeWebIconOverrides(brand, targetDirectory),
     (override) =>
       fs.copyFile(
         path.join(repoRoot, override.sourceRelativePath),
