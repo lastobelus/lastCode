@@ -355,6 +355,30 @@ describe("ArchivedThreadsPanel", () => {
     expect(state.requestedEnvironmentIds).toEqual([]);
   });
 
+  it.each(["all", "project", "checkout"] as const)(
+    "shows unavailable archives for a disconnected %s scope, then recovers on connection",
+    (kind) => {
+      state.scope = {
+        kind,
+        environmentIds: [envA],
+        members: [{ id: "project-a", environmentId: envA }],
+      };
+      state.connectedEnvironmentIds = [];
+      const renderer = renderPanel();
+      expect(state.requestedEnvironmentIds).toEqual([]);
+      expect(text(renderer)).toContain("No connected environments");
+      expect(text(renderer)).not.toContain("No archived threads");
+      expect(
+        renderer.root.find((node) => node.props["data-testid"] === "row-description").children,
+      ).toContain("Connect an environment in this scope to view archived threads.");
+
+      state.connectedEnvironmentIds = [envA];
+      act(() => renderer.update(<ScopedArchive />));
+      expect(text(renderer)).toContain("Alpha thread");
+      expect(text(renderer)).not.toContain("No connected environments");
+    },
+  );
+
   it("waits for scope discovery before showing an empty archive", () => {
     state.scopeReady = false;
     state.connectedEnvironmentIds = [];
@@ -364,6 +388,7 @@ describe("ArchivedThreadsPanel", () => {
     expect(text(renderer)).not.toContain("No archived threads");
 
     state.scopeReady = true;
+    state.connectedEnvironmentIds = [envA];
     act(() => renderer.update(<ScopedArchive />));
     expect(text(renderer)).toContain("No archived threads");
     expect(text(renderer)).not.toContain("Loading archived threads");

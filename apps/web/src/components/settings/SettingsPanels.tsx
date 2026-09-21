@@ -3385,13 +3385,18 @@ export function ArchivedThreadsPanel() {
                   ? "Loading archived threads"
                   : archiveError
                     ? "Could not load archived threads"
-                    : "No archived threads"}
+                    : environmentIds.length === 0
+                      ? "No connected environments"
+                      : "No archived threads"}
               </span>
             }
             description={
               isLoadingArchive
                 ? "Checking connected environments."
-                : (archiveError ?? "Archived threads will appear here.")
+                : (archiveError ??
+                  (environmentIds.length === 0
+                    ? "Connect an environment in this scope to view archived threads."
+                    : "Archived threads will appear here."))
             }
           />
         </SettingsSection>
