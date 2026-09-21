@@ -55,6 +55,17 @@ vi.mock("./SettingsScopeContext", () => ({
   }),
 }));
 
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useLocation: ({ select }: { select: (location: { hash: string }) => unknown }) =>
+    select({ hash: "" }),
+}));
+
+vi.mock("../../state/environments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/environments")>()),
+  useEnvironments: () => ({ environments: [] }),
+}));
+
 vi.mock("../../lib/archivedThreadsState", () => ({
   useArchivedThreadSnapshots: (environmentIds: EnvironmentId[]) => {
     state.requestedEnvironmentIds = environmentIds;
@@ -105,6 +116,7 @@ vi.mock("./settingsLayout", () => ({
 }));
 
 import { ArchivedThreadsPanel } from "./SettingsPanels";
+import { SettingsScopeBoundary } from "../../routes/settings";
 
 const envA = "environment-a" as EnvironmentId;
 const envB = "environment-b" as EnvironmentId;
@@ -128,10 +140,18 @@ function snapshot(
   };
 }
 
+function ScopedArchive() {
+  return (
+    <SettingsScopeBoundary pathname="/settings/archived">
+      <ArchivedThreadsPanel />
+    </SettingsScopeBoundary>
+  );
+}
+
 function renderPanel(): ReactTestRenderer {
   let renderer!: ReactTestRenderer;
   act(() => {
-    renderer = create(<ArchivedThreadsPanel />);
+    renderer = create(<ScopedArchive />);
   });
   renderers.push(renderer);
   return renderer;
@@ -292,6 +312,7 @@ describe("ArchivedThreadsPanel", () => {
 
   it("loads archives from a connected environment before its server config arrives", () => {
     state.configsReady = false;
+    state.scope = { kind: "environment", environmentIds: [envA], members: [] };
     state.connectedEnvironmentIds = [envA];
     state.archive.isLoading = true;
     state.archive.snapshots = [];
@@ -309,8 +330,29 @@ describe("ArchivedThreadsPanel", () => {
         [{ id: "thread-a", projectId: "project-a", title: "Alpha thread" }],
       ),
     ];
-    act(() => renderer.update(<ArchivedThreadsPanel />));
+    act(() => renderer.update(<ScopedArchive />));
     expect(text(renderer)).toContain("Alpha thread");
+  });
+
+  it.each([
+    ["/settings/archived", false],
+    ["/settings/general", true],
+  ] as const)("keeps the reconnect notice for %s when connected=%s", (pathname, connected) => {
+    state.scope = { kind: "environment", environmentIds: [envA], members: [] };
+    state.configsReady = false;
+    state.connectedEnvironmentIds = connected ? [envA] : [];
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <SettingsScopeBoundary pathname={pathname}>
+          <ArchivedThreadsPanel />
+        </SettingsScopeBoundary>,
+      );
+    });
+    renderers.push(renderer);
+
+    expect(renderer.root.findByType("p").children.join("")).toContain("Reconnect");
+    expect(state.requestedEnvironmentIds).toEqual([]);
   });
 
   it("waits for scope discovery before showing an empty archive", () => {
@@ -322,7 +364,7 @@ describe("ArchivedThreadsPanel", () => {
     expect(text(renderer)).not.toContain("No archived threads");
 
     state.scopeReady = true;
-    act(() => renderer.update(<ArchivedThreadsPanel />));
+    act(() => renderer.update(<ScopedArchive />));
     expect(text(renderer)).toContain("No archived threads");
     expect(text(renderer)).not.toContain("Loading archived threads");
   });

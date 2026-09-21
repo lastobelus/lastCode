@@ -54,8 +54,14 @@ const DEVICE_ONLY_PATHS = new Set([
   "/settings/connections",
 ]);
 
-function SettingsScopeBoundary({ pathname, children }: { pathname: string; children: ReactNode }) {
-  const { scope, connectedEnvironments } = useSettingsScope();
+export function SettingsScopeBoundary({
+  pathname,
+  children,
+}: {
+  pathname: string;
+  children: ReactNode;
+}) {
+  const { scope, connectedEnvironments, environments: scopedEnvironments } = useSettingsScope();
   const { environments } = useEnvironments();
   const hash = useLocation({ select: (location) => location.hash });
   const searchTarget = getSettingsSearchTargetScope(hash);
@@ -104,7 +110,11 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
   }
   if (scope.kind === "unavailable")
     return <p className="p-8 text-sm text-muted-foreground">{scope.message}</p>;
-  if (scope.kind === "environment" && connectedEnvironments.length === 0) {
+  // Archive reads can start before configs are ready for settings writes.
+  const canReadArchive =
+    pathname === "/settings/archived" &&
+    scopedEnvironments.some((environment) => environment.connection.phase === "connected");
+  if (scope.kind === "environment" && connectedEnvironments.length === 0 && !canReadArchive) {
     return (
       <p className="p-8 text-sm text-muted-foreground">
         Reconnect {scope.label} to change its settings.
