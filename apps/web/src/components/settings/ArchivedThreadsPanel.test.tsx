@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 const state = vi.hoisted(() => ({
   scope: null as unknown as {
-    kind: "all" | "environment" | "project" | "checkout";
+    kind: "all" | "environment" | "project" | "checkout" | "unavailable";
+    message?: string;
     environmentIds: EnvironmentId[];
     members: Array<{ id: string; environmentId: EnvironmentId }>;
   },
@@ -378,6 +379,37 @@ describe("ArchivedThreadsPanel", () => {
       expect(text(renderer)).not.toContain("No connected environments");
     },
   );
+
+  it.each([true, false])("waits for a saved project scope to resolve (exists=%s)", (exists) => {
+    state.scope = {
+      kind: "unavailable",
+      environmentIds: [],
+      members: [],
+      message: "This project is no longer available.",
+    };
+    state.scopeReady = false;
+    const renderer = renderPanel();
+    expect(text(renderer)).toContain("Loading archived threads");
+    expect(renderer.root.findAllByType("p")).toHaveLength(0);
+
+    state.scopeReady = true;
+    if (exists) {
+      state.scope = {
+        kind: "project",
+        environmentIds: [envA],
+        members: [{ id: "project-a", environmentId: envA }],
+      };
+    }
+    act(() => renderer.update(<ScopedArchive />));
+    if (exists) {
+      expect(text(renderer)).toContain("Alpha thread");
+      expect(renderer.root.findAllByType("p")).toHaveLength(0);
+    } else {
+      expect(renderer.root.findByType("p").children.join("")).toBe(
+        "This project is no longer available.",
+      );
+    }
+  });
 
   it("waits for scope discovery before showing an empty archive", () => {
     state.scopeReady = false;

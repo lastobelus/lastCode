@@ -2,6 +2,7 @@ import { createContext, type ReactNode, useContext, useMemo } from "react";
 
 import { useClientSettingsHydrated } from "../../hooks/useSettings";
 import { isHostedStaticApp } from "../../hostedPairing";
+import { useAllEnvironmentShellsBootstrapped } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
@@ -11,9 +12,13 @@ function useResolvedSettingsScope(search: SettingsScopeSearch) {
   const groups = useSettingsProjectGroups();
   const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
   const settingsHydrated = useClientSettingsHydrated();
+  const shellsBootstrapped = useAllEnvironmentShellsBootstrapped();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isReady =
-    environmentsReady && settingsHydrated && (isHostedStaticApp() || primaryEnvironmentId !== null);
+    environmentsReady &&
+    settingsHydrated &&
+    (isHostedStaticApp() || primaryEnvironmentId !== null) &&
+    (search.project === undefined || shellsBootstrapped);
   return useMemo(() => {
     const scope = resolveSettingsScope(search, groups, availableEnvironments);
     const selected = selectScopedSettingsEnvironments(

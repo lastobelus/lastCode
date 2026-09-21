@@ -61,13 +61,20 @@ export function SettingsScopeBoundary({
   pathname: string;
   children: ReactNode;
 }) {
-  const { scope, connectedEnvironments, environments: scopedEnvironments } = useSettingsScope();
+  const {
+    scope,
+    connectedEnvironments,
+    environments: scopedEnvironments,
+    isReady,
+  } = useSettingsScope();
   const { environments } = useEnvironments();
   const hash = useLocation({ select: (location) => location.hash });
   const searchTarget = getSettingsSearchTargetScope(hash);
   const autoSettlementAvailability = searchTarget?.requiresThreadAutoSettlement
     ? getThreadAutoSettlementSearchAvailability(environments, scope)
     : null;
+  // Let Archive show its loading state before declaring an unresolved saved scope unavailable.
+  if (pathname === "/settings/archived" && !isReady) return children;
   if (
     scope.kind !== "unavailable" &&
     searchTarget &&
