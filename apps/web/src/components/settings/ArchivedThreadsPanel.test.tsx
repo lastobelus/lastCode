@@ -9,10 +9,13 @@ const state = vi.hoisted(() => ({
   scope: null as unknown as {
     kind: "all" | "environment" | "project" | "checkout" | "unavailable";
     message?: string;
+    reason?: string;
     environmentIds: EnvironmentId[];
     members: Array<{ id: string; environmentId: EnvironmentId }>;
   },
   scopeReady: true,
+  projectSnapshotsReady: true,
+  disabledEnvironmentIds: [] as EnvironmentId[],
   configsReady: true,
   connectedEnvironmentIds: [] as EnvironmentId[],
   archive: {
@@ -43,10 +46,11 @@ vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({
     scope: state.scope,
     isReady: state.scopeReady,
+    projectSnapshotsReady: state.projectSnapshotsReady,
     environments: state.scope.environmentIds.map((environmentId) => ({
       environmentId,
       connection: {
-        phase: state.connectedEnvironmentIds.includes(environmentId) ? "connected" : "disconnected",
+        phase: state.connectedEnvironmentIds.includes(environmentId) ? "connected" : "offline",
       },
       serverConfig: state.configsReady ? {} : null,
     })),
@@ -64,7 +68,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 vi.mock("../../state/environments", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/environments")>()),
-  useEnvironments: () => ({ environments: [] }),
+  useEnvironments: () => ({
+    environments: [envA, envB].map((environmentId) => ({
+      environmentId,
+      entry: { enabled: !state.disabledEnvironmentIds.includes(environmentId) },
+      connection: {
+        phase: state.connectedEnvironmentIds.includes(environmentId) ? "connected" : "offline",
+      },
+    })),
+  }),
 }));
 
 vi.mock("../../lib/archivedThreadsState", () => ({
@@ -181,6 +193,8 @@ describe("ArchivedThreadsPanel", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.scope = { kind: "all", environmentIds: [envA, envB], members: [] };
     state.scopeReady = true;
+    state.projectSnapshotsReady = true;
+    state.disabledEnvironmentIds = [];
     state.configsReady = true;
     state.connectedEnvironmentIds = [envA, envB];
     state.archive.snapshots = [
@@ -379,6 +393,53 @@ describe("ArchivedThreadsPanel", () => {
       expect(text(renderer)).not.toContain("No connected environments");
     },
   );
+
+  it.each(["project-missing", "checkout-missing"])(
+    "does not reject a cached %s scope before live snapshots",
+    (reason) => {
+      state.scope = {
+        kind: "unavailable",
+        reason,
+        message: "This project is no longer available.",
+        environmentIds: [],
+        members: [],
+      };
+      state.projectSnapshotsReady = false;
+      const renderer = renderPanel();
+      expect(renderer.root.findByType("p").children.join("")).toBe("Loading archived threads");
+
+      state.connectedEnvironmentIds = [envA];
+      act(() => renderer.update(<ScopedArchive />));
+      expect(renderer.root.findByType("p").children.join("")).toContain("offline or syncing");
+      expect(renderer.root.findByType("p").children.join("")).not.toContain("no longer available");
+
+      state.disabledEnvironmentIds = [envB];
+      act(() => renderer.update(<ScopedArchive />));
+      expect(renderer.root.findByType("p").children.join("")).toBe("Loading archived threads");
+
+      state.disabledEnvironmentIds = [envA, envB];
+      act(() => renderer.update(<ScopedArchive />));
+      expect(renderer.root.findByType("p").children.join("")).toContain("offline or syncing");
+
+      state.disabledEnvironmentIds = [];
+      state.projectSnapshotsReady = true;
+      act(() => renderer.update(<ScopedArchive />));
+      expect(renderer.root.findByType("p").children.join("")).toBe(
+        "This project is no longer available.",
+      );
+    },
+  );
+
+  it("keeps a resolved project usable while another environment lacks a live snapshot", () => {
+    state.scope = {
+      kind: "project",
+      environmentIds: [envA],
+      members: [{ id: "project-a", environmentId: envA }],
+    };
+    state.projectSnapshotsReady = false;
+    state.connectedEnvironmentIds = [envA];
+    expect(text(renderPanel())).toContain("Alpha thread");
+  });
 
   it.each([true, false])("waits for a saved project scope to resolve (exists=%s)", (exists) => {
     state.scope = {

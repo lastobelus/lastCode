@@ -66,6 +66,7 @@ export function SettingsScopeBoundary({
     connectedEnvironments,
     environments: scopedEnvironments,
     isReady,
+    projectSnapshotsReady,
   } = useSettingsScope();
   const { environments } = useEnvironments();
   const hash = useLocation({ select: (location) => location.hash });
@@ -75,6 +76,26 @@ export function SettingsScopeBoundary({
     : null;
   // Let Archive show its loading state before declaring an unresolved saved scope unavailable.
   if (pathname === "/settings/archived" && !isReady) return children;
+  if (
+    pathname === "/settings/archived" &&
+    scope.kind === "unavailable" &&
+    (scope.reason === "project-missing" || scope.reason === "checkout-missing") &&
+    !projectSnapshotsReady
+  ) {
+    return (
+      <p className="p-8 text-sm text-muted-foreground">
+        {!environments.some((environment) => environment.entry.enabled) ||
+        environments.some(
+          (environment) =>
+            environment.entry.enabled &&
+            environment.connection.phase !== "connected" &&
+            environment.connection.phase !== "connecting",
+        )
+          ? "The selected project cannot be resolved while environments are offline or syncing. Reconnect to check its archived threads."
+          : "Loading archived threads"}
+      </p>
+    );
+  }
   if (
     scope.kind !== "unavailable" &&
     searchTarget &&
