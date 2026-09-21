@@ -1,5 +1,8 @@
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 
+import { useClientSettingsHydrated } from "../../hooks/useSettings";
+import { isHostedStaticApp } from "../../hostedPairing";
+import { useAllEnvironmentProjectSnapshotsReady } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
@@ -7,8 +10,12 @@ import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope"
 
 function useResolvedSettingsScope(search: SettingsScopeSearch) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
+  const settingsHydrated = useClientSettingsHydrated();
+  const projectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const isReady =
+    environmentsReady && settingsHydrated && (isHostedStaticApp() || primaryEnvironmentId !== null);
   return useMemo(() => {
     const scope = resolveSettingsScope(search, groups, availableEnvironments);
     const selected = selectScopedSettingsEnvironments(
@@ -25,8 +32,8 @@ function useResolvedSettingsScope(search: SettingsScopeSearch) {
       ) ??
       targets[0] ??
       null;
-    return { scope, groups, ...selected, targets, target };
-  }, [availableEnvironments, groups, primaryEnvironmentId, search]);
+    return { scope, groups, ...selected, targets, target, isReady, projectSnapshotsReady };
+  }, [availableEnvironments, groups, isReady, primaryEnvironmentId, projectSnapshotsReady, search]);
 }
 
 const SettingsScopeContext = createContext<
