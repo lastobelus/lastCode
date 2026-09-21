@@ -94,6 +94,7 @@ import {
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
+import { derivePhysicalProjectKey } from "../../logicalProject";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import {
@@ -3261,7 +3262,7 @@ export function ArchivedThreadsPanel() {
   const archivedGroups = useMemo(() => {
     const selectedProjectKeys =
       scope.kind === "project" || scope.kind === "checkout"
-        ? new Set(scope.members.map((member) => `${member.environmentId}:${member.id}`))
+        ? new Set(scope.members.map((member) => member.physicalProjectKey))
         : null;
     const projectsByEnvironmentAndId = new Map(
       archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
@@ -3269,7 +3270,7 @@ export function ArchivedThreadsPanel() {
           .filter(
             (project) =>
               selectedProjectKeys === null ||
-              selectedProjectKeys.has(`${environmentId}:${project.id}`),
+              selectedProjectKeys.has(derivePhysicalProjectKey({ ...project, environmentId })),
           )
           .map(
             (project) => [`${environmentId}:${project.id}`, { ...project, environmentId }] as const,

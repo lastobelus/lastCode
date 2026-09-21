@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { ProjectId, type EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -10,8 +10,12 @@ const state = vi.hoisted(() => ({
     kind: "all" | "environment" | "project" | "checkout" | "unavailable";
     message?: string;
     reason?: string;
-    environmentIds: EnvironmentId[];
-    members: Array<{ id: string; environmentId: EnvironmentId }>;
+    environmentIds: ReadonlyArray<EnvironmentId>;
+    members: ReadonlyArray<{
+      id: string;
+      environmentId: EnvironmentId;
+      physicalProjectKey?: string;
+    }>;
   },
   scopeReady: true,
   projectSnapshotsReady: true,
@@ -22,7 +26,7 @@ const state = vi.hoisted(() => ({
     snapshots: [] as Array<{
       environmentId: EnvironmentId;
       snapshot: {
-        projects: Array<{ id: string; title: string }>;
+        projects: Array<{ id: string; title: string; workspaceRoot: string }>;
         threads: Array<{
           id: string;
           projectId: string;
@@ -44,7 +48,14 @@ const state = vi.hoisted(() => ({
 
 vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({
-    scope: state.scope,
+    scope: {
+      ...state.scope,
+      members: state.scope.members.map((member) => ({
+        ...member,
+        physicalProjectKey:
+          member.physicalProjectKey ?? `${member.environmentId}:/repos/${member.id}`,
+      })),
+    },
     isReady: state.scopeReady,
     projectSnapshotsReady: state.projectSnapshotsReady,
     environments: state.scope.environmentIds.map((environmentId) => ({
@@ -130,6 +141,8 @@ vi.mock("./settingsLayout", () => ({
 
 import { ArchivedThreadsPanel } from "./SettingsPanels";
 import { SettingsScopeBoundary } from "../../routes/settings";
+import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
+import { resolveSettingsScope } from "./settingsScope";
 
 const envA = "environment-a" as EnvironmentId;
 const envB = "environment-b" as EnvironmentId;
@@ -137,13 +150,16 @@ const renderers: ReactTestRenderer[] = [];
 
 function snapshot(
   environmentId: EnvironmentId,
-  projects: Array<{ id: string; title: string }>,
+  projects: Array<{ id: string; title: string; workspaceRoot?: string }>,
   threads: Array<{ id: string; projectId: string; title: string }>,
 ) {
   return {
     environmentId,
     snapshot: {
-      projects,
+      projects: projects.map((project) => ({
+        ...project,
+        workspaceRoot: project.workspaceRoot ?? `/repos/${project.id}`,
+      })),
       threads: threads.map((thread, index) => ({
         ...thread,
         createdAt: `2026-09-0${index + 1}T00:00:00.000Z`,
@@ -277,6 +293,66 @@ describe("ArchivedThreadsPanel", () => {
     for (const title of shown) expect(renderedText).toContain(title);
     for (const title of hidden) expect(renderedText).not.toContain(title);
   });
+
+  it.each([false, true])(
+    "includes archived duplicate registrations in a scoped workspace (checkout=%s)",
+    (checkout) => {
+      const projects = [
+        { id: "old", workspaceRoot: "/repos/alpha/", environmentId: envA },
+        { id: "new", workspaceRoot: "/repos/alpha", environmentId: envA },
+        { id: "other", workspaceRoot: "/repos/other", environmentId: envA },
+        { id: "remote", workspaceRoot: "/repos/alpha", environmentId: envB },
+      ].map((project, index) => ({
+        ...project,
+        id: ProjectId.make(project.id),
+        title: project.id,
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-09-01T00:00:00.000Z",
+        updatedAt: `2026-09-0${index + 1}T00:00:00.000Z`,
+      }));
+      const groups = buildSidebarProjectSnapshots({
+        projects,
+        settings: { sidebarProjectGroupingMode: "separate", sidebarProjectGroupingOverrides: {} },
+        primaryEnvironmentId: envA,
+        resolveEnvironmentLabel: () => "Environment",
+      });
+      const group = groups.find((entry) =>
+        entry.memberProjectRefs.some((ref) => ref.projectId === "old"),
+      )!;
+      expect(group.memberProjects.map((member) => member.id)).toEqual(["new"]);
+      state.scope = resolveSettingsScope(
+        {
+          project: group.projectKey,
+          machine: envA,
+          ...(checkout ? { checkout: group.memberProjects[0]!.physicalProjectKey } : {}),
+        },
+        groups,
+        [
+          { environmentId: envA, label: "A" },
+          { environmentId: envB, label: "B" },
+        ],
+      );
+      state.archive.snapshots = [envA, envB].map((environmentId) =>
+        snapshot(
+          environmentId,
+          projects.filter((project) => project.environmentId === environmentId),
+          projects
+            .filter((project) => project.environmentId === environmentId)
+            .map((project) => ({
+              id: `thread-${project.id}`,
+              projectId: project.id,
+              title: `Archive ${project.id}`,
+            })),
+        ),
+      );
+      const renderedText = text(renderPanel());
+      expect(renderedText).toContain("Archive old");
+      expect(renderedText).toContain("Archive new");
+      expect(renderedText).not.toContain("Archive other");
+      expect(renderedText).not.toContain("Archive remote");
+    },
+  );
 
   it("keeps matching project IDs in different environments separate and sorts newest first", () => {
     state.archive.snapshots = [
