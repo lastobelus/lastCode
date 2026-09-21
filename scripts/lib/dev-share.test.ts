@@ -80,7 +80,7 @@ describe("unshareDevServer", () => {
         Effect.provide(
           spawnerLayer({
             off: { exitCode: 0 },
-            serveStatus: serveStatus("http://127.0.0.1:5788"),
+            serveStatus: serveStatus("http://localhost:5788"),
           }),
         ),
       );
@@ -101,7 +101,7 @@ describe("unshareDevServer", () => {
         Effect.provide(
           spawnerLayer({
             off: { exitCode: 1, stderr: "permission denied" },
-            serveStatus: serveStatus("http://127.0.0.1:5788"),
+            serveStatus: serveStatus("http://localhost:5788"),
           }),
         ),
       );
@@ -133,6 +133,18 @@ describe("shareDevServer", () => {
 
       assert.equal(shared.host, "host.example.ts.net");
       assert.equal(shared.url, "https://host.example.ts.net:5788/");
+    }),
+  );
+
+  // Vite binds `localhost`, which modern Node resolves to `::1` first, so a
+  // 127.0.0.1 target would proxy to a loopback nothing listens on.
+  it.effect("proxies to the localhost name Vite binds, not 127.0.0.1", () =>
+    Effect.gen(function* () {
+      const calls: Array<ReadonlyArray<string>> = [];
+      yield* shareDevServer({ webPort: 5788 }).pipe(Effect.provide(spawnerLayer({ calls })));
+
+      const serveCall = calls.find((args) => args.includes("--bg"));
+      assert.deepEqual(serveCall, ["serve", "--bg", "--https=5788", "http://localhost:5788"]);
     }),
   );
 

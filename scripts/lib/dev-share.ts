@@ -20,7 +20,6 @@ import {
   type TailscaleServeError,
   type TailscaleStderrDiagnostic,
 } from "@t3tools/tailscale";
-import { SHARED_DEV_LOOPBACK_HOST } from "@t3tools/shared/devProxy";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { ChildProcessSpawner } from "effect/unstable/process";
@@ -109,7 +108,7 @@ export type DevShareError =
   | DevServeFailedError;
 
 /**
- * Removes any mapping for `webPort`, reporting whether the port is now clear.
+ * Removes the matching localhost mapping for `webPort`, preserving other handlers.
  *
  * Runs uninterruptibly: this is called from a finalizer on the way out of an
  * interrupted program, and cancelling the cleanup subprocess would leave
@@ -129,7 +128,7 @@ export const unshareDevServer = (
   ChildProcessSpawner.ChildProcessSpawner
 > =>
   disableTailscaleServe({
-    localHost: SHARED_DEV_LOOPBACK_HOST,
+    localHost: "localhost",
     localPort: webPort,
     servePort: webPort,
   }).pipe(
@@ -159,7 +158,7 @@ export interface DevShareResult {
 
 /**
  * Publishes `webPort` on the tailnet at the same port number and returns the
- * resulting HTTPS URL. Idempotent: re-running replaces any existing mapping.
+ * resulting HTTPS URL. Reuses the matching handler and refuses other mappings.
  */
 export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (input: {
   readonly webPort: number;
@@ -171,10 +170,16 @@ export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (in
     return yield* new TailnetNameMissingError();
   }
 
+  // Proxy to the hostname Vite binds rather than the package default of
+  // 127.0.0.1. Vite listens on `localhost`, which Node 17+ resolves to `::1`
+  // first, so it only binds the IPv6 loopback and a 127.0.0.1 target has
+  // nothing behind it (tailscale answers 502). Passing `localhost` lets the
+  // tailscale proxy resolve it the same way Node did. Not a literal `[::1]`:
+  // tailscale rejects that form.
   yield* ensureTailscaleServe({
-    localHost: SHARED_DEV_LOOPBACK_HOST,
     localPort: input.webPort,
     servePort: input.webPort,
+    localHost: "localhost",
   }).pipe(
     Effect.mapError((error) => {
       const explanation = explainCommandFailure(error);
