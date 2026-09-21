@@ -3240,10 +3240,14 @@ export function GeneralSettingsPanel() {
 }
 
 export function ArchivedThreadsPanel() {
-  const { scope, connectedEnvironments, isReady: isScopeReady } = useSettingsScope();
+  const { scope, environments, isReady: isScopeReady } = useSettingsScope();
+  // Archive reads need a connection, not the server config required by settings writes.
   const environmentIds = useMemo(
-    () => connectedEnvironments.map((environment) => environment.environmentId),
-    [connectedEnvironments],
+    () =>
+      environments
+        .filter((environment) => environment.connection.phase === "connected")
+        .map((environment) => environment.environmentId),
+    [environments],
   );
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {

@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
     members: Array<{ id: string; environmentId: EnvironmentId }>;
   },
   scopeReady: true,
+  configsReady: true,
   connectedEnvironmentIds: [] as EnvironmentId[],
   archive: {
     snapshots: [] as Array<{
@@ -41,9 +42,16 @@ vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({
     scope: state.scope,
     isReady: state.scopeReady,
-    connectedEnvironments: state.connectedEnvironmentIds.map((environmentId) => ({
+    environments: state.scope.environmentIds.map((environmentId) => ({
       environmentId,
+      connection: {
+        phase: state.connectedEnvironmentIds.includes(environmentId) ? "connected" : "disconnected",
+      },
+      serverConfig: state.configsReady ? {} : null,
     })),
+    connectedEnvironments: state.configsReady
+      ? state.connectedEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : [],
   }),
 }));
 
@@ -152,6 +160,7 @@ describe("ArchivedThreadsPanel", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.scope = { kind: "all", environmentIds: [envA, envB], members: [] };
     state.scopeReady = true;
+    state.configsReady = true;
     state.connectedEnvironmentIds = [envA, envB];
     state.archive.snapshots = [
       snapshot(
@@ -279,6 +288,29 @@ describe("ArchivedThreadsPanel", () => {
     expect(state.requestedEnvironmentIds).toEqual([envA]);
     expect(renderedText).toContain("Alpha thread");
     expect(renderedText).not.toContain("Beta thread");
+  });
+
+  it("loads archives from a connected environment before its server config arrives", () => {
+    state.configsReady = false;
+    state.connectedEnvironmentIds = [envA];
+    state.archive.isLoading = true;
+    state.archive.snapshots = [];
+    const renderer = renderPanel();
+
+    expect(state.requestedEnvironmentIds).toEqual([envA]);
+    expect(text(renderer)).toContain("Loading archived threads");
+    expect(text(renderer)).not.toContain("No archived threads");
+
+    state.archive.isLoading = false;
+    state.archive.snapshots = [
+      snapshot(
+        envA,
+        [{ id: "project-a", title: "Alpha" }],
+        [{ id: "thread-a", projectId: "project-a", title: "Alpha thread" }],
+      ),
+    ];
+    act(() => renderer.update(<ArchivedThreadsPanel />));
+    expect(text(renderer)).toContain("Alpha thread");
   });
 
   it("waits for scope discovery before showing an empty archive", () => {
