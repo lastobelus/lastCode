@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
     environmentIds: EnvironmentId[];
     members: Array<{ id: string; environmentId: EnvironmentId }>;
   },
+  scopeReady: true,
   connectedEnvironmentIds: [] as EnvironmentId[],
   archive: {
     snapshots: [] as Array<{
@@ -39,6 +40,7 @@ const state = vi.hoisted(() => ({
 vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({
     scope: state.scope,
+    isReady: state.scopeReady,
     connectedEnvironments: state.connectedEnvironmentIds.map((environmentId) => ({
       environmentId,
     })),
@@ -149,6 +151,7 @@ describe("ArchivedThreadsPanel", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.scope = { kind: "all", environmentIds: [envA, envB], members: [] };
+    state.scopeReady = true;
     state.connectedEnvironmentIds = [envA, envB];
     state.archive.snapshots = [
       snapshot(
@@ -231,6 +234,35 @@ describe("ArchivedThreadsPanel", () => {
     for (const title of hidden) expect(renderedText).not.toContain(title);
   });
 
+  it("keeps matching project IDs in different environments separate and sorts newest first", () => {
+    state.archive.snapshots = [
+      snapshot(
+        envA,
+        [{ id: "shared-id", title: "Alpha" }],
+        [
+          { id: "older", projectId: "shared-id", title: "Older Alpha" },
+          { id: "newer", projectId: "shared-id", title: "Newer Alpha" },
+        ],
+      ),
+      snapshot(
+        envB,
+        [{ id: "shared-id", title: "Beta" }],
+        [{ id: "beta", projectId: "shared-id", title: "Beta thread" }],
+      ),
+    ];
+
+    const renderer = renderPanel();
+    const sections = renderer.root.findAllByType("section");
+    expect(sections).toHaveLength(2);
+    expect(
+      sections.map((section) =>
+        section
+          .findAll((node) => node.props["data-testid"] === "row-title")
+          .map((node) => node.children.join("")),
+      ),
+    ).toEqual([["Newer Alpha", "Older Alpha"], ["Beta thread"]]);
+  });
+
   it("queries only connected environments while preserving the selected scope", () => {
     state.scope = {
       kind: "project",
@@ -247,6 +279,20 @@ describe("ArchivedThreadsPanel", () => {
     expect(state.requestedEnvironmentIds).toEqual([envA]);
     expect(renderedText).toContain("Alpha thread");
     expect(renderedText).not.toContain("Beta thread");
+  });
+
+  it("waits for scope discovery before showing an empty archive", () => {
+    state.scopeReady = false;
+    state.connectedEnvironmentIds = [];
+    state.archive.snapshots = [];
+    const renderer = renderPanel();
+    expect(text(renderer)).toContain("Loading archived threads");
+    expect(text(renderer)).not.toContain("No archived threads");
+
+    state.scopeReady = true;
+    act(() => renderer.update(<ArchivedThreadsPanel />));
+    expect(text(renderer)).toContain("No archived threads");
+    expect(text(renderer)).not.toContain("Loading archived threads");
   });
 
   it.each([

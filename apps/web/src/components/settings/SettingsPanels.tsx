@@ -3240,7 +3240,7 @@ export function GeneralSettingsPanel() {
 }
 
 export function ArchivedThreadsPanel() {
-  const { scope, connectedEnvironments } = useSettingsScope();
+  const { scope, connectedEnvironments, isReady: isScopeReady } = useSettingsScope();
   const environmentIds = useMemo(
     () => connectedEnvironments.map((environment) => environment.environmentId),
     [connectedEnvironments],
@@ -3249,9 +3249,10 @@ export function ArchivedThreadsPanel() {
   const {
     snapshots: archivedSnapshots,
     error: archiveError,
-    isLoading: isLoadingArchive,
+    isLoading: isLoadingSnapshots,
     refresh: refreshArchivedThreads,
   } = useArchivedThreadSnapshots(environmentIds);
+  const isLoadingArchive = !isScopeReady || isLoadingSnapshots;
 
   const archivedGroups = useMemo(() => {
     const selectedProjectKeys =
@@ -3278,19 +3279,22 @@ export function ArchivedThreadsPanel() {
       })),
     );
 
+    const threadsByProject = new Map<string, Array<(typeof threads)[number]>>();
+    for (const thread of threads) {
+      const key = `${thread.environmentId}:${thread.projectId}`;
+      const projectThreads = threadsByProject.get(key);
+      if (projectThreads) projectThreads.push(thread);
+      else threadsByProject.set(key, [thread]);
+    }
+
     const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
     const groups: Array<{
       readonly project: (typeof archivedProjects)[number];
       readonly threads: Array<(typeof threads)[number]>;
     }> = [];
     for (const project of archivedProjects) {
-      const projectThreads: Array<(typeof threads)[number]> = [];
-      for (const thread of threads) {
-        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
-          projectThreads.push(thread);
-        }
-      }
-      if (projectThreads.length > 0) {
+      const projectThreads = threadsByProject.get(`${project.environmentId}:${project.id}`);
+      if (projectThreads && projectThreads.length > 0) {
         groups.push({
           project,
           threads: projectThreads.toSorted((left, right) => {
