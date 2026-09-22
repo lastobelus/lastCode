@@ -6,6 +6,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
@@ -22,7 +23,10 @@ import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
-import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
+import {
+  loadArchivedThreadsForEnvironment,
+  refreshArchivedThreadsForEnvironment,
+} from "../lib/archivedThreadsState";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { readLocalApi } from "../localApi";
 import {
@@ -31,6 +35,7 @@ import {
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsWorktreeCleanup,
   readEnvironmentThreadRefs,
   readProject,
   readThreadShell,
@@ -56,6 +61,65 @@ export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveB
   override get message(): string {
     return "Cannot archive a running thread.";
   }
+}
+
+export function shouldDeleteWorktreeClientSide(input: {
+  readonly shouldDeleteWorktree: boolean;
+  readonly supportsDurableWorktreeCleanup: boolean;
+}): boolean {
+  return input.shouldDeleteWorktree && !input.supportsDurableWorktreeCleanup;
+}
+
+export type DeleteThreadOptions = {
+  readonly deletedThreadKeys?: ReadonlySet<string>;
+  /** Shells supplied by archived-thread views, which are outside the active store. */
+  readonly archivedThreads?: ReadonlyArray<EnvironmentThreadShell>;
+};
+
+export function resolveThreadTargetWithArchivedFallback<
+  T extends Pick<EnvironmentThreadShell, "environmentId" | "id">,
+>(
+  target: ScopedThreadRef,
+  activeThread: T | null,
+  archivedThreads: ReadonlyArray<T> | undefined,
+): { readonly thread: T; readonly threadRef: ScopedThreadRef } | null {
+  const candidate =
+    activeThread ??
+    archivedThreads?.find(
+      (thread) => thread.environmentId === target.environmentId && thread.id === target.threadId,
+    );
+  if (
+    candidate === undefined ||
+    candidate.environmentId !== target.environmentId ||
+    candidate.id !== target.threadId
+  ) {
+    return null;
+  }
+  return { thread: candidate, threadRef: target };
+}
+
+export function collectThreadDeleteCandidates<
+  T extends Pick<EnvironmentThreadShell, "environmentId" | "id" | "worktreePath">,
+>(
+  activeThreads: ReadonlyArray<T>,
+  targetThread: T,
+  archivedThreads: ReadonlyArray<T>,
+): ReadonlyArray<T> {
+  const candidates = new Map<string, T>();
+  for (const thread of [...activeThreads, ...archivedThreads, targetThread]) {
+    candidates.set(`${thread.environmentId}:${thread.id}`, thread);
+  }
+  return [...candidates.values()];
+}
+
+export function resolveArchivedThreadsForDelete<T>(input: {
+  readonly archivedThreads?: ReadonlyArray<T>;
+  readonly worktreePath: string | null;
+  readonly load: () => Promise<ReadonlyArray<T>>;
+}): Promise<ReadonlyArray<T>> {
+  if (input.archivedThreads !== undefined) return Promise.resolve(input.archivedThreads);
+  if (input.worktreePath === null) return Promise.resolve([]);
+  return input.load();
 }
 
 export class ThreadSettlementUnsupportedError extends Schema.TaggedError<ThreadSettlementUnsupportedError>()(
@@ -341,8 +405,12 @@ export function useThreadActions() {
   );
 
   const deleteThread = useCallback(
-    async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
-      const resolved = resolveThreadTarget(target);
+    async (target: ScopedThreadRef, opts: DeleteThreadOptions = {}) => {
+      const resolved = resolveThreadTargetWithArchivedFallback(
+        target,
+        resolveThreadTarget(target)?.thread ?? null,
+        opts.archivedThreads,
+      );
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
         const result = await deleteThreadMutation({
@@ -355,10 +423,22 @@ export function useThreadActions() {
         return result;
       }
       const { thread, threadRef } = resolved;
-      const threads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
+      const archivedThreadsResult = await settlePromise(() =>
+        resolveArchivedThreadsForDelete({
+          ...(opts.archivedThreads === undefined ? {} : { archivedThreads: opts.archivedThreads }),
+          worktreePath: thread.worktreePath,
+          load: () => loadArchivedThreadsForEnvironment(threadRef.environmentId),
+        }),
+      );
+      if (archivedThreadsResult._tag === "Failure") {
+        return archivedThreadsResult;
+      }
+      const archivedThreads = archivedThreadsResult.value;
+      const activeThreads = readEnvironmentThreadRefs(threadRef.environmentId).flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell === null ? [] : [shell];
       });
+      const threads = collectThreadDeleteCandidates(activeThreads, thread, archivedThreads);
       const threadProject = readProject({
         environmentId: threadRef.environmentId,
         projectId: thread.projectId,
@@ -383,6 +463,9 @@ export function useThreadActions() {
       const displayWorktreePath = orphanedWorktreePath
         ? formatWorktreePathForDisplay(orphanedWorktreePath)
         : null;
+      const supportsDurableWorktreeCleanup = readEnvironmentSupportsWorktreeCleanup(
+        threadRef.environmentId,
+      );
       const canDeleteWorktree = orphanedWorktreePath !== null && threadProject !== null;
       const localApi = readLocalApi();
       let shouldDeleteWorktree = false;
@@ -435,7 +518,12 @@ export function useThreadActions() {
       });
       const deleteResult = await deleteThreadMutation({
         environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId },
+        input: {
+          threadId: threadRef.threadId,
+          ...(shouldDeleteWorktree && supportsDurableWorktreeCleanup
+            ? { deleteWorktree: true }
+            : {}),
+        },
       });
       if (deleteResult._tag === "Failure") {
         return deleteResult;
@@ -466,7 +554,14 @@ export function useThreadActions() {
         );
       }
 
-      if (!shouldDeleteWorktree || !orphanedWorktreePath || !threadProject) {
+      if (
+        !shouldDeleteWorktreeClientSide({
+          shouldDeleteWorktree,
+          supportsDurableWorktreeCleanup,
+        }) ||
+        !orphanedWorktreePath ||
+        !threadProject
+      ) {
         return deleteResult;
       }
 
@@ -515,6 +610,7 @@ export function useThreadActions() {
         // The thread was deleted. Cleanup has its own toast; returning its
         // failure would make callers incorrectly report a thread deletion error.
       }
+
       return deleteResult;
     },
     [
@@ -832,9 +928,13 @@ export function useThreadActions() {
   );
 
   const confirmAndDeleteThread = useCallback(
-    async (target: ScopedThreadRef) => {
+    async (target: ScopedThreadRef, opts: Pick<DeleteThreadOptions, "archivedThreads"> = {}) => {
       const localApi = readLocalApi();
-      const resolved = resolveThreadTarget(target);
+      const resolved = resolveThreadTargetWithArchivedFallback(
+        target,
+        resolveThreadTarget(target)?.thread ?? null,
+        opts.archivedThreads,
+      );
 
       if (confirmThreadDelete && localApi) {
         const title = resolved?.thread.title ?? "this thread";
@@ -855,7 +955,7 @@ export function useThreadActions() {
         }
       }
 
-      return deleteThread(target);
+      return deleteThread(target, opts);
     },
     [confirmThreadDelete, deleteThread, resolveThreadTarget],
   );
