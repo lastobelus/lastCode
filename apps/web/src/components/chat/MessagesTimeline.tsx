@@ -1504,13 +1504,14 @@ function TimelineAnnotationPopover({
       />
       <PopoverPopup
         align="center"
-        className="w-80 max-w-80 text-left shadow-xl shadow-black/25 before:hidden"
+        className="w-80 max-w-80 text-left before:hidden"
         data-minimap-preview
+        elevated
         finalFocus={false}
         initialFocus={false}
         side="right"
         tooltipStyle
-        viewportClassName="p-0"
+        viewportPadding="none"
       >
         <div className="w-80 max-w-80 bg-warning/10 p-3 text-warning-foreground">
           {earlier ? (
