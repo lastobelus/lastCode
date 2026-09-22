@@ -20,6 +20,7 @@ type AnchorElement = ReactElement<{
 
 const baseState: DesktopUpdateState = {
   enabled: true,
+  source: "hosted",
   status: "available",
   channel: "nightly",
   currentVersion: "0.0.35",
@@ -35,6 +36,8 @@ const baseState: DesktopUpdateState = {
   message: null,
   errorContext: null,
   canRetry: false,
+  localBuildProgress: null,
+  localBuildFailure: null,
 };
 
 function collectAnchors(node: ReactNode, anchors: AnchorElement[] = []): AnchorElement[] {

@@ -1,0 +1,218 @@
+# Local Nightly Updates
+
+LastCode can turn immutable local checkpoint and LastCode revision tags into an
+in-app update without publishing a release or using GitHub Actions. This is a
+local Apple Silicon artifact builder and consumer workflow, not a public
+distribution channel.
+
+## Opt in
+
+The feature is off by default. In the packaged Apple Silicon desktop app, open
+**Settings → LastCode** and enable **Show and install local nightlies**.
+This is separate from the normal **Update track** setting, which controls T3
+Code's hosted stable/nightly release channel and does not enable local builds.
+
+Nothing is inspected, built, downloaded, or installed while the setting is
+off. The setting is stored in LastCode's desktop settings, separate from T3
+Code's state.
+
+Before enabling it, install the checkpoint service and dashboard:
+
+```bash
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm run lastcode:checkpoints -- --install
+pnpm run lastcode:build -- --install
+pnpm run lastcode:install -- --install
+```
+
+The two optional userland commands can be removed later with
+`lastcode-build --uninstall` and `lastcode-install --uninstall`. Their shared
+checkpoint configuration and build artifacts are preserved.
+
+The dashboard installer records the dedicated automation worktree in
+`~/.lastcode/dashboard.json`. The desktop updater uses that worktree only to
+read checkpoint tags and launch the versioned helper; it never checks out or
+cleans a human development worktree.
+
+The optional `lastcode-build [CHECKPOINT]` command exposes the same builder for
+manual bootstrap builds. It defaults to the newest installable checkpoint or
+revision; a final nightly number such as `1090` selects the newest installable
+for that upstream nightly.
+Manual and in-app builds share one cross-process lock. If either path is already
+building, the other exits with the owning process and start time instead of
+mutating the shared build worktree. A lock left by a terminated process is
+reclaimed automatically on the next attempt.
+
+The companion `lastcode-install` command uses `fzf` to choose a retained DMG,
+with the most recently built image selected by default. It stages and validates
+the replacement before quitting LastCode, then replaces
+`/Applications/LastCode.app` and relaunches it. Passing a DMG path skips the
+picker. An install-wide lock prevents overlapping commands from racing the app
+replacement. This manual bootstrap path does not require the currently installed
+app to have local nightly updates enabled.
+Quarantined `.incomplete-*` artifact directories are never offered in the
+picker.
+
+## User flow
+
+1. The desktop checks the local repository at startup, every four minutes, and
+   when the sidebar update button is clicked.
+2. If a checkpoint or revision is newer than the installed LastCode version,
+   the sidebar button changes state. Its hover card separates new downstream
+   work under **LastCode changes** from upstream work grouped by the nightly
+   that introduced it. This also applies when upstream has not moved and only a
+   newer LastCode revision is available.
+3. The first click creates or reuses
+   `~/.lastcode/local-updates/build-worktree`, installs its pinned dependencies,
+   runs full checkpoint CI, and builds the selected tag's DMG plus updater ZIP.
+   One build at a time owns this worktree, from checkout through final artifact
+   validation. While that work runs, the sidebar's circular indicator shows a
+   stage-weighted estimated percentage. Hover it to see the current concise
+   phase and `% est.`. The estimate follows real preparation, CI, and packaging
+   markers, moves forward only, and stays below 100% until the build becomes
+   installable.
+   The build generates updater metadata for `lastobelus/lastCode` by default;
+   a fork can set `LASTCODE_GITHUB_REPOSITORY=owner/repo` in its configured
+   environment to select its own metadata source.
+4. The resulting files are immutable under
+   `~/.lastcode/local-updates/artifacts/<nightly>/<commit>/`. Existing complete
+   output is reused instead of overwritten.
+5. The exact retained DMG path and SHA-256 from the immutable build manifest are
+   kept as the selected install artifact. Local nightlies do not enter
+   `electron-updater` or Squirrel; those paths require a stable macOS signing
+   identity that successive ad-hoc builds do not have.
+6. The button changes to the install state. After confirmation, LastCode starts
+   a detached managed installer. The installer takes the same lock used by
+   `lastcode-install`, verifies the exact checksum, mounts and validates the
+   bundle, and stages the replacement beside `/Applications/LastCode.app`.
+7. Only after the installer reports readiness does LastCode gracefully stop its
+   backends and transfer commit ownership to the helper. The current app quits,
+   then the helper swaps the staged bundle with rollback protection. It launches
+   the requested version without Electron's helper-only Node mode, retries a
+   forced new app launch when macOS accepts but drops the request, and requires
+   the process to remain running before deleting the previous bundle.
+
+The DMG is retained as both the inspectable manual artifact and the in-app
+install source. The paired ZIP and `nightly-mac.yml` remain part of the complete
+desktop build output, but the certificate-free local channel does not hand them
+to Squirrel. Hosted signed releases continue to use `electron-updater`.
+
+### Release-note grouping
+
+The local updater compares the exact installed checkpoint or revision with the
+newest installable tag. **LastCode changes** contains only downstream patches
+that entered after the installed tag's recorded source snapshot and remain
+downstream-only at the offered target. Rebased copies of changes already in the
+installed build are not repeated. If upstream has since adopted an equivalent
+patch, that change appears only in the upstream nightly that adopted it.
+
+Upstream subjects are compared between consecutive nightly tags and shown
+newest-first. Empty nightly groups are omitted. The hover card shows at most
+eight subjects in each section and at most six upstream nightly sections; an
+explicit summary reports anything omitted by those bounds.
+
+This classification depends on the immutable installable tag and its annotated
+`Source-Commit` metadata. When the installed tag or a safe source boundary is
+unavailable, the LastCode section says **Couldn’t determine changes from this
+installed build.** Accurate upstream nightly groups are still shown. A known
+empty LastCode section is omitted.
+
+Electron's macOS credential storage can synchronously block its main process
+while the Keychain prompt is open. If a long-running request returns Electron's
+generic protocol-level HTTP 500 after that delay, the desktop client keeps
+retrying for one hour. Structured server HTTP 500 responses still surface
+immediately, and ordinary 502/503/504 gateway failures retain the normal
+15-second retry deadline. You can leave the build or install unattended, return
+to handle a prompt, and continue without rebuilding, reinstalling, or relaunching
+LastCode.
+
+## LastCode-only revisions
+
+One upstream checkpoint remains the immutable record for each T3 Code nightly.
+When `lastcode/main` advances before another upstream nightly exists, the
+checkpoint daemon publishes an ordered tag such as:
+
+```text
+lastcode/revision/v0.0.34-nightly.20260816.1105.1
+```
+
+The guarded PR merge command requests an immediate daemon run. If that request
+is missed because the service is unavailable, a later managed run repairs it.
+The daemon replays only the newly merged LastCode commits onto the newest
+checkpoint, smoke-tests the result, publishes the revision, and promotes it when
+the PR queue permits. The running app then discovers version
+`0.0.34-nightly.20260816.1105.1` through the same button and builds it only after
+the first click. A later upstream `1106` still sorts after every `1105.N`
+revision.
+
+## Failure handling and logs
+
+A failed check or build leaves the current app installed and changes the
+sidebar button to a persistent red retry state. Hovering a local build failure
+opens an interactive panel with the last phase, estimated percentage, and exact
+error. **Copy details** creates a bounded, control-sequence-sanitized summary
+with the installed and target versions, selected checkpoint, failure context,
+error, and expanded log path. It does not copy the build log or environment.
+Clipboard failures are shown in the app instead of being ignored. Starting a
+retry clears the visible failure and begins progress again for the selected
+build.
+
+When checkpoint maintenance has a persistent recovery thread configured, a
+failed build also posts a bounded, redacted alert to that same thread. The alert
+names the selected checkpoint, retained build worktree, and build log, and asks
+the agent in that thread to fix the concrete failure and leave a working current
+build. Alert delivery is best-effort: a missing configuration or delivery error
+is reported beside the original updater error and never replaces it.
+
+Build output is appended to:
+
+```text
+~/.lastcode/local-updates/build.log
+```
+
+Install-helper preflight and post-quit swap diagnostics are appended to:
+
+```text
+~/.lastcode/local-updates/install.log
+```
+
+If helper launch, checksum validation, bundle validation, staging, or lock
+acquisition fails before readiness, LastCode keeps its backends and visible
+window running and presents a retryable install error. If shutdown cannot finish
+after readiness, LastCode cancels the handoff so the helper removes its staging
+area and releases the lock. A failure after the old process exits restores the
+previous app before the helper reports the error in the install log. The log
+contains the complete helper transcript, including successful preflight and
+relaunch attempts.
+
+The dedicated build worktree is preserved for inspection. The helper refuses
+to reuse that path if it belongs to another Git repository, refuses a dirty
+tracked/untracked worktree, and never removes or resets the canonical checkout
+or the checkpoint daemon's automation worktree. If packaging left an incomplete
+artifact directory, the next attempt renames it with an `.incomplete-*` suffix
+for inspection before creating fresh output at the immutable build path. Reuse
+also requires the checksum file and the manifest's annotated
+`lastcode/build/*` tag to exist and point at the checkpoint commit, so an
+interrupted finalization is retried instead of treated as complete.
+Interrupting or quitting during a build terminates the helper's entire process
+group so CI and packaging cannot continue orphaned against that worktree.
+The next build also reclaims an ownerless or partial lock left behind during the
+lock's initialization, after a short grace period that avoids stealing it from a
+still-starting process.
+
+Turning the setting off hides the local updater and stops future checks. It
+does not delete build artifacts, CI stamps, Git tags, or worktrees.
+The transition waits for any checkpoint inspection already in progress before
+restoring hosted updater state, so a late poll cannot turn the feature back on.
+
+## Current scope
+
+- packaged LastCode desktop builds on Apple Silicon macOS;
+- local `lastcode/checkpoint/*` and `lastcode/revision/*` tags already fetched
+  by the checkpoint daemon;
+- ad-hoc-signed, non-notarized personal builds; and
+- one build at a time, initiated interactively from the sidebar.
+
+Public releases, notarization, x64 builds, remote build hosts, and automatic
+installation are intentionally outside this workflow.

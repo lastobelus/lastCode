@@ -13,6 +13,24 @@
       "command": "vp i && New-Item -ItemType SymbolicLink -Path .env -Target \"$env:T3CODE_PROJECT_ROOT\\.env\" -Force && New-Item -ItemType SymbolicLink -Path \"infra\\relay\\.env\" -Target \"$env:T3CODE_PROJECT_ROOT\\infra\\relay\\.env\" -Force && node apps\\web\\scripts\\warm-dep-cache.ts",
       "icon": "configure",
       "runOnWorktreeCreate": true
+    },
+    {
+      "id": "lc-local-ci",
+      "name": "Run Quick CI",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
+      "icon": "test"
+    },
+    {
+      "id": "lc-build-local-package",
+      "name": "Build Local Package",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts\" run",
+      "icon": "build"
+    },
+    {
+      "id": "lc-build-intel-package",
+      "name": "Build Intel package (macOS)",
+      "command": "mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
+      "icon": "build"
     }
   ]
 }
