@@ -1,3 +1,5 @@
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { SymbolView } from "./AppSymbol";
 import { Image } from "expo-image";
 import { useLayoutEffect, useMemo, useState } from "react";
@@ -8,10 +10,8 @@ import {
   getProjectFaviconResourceKey,
   isProjectFaviconFallbackUrl,
 } from "@t3tools/shared/projectFavicon";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/unstable/reactivity";
 import { projectFaviconUrlAtom } from "../state/assets";
-
+import { mobilePreferencesAtom } from "../state/preferences";
 import {
   beginProjectFaviconRequest,
   createProjectFaviconRequest,
@@ -19,6 +19,7 @@ import {
   markProjectFaviconFailed,
   markProjectFaviconLoaded,
 } from "./projectFaviconCache";
+import { resolveProjectFaviconBorderRadius } from "./projectFaviconAppearance";
 
 const EMPTY_FAVICON_URL = Atom.make<string | null>(null);
 
@@ -32,6 +33,10 @@ export function ProjectFavicon(props: {
   readonly faviconPath?: string | null;
 }) {
   const size = props.size ?? 42;
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const roundedProjectIcons =
+    AsyncResult.isSuccess(preferencesResult) &&
+    preferencesResult.value.roundedProjectIcons === true;
   const faviconUrl = useAtomValue(
     props.workspaceRoot == null
       ? EMPTY_FAVICON_URL
@@ -58,6 +63,7 @@ export function ProjectFavicon(props: {
       faviconUrl={renderableFaviconUrl}
       open={props.open}
       projectTitle={props.projectTitle}
+      rounded={roundedProjectIcons}
       size={size}
     />
   );
@@ -68,6 +74,7 @@ function ProjectFaviconImage(props: {
   readonly faviconUrl: string | null;
   readonly open?: boolean;
   readonly projectTitle: string;
+  readonly rounded: boolean;
   readonly size: number;
 }) {
   const faviconRequest = useMemo(
@@ -126,7 +133,7 @@ function ProjectFaviconImage(props: {
           style={{
             width: props.size,
             height: props.size,
-            borderRadius: props.size * 0.16,
+            borderRadius: resolveProjectFaviconBorderRadius(props.size, props.rounded),
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
           contentFit="contain"
