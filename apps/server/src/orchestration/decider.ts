@@ -139,6 +139,22 @@ function findPullRequestLink(
   return thread.pullRequests.find((link) => threadPullRequestKeysEqual(link, key));
 }
 
+function latestUserMessageId(thread: OrchestrationReadModel["threads"][number]) {
+  return (
+    thread.latestUserMessageId ??
+    thread.messages
+      .filter((message) => message.role === "user")
+      .toSorted(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+      )[0]?.id
+  );
+}
+
+function nextAnnotationAnchorMessageId(thread: OrchestrationReadModel["threads"][number]) {
+  return latestUserMessageId(thread) ?? thread.annotation?.anchorMessageId;
+}
+
 function worktreeCleanupTimestamp(
   cleanup: NonNullable<OrchestrationReadModel["threads"][number]["worktreeCleanup"]>,
 ): string {
@@ -439,6 +455,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const activeThreads = projectThreads.filter((thread) => thread.deletedAt === null);
+      const persistentThread = activeThreads.find((thread) => thread.persistent);
+      if (persistentThread !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' cannot be deleted while thread '${persistentThread.id}' is persistent. Disable persistence or move it to another thread first.`,
+        });
+      }
       if (activeThreads.length > 0 && command.force !== true) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -534,6 +557,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (thread.persistent) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Persistent thread '${thread.id}' cannot be deleted until persistence is disabled or moved to another thread.`,
+        });
+      }
       const occurredAt = yield* nowIso;
 
       // Deletion commands can be retried after the first deleted event has
@@ -753,11 +782,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.archive": {
-      yield* requireThreadNotArchived({
+      const thread = yield* requireThreadNotArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (thread.persistent) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Persistent thread '${thread.id}' cannot be archived until persistence is disabled or moved to another thread.`,
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -797,6 +832,41 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.persistence.set": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.archivedAt !== null || thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Only an active thread can be marked persistent.`,
+        });
+      }
+      const current = readModel.threads.find(
+        (candidate) => candidate.deletedAt === null && candidate.persistent,
+      );
+      if (!command.persistent && current?.id !== thread.id) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${thread.id}' is not the persistent thread.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.persistence-changed",
+        payload: {
+          threadId: command.threadId,
+          persistentThreadId: command.persistent ? command.threadId : null,
+          replacedThreadId: current?.id ?? null,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
     case "thread.settle":
     case "thread.auto-settle": {
       const thread = yield* requireThreadNotArchived({
@@ -812,6 +882,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandType: command.type,
           detail: `thread ${command.threadId} changed before automatic settlement`,
         });
+      }
+      if (command.type === "thread.auto-settle" && thread.attention != null) {
+        return yield* new OrchestrationThreadSettleBlockedError({ threadId: command.threadId });
       }
       // The server owns settle eligibility. A stale command must not settle
       // a thread whose session is coming alive or working.
@@ -835,7 +908,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const occurredAt = yield* nowIso;
       // Settling inside the adoption window would hide just-requested work.
       if (hasQueuedTurnStartForThread(thread, occurredAt)) {
-        return yield* new OrchestrationThreadSettleBlockedError({ threadId: command.threadId });
+        return yield* new OrchestrationThreadSettleBlockedError({
+          threadId: command.threadId,
+        });
       }
       // Settling an already-settled thread re-emits with the original
       // settledAt: the engine rejects zero-event commands, and bulk-settle /
@@ -919,6 +994,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
+      if (thread.attention != null) {
+        companionEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.attention-cleared",
+          payload: {
+            threadId: command.threadId,
+            updatedAt: occurredAt,
+          },
+        });
+      }
       return companionEvents.length > 0 ? [settledEvent, ...companionEvents] : settledEvent;
     }
 
@@ -972,10 +1062,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // user-input request is the agent waiting on the user, and hiding it
       // defeats the request. (A running session IS snoozable — snooze only
       // affects visibility, never the agent.)
-      if (openRequests(thread).size > 0) {
+      if (openRequests(thread).size > 0 || thread.attention != null) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `thread ${command.threadId} has a pending approval or user-input request and cannot be snoozed`,
+          detail: `thread ${command.threadId} needs user attention and cannot be snoozed`,
         });
       }
       // A queued turn start — a user message no turn has adopted yet — is
@@ -1236,6 +1326,121 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           activeOrderKey: command.orderKey,
           // Arranging the list is not thread activity or a lifecycle transition.
           updatedAt: thread.updatedAt,
+        },
+      };
+    }
+
+    case "thread.annotation.upsert": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-upserted",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            body: command.body,
+            anchorMessageId,
+            createdAt: thread.annotation?.createdAt ?? occurredAt,
+            updatedAt: occurredAt,
+            resolvedAt: thread.annotation?.resolvedAt ?? null,
+          },
+        },
+      };
+    }
+
+    case "thread.annotation.resolve": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.annotation == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no annotation to resolve`,
+        });
+      }
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-resolved",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            ...thread.annotation,
+            anchorMessageId,
+            updatedAt: occurredAt,
+            resolvedAt: occurredAt,
+          },
+        },
+      };
+    }
+
+    case "thread.annotation.reopen": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.annotation == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no annotation to reopen`,
+        });
+      }
+      const anchorMessageId = nextAnnotationAnchorMessageId(thread);
+      if (anchorMessageId === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has no user message to anchor an annotation`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.annotation-reopened",
+        payload: {
+          threadId: command.threadId,
+          annotation: {
+            ...thread.annotation,
+            anchorMessageId,
+            updatedAt: occurredAt,
+            resolvedAt: null,
+          },
         },
       };
     }
@@ -1732,6 +1937,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.sourceThreadId === command.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A cross-thread message source must differ from its target thread.",
+        });
+      }
+      if (command.sourceThreadId !== undefined) {
+        yield* requireThread({
+          readModel,
+          command,
+          threadId: command.sourceThreadId,
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1783,6 +2001,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               ...(command.message.context !== undefined
                 ? { context: command.message.context }
                 : {}),
+              ...(command.sourceThreadId !== undefined
+                ? { sourceThreadId: command.sourceThreadId }
+                : {}),
               turnId: null,
               streaming: false,
               createdAt: command.createdAt,
@@ -1808,6 +2029,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.trackRequestCorrelation === true ? { trackRequestCorrelation: true } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1849,9 +2071,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
+      const attentionClearedEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        targetThread.attention == null
+          ? null
+          : {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.attention-cleared",
+              payload: {
+                threadId: command.threadId,
+                updatedAt: command.createdAt,
+              },
+            };
       return [
         ...lifecycleResetEvents,
         ...(userMessageEvent ? [userMessageEvent] : []),
+        ...(attentionClearedEvent === null ? [] : [attentionClearedEvent]),
         turnStartRequestedEvent,
       ];
     }
@@ -1899,12 +2138,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const interruptRequestedEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1917,7 +2156,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
         },
-      };
+      } as const;
+      if (thread.attention == null) {
+        return interruptRequestedEvent;
+      }
+      return [
+        interruptRequestedEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.attention-cleared",
+          payload: {
+            threadId: command.threadId,
+            updatedAt: command.createdAt,
+          },
+        },
+      ];
     }
 
     case "thread.approval.respond": {
@@ -2214,12 +2472,66 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.turn-request.resolve": {
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-request-resolved",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          outcome: command.outcome,
+        },
+      };
+    }
+
+    case "thread.turn-assistant.finalize": {
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-assistant-finalized",
+        payload: {
+          threadId: command.threadId,
+          turnId: command.turnId,
+          finalizedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.session.set": {
       const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const previousSession = thread.session;
+      const sameProvider = previousSession?.providerName === command.session.providerName;
+      const sameBinding =
+        sameProvider &&
+        (command.session.providerInstanceId === undefined ||
+          command.session.providerInstanceId === previousSession?.providerInstanceId);
+      const providerThreadIdWasSupplied = Object.hasOwn(command.session, "providerThreadId");
+      const session = {
+        ...command.session,
+        ...(sameProvider &&
+        command.session.providerInstanceId === undefined &&
+        previousSession?.providerInstanceId !== undefined
+          ? { providerInstanceId: previousSession.providerInstanceId }
+          : {}),
+        providerThreadId: providerThreadIdWasSupplied
+          ? (command.session.providerThreadId ?? null)
+          : sameBinding
+            ? (previousSession?.providerThreadId ?? null)
+            : null,
+      };
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -2231,9 +2543,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-set",
         payload: {
           threadId: command.threadId,
-          session: command.session,
+          session,
         },
       };
+      const terminalAttentionClearEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        thread.attention != null &&
+        (command.session.status === "error" || command.session.status === "interrupted")
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.attention-cleared",
+              payload: {
+                threadId: command.threadId,
+                updatedAt: command.createdAt,
+              },
+            }
+          : null;
       // Only a session coming alive is activity worth waking a settled thread
       // for — status writes like ready/stopped/error arrive after the fact and
       // must not fight a user's explicit settle. Snooze is deliberately NOT
@@ -2246,7 +2575,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.session.status === "starting" || command.session.status === "running";
       // Real activity resets ANY override (settled wakes, active unpins).
       if (thread.settledOverride === null || !isSessionActivity) {
-        return sessionSetEvent;
+        return terminalAttentionClearEvent === null
+          ? sessionSetEvent
+          : [sessionSetEvent, terminalAttentionClearEvent];
       }
       const unsettledEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
@@ -2473,12 +2804,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.revert.complete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const revertedEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -2490,7 +2821,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           turnCount: command.turnCount,
         },
-      };
+      } as const;
+      if (thread.attention == null) {
+        return revertedEvent;
+      }
+      return [
+        revertedEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.attention-cleared",
+          payload: {
+            threadId: command.threadId,
+            updatedAt: command.createdAt,
+          },
+        },
+      ];
     }
 
     case "thread.activity.append": {
@@ -2545,6 +2895,86 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, activityAppendedEvent];
+    }
+
+    case "thread.attention.set": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const unchanged = thread.attention?.kind === command.attention.kind;
+      const unchangedAndVisible =
+        unchanged && thread.settledOverride === null && thread.snoozedUntil == null;
+      const attentionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.attention-set",
+        payload: {
+          threadId: command.threadId,
+          attention: unchanged ? thread.attention! : command.attention,
+          updatedAt: unchangedAndVisible ? thread.updatedAt : command.createdAt,
+        },
+      };
+      const wakeEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      if (thread.settledOverride !== null) {
+        wakeEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.unsettled",
+          payload: {
+            threadId: command.threadId,
+            reason: "activity",
+            updatedAt: command.createdAt,
+          },
+        });
+      }
+      if (thread.snoozedUntil != null) {
+        wakeEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.unsnoozed",
+          payload: {
+            threadId: command.threadId,
+            reason: "activity",
+            updatedAt: command.createdAt,
+          },
+        });
+      }
+      return [...wakeEvents, attentionSetEvent];
+    }
+
+    case "thread.attention.clear": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.attention-cleared",
+        payload: {
+          threadId: command.threadId,
+          updatedAt: thread.attention == null ? thread.updatedAt : command.createdAt,
+        },
+      };
     }
 
     default: {

@@ -66,7 +66,7 @@ export const UpdateDrainStatus = Schema.Struct({
 });
 export type UpdateDrainStatus = typeof UpdateDrainStatus.Type;
 
-export class UpdateDrainAdmissionError extends Schema.TaggedErrorClass<UpdateDrainAdmissionError>()(
+export class UpdateDrainAdmissionError extends Schema.TaggedError<UpdateDrainAdmissionError>()(
   "UpdateDrainAdmissionError",
   {
     reason: Schema.Literal("update_draining"),
@@ -188,10 +188,7 @@ export const UpdateDrainClaimInput = Schema.Struct({
 });
 export type UpdateDrainClaimInput = typeof UpdateDrainClaimInput.Type;
 
-export class UpdateDrainError extends Schema.TaggedErrorClass<UpdateDrainError>()(
-  "UpdateDrainError",
-  {
-    reason: UpdateDrainFailureReason,
-    message: Schema.String,
-  },
-) {}
+export class UpdateDrainError extends Schema.TaggedError<UpdateDrainError>()("UpdateDrainError", {
+  reason: UpdateDrainFailureReason,
+  message: Schema.String,
+}) {}

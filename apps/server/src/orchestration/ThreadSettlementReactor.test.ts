@@ -306,7 +306,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       number: 42,
       mergedAt: NOW,
     }),
-    layer: ThreadSettlementReactor.layer.pipe(Layer.provide(dependencies)),
+    layer: ThreadSettlementReactor.layer.pipe(Layer.provideMerge(dependencies)),
   };
 });
 
@@ -1915,9 +1915,18 @@ describe("storage cleanup", () => {
           assert.strictEqual(yield* fs.exists(activeLog), true);
         }).pipe(
           Effect.provide(
-            ServerConfig.layerTest(process.cwd(), { prefix: "t3-storage-cleanup-" }).pipe(
-              Layer.provideMerge(NodeServices.layer),
-            ),
+            Layer.unwrap(
+              Effect.gen(function* () {
+                const fs = yield* FileSystem.FileSystem;
+                const temporary = yield* fs.makeTempDirectoryScoped({
+                  prefix: "t3-storage-cleanup-",
+                });
+                // macOS temporary paths can traverse /var's symlink. Cleanup
+                // intentionally rejects symlinked roots, so use the real path.
+                const root = yield* fs.realPath(temporary);
+                return ServerConfig.layerTest(process.cwd(), root);
+              }),
+            ).pipe(Layer.provideMerge(NodeServices.layer)),
           ),
           Effect.scoped,
         ),

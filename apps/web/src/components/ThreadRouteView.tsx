@@ -30,6 +30,7 @@ import {
   type ThreadRouteTarget,
 } from "../threadRoutes";
 import { resolveThreadSyncPhase } from "../threadSync";
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -81,6 +82,9 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const serverThreadShell = useThreadShell(serverThreadRef);
   const serverThreadDetail = useThreadDetail(serverThreadRef);
   const serverThreadStatus = useThreadStatus(serverThreadRef);
+  useEffect(() => {
+    if (serverThreadRef && serverThreadStatus === "deleted") purgeThreadHandoffs(serverThreadRef);
+  }, [serverThreadRef, serverThreadStatus]);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
   const bootstrapComplete = shell.data?.snapshot._tag === "Some";
   const draftThread = useComposerDraftStore((store) =>

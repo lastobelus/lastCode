@@ -2,7 +2,7 @@ import {
   ActionResumeError,
   ActionResumeState,
   ActionRunInspection,
-  PreviewAutomationUnavailableError,
+  McpCapabilityUnavailableError,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
@@ -10,7 +10,7 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const dependencies = [McpInvocationContext.McpInvocationContext];
-const ActionResumeToolError = Schema.Union([ActionResumeError, PreviewAutomationUnavailableError]);
+const ActionResumeToolError = Schema.Union([ActionResumeError, McpCapabilityUnavailableError]);
 
 const ListedProjectAction = Schema.Struct({
   id: Schema.String,
