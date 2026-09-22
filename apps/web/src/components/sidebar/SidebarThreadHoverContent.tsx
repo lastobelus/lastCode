@@ -1,0 +1,193 @@
+import { CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
+import type { ProjectIconOverride } from "@t3tools/contracts";
+import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+
+import type { ProviderInstanceEntry } from "../../providerInstances";
+import type { SidebarThreadSummary } from "../../types";
+import { cn } from "~/lib/utils";
+import { ProjectFavicon } from "../ProjectFavicon";
+import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { EnvironmentIcon } from "../../environmentIcons";
+import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
+
+export interface SidebarThreadHoverContentProps {
+  thread: SidebarThreadSummary;
+  projectTitle: string | null;
+  projectDisplayName?: string | null;
+  projectCwd: string | null;
+  projectFaviconPath: string | null;
+  projectIcon?: ProjectIconOverride | null;
+  environmentLabel: string | null;
+  environmentIconKind?: "laptop" | "server";
+  environmentIconColor?: EnvironmentIconColor | undefined;
+  providerEntry: ProviderInstanceEntry | null;
+  showInstanceBadge: boolean;
+  modelInstanceId: string;
+  modelLabel: string;
+  branchMismatch: {
+    threadBranch: string;
+    currentBranch: string;
+  } | null;
+  terminalStatus: TerminalStatusIndicator | null;
+  terminalProcessCount: number;
+  cleanupBlockerTitle?: string | null;
+  showCleanup?: boolean;
+}
+
+function terminalProcessLabel(count: number): string {
+  return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
+}
+
+export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps) {
+  const driverKind = props.providerEntry?.driverKind ?? null;
+  const projectDisplayName = props.projectDisplayName ?? props.projectTitle;
+  const actionPresentation =
+    props.thread.actionResume?.outcome === "running"
+      ? actionRunningPresentation(props.thread.actionResume)
+      : null;
+
+  return (
+    <div className="flex min-w-0 max-w-80 flex-col gap-2 p-(--floating-content-inset)">
+      <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
+        {props.thread.title}
+      </div>
+      <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
+        {projectDisplayName ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <ProjectFavicon
+              environmentId={props.thread.environmentId}
+              cwd={props.projectCwd ?? ""}
+              projectName={props.projectTitle ?? ""}
+              faviconPath={props.projectFaviconPath}
+              projectIcon={props.projectIcon ?? null}
+              className="size-3 shrink-0"
+            />
+            <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
+          </div>
+        ) : null}
+        {props.environmentLabel ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <EnvironmentIcon
+              kind={props.environmentIconKind ?? "server"}
+              context="hover"
+              color={props.environmentIconColor}
+              className="size-3 shrink-0"
+            />
+            <div className="min-w-0 truncate text-foreground/75">{props.environmentLabel}</div>
+          </div>
+        ) : null}
+        {props.thread.branch ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
+            <div className="min-w-0 truncate text-foreground/75">{props.thread.branch}</div>
+          </div>
+        ) : null}
+        {props.branchMismatch ? (
+          <div className="flex min-w-0 items-start gap-2 text-warning">
+            <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
+            <div className="min-w-0 flex-1 wrap-break-word leading-5">
+              You're currently checked out on another branch.
+            </div>
+          </div>
+        ) : null}
+        {driverKind ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <ProviderInstanceIcon
+              driverKind={driverKind}
+              displayName={
+                props.providerEntry?.displayName ??
+                props.thread.session?.providerName ??
+                props.modelInstanceId
+              }
+              accentColor={props.providerEntry?.accentColor}
+              showBadge={props.showInstanceBadge && props.providerEntry?.accentColor !== undefined}
+              badgeContent="none"
+              badgeClassName="h-2 min-w-2 px-0"
+              iconClassName="size-3 shrink-0 grayscale opacity-60"
+            />
+            <div className="min-w-0 truncate text-foreground/75">
+              {props.showInstanceBadge && props.providerEntry
+                ? `${props.modelLabel} · ${props.providerEntry.displayName}`
+                : props.modelLabel}
+            </div>
+          </div>
+        ) : null}
+        {props.terminalStatus ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <TerminalIcon
+              aria-hidden
+              className={cn("size-3 shrink-0", props.terminalStatus.colorClass)}
+            />
+            <div className="min-w-0 truncate text-foreground/75">
+              {terminalProcessLabel(props.terminalProcessCount)}
+            </div>
+          </div>
+        ) : null}
+        {actionPresentation ? (
+          <div
+            className={cn(
+              "flex min-w-0 items-center gap-2",
+              actionPresentation.state === "working"
+                ? "text-info-foreground"
+                : "text-warning-foreground",
+            )}
+          >
+            <RotateCcwClockIcon aria-hidden className="size-3 shrink-0" />
+            <div className="min-w-0 truncate">
+              {actionPresentation.label}: {actionPresentation.summary}
+            </div>
+          </div>
+        ) : null}
+        {props.thread.session?.lastError ? (
+          <div className="flex min-w-0 items-center gap-2 text-error-foreground">
+            <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
+            <div className="min-w-0 truncate">Error occurred</div>
+          </div>
+        ) : null}
+      </div>
+      {props.showCleanup === false ? null : (
+        <SidebarThreadCleanupHoverContent
+          thread={props.thread}
+          blockerTitle={props.cleanupBlockerTitle ?? null}
+        />
+      )}
+    </div>
+  );
+}
+
+export function SidebarThreadCleanupHoverContent(props: {
+  thread: SidebarThreadSummary;
+  blockerTitle: string | null;
+  standalone?: boolean;
+}) {
+  const cleanup = props.thread.worktreeCleanup;
+  if (cleanup == null || cleanup.status === "failed") return null;
+
+  return (
+    <div
+      className={cn(
+        !props.standalone && "-mx-(--floating-content-inset) -mb-(--floating-content-inset)",
+        "border-t border-warning/25 bg-warning px-(--floating-content-inset) py-2 text-xs text-warning-foreground",
+      )}
+    >
+      {cleanup.status === "deleting" ? (
+        <>
+          <div className="font-medium">Deleting worktree</div>
+          <div className="mt-1 break-all font-mono text-3xs text-left [text-wrap-style:auto] opacity-80">
+            {cleanup.worktreePath}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="font-medium">Waiting for cleanup</div>
+          <div className="mt-1 truncate">
+            {cleanup.blockedByThreadId}
+            {props.blockerTitle ? ` — ${props.blockerTitle}` : ""}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

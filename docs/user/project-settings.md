@@ -100,6 +100,16 @@ When no image is found, web and desktop show a two-character monogram with a col
 from the icon palette, derived from the saved project name. For example, `Nebula` becomes `NA`,
 `Silver Orchard` becomes `SO`, and `M7 Forge` becomes `M7`.
 
+## Choose the icon shape
+
+Project icons keep the shape of their source image by default. To round their corners in the web
+or desktop app, open **Settings → LastCode** and enable **Rounded project icons**. This preference
+is saved in the current LastCode profile.
+
+T3 Code Mobile stores the same preference separately on each device. Open
+**Settings → Appearance** and enable **Rounded project icons** on every mobile device where you
+want rounded corners.
+
 ## Let an agent run an Action and resume
 
 Project Actions can hand long-running work back to Codex or Claude when they finish. Edit an
@@ -126,6 +136,7 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
+
 
 ## Keep the default branch current
 
