@@ -483,6 +483,15 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     return supported;
   }, [serverConfigs]);
+  const persistenceEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadPersistence === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   const machineByEnvironmentId = useMemo(
     () =>
       new Map(
@@ -722,6 +731,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onRenameThread={handleRenameThread}
           onRegenerateThreadTitle={handleRegenerateThreadTitle}
           titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+          persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
           settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
           onSettleThread={handleSettleThread}
           snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -760,6 +770,7 @@ export function HomeScreen(props: HomeScreenProps) {
       handleUnsettleThread,
       pinningEnvironmentIds,
       machineByEnvironmentId,
+      persistenceEnvironmentIds,
       pinReorderEnvironmentIds,
       projectByKey,
       props.onArchiveThread,

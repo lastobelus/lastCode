@@ -15,6 +15,7 @@ export const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 export type SupervisorState = {
   readonly schemaVersion: 1;
   readonly supervisorPid: number;
+  readonly launchdPid: number;
   readonly status: "failed" | "success";
   readonly phase: string;
   readonly startedAt: string;
@@ -59,6 +60,9 @@ function validState(value: unknown): value is SupervisorState {
     typeof state.supervisorPid === "number" &&
     Number.isSafeInteger(state.supervisorPid) &&
     state.supervisorPid > 0 &&
+    typeof state.launchdPid === "number" &&
+    Number.isSafeInteger(state.launchdPid) &&
+    state.launchdPid > 0 &&
     (state.status === "success" || state.status === "failed") &&
     typeof state.phase === "string" &&
     Number.isFinite(started) &&
@@ -152,7 +156,7 @@ export async function waitForCheckpoint(
     }
     const daemonExited = currentDaemon.state === "idle";
     if (daemonExited) {
-      if (!validState(currentState) || currentState.supervisorPid !== pid) {
+      if (!validState(currentState) || currentState.launchdPid !== pid) {
         throw new CheckpointWaitError(
           "no-state",
           `Checkpoint supervisor run ${pid} exited without a matching terminal state.`,

@@ -167,7 +167,7 @@ export class ProjectAlreadyExistsError extends Schema.TaggedError<ProjectAlready
   }
 }
 
-export class ProjectActionReconcileFileError extends Schema.TaggedErrorClass<ProjectActionReconcileFileError>()(
+export class ProjectActionReconcileFileError extends Schema.TaggedError<ProjectActionReconcileFileError>()(
   "ProjectActionReconcileFileError",
   {
     operation: Schema.Literals([
@@ -648,20 +648,20 @@ const readManagedProjectActionState = Effect.fn("readManagedProjectActionState")
 
 const projectReconcileActionsCommand = Command.make("reconcile-actions", {
   ...projectLocationFlags,
-  project: Argument.string("project").pipe(
+  project: Argument.String("project").pipe(
     Argument.withDescription("Project id or workspace root to reconcile."),
   ),
-  sourceFile: Flag.string("source-file").pipe(
+  sourceFile: Flag.String("source-file").pipe(
     Flag.withDescription("Absolute path to the checked-in t3.json source."),
   ),
-  stateFile: Flag.string("state-file").pipe(
+  stateFile: Flag.String("state-file").pipe(
     Flag.withDescription("Absolute environment-local ownership state path."),
   ),
-  createIfMissing: Flag.boolean("create-if-missing").pipe(
+  createIfMissing: Flag.Boolean("create-if-missing").pipe(
     Flag.withDescription("Create the project before reconciling when it is not yet registered."),
     Flag.withDefault(false),
   ),
-  trustedSourceIds: Flag.string("trusted-source-ids").pipe(
+  trustedSourceIds: Flag.String("trusted-source-ids").pipe(
     Flag.withDescription("Comma-separated checked-in Action ids granted agent resume."),
     Flag.optional,
   ),
