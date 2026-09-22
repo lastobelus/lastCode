@@ -97,7 +97,8 @@ export function assetResponseHeaders(
   const lowerPath = filePath.toLowerCase();
   const inlineMimeType = options?.mimeType?.split(";", 1)[0]?.trim();
   return {
-    "Cache-Control": "private, max-age=3600",
+    // Effect compression drops file Content-Type: https://github.com/Effect-TS/effect/issues/8146
+    "Cache-Control": "private, max-age=3600, no-transform",
     "X-Content-Type-Options": "nosniff",
     ...(options?.download
       ? {
@@ -175,7 +176,7 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     // Host media can change in place. Do not invite conditional range requests
     // with validators that cannot establish byte-for-byte identity. Attachment media
     // carries no `file`, and must not outlive the signed URL that granted it either.
-    headers["Cache-Control"] = "private, no-store";
+    headers["Cache-Control"] = "private, no-store, no-transform";
   }
   let status = 200;
   let offset = 0n;
