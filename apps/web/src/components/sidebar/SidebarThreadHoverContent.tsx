@@ -87,7 +87,9 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {props.thread.branch ? (
           <div className="flex min-w-0 items-center gap-2">
             <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-            <MiddleTruncate value={props.thread.branch} className="flex text-foreground/75" />
+            <div className="min-w-0 text-foreground/75">
+              <MiddleTruncate value={props.thread.branch} className="flex" />
+            </div>
           </div>
         ) : null}
         {props.branchMismatch ? (

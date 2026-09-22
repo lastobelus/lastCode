@@ -130,10 +130,11 @@ export function ThreadAnnotationEditorDialog(props: {
               defaultValue={props.annotation?.body ?? ""}
               aria-label="Thread annotation"
               autoFocus
-              className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none [&_[data-slot=textarea]]:font-mono [&_[data-slot=textarea]]:text-sm"
+              className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none"
               disabled={saving}
               maxLength={THREAD_ANNOTATION_MAX_BODY_CHARS}
               placeholder={"# Follow up\n\n- [ ] Next step\n- #tag"}
+              variant="code"
               onChange={(event) => {
                 const nextCanSave = event.target.value.trim().length > 0;
                 if (nextCanSave === canSaveRef.current) return;
@@ -282,11 +283,10 @@ export function ThreadAnnotationActions(props: {
         <Button
           aria-expanded={props.expanded === true}
           aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
-          className="text-warning-foreground"
           disabled={props.pending}
           size="icon-xs"
           type="button"
-          variant="ghost"
+          variant="ghost-warning"
           onClick={props.onToggleExpanded}
         >
           <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
@@ -364,12 +364,13 @@ export function ThreadAnnotationHoverPopover(props: {
       </PopoverTrigger>
       <PopoverPopup
         align="start"
-        className="max-w-80 text-left whitespace-normal shadow-xl shadow-black/25 before:hidden"
+        className="max-w-80 text-left whitespace-normal before:hidden"
+        elevated
         finalFocus={false}
         initialFocus={false}
         side="right"
         tooltipStyle
-        viewportClassName="p-0"
+        viewportPadding="none"
         onMouseEnter={() => {
           if (!openRef.current && !rowActiveRef.current) return;
           popupHoveredRef.current = true;

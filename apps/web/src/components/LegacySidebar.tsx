@@ -910,11 +910,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         size="sm"
         isActive={isActive}
         data-testid={`thread-row-${thread.id}`}
+        data-cleanup-pending={isCleanupPending}
+        data-file-drag-over={isFileDragOver}
         aria-disabled={isCleanupPending || undefined}
         className={`${resolveThreadRowClassName({
           isActive,
           isSelected,
-        })} relative isolate ${isCleanupPending ? "cursor-not-allowed opacity-65" : ""}${isFileDragOver ? " ring-1 ring-inset ring-primary/70" : ""}`}
+        })} relative isolate`}
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
         onKeyDown={handleRowKeyDown}
@@ -932,10 +934,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             />
             <TooltipPopup
               align="start"
-              className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+              className="max-w-80 text-left whitespace-normal"
               side="right"
               sideOffset={4}
               variant="glass"
+              viewportPadding="none"
             >
               {threadHoverDetails}
             </TooltipPopup>
@@ -1263,10 +1266,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       >
         <TooltipPopup
           align="start"
-          className="max-w-80 text-left whitespace-normal [&_[data-slot=tooltip-viewport]]:p-0"
+          className="max-w-80 text-left whitespace-normal"
           side="right"
           sideOffset={4}
           variant="glass"
+          viewportPadding="none"
         >
           {threadHoverDetails}
         </TooltipPopup>
