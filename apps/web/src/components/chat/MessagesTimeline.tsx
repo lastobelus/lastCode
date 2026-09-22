@@ -52,6 +52,11 @@ const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 const NOOP_QUEUED_MESSAGE_ACTION = (_id: string) => {};
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+import {
+  actionResultDetails,
+  actionResultPresentation,
+  parseActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
@@ -261,7 +266,7 @@ import { ComputerUseAppIcon } from "~/components/Icons";
 // Context — shared state consumed by every row component via Context.
 // Propagates through LegendList's memo boundaries for shared callbacks and
 // non-row-scoped state. `nowIso` is intentionally excluded — self-ticking
-// components (WorkingTimer, LiveElapsed) handle it.
+// components (ElapsedTimer, LiveElapsed) handle it.
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
@@ -283,6 +288,8 @@ interface TimelineRowSharedState {
   onFileDownload: (attachment: ChatFileAttachment) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  expandedActionMessageIds: ReadonlySet<string>;
+  onToggleActionFollowUp: (rowId: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
@@ -410,6 +417,7 @@ interface MessagesTimelineProps {
   onCancelWorktreeSetup?: () => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
+  waitingStartedAt?: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   latestTurn: TimelineLatestTurn | null;
@@ -483,6 +491,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isPreparingWorktree = false,
   isCompacting = false,
   activeTurnStartedAt,
+  waitingStartedAt = null,
   agentPanelModel,
   onOpenAgents = NOOP_OPEN_AGENTS,
   listRef,
@@ -594,6 +603,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedEntries: new Set(),
       },
     [listIdentityKey, rememberedPosition],
+  );
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    new Set(),
   );
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
@@ -710,6 +722,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     },
     [suspendEndScrollMaintenanceForDisclosure],
   );
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setExpandedActionMessageIds((existing) => {
+        const next = new Set(existing);
+        if (next.has(rowId)) {
+          next.delete(rowId);
+        } else {
+          next.add(rowId);
+        }
+        return next;
+      });
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
 
   // An in-session interrupt leaves its turn expanded so the user keeps their
   // place; the next turn (or a reload, since this is local state) folds it.
@@ -783,6 +810,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         liveAgentTaskIds,
         worktreeSetup,
         queuedMessages,
+        waitingStartedAt,
       },
       previous?.threadKey === listIdentityKey && previous.workspaceRoot === workspaceRoot
         ? previous.projection
@@ -806,6 +834,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     liveAgentTaskIds,
     worktreeSetup,
     queuedMessages,
+    waitingStartedAt,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
@@ -1147,6 +1176,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onFileDownload,
       openPullRequest,
       onOpenTurnDiff,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
@@ -1183,6 +1214,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onFileDownload,
       openPullRequest,
       onOpenTurnDiff,
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       onToggleTurnFold,
       onToggleWorkGroup,
       suspendEndScrollMaintenanceForDisclosure,
@@ -1246,7 +1279,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
-  if (rows.length === 0 && !isWorking) {
+  if (rows.length === 0 && !isWorking && waitingStartedAt === null) {
     if (hideEmptyPlaceholder) {
       // Occupy the pane with the theme surface so a thread switch cannot
       // punch a hole through to the window chrome (white in light mode).
@@ -1719,11 +1752,15 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <ReasoningTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "thinking" ? <ThinkingTimelineRow /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
       {row.kind === "queued-message" ? <QueuedMessageTimelineRow row={row} /> : null}
+      {row.kind === "waiting" ? <WaitingTimelineRow row={row} /> : null}
     </div>
   );
 });
@@ -2462,6 +2499,122 @@ function AssistantMessageMeta({
   );
 }
 
+function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const actionFollowUp = parseActionResumeFollowUp(row.message.text);
+  const actionOutputExpanded = ctx.expandedActionMessageIds.has(row.id);
+
+  if (actionFollowUp) {
+    const presentation = actionResultPresentation(actionFollowUp);
+    const actionDetails = actionResultDetails(actionFollowUp.report);
+    const actionDetailsAvailable = actionDetails.length > 0;
+    const actionExpandable = !actionFollowUp.detailedOutputAvailable || actionDetailsAvailable;
+    const toneClass =
+      presentation.outcome === "success"
+        ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-300"
+        : presentation.outcome === "error"
+          ? "border-red-500/25 bg-red-500/[0.06] text-red-700 dark:text-red-300"
+          : presentation.outcome === "cancelled"
+            ? "border-border bg-muted/30 text-muted-foreground"
+            : presentation.outcome === "blocked"
+              ? "border-violet-500/25 bg-violet-500/[0.06] text-violet-700 dark:text-violet-300"
+              : "border-warning/28 bg-warning/8 text-warning-foreground";
+    const OutcomeIcon =
+      presentation.outcome === "success"
+        ? CheckIcon
+        : presentation.outcome === "cancelled" || presentation.outcome === "error"
+          ? XIcon
+          : CircleAlertIcon;
+    const heading = (
+      <>
+        <OutcomeIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          {presentation.label}: {actionFollowUp.actionName}
+        </span>
+      </>
+    );
+    return (
+      <div className={cn("mx-1 overflow-hidden rounded-lg border", toneClass)}>
+        {actionExpandable ? (
+          <button
+            type="button"
+            aria-expanded={actionOutputExpanded}
+            className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium"
+            onClick={() => ctx.onToggleActionFollowUp(row.id)}
+          >
+            {heading}
+            {actionOutputExpanded ? (
+              <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+            ) : (
+              <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+            )}
+          </button>
+        ) : (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+            {heading}
+          </div>
+        )}
+        {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
+          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
+            {actionFollowUp.output}
+          </pre>
+        ) : (
+          <div className="px-3 pb-2.5 pt-1">
+            <p className="truncate text-sm text-foreground/90">{presentation.summary}</p>
+            {actionDetailsAvailable && actionOutputExpanded ? (
+              <dl className="mt-2 space-y-1.5 text-xs text-foreground/90">
+                {actionDetails.map((detail) => (
+                  <div key={detail.id} className="min-w-0">
+                    <dt className="font-medium text-muted-foreground">{detail.label}</dt>
+                    <dd className="break-words">
+                      {detail.href ? (
+                        <a
+                          href={detail.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline underline-offset-2"
+                        >
+                          {detail.value}
+                        </a>
+                      ) : (
+                        detail.value
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+            {actionFollowUp.detailedOutputAvailable && !actionDetailsAvailable ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Detailed output retained in the Action terminal.
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-1 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-yellow-800 dark:text-yellow-200">
+        <BotIcon aria-hidden className="size-3.5" />
+        Automated follow-up
+      </div>
+      <div className="text-sm text-foreground/90">
+        <ChatMarkdown
+          text={row.message.text}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          isStreaming={false}
+          lineBreaks
+          skills={ctx.skills}
+        />
+      </div>
+    </div>
+  );
+}
+
 function AssistantCopyButton({
   message,
   showCopyButton,
@@ -2504,6 +2657,15 @@ function ProposedPlanTimelineRow({
   );
 }
 
+function ActivityEllipsis() {
+  return (
+    <span aria-hidden className="inline-flex items-center gap-[3px]">
+      <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse" />
+      <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:200ms]" />
+      <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
+    </span>
+  );
+}
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =
     use(TimelineRowActivityCtx);
@@ -2516,7 +2678,7 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
     <CompactingLabel />
   ) : row.createdAt ? (
     <>
-      Working for <WorkingTimer createdAt={row.createdAt} />
+      Working for <ElapsedTimer createdAt={row.createdAt} />
     </>
   ) : (
     "Working..."
@@ -2879,13 +3041,26 @@ function CompactingLabel() {
   );
 }
 
+function WaitingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "waiting" }> }) {
+  return (
+    <div className="py-0.5 pl-1.5">
+      <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
+        <ActivityEllipsis />
+        <span className="shrink-0">
+          Waiting for <ElapsedTimer createdAt={row.createdAt} />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Self-ticking labels — update their own text nodes so elapsed-time display
 // does not create a React commit every second while a response is streaming.
 // ---------------------------------------------------------------------------
 
-/** Live elapsed time for the "Working for" label. */
-function WorkingTimer({ createdAt }: { createdAt: string }) {
+/** Live elapsed label shared by Working and Waiting rows. */
+function ElapsedTimer({ createdAt }: { createdAt: string }) {
   const textRef = useRef<HTMLSpanElement>(null);
   const initialText = formatWorkingTimerNow(createdAt);
 
