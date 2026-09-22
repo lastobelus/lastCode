@@ -5,6 +5,9 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 
+import { useClientSettingsHydrated } from "../../hooks/useSettings";
+import { isHostedStaticApp } from "../../hostedPairing";
+import { useAllEnvironmentProjectSnapshotsReady } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
@@ -55,13 +58,17 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 
 function useResolvedSettingsScope(search: SettingsScopeSearch) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
+  const settingsHydrated = useClientSettingsHydrated();
+  const projectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const scope = useMemo(
     () => resolveSettingsScope(search, groups, availableEnvironments),
     [availableEnvironments, groups, search],
   );
   const projectFiles = useMemberProjectFiles(scope);
+  const isReady =
+    environmentsReady && settingsHydrated && (isHostedStaticApp() || primaryEnvironmentId !== null);
   return useMemo(() => {
     const selected = selectScopedSettingsEnvironments(
       scope,
@@ -81,8 +88,8 @@ function useResolvedSettingsScope(search: SettingsScopeSearch) {
       ) ??
       targets[0] ??
       null;
-    return { scope, groups, ...selected, targets, target };
-  }, [availableEnvironments, groups, primaryEnvironmentId, projectFiles, scope]);
+    return { scope, groups, ...selected, targets, target, isReady, projectSnapshotsReady };
+  }, [availableEnvironments, groups, isReady, primaryEnvironmentId, projectFiles, projectSnapshotsReady, scope]);
 }
 
 const SettingsScopeContext = createContext<
