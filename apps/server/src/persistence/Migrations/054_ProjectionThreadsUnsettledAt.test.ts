@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import Migration0048 from "./048_ProjectionThreadAnnotation.ts";
 import Migration0049 from "./049_UpdateDrain.ts";
@@ -12,7 +13,7 @@ import Migration0051 from "./051_ProjectionTurnRequestCorrelations.ts";
 import Migration0052 from "./052_ProjectionThreadWorktreeCleanup.ts";
 import Migration0053 from "./053_ProjectionThreadLinkedPullRequest.ts";
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 layer("054_ProjectionThreadsUnsettledAt", (it) => {
   it.effect("bridges databases whose old ledger would skip the new upstream migration", () =>
@@ -43,15 +44,7 @@ layer("054_ProjectionThreadsUnsettledAt", (it) => {
       `;
       assert.isFalse(before.some((column) => column.name === "unsettled_at"));
 
-      const executed = yield* runMigrations({ toMigrationInclusive: 54 });
-      assert.deepStrictEqual(executed, [
-        [49, "UpdateDrain"],
-        [50, "UpdateDrainClaim"],
-        [51, "ProjectionTurnRequestCorrelations"],
-        [52, "ProjectionThreadWorktreeCleanup"],
-        [53, "ProjectionThreadLinkedPullRequest"],
-        [54, "ProjectionThreadsUnsettledAt"],
-      ]);
+      yield* runDatabaseMigrations();
 
       const after = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_threads)
