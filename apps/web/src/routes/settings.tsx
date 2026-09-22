@@ -42,14 +42,48 @@ function RestoreDeviceDefaultsButton({ onRestored }: { onRestored: () => void })
   );
 }
 
-function SettingsScopeBoundary({ pathname, children }: { pathname: string; children: ReactNode }) {
-  const { scope, connectedEnvironments } = useSettingsScope();
+export function SettingsScopeBoundary({
+  pathname,
+  children,
+}: {
+  pathname: string;
+  children: ReactNode;
+}) {
+  const {
+    scope,
+    connectedEnvironments,
+    environments: scopedEnvironments,
+    isReady,
+    projectSnapshotsReady,
+  } = useSettingsScope();
   const { environments } = useEnvironments();
   const hash = useLocation({ select: (location) => location.hash });
   const searchTarget = getSettingsSearchTargetScope(hash);
   const autoSettlementAvailability = searchTarget?.requiresThreadAutoSettlement
     ? getThreadAutoSettlementSearchAvailability(environments, scope)
     : null;
+  // Let Archive show its loading state before declaring an unresolved saved scope unavailable.
+  if (pathname === "/settings/archived" && !isReady) return children;
+  if (
+    pathname === "/settings/archived" &&
+    scope.kind === "unavailable" &&
+    (scope.reason === "project-missing" || scope.reason === "checkout-missing") &&
+    !projectSnapshotsReady
+  ) {
+    return (
+      <p className="p-8 text-sm text-muted-foreground">
+        {!environments.some((environment) => environment.entry.enabled) ||
+        environments.some(
+          (environment) =>
+            environment.entry.enabled &&
+            environment.connection.phase !== "connected" &&
+            environment.connection.phase !== "connecting",
+        )
+          ? "The selected project cannot be resolved while environments are offline or syncing. Reconnect to check its archived threads."
+          : "Loading archived threads"}
+      </p>
+    );
+  }
   if (
     scope.kind !== "unavailable" &&
     searchTarget &&
@@ -97,7 +131,11 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
         <p className="text-sm text-muted-foreground">{scope.message}</p>
       </SettingsPageContainer>
     );
-  if (scope.kind === "environment" && connectedEnvironments.length === 0) {
+  // Archive reads can start before configs are ready for settings writes.
+  const canReadArchive =
+    pathname === "/settings/archived" &&
+    scopedEnvironments.some((environment) => environment.connection.phase === "connected");
+  if (scope.kind === "environment" && connectedEnvironments.length === 0 && !canReadArchive) {
     return (
       <SettingsPageContainer>
         <p className="text-sm text-muted-foreground">
