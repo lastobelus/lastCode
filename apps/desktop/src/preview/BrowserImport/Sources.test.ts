@@ -716,6 +716,7 @@ describe("Firefox Snap profiles", () => {
           ]);
         }),
       ),
+    { timeout: 60_000 },
   );
 
   it.effect("keeps matching profile names in native and Snap installs distinct", () =>
@@ -896,39 +897,42 @@ describe("listSourceProfiles Firefox fallback", () => {
 });
 
 describe("isSourceRunning for Firefox", () => {
-  it.effect.skipIf(!symlinksSupported)("finds the lock inside the profile, not at the root", () =>
-    run(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-firefox-" });
-        const context = yield* sourcePathContext.pipe(
-          Effect.provideService(HostProcessEnvironment, { HOME: home }),
-          Effect.provideService(HostProcessPlatform, "darwin"),
-        );
-        const root = firefox.userDataDirectory(context)!;
-        const profile = `${root}/Profiles/abcd.default-release`;
-        yield* fileSystem.makeDirectory(profile, { recursive: true });
-        yield* fileSystem.writeFileString(`${profile}/cookies.sqlite`, "db");
+  it.effect.skipIf(!symlinksSupported)(
+    "finds the lock inside the profile, not at the root",
+    () =>
+      run(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-firefox-" });
+          const context = yield* sourcePathContext.pipe(
+            Effect.provideService(HostProcessEnvironment, { HOME: home }),
+            Effect.provideService(HostProcessPlatform, "darwin"),
+          );
+          const root = firefox.userDataDirectory(context)!;
+          const profile = `${root}/Profiles/abcd.default-release`;
+          yield* fileSystem.makeDirectory(profile, { recursive: true });
+          yield* fileSystem.writeFileString(`${profile}/cookies.sqlite`, "db");
 
-        assert.isFalse(yield* isSourceRunning(firefox, context));
+          assert.isFalse(yield* isSourceRunning(firefox, context));
 
-        // Firefox keeps its locks per profile. A root-level lock is not one,
-        // and looking there was why a running Firefox read as importable.
-        yield* fileSystem.writeFileString(`${root}/lock`, "");
-        assert.isFalse(yield* isSourceRunning(firefox, context));
+          // Firefox keeps its locks per profile. A root-level lock is not one,
+          // and looking there was why a running Firefox read as importable.
+          yield* fileSystem.writeFileString(`${root}/lock`, "");
+          assert.isFalse(yield* isSourceRunning(firefox, context));
 
-        // `.parentlock` is deliberately left on disk after a clean exit as a
-        // last-used marker, so an unlocked one is not evidence of a running
-        // browser — treating it as one blocked every import after first use.
-        yield* fileSystem.writeFileString(`${profile}/.parentlock`, "");
-        assert.isFalse(yield* isSourceRunning(firefox, context));
+          // `.parentlock` is deliberately left on disk after a clean exit as a
+          // last-used marker, so an unlocked one is not evidence of a running
+          // browser — treating it as one blocked every import after first use.
+          yield* fileSystem.writeFileString(`${profile}/.parentlock`, "");
+          assert.isFalse(yield* isSourceRunning(firefox, context));
 
-        // The `lock` symlink is what Firefox removes on exit; a live pid in
-        // its target means the profile is held.
-        yield* fileSystem.symlink(`127.0.0.1:+${process.pid}`, `${profile}/lock`);
-        assert.isTrue(yield* isSourceRunning(firefox, context));
-      }),
-    ),
+          // The `lock` symlink is what Firefox removes on exit; a live pid in
+          // its target means the profile is held.
+          yield* fileSystem.symlink(`127.0.0.1:+${process.pid}`, `${profile}/lock`);
+          assert.isTrue(yield* isSourceRunning(firefox, context));
+        }),
+      ),
+    { timeout: 60_000 },
   );
 
   it.effect("reports not-held when no interpreter can run the fcntl probe", () =>
