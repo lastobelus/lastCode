@@ -439,7 +439,8 @@ export type MessagesTimelineRow =
       queuedMessage: QueuedComposerMessage;
       /** Oldest queued message, the one the next boundary sends. */
       isNext: boolean;
-    };
+    }
+  | { kind: "waiting"; id: string; createdAt: string };
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -954,6 +955,7 @@ export function deriveMessagesTimelineRows(input: {
   worktreeSetup?: WorktreeSetupSnapshot | null;
   /** Messages sent during the running turn, rendered after the live rows. */
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
+  waitingStartedAt?: string | null;
 }): MessagesTimelineRow[] {
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
@@ -1452,6 +1454,13 @@ export function deriveMessagesTimelineRows(input: {
       createdAt: input.activeTurnStartedAt,
     });
   }
+  if (!input.isWorking && input.waitingStartedAt) {
+    nextRows.push({
+      kind: "waiting",
+      id: "waiting-indicator-row",
+      createdAt: input.waitingStartedAt,
+    });
+  }
   const rows = attachTrailingToolGroupsToAssistant(nextRows);
   input.queuedMessages?.forEach((queuedMessage, index) => {
     rows.push({
@@ -1593,6 +1602,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return a.createdAt === (b as typeof a).createdAt;
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
+    case "waiting":
+      return a.createdAt === (b as typeof a).createdAt;
 
     case "assistant-meta": {
       const bm = b as typeof a;
