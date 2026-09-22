@@ -21,7 +21,7 @@ import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurn
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrain } from "./UpdateDrain.ts";
 
-export const UpdateDrainAdmissionKind = [
+const UpdateDrainAdmissionKind = [
   "thread-turn",
   "terminal-open",
   "terminal-restart",
@@ -29,7 +29,7 @@ export const UpdateDrainAdmissionKind = [
   "action-resume",
   "setup-script",
 ] as const;
-export type UpdateDrainAdmissionKind = (typeof UpdateDrainAdmissionKind)[number];
+type UpdateDrainAdmissionKind = (typeof UpdateDrainAdmissionKind)[number];
 
 type UpdateDrainLifecycleCommand = UpdateDrainStartCommand | UpdateDrainCancelCommand;
 
