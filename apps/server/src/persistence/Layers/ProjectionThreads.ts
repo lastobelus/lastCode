@@ -1,3 +1,4 @@
+import { ModelSelection, ThreadLinkedPullRequest, ThreadWorktreeCleanup } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -7,12 +8,15 @@ import * as Struct from "effect/Struct";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  ActiveWorktreeOwner,
   GetProjectionThreadInput,
+  ListActiveWorktreeOwnerThreadsInput,
+  ListPendingWorktreeCleanupThreadsInput,
   ProjectionThread,
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection, ThreadLinkedPullRequest, ThreadTitleState } from "@t3tools/contracts";
+import { ThreadTitleState } from "@t3tools/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
@@ -20,6 +24,7 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    worktreeCleanup: Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup)),
   }),
 );
 
@@ -57,6 +62,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           auto_settle_disabled_at,
           title_regeneration_request_id,
           title_regeneration_started_at,
+          worktree_cleanup_json,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -90,6 +96,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.autoSettleDisabledAt ?? null},
           ${row.titleRegenerationRequestId ?? null},
           ${row.titleRegenerationStartedAt ?? null},
+          ${row.worktreeCleanup == null ? null : JSON.stringify(row.worktreeCleanup)},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
@@ -123,6 +130,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           auto_settle_disabled_at = excluded.auto_settle_disabled_at,
           title_regeneration_request_id = excluded.title_regeneration_request_id,
           title_regeneration_started_at = excluded.title_regeneration_started_at,
+          worktree_cleanup_json = excluded.worktree_cleanup_json,
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
@@ -163,6 +171,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           auto_settle_disabled_at AS "autoSettleDisabledAt",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -170,6 +179,66 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE thread_id = ${threadId}
+      `,
+  });
+
+  const listPendingWorktreeCleanupRows = SqlSchema.findAll({
+    Request: ListPendingWorktreeCleanupThreadsInput,
+    Result: ProjectionThreadDbRow,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          project_id AS "projectId",
+          title,
+          title_state_json AS "titleState",
+          model_selection_json AS "modelSelection",
+          runtime_mode AS "runtimeMode",
+          interaction_mode AS "interactionMode",
+          branch,
+          worktree_path AS "worktreePath",
+          linked_pull_request_json AS "linkedPullRequest",
+          branch_pull_request_json AS "branchPullRequest",
+          latest_turn_id AS "latestTurnId",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          settled_override AS "settledOverride",
+          settled_at AS "settledAt",
+          unsettled_at AS "unsettledAt",
+          snoozed_until AS "snoozedUntil",
+          snoozed_at AS "snoozedAt",
+          pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
+          active_order_key AS "activeOrderKey",
+          auto_settle_disabled_at AS "autoSettleDisabledAt",
+          title_regeneration_request_id AS "titleRegenerationRequestId",
+          title_regeneration_started_at AS "titleRegenerationStartedAt",
+          worktree_cleanup_json AS "worktreeCleanup",
+          latest_user_message_at AS "latestUserMessageAt",
+          pending_approval_count AS "pendingApprovalCount",
+          pending_user_input_count AS "pendingUserInputCount",
+          has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          deleted_at AS "deletedAt"
+        FROM projection_threads
+        WHERE worktree_cleanup_json IS NOT NULL
+          AND json_extract(worktree_cleanup_json, '$.status') IN ('deleting', 'queued')
+        ORDER BY deleted_at ASC, thread_id ASC
+      `,
+  });
+
+  const listActiveWorktreeOwnerRows = SqlSchema.findAll({
+    Request: ListActiveWorktreeOwnerThreadsInput,
+    Result: ActiveWorktreeOwner,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          worktree_path AS "worktreePath"
+        FROM projection_threads
+        WHERE deleted_at IS NULL
+          AND worktree_path IS NOT NULL
+        ORDER BY created_at ASC, thread_id ASC
       `,
   });
 
@@ -183,9 +252,27 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.getById:query")),
     );
 
+  const listPendingWorktreeCleanup: ProjectionThreadRepositoryShape["listPendingWorktreeCleanup"] =
+    () =>
+      listPendingWorktreeCleanupRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionThreadRepository.listPendingWorktreeCleanup:query"),
+        ),
+      );
+
+  const listActiveWorktreeOwners: ProjectionThreadRepositoryShape["listActiveWorktreeOwners"] =
+    () =>
+      listActiveWorktreeOwnerRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionThreadRepository.listActiveWorktreeOwners:query"),
+        ),
+      );
+
   return {
     upsert,
     getById,
+    listPendingWorktreeCleanup,
+    listActiveWorktreeOwners,
   } satisfies ProjectionThreadRepositoryShape;
 });
 
