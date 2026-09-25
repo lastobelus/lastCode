@@ -22,6 +22,7 @@ import {
   rememberPreviewUrl,
 } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import {
   browserDefaultOpenProfileId,
@@ -55,6 +56,7 @@ export async function openUrlInPreview<E>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
+  readonly onOpened?: (tabId: string) => void;
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
@@ -78,6 +80,7 @@ export async function openUrlInPreview<E>(input: {
     applyPreviewServerSnapshot(input.threadRef, snapshot);
     rememberPreviewUrl(input.threadRef, input.url);
     useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
+    input.onOpened?.(snapshot.tabId);
   });
 }
 
@@ -131,9 +134,18 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return openUrlInPreview({
+  const result = await openUrlInPreview({
     threadRef: input.threadRef,
     url: assetUrl,
     openPreview: input.openPreview,
+    onOpened: (tabId) => {
+      rememberHandoffBrowser(
+        input.threadRef,
+        tabId,
+        { kind: "file", path: input.filePath },
+        assetUrl,
+      );
+    },
   });
+  return result;
 }

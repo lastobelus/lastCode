@@ -164,11 +164,11 @@ describe("LastCode userland install command", () => {
     ).toBe(false);
 
     const commands = [];
-    resetScreenRecordingPermission((command, args) => {
-      commands.push([command, args]);
+    resetScreenRecordingPermission((command, args, options) => {
+      commands.push([command, args, options]);
     });
     expect(commands).toEqual([
-      ["tccutil", ["reset", "ScreenCapture", "codes.lastobelus.lastcode"]],
+      ["tccutil", ["reset", "ScreenCapture", "codes.lastobelus.lastcode"], { timeoutMs: 10_000 }],
     ]);
     expect(() =>
       resetScreenRecordingPermission(() => {

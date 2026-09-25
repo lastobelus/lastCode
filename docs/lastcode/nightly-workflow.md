@@ -2,12 +2,12 @@
 
 ## Objectives
 
-The workflow has four independent requirements:
+The workflow has five independent requirements:
 
 1. Track upstream T3 Code nightly tags.
 2. Rebase the complete LastCode [downstream carry set](glossary.md#downstream-carry-set) rather than merge upstream history.
-3. Preserve an immutable LastCode checkpoint for every upstream nightly,
-   including nightlies that are never packaged.
+3. Preserve an immutable LastCode checkpoint for each selected upstream target;
+   intermediate upstream nightlies need not be checkpointed.
 4. Publish an ordered installable revision when `lastcode/main` changes between
    upstream nightlies.
 5. Build only when a checkpoint or revision is intentionally selected and has
@@ -57,7 +57,7 @@ Run it and publish checkpoint tags:
 ```bash
 pnpm run lastcode:checkpoint -- \
   --push-tags \
-  --promote-if-no-open-prs \
+  --promote \
   --mirror-upstream-main \
   --supersede-failed-recovery
 ```
@@ -65,15 +65,20 @@ pnpm run lastcode:checkpoint -- \
 The command:
 
 1. fetches upstream tags and the fork's existing checkpoint tags;
-2. identifies every missing nightly newer than the current downstream base;
+2. selects the newest available nightly newer than the current downstream base;
 3. creates an initial checkpoint for the current base when bootstrapping;
-4. processes missing nightlies oldest-first in a dedicated Git worktree;
+4. pins that target for the run and replays directly onto it in a dedicated Git worktree;
 5. rebases with Git `rerere` enabled so recurring resolutions can be reused;
 6. installs dependencies and runs the checkpoint smoke gate;
-7. creates and optionally pushes one annotated checkpoint tag per nightly; and
+7. creates and optionally pushes one annotated checkpoint tag for that target;
 8. publishes a revision when `lastcode/main` has new commits but upstream has no
    uncheckpointed nightly; and
 9. optionally promotes the newest checkpoint or revision to `lastcode/main`.
+
+Intermediate tags remain available upstream for diagnosis but are not backfilled.
+An explicitly selected repaired recovery keeps its original target, even when newer
+nightlies exist; the next run can advance from that repair to the newest target.
+Unselected, manually modified recoveries remain protected from automatic retirement.
 
 The smoke gate checks fork identity invariants, `git diff --check`, focused
 LastCode tests, desktop protocol tests, and every workspace typecheck. It is
@@ -81,7 +86,7 @@ intentionally smaller than the full build gate.
 
 Checkpoint-tag publication uses `git push --no-verify` after that dedicated
 smoke gate passes. This avoids rerunning the generic repository-wide pre-push
-gate for every immutable tag while catching up across multiple nightlies.
+gate after the checkpoint smoke validation.
 Ordinary human branch pushes still run the pre-push quick gate. Automation-controlled
 tag publication, `lastcode/main` promotion, and the exact upstream `main` mirror
 push with `--no-verify`: the checkpoint or revision candidate has already passed
@@ -96,18 +101,52 @@ validate the wrong revision.
 
 ### Promotion and open PRs
 
-`--promote-if-no-open-prs` keeps `lastcode/main` stable while any PR targeting it
-is open. Checkpoint tags are still created and pushed, so PR activity cannot
-cause a nightly to be missed. A later scheduled run promotes the newest
-checkpoint after the PR queue is empty.
+`--promote` advances `lastcode/main` independently of open pull requests.
+Open PRs never pause checkpoint creation, repaired-checkpoint publication, or
+promotion. Feature branches may remain open while daily updates advance.
 
-Promotion uses an exact `--force-with-lease` value. It refuses to overwrite a
-remote branch that changed after the job fetched it.
+Each candidate is prepared from a pinned `lastcode/main` source commit.
+Promotion uses that incorporated source as its exact `--force-with-lease`
+value, rather than adopting a newer remote head at publication time. A merge
+arriving during preparation therefore rejects promotion instead of being
+replaced by a candidate that omitted it. A later run recomputes from the new
+source, including the merged work.
 
-Checkpoint metadata records the exact `lastcode/main` source commit used for a
-rebase. If publication succeeds but promotion fails, a later run recognizes the
-published checkpoint as belonging to the unchanged source commit and retries
-promotion instead of treating the older main branch as current.
+Checkpoint metadata records the exact source as `Source-Commit`. If publication
+succeeds but promotion fails while the source remains unchanged, a later run
+retries the published candidate. If main has moved, the run incorporates the
+new source before promotion; a newer lease alone cannot make a stale candidate
+safe. Immutable publication may succeed before promotion is rejected.
+
+Open PRs must obtain fresh validation against the current base before merging.
+After a checkpoint changes `lastcode/main`, refresh the PR branch as needed and
+rerun validation; results for the previous base do not authorize a merge. Use
+the guarded merge command, which checks the exact head and current base.
+
+The guarded merge command and checkpoint publisher use
+`refs/lastcode/main-write-lock` to serialize their final updates across machines.
+They acquire it only after preparation and validation, then verify the current
+source/base before writing main. An open PR never owns this lock; an actively
+executing merge owns it only through the final checks and merge request. A busy
+lock fails promptly so a later invocation can retry. Existing GitHub account and
+checkpoint push permissions remain unchanged.
+
+Use the updated `pnpm lastcode:merge` command for all PR merges after deploying
+this change, and refresh the coordinator before resuming checkpoint runs.
+Direct GitHub UI merges, plain `gh pr merge`, old scripts, and manual pushes do
+not participate in this coordination. The checkpoint source lease still protects
+commits written outside it, but those writes can invalidate PR validation during
+a merge request. GitHub's merge API only conditions on the PR head, so the guarded
+command is required for the final base-validation guarantee.
+
+If a network failure leaves a main update's outcome uncertain, retain the remote
+lock rather than allow a competing write while GitHub may still finish it.
+Inspect the lock's owner commit, the PR's terminal state, remote main, and the
+originating process before releasing it. Never infer abandonment from age or
+steal a live lock. After confirming the operation cannot still write main, remove
+only the exact observed owner with
+`git push --no-verify --force-with-lease=refs/lastcode/main-write-lock:<owner-sha> origin :refs/lastcode/main-write-lock`.
+Then rerun the ordinary command to recheck the current source and validation.
 
 That source snapshot is stored as `Source-Commit` in every annotated checkpoint
 and revision tag. Besides making publication idempotent, it lets the packaged
@@ -118,16 +157,14 @@ source commit as the ancestry boundary. If the metadata or ancestry cannot
 establish a safe boundary, LastCode changes are reported as unavailable rather
 than inferred from commit titles.
 
-When a LastCode PR merges after a newer checkpoint was created while PR
-promotion was paused, the daemon replays only the newly merged commits onto that
-checkpoint. It publishes the result as the next immutable
+When a LastCode PR merges after a checkpoint was created, the daemon replays
+only the newly merged commits onto that checkpoint. It publishes the result as
+the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
 requests an immediate daemon run without interrupting one already in progress.
 Hosts without the optional service skip that request silently; the managed
 checkpoint service repairs a missed request where it is installed.
-
-Use `--promote` only when intentionally overriding the open-PR safeguard.
 
 ### Carry replay ownership
 
@@ -212,7 +249,25 @@ newer repository checkout. A desktop build that supports grouped notes requests
 LastCode provenance state and bounded, consecutive upstream-nightly groups. The
 build command and artifact protocol remain unchanged.
 
+The supervisor refreshes its installed script before invoking checkpoint code.
+When upgrading from the retired PR-gated command, an already-running older
+supervisor may fail once with an unknown option after refreshing itself. The
+next managed invocation uses `--promote`; preserve any selected recovery across
+that transition. No application restart is required.
+
 ### Failure recovery
+
+Selected repaired-checkpoint publication also pins the source revision and
+atomically publishes with a lease against that incorporated source. Open PRs
+are irrelevant to this check. If main changes after recovery selection, the
+publication is rejected and the recovery worktree is retained. Inspect the new
+source and select recovery again so the repair includes current merged work;
+do not retry a stale selection with an updated lease alone.
+
+Before following any recovery cleanup printed by a status report, verify the
+current daemon state and ownership of the retained worktree. Preserve active
+threads, processes, and operator work. A historical failure is not evidence
+that the same recovery is still pending.
 
 If a nightly or revision rebase or smoke validation fails, the command stops and
 retains both:
@@ -267,22 +322,57 @@ semantic conflict resolution.
 
 ## Local Scheduling
 
-Install the per-user launch agent:
+Save the deployment-owned schedule outside the checkout, then install the
+per-user launch agent from that setting:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+pnpm lastcode:checkpoint:service install
 ```
 
+`--daily-at` is a 24-hour `HH:MM` wall clock and `--time-zone` is an IANA time
+zone. The scheduler resolves that zone itself instead of depending on the Mac's
+current time zone or launchd calendar behavior. It runs once on repeated
+fall-back hours; if spring-forward skips the configured time, it runs at the
+first available minute afterward. Sleeping through the configured time also
+runs the job on the next wake that same local day.
+
+Existing interval deployments remain supported:
+
+```bash
+pnpm lastcode:checkpoint:service configure-schedule \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service install
+```
+
+`configure-schedule` only updates
+`~/.lastcode/automation/checkpoint-schedule.json`; it does not start, stop, or
+reload the service. Run `install` when the saved schedule should take effect.
+Daily installation waits for the configured wall clock instead of starting an
+immediate checkpoint. Interval installation retains its existing immediate
+first run.
+
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
+maintenance. Open that thread's context menu (right-click on desktop/web or
+long-press on mobile), choose **Mark as persistent thread**, then configure its
+thread ID once:
 
 ```bash
 pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
   --recovery-thread <thread-id>
 ```
 
 The service reuses that thread instead of creating a new thread per failure. A
+message-square-lock marker and italic title identify it in LastCode. The server
+blocks archive and permanent deletion while the thread is persistent. Marking
+another thread persistent atomically transfers the safeguard. A project that
+contains the persistent thread cannot be removed either, because project removal
+would delete its threads. Choose **Disable persistent thread** when recovery
+delivery no longer needs protection.
+
+A standalone supervisor covers fetch, checkout, dependency setup, and checkpoint
 execution; every run writes terminal state to
 `~/.lastcode/automation/checkpoint-service-state.json`. A failed alert remains
 queued until delivery begins, unless the service recovers first; an alert that
@@ -303,12 +393,12 @@ clears the saved destination):
 
 ```bash
 pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS" \
   --no-recovery-thread
 ```
 
-The job runs through the managed checkpoint service. Missed invocations do not
-matter: every run discovers all uncheckpointed tags and catches up oldest-first.
+The job runs through the managed checkpoint service. Each run selects the newest
+available nightly as one fixed target; older gaps do not force it through a
+backlog first, and a newer nightly appearing mid-run waits for the next run.
 When the latest checkpoint is already promoted, the job exits without running
 the local push gate or pushing an unchanged branch.
 The supervisor executes the equivalent of:
@@ -316,7 +406,7 @@ The supervisor executes the equivalent of:
 ```bash
 pnpm run lastcode:checkpoint -- \
   --push-tags \
-  --promote-if-no-open-prs \
+  --promote \
   --mirror-upstream-main \
   --supersede-failed-recovery
 ```
@@ -332,9 +422,14 @@ Operational commands:
 
 ```bash
 pnpm lastcode:checkpoint:service status
+# Bypass the cadence once. At or after today's daily time, this satisfies that slot.
 pnpm lastcode:checkpoint:service run-now
 pnpm lastcode:checkpoint:service uninstall
 ```
+
+The guarded merge hook's automatic `run-now --if-installed` request is deferred
+when a daily schedule is installed, so frequent merges do not bypass the chosen
+cadence. A manual `run-now` remains immediate.
 
 ### Checkpoint dashboard
 
@@ -342,8 +437,7 @@ Install the launch agent first so its dedicated automation worktree exists, then
 install the checkpoint dashboard as a user command:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 ```
 
@@ -361,6 +455,15 @@ Show the latest eight checkpoint activities, or choose another count:
 lastcode-checkpoints
 lastcode-checkpoints -n 20
 lastcode-checkpoints --verbose
+```
+
+The dashboard compares the supervisor's configured recovery thread ID with
+LastCode's authoritative thread list. If the ID is missing or no longer marked
+persistent, it prints the mismatch and repair guidance. After designating the
+replacement in LastCode, repair the supervisor configuration atomically with:
+
+```bash
+lastcode-checkpoints --repair-persistent-thread
 ```
 
 The dashboard shows success or failure, upstream nightly, number of downstream
@@ -559,11 +662,10 @@ Configure the fork so that:
 - ordinary LastCode changes arrive through PRs targeting `lastcode/main`; and
 - GitHub Actions are enabled for the manually dispatched
   [LastCode Intel artifact workflow](release.md#intel-build-publication) and the
-  pull-request CI workflow. During the hosted-CI proof stage, guarded merge still
-  requires the exact local Full CI stamp; the hosted run is observed and measured
-  before it replaces that local PR authority.
+  pull-request CI workflow.
 
 Branch protection must permit the intentional force-with-lease promotion model.
-If GitHub cannot express that narrowly enough for a personal repository, rely on
-repository ownership plus the checkpoint command's lease check rather than a
-rule that makes promotion impossible.
+Keep the existing checkpoint force-push permissions. The checkpoint command
+binds its lease to the incorporated source; the guarded merge command checks
+exact head/base CI. Their shared remote lock serializes the final main updates
+without requiring another account or a new ruleset.

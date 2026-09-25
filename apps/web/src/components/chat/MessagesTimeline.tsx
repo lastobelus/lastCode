@@ -19,10 +19,12 @@ import {
   type ScopedThreadRef,
   type ServerProviderSkill,
   type ToolActivityIcon,
+  type ThreadAnnotation,
+  type ThreadId,
   type TurnId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import {
@@ -52,6 +54,7 @@ const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 const NOOP_QUEUED_MESSAGE_ACTION = (_id: string) => {};
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+const NOOP_OPEN_SOURCE_THREAD = (_threadId: ThreadId) => {};
 import {
   actionResultDetails,
   actionResultPresentation,
@@ -92,6 +95,7 @@ import {
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import {
+  type ChatAttachment,
   type ChatMessage,
   type ChatFileAttachment,
   type ChatImageAttachment,
@@ -112,6 +116,7 @@ import remarkGfm from "remark-gfm";
 import type { Root, RootContent } from "mdast";
 import { T3Wordmark } from "../T3Wordmark";
 import {
+  ArrowUpRightIcon,
   BotIcon,
   BrainIcon,
   CheckIcon,
@@ -121,6 +126,7 @@ import {
   CircleAlertIcon,
   DownloadIcon,
   EyeIcon,
+  FileIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -158,10 +164,8 @@ import {
 } from "./SnapShotAttachmentDetails";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
-import { useAtomValue } from "@effect/atom-react";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
 import { useProject, useThread } from "../../state/entities";
-import { serverEnvironment } from "../../state/server";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
   readTimelinePosition,
@@ -250,10 +254,19 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
+import {
+  ThreadAnnotationActions,
+  ThreadAnnotationBody,
+  useThreadAnnotationBodyPending,
+} from "../thread-annotation/ThreadAnnotation";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import { deriveAgentSpawnSummary } from "./agentSpawnSummary";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import { resolveThreadStatusPill } from "../Sidebar.logic";
+import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { useClientSettings } from "../../hooks/useSettings";
+import { useThreadShell } from "../../state/entities";
 import {
   buildReviewCommentRenderablePatch,
   formatReviewCommentFence,
@@ -280,6 +293,7 @@ interface TimelineRowSharedState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
+  onOpenSourceThread: (threadId: ThreadId) => void;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onRunShellCommand: ((command: string) => void) | undefined;
@@ -440,6 +454,7 @@ interface MessagesTimelineProps {
   onFileOpen?: (attachment: ChatFileAttachment) => void;
   onFileDownload?: (attachment: ChatFileAttachment) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  onOpenSourceThread?: (threadId: ThreadId) => void;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
@@ -473,6 +488,11 @@ interface MessagesTimelineProps {
   onSteerQueuedMessage?: (id: string) => void;
   steerQueuedMessageShortcutLabel?: string | null;
   onRemoveQueuedMessage?: (id: string) => void;
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: () => void;
+  onAnnotationBodyChange?: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationResolve?: () => void;
+  onAnnotationReopen?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +531,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onFileOpen = NOOP_OPEN_ATTACHMENT,
   onFileDownload = NOOP_OPEN_ATTACHMENT,
   activeThreadEnvironmentId,
+  onOpenSourceThread = NOOP_OPEN_SOURCE_THREAD,
   markdownCwd,
   resolvedTheme,
   timestampFormat,
@@ -532,6 +553,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
   steerQueuedMessageShortcutLabel = null,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
+  annotation = null,
+  onAnnotationEdit = NOOP_OPEN_AGENTS,
+  onAnnotationBodyChange,
+  onAnnotationResolve = NOOP_OPEN_AGENTS,
+  onAnnotationReopen = NOOP_OPEN_AGENTS,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   const rememberedPosition = useMemo(
@@ -1168,6 +1194,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      onOpenSourceThread,
       onRevertToTurnCount,
       onUseArtifactTemplate,
       onRunShellCommand,
@@ -1206,6 +1233,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      onOpenSourceThread,
       onRevertToTurnCount,
       onUseArtifactTemplate,
       onRunShellCommand,
@@ -1362,11 +1390,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListFooterComponent={timelineListFooter}
           />
           <TimelineMinimap
+            annotation={annotation}
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             currentIndex={minimapCurrentIndex}
             stripMap={minimapStripMap}
+            threadRef={parseScopedThreadKey(routeThreadKey)}
+            markdownCwd={markdownCwd}
+            onAnnotationEdit={onAnnotationEdit}
+            onAnnotationBodyChange={onAnnotationBodyChange}
+            onAnnotationResolve={onAnnotationResolve}
+            onAnnotationReopen={onAnnotationReopen}
             onSelect={(item) => {
               onManualNavigation();
               void listRef.current?.scrollToIndex({
@@ -1412,22 +1447,126 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
+function TimelineAnnotationPopover({
+  annotation,
+  ariaLabel,
+  earlier,
+  markdownCwd,
+  open,
+  threadRef,
+  triggerClassName,
+  onActivate,
+  onAnnotationBodyChange,
+  onAnnotationEdit,
+  onAnnotationResolve,
+  onAnnotationReopen,
+  onOpenChange,
+}: {
+  annotation: ThreadAnnotation;
+  ariaLabel: string;
+  earlier: boolean;
+  markdownCwd: string | undefined;
+  open: boolean;
+  threadRef: ScopedThreadRef;
+  triggerClassName: string;
+  onActivate?: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationEdit: () => void;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger
+        closeDelay={120}
+        delay={0}
+        openOnHover
+        render={
+          <button
+            aria-label={ariaLabel}
+            className={triggerClassName}
+            data-thread-annotation-marker={earlier ? undefined : ""}
+            type="button"
+          />
+        }
+        onClick={(event) => {
+          event.stopPropagation();
+          onActivate?.();
+        }}
+        onFocus={onActivate}
+      />
+      <PopoverPopup
+        align="center"
+        width="md"
+        data-minimap-preview
+        elevated
+        finalFocus={false}
+        initialFocus={false}
+        side="right"
+        tooltipStyle
+        padding="none"
+      >
+        <div className="w-80 max-w-80 bg-warning/10 p-3 text-left text-warning-foreground">
+          {earlier ? (
+            <div className="mb-2 text-2xs font-medium">Attached to an earlier message</div>
+          ) : null}
+          <ThreadAnnotationBody
+            annotation={annotation}
+            className="max-h-52 overflow-y-auto"
+            compact
+            cwd={markdownCwd}
+            onBodyChange={onAnnotationBodyChange}
+            threadRef={threadRef}
+          />
+          <div className="mt-2">
+            <ThreadAnnotationActions
+              annotation={annotation}
+              onEdit={onAnnotationEdit}
+              onReopen={onAnnotationReopen}
+              onResolve={onAnnotationResolve}
+              pending={annotationBodyPending}
+            />
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 function TimelineMinimap({
+  annotation,
   hasPersistentGutter,
   hitStripWidth,
   currentIndex,
   items,
+  markdownCwd,
   stripMap,
+  threadRef,
+  onAnnotationEdit,
+  onAnnotationBodyChange,
+  onAnnotationResolve,
+  onAnnotationReopen,
   onSelect,
 }: {
+  annotation: ThreadAnnotation | null;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   currentIndex: number | null;
   items: ReadonlyArray<TimelineMinimapItem>;
+  markdownCwd: string | undefined;
   stripMap: Map<string, HTMLSpanElement>;
+  threadRef: ScopedThreadRef | null;
+  onAnnotationEdit: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [annotationPopoverOpen, setAnnotationPopoverOpen] = useState(false);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -1438,6 +1577,10 @@ function TimelineMinimap({
       ),
     [items, resolvedActiveIndex],
   );
+  const annotationItemIndex = annotation
+    ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
+    : -1;
+  const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -1487,7 +1630,7 @@ function TimelineMinimap({
     [items.length],
   );
 
-  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS) {
+  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS && annotation === null) {
     return null;
   }
 
@@ -1495,6 +1638,8 @@ function TimelineMinimap({
     <div
       className={cn(
         "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        annotation !== null &&
+          "[@media(pointer:coarse)]:block [@media(pointer:coarse)]:opacity-100",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
@@ -1508,11 +1653,16 @@ function TimelineMinimap({
             "absolute top-1/2 left-3 -translate-y-1/2",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            hitStripWidth > 0 || annotation !== null
+              ? "pointer-events-auto"
+              : "pointer-events-none",
           )}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
-            width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
+            width: resolveTimelineMinimapInteractiveWidth(
+              Math.max(hitStripWidth, annotation === null ? 0 : 14),
+              activeItem !== null,
+            ),
           }}
         >
           <TimelineMinimapNavigationButton
@@ -1600,7 +1750,7 @@ function TimelineMinimap({
                 />
               );
             })}
-            {activeItem ? (
+            {activeItem && !annotationPopoverOpen ? (
               <span
                 className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
                 data-minimap-preview
@@ -1630,6 +1780,30 @@ function TimelineMinimap({
               </span>
             ) : null}
           </button>
+          {annotationItemIndex >= 0 && annotation && threadRef ? (
+            <span
+              className="pointer-events-none absolute left-0 h-0.5 w-2 -translate-y-1/2"
+              style={{
+                top: `${resolveTimelineMinimapTopPercent(annotationItemIndex, items.length)}%`,
+              }}
+            >
+              <TimelineAnnotationPopover
+                annotation={annotation}
+                ariaLabel="Thread annotation"
+                earlier={false}
+                markdownCwd={markdownCwd}
+                open={annotationPopoverOpen}
+                threadRef={threadRef}
+                triggerClassName="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
+                onActivate={() => setActiveIndex(annotationItemIndex)}
+                onAnnotationBodyChange={onAnnotationBodyChange}
+                onAnnotationEdit={onAnnotationEdit}
+                onAnnotationReopen={onAnnotationReopen}
+                onAnnotationResolve={onAnnotationResolve}
+                onOpenChange={setAnnotationPopoverOpen}
+              />
+            </span>
+          ) : null}
           <TimelineMinimapNavigationButton
             direction="next"
             disabled={nextItem === null}
@@ -1638,6 +1812,31 @@ function TimelineMinimap({
             }}
           />
         </div>
+        {annotationIsEarlier && annotation && threadRef ? (
+          <div
+            className="pointer-events-auto absolute left-3"
+            data-thread-annotation-overflow
+            style={{
+              top: "50%",
+              transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
+            }}
+          >
+            <TimelineAnnotationPopover
+              annotation={annotation}
+              ariaLabel="Annotation attached to an earlier message"
+              earlier
+              markdownCwd={markdownCwd}
+              open={annotationPopoverOpen}
+              threadRef={threadRef}
+              triggerClassName="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationReopen={onAnnotationReopen}
+              onAnnotationResolve={onAnnotationResolve}
+              onOpenChange={setAnnotationPopoverOpen}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1744,7 +1943,16 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "message" &&
+      row.message.role === "user" &&
+      row.message.sourceThreadId !== undefined ? (
+        <AgentMessageTimelineRow row={row} sourceThreadId={row.message.sourceThreadId} />
+      ) : null}
+      {row.kind === "message" &&
+      row.message.role === "user" &&
+      row.message.sourceThreadId === undefined ? (
+        <UserTimelineRow row={row} />
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -1962,6 +2170,205 @@ const MESSAGE_HEADING_LEVEL = 3;
 
 function MessageAuthorHeading({ children }: { children: string }) {
   return <h3 className="sr-only select-none">{children}</h3>;
+}
+
+function AgentMessageTimelineRow({
+  row,
+  sourceThreadId,
+}: {
+  row: Extract<TimelineRow, { kind: "message" }>;
+  sourceThreadId: ThreadId;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  const source = useThreadShell(scopeThreadRef(ctx.activeThreadEnvironmentId, sourceThreadId));
+  const compactStatus = useClientSettings((settings) => settings.compactLegacySidebarStatuses);
+  const resolvedStatus = source
+    ? (resolveThreadStatusPill({ thread: source }) ??
+      (source.session?.status === "error"
+        ? {
+            label: "Failed",
+            colorClass: "text-red-700 dark:text-red-300",
+            dotClass: "bg-red-600 dark:bg-red-300",
+            pulse: false,
+          }
+        : {
+            label: "Ready",
+            colorClass: "text-muted-foreground",
+            dotClass: "bg-muted-foreground/55",
+            pulse: false,
+          }))
+    : null;
+  const status = resolvedStatus ? { ...resolvedStatus, pulse: false } : null;
+  const sourceTitle = source?.title ?? "source thread";
+  const images = (row.message.attachments ?? []).filter(isImageAttachment);
+  const files = (row.message.attachments ?? []).filter(isFileAttachment);
+  const unknownAttachments = (row.message.attachments ?? []).filter(
+    (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
+  );
+
+  return (
+    <div className="group flex flex-col items-start gap-1">
+      <div className="w-fit max-w-[80%] rounded-2xl border border-primary/55 bg-secondary px-3.5 py-3 text-foreground">
+        <div className="mb-2 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs leading-none">
+          <span className="font-semibold tracking-wide text-muted-foreground">AGENT MESSAGE</span>
+          <span className="text-muted-foreground/45" aria-hidden="true">
+            ·
+          </span>
+          {status ? <ThreadStatusLabel status={status} compact={compactStatus} /> : null}
+          <AgentMessageSourceTitle
+            sourceThreadId={sourceThreadId}
+            sourceTitle={source ? sourceTitle : null}
+            onOpenSourceThread={ctx.onOpenSourceThread}
+          />
+          <Tooltip>
+            <TooltipTrigger
+              render={<span className="ms-auto text-muted-foreground tabular-nums" />}
+            >
+              {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+            </TooltipTrigger>
+            <TooltipPopup>
+              {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
+            </TooltipPopup>
+          </Tooltip>
+        </div>
+        <MessageAttachments images={images} files={files} unknown={unknownAttachments} />
+        <ChatMarkdown
+          text={row.message.text}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          skills={ctx.skills}
+        />
+      </div>
+      {typeof row.revertTurnCount === "number" ? (
+        <div className="flex w-full max-w-[80%] items-center justify-start ps-1 text-xs opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+          <RevertUserMessageButton turnCount={row.revertTurnCount} messageId={row.message.id} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentMessageSourceTitle({
+  sourceThreadId,
+  sourceTitle,
+  onOpenSourceThread,
+}: {
+  sourceThreadId: ThreadId;
+  sourceTitle: string | null;
+  onOpenSourceThread: (threadId: ThreadId) => void;
+}) {
+  return sourceTitle ? (
+    <button
+      type="button"
+      onClick={() => onOpenSourceThread(sourceThreadId)}
+      className="inline-flex min-w-0 items-center gap-0.5 rounded-sm font-medium lowercase text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+      aria-label={`Open source thread: ${sourceTitle}`}
+    >
+      <span className="truncate">{sourceTitle}</span>
+      <ArrowUpRightIcon className="size-3 shrink-0" aria-hidden="true" />
+    </button>
+  ) : (
+    <span className="min-w-0 truncate font-medium lowercase text-muted-foreground">
+      source thread unavailable
+    </span>
+  );
+}
+
+function MessageAttachments({
+  images,
+  files,
+  unknown,
+  children,
+}: {
+  images: ReadonlyArray<ChatImageAttachment>;
+  files: ReadonlyArray<ChatFileAttachment>;
+  unknown: ReadonlyArray<ChatAttachment>;
+  children?: ReactNode;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <>
+      {images.length > 0 ? (
+        <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
+          {images.map((image) => (
+            <div
+              key={image.id}
+              className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(images, image.id);
+                    if (!preview) return;
+                    ctx.onImageExpand(preview);
+                  }}
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className="block h-auto max-h-[220px] w-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-secondary-label text-2xs">
+                  {image.name}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {children}
+      {files.length > 0 || unknown.length > 0 ? (
+        <div className="mb-2 flex flex-col gap-1">
+          {files.map((file) => {
+            const content = (
+              <>
+                <FileIcon className="size-4 shrink-0 text-secondary-label" />
+                <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                {file.downloadable === false ? null : <DownloadIcon className="size-4 shrink-0" />}
+              </>
+            );
+            return file.previewUrl ? (
+              <a
+                key={file.id}
+                href={file.previewUrl}
+                download={file.name}
+                className="flex min-w-0 items-center gap-2 rounded-md py-1 text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </a>
+            ) : file.downloadable === false ? (
+              <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                {content}
+              </div>
+            ) : (
+              <button
+                key={file.id}
+                type="button"
+                aria-label={`Download ${file.name}`}
+                onClick={() => ctx.onFileOpen(file)}
+                className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+              >
+                {content}
+              </button>
+            );
+          })}
+          {unknown.map((attachment) => (
+            <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+              <FileIcon className="size-4 shrink-0 text-secondary-label" />
+              <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
@@ -2511,13 +2918,13 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
     const actionExpandable = !actionFollowUp.detailedOutputAvailable || actionDetailsAvailable;
     const toneClass =
       presentation.outcome === "success"
-        ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-700 dark:text-emerald-300"
+        ? "border-success/25 bg-success/6 text-success-foreground"
         : presentation.outcome === "error"
-          ? "border-red-500/25 bg-red-500/[0.06] text-red-700 dark:text-red-300"
+          ? "border-error/25 bg-error/6 text-error-foreground"
           : presentation.outcome === "cancelled"
             ? "border-border bg-muted/30 text-muted-foreground"
             : presentation.outcome === "blocked"
-              ? "border-violet-500/25 bg-violet-500/[0.06] text-violet-700 dark:text-violet-300"
+              ? "border-info/25 bg-info/6 text-info-foreground"
               : "border-warning/28 bg-warning/8 text-warning-foreground";
     const OutcomeIcon =
       presentation.outcome === "success"
@@ -2555,7 +2962,7 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
           </div>
         )}
         {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
-          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-neutral-950 px-3 py-2.5 font-mono text-xs leading-5 text-neutral-100 shadow-inner dark:border-white/10">
+          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-code px-3 py-2.5 font-mono text-xs leading-5 text-code-foreground shadow-inner dark:border-white/10">
             {actionFollowUp.output}
           </pre>
         ) : (
@@ -2596,8 +3003,8 @@ function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message
   }
 
   return (
-    <div className="mx-1 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2.5">
-      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-yellow-800 dark:text-yellow-200">
+    <div className="mx-1 rounded-lg border border-warning/25 bg-warning/6 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-warning-foreground">
         <BotIcon aria-hidden className="size-3.5" />
         Automated follow-up
       </div>
@@ -2659,10 +3066,16 @@ function ProposedPlanTimelineRow({
 
 function ActivityEllipsis() {
   return (
-    <span aria-hidden className="inline-flex items-center gap-[3px]">
+    <span aria-hidden className="inline-flex items-center gap-0.75">
       <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse" />
-      <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:200ms]" />
-      <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
+      <span
+        className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse"
+        style={{ animationDelay: "200ms" }}
+      />
+      <span
+        className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse"
+        style={{ animationDelay: "400ms" }}
+      />
     </span>
   );
 }
@@ -3044,7 +3457,7 @@ function CompactingLabel() {
 function WaitingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "waiting" }> }) {
   return (
     <div className="py-0.5 pl-1.5">
-      <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
+      <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-2xs tabular-nums">
         <ActivityEllipsis />
         <span className="shrink-0">
           Waiting for <ElapsedTimer createdAt={row.createdAt} />
@@ -3575,9 +3988,6 @@ function AssistantChangedFilesSectionInner({
     thread && thread.projectId
       ? { environmentId: thread.environmentId, projectId: thread.projectId }
       : null,
-  );
-  const serverConfig = useAtomValue(
-    serverEnvironment.configValueAtom(ctx.activeThreadEnvironmentId),
   );
   const onFileContextMenu = useFileContextMenuHandler(ctx.activeThreadEnvironmentId);
 

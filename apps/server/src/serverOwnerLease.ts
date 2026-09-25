@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 const DARWIN_O_EXLOCK = 0x20;
 const DARWIN_O_NOFOLLOW = 0x100;
 
-export class ServerOwnerLeaseHeldError extends Schema.TaggedErrorClass<ServerOwnerLeaseHeldError>()(
+export class ServerOwnerLeaseHeldError extends Schema.TaggedError<ServerOwnerLeaseHeldError>()(
   "ServerOwnerLeaseHeldError",
   {
     stateDir: Schema.String,
@@ -19,7 +19,7 @@ export class ServerOwnerLeaseHeldError extends Schema.TaggedErrorClass<ServerOwn
   }
 }
 
-export class ServerOwnerLeaseUnavailableError extends Schema.TaggedErrorClass<ServerOwnerLeaseUnavailableError>()(
+export class ServerOwnerLeaseUnavailableError extends Schema.TaggedError<ServerOwnerLeaseUnavailableError>()(
   "ServerOwnerLeaseUnavailableError",
   {
     stateDir: Schema.String,

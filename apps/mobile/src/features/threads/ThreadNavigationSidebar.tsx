@@ -344,6 +344,15 @@ function ThreadNavigationSidebarPane(
     }
     return supported;
   }, [serverConfigs]);
+  const persistenceEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadPersistence === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   const pinReorderEnvironmentIds = useMemo(() => {
     const supported = new Set<EnvironmentId>();
     for (const [environmentId, config] of serverConfigs) {
@@ -772,6 +781,7 @@ function ThreadNavigationSidebarPane(
               onRenameThread={renameThread}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+              persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
               settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
               onSettleThread={settleThread}
               snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -843,6 +853,7 @@ function ThreadNavigationSidebarPane(
       pinningEnvironmentIds,
       autoSettleOptOutEnvironmentIds,
       setThreadAutoSettle,
+      persistenceEnvironmentIds,
       projectByKey,
       projectTitleByProjectKey,
       regenerateThreadTitle,

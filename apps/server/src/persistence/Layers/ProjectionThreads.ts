@@ -1,4 +1,10 @@
-import { ModelSelection, ThreadLinkedPullRequest, ThreadWorktreeCleanup } from "@t3tools/contracts";
+import {
+  ModelSelection,
+  ThreadAnnotation,
+  ThreadAttention,
+  ThreadLinkedPullRequest,
+  ThreadWorktreeCleanup,
+} from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -14,6 +20,7 @@ import {
   ListPendingWorktreeCleanupThreadsInput,
   ProjectionThread,
   ProjectionThreadRepository,
+  UpsertProjectionThreadInput,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
 import { ThreadTitleState } from "@t3tools/contracts";
@@ -24,7 +31,9 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    annotation: Schema.NullOr(Schema.fromJsonString(ThreadAnnotation)),
     worktreeCleanup: Schema.NullOr(Schema.fromJsonString(ThreadWorktreeCleanup)),
+    attention: Schema.NullOr(Schema.fromJsonString(ThreadAttention)),
   }),
 );
 
@@ -32,7 +41,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const upsertProjectionThreadRow = SqlSchema.void({
-    Request: ProjectionThread,
+    Request: UpsertProjectionThreadInput,
     execute: (row) =>
       sql`
         INSERT INTO projection_threads (
@@ -57,12 +66,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_until,
           snoozed_at,
           pinned_at,
+          persistent,
           pin_order_key,
           active_order_key,
           auto_settle_disabled_at,
           title_regeneration_request_id,
           title_regeneration_started_at,
+          annotation_json,
           worktree_cleanup_json,
+          latest_user_message_id,
+          attention_json,
           latest_user_message_at,
           pending_approval_count,
           pending_user_input_count,
@@ -91,12 +104,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.snoozedUntil},
           ${row.snoozedAt},
           ${row.pinnedAt},
+          ${row.persistent ?? 0},
           ${row.pinOrderKey ?? null},
           ${row.activeOrderKey ?? null},
           ${row.autoSettleDisabledAt ?? null},
           ${row.titleRegenerationRequestId ?? null},
           ${row.titleRegenerationStartedAt ?? null},
+          ${row.annotation == null ? null : JSON.stringify(row.annotation)},
           ${row.worktreeCleanup == null ? null : JSON.stringify(row.worktreeCleanup)},
+          ${row.latestUserMessageId ?? null},
+          ${row.attention == null ? null : JSON.stringify(row.attention)},
           ${row.latestUserMessageAt},
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
@@ -125,12 +142,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_until = excluded.snoozed_until,
           snoozed_at = excluded.snoozed_at,
           pinned_at = excluded.pinned_at,
+          persistent = excluded.persistent,
           pin_order_key = excluded.pin_order_key,
           active_order_key = excluded.active_order_key,
           auto_settle_disabled_at = excluded.auto_settle_disabled_at,
           title_regeneration_request_id = excluded.title_regeneration_request_id,
           title_regeneration_started_at = excluded.title_regeneration_started_at,
+          annotation_json = excluded.annotation_json,
           worktree_cleanup_json = excluded.worktree_cleanup_json,
+          latest_user_message_id = excluded.latest_user_message_id,
+          attention_json = excluded.attention_json,
           latest_user_message_at = excluded.latest_user_message_at,
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
@@ -166,12 +187,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          persistent,
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           auto_settle_disabled_at AS "autoSettleDisabledAt",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
+          latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
@@ -209,12 +234,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          persistent,
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           auto_settle_disabled_at AS "autoSettleDisabledAt",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
+          annotation_json AS "annotation",
           worktree_cleanup_json AS "worktreeCleanup",
+          latest_user_message_id AS "latestUserMessageId",
+          attention_json AS "attention",
           latest_user_message_at AS "latestUserMessageAt",
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",

@@ -33,7 +33,11 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import type { ProjectIconOverride, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import {
+  resolveEnvironmentMachineKind,
+  type ScopedThreadRef,
+  type ThreadId,
+} from "@t3tools/contracts";
 import type { EnvironmentIconColor, TimestampFormat } from "@t3tools/contracts/settings";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
@@ -47,8 +51,9 @@ import {
   ClockIcon,
   EyeIcon,
   FolderIcon,
-  GitBranchIcon,
   MessageCircleQuestionIcon,
+  MessageSquareIcon,
+  MessageSquareLockIcon,
   PinIcon,
   PinOffIcon,
   PlusIcon,
@@ -76,6 +81,9 @@ import {
 import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
+import { describeHandoff } from "../handoffs/handoffMenu";
+import { readThreadHandoffs } from "../handoffs/handoffsStore";
+import { useOpenHandoff } from "../handoffs/useOpenHandoff";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -100,10 +108,7 @@ import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { readLocalApi } from "../localApi";
-import {
-  isSameSidebarThreadRef,
-  useSidebarPendingFileDropStore,
-} from "../sidebarPendingFileDropStore";
+import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
@@ -146,7 +151,6 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
-import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
@@ -154,7 +158,8 @@ import {
   applySidebarThreadDrop,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
-  deleteSelectedThreadEntries,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -197,13 +202,11 @@ import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import {
   ThreadPullRequestBadgeControl,
-  ThreadPullRequestsMiniList,
   ThreadWorktreeIndicator,
   prStatusIndicator,
   resolveThreadPullRequestBadge,
   terminalStatusFromRunningIds,
   synchronizeTerminalPulse,
-  type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
 import { resolveSnoozePresets, snoozeWakeLabel, type SnoozePreset } from "./Sidebar.snooze";
@@ -245,6 +248,7 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
   composerDraftHasUserContent,
@@ -320,120 +324,10 @@ function terminalProcessLabel(count: number): string {
   return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
 }
 
-function SidebarThreadTooltip({
-  thread,
-  project,
-  projectDisplayName,
-  environmentLabel,
-  environmentMachine,
-  providerEntry,
-  showInstanceBadge,
-  modelInstanceId,
-  modelLabel,
-  branchMismatch,
-  terminalStatus,
-  terminalProcessCount,
-}: {
-  thread: SidebarThreadSummary;
-  project: ProjectFaviconProject | null;
-  projectDisplayName: string | null;
-  environmentLabel: string | null;
-  environmentMachine: EnvironmentMachineKind;
-  providerEntry: ProviderInstanceEntry | null;
-  showInstanceBadge: boolean;
-  modelInstanceId: string;
-  modelLabel: string;
-  branchMismatch: {
-    threadBranch: string;
-    currentBranch: string;
-  } | null;
-  terminalStatus: TerminalStatusIndicator | null;
-  terminalProcessCount: number;
-}) {
-  const driverKind = providerEntry?.driverKind ?? null;
-  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
+function SidebarThreadTooltip(props: SidebarThreadHoverContentProps) {
   return (
-    <TooltipPopup side="right" align="start" sideOffset={4} variant="glass">
-      {/* The viewport's own inset (py-1 px-2) plus this one make the floating inset. */}
-      <div className="flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2">
-        <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
-          {thread.title}
-        </div>
-        <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
-          {projectDisplayName ? (
-            <div className="flex min-w-0 items-center gap-2">
-              {project ? <ProjectFavicon project={project} className="size-3 shrink-0" /> : null}
-              <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
-            </div>
-          ) : null}
-          {environmentLabel ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <EnvironmentMachineIcon
-                kind={environmentMachine}
-                className="size-3 shrink-0 stroke-muted-foreground"
-              />
-              <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
-            </div>
-          ) : null}
-          {thread.branch ? (
-            <div className="flex min-w-0 items-center gap-2 text-foreground/75">
-              <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-              <MiddleTruncate value={thread.branch} className="flex" />
-            </div>
-          ) : null}
-          {branchMismatch ? (
-            <div className="flex min-w-0 items-start gap-2 text-warning">
-              <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 flex-1 wrap-break-word leading-5">
-                You're currently checked out on another branch.
-              </div>
-            </div>
-          ) : null}
-          {driverKind ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <ProviderInstanceIcon
-                driverKind={driverKind}
-                displayName={
-                  providerEntry?.displayName ?? thread.session?.providerName ?? modelInstanceId
-                }
-                accentColor={providerEntry?.accentColor}
-                // Initials would swallow a size-3 glyph: accent dot, name in label.
-                showBadge={showInstanceBadge && providerEntry?.accentColor !== undefined}
-                badgeContent="none"
-                badgeClassName="h-2 min-w-2 px-0"
-                iconClassName="size-3 shrink-0 grayscale opacity-60"
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {showInstanceBadge && providerEntry
-                  ? `${modelLabel} · ${providerEntry.displayName}`
-                  : modelLabel}
-              </div>
-            </div>
-          ) : null}
-          {terminalStatus ? (
-            <div className="flex min-w-0 items-center gap-2">
-              <TerminalIcon
-                aria-hidden
-                className={cn("size-3 shrink-0", terminalStatus.colorClass)}
-              />
-              <div className="min-w-0 truncate text-foreground/75">
-                {terminalProcessLabel(terminalProcessCount)}
-              </div>
-            </div>
-          ) : null}
-          {thread.session?.lastError ? (
-            <div className="flex min-w-0 items-center gap-2 text-destructive-foreground">
-              <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
-              <div className="min-w-0 truncate">Error occurred</div>
-            </div>
-          ) : null}
-        </div>
-        {supportsMultiplePullRequests && thread.pullRequests.length > 0 ? (
-          <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
-            <ThreadPullRequestsMiniList pullRequests={thread.pullRequests} />
-          </div>
-        ) : null}
-      </div>
+    <TooltipPopup side="right" align="start" sideOffset={4} variant="glass" viewportPadding="none">
+      <SidebarThreadHoverContent {...props} />
     </TooltipPopup>
   );
 }
@@ -716,7 +610,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   onNavigate: (draftId: DraftId) => void;
   onDiscard: (draftId: DraftId) => void;
 }) {
-  const { composer, draftId, onDiscard, onNavigate, session } = props;
+  const { composer, draftId, onDiscard, onNavigate } = props;
   const promptPreview =
     replaceComposerContextReferences(composer.prompt, (occurrence) => occurrence.label)
       .trim()
@@ -1174,7 +1068,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     isActive: props.isActive,
     isSelected,
   });
-  const isInFlight = status === "working" || status === "monitoring";
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
@@ -1222,37 +1115,43 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     icon: "waiting" as const,
                     className: "text-warning-foreground",
                   }
-                : status === "approval"
+                : status === "question"
                   ? {
-                      label: "Approval",
-                      icon: "approval" as const,
-                      className: "text-warning-foreground",
+                      label: "Question",
+                      icon: "question" as const,
+                      className: "text-violet-600 dark:text-violet-300",
                     }
-                  : status === "input"
+                  : status === "approval"
                     ? {
-                        label: "Input",
-                        icon: "input" as const,
-                        className: "text-indigo-600 dark:text-indigo-300",
+                        label: "Approval",
+                        icon: "approval" as const,
+                        className: "text-warning-foreground",
                       }
-                    : status === "failed"
+                    : status === "input"
                       ? {
-                          label: "Failed",
-                          icon: "failed" as const,
-                          className: "text-red-700 dark:text-red-300",
+                          label: "Input",
+                          icon: "input" as const,
+                          className: "text-indigo-600 dark:text-indigo-300",
                         }
-                      : isWoke
+                      : status === "failed"
                         ? {
-                            label: "Woke",
-                            icon: "woke" as const,
-                            className: "text-warning-foreground",
+                            label: "Failed",
+                            icon: "failed" as const,
+                            className: "text-red-700 dark:text-red-300",
                           }
-                        : isUnread
+                        : isWoke
                           ? {
-                              label: "Done",
-                              icon: "done" as const,
-                              className: "text-emerald-700 dark:text-emerald-300",
+                              label: "Woke",
+                              icon: "woke" as const,
+                              className: "text-warning-foreground",
                             }
-                          : null;
+                          : isUnread
+                            ? {
+                                label: "Done",
+                                icon: "done" as const,
+                                className: "text-emerald-700 dark:text-emerald-300",
+                              }
+                            : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -1292,7 +1191,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const detailsTooltip = (
     <SidebarThreadTooltip
       thread={thread}
-      project={props.project}
+      projectTitle={props.project?.title ?? null}
+      projectCwd={props.project?.workspaceRoot ?? null}
+      projectFaviconPath={props.project?.faviconPath ?? null}
+      projectIcon={props.project?.projectIcon ?? null}
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
       environmentIconKind={environmentIconKind}
@@ -1571,7 +1473,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   ) : (
     <span
       className={cn(
-        "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+        "flex min-w-0 flex-1 items-center gap-1 text-sm transition-opacity motion-reduce:transition-none",
         shouldRecede ? "font-normal" : "font-medium",
         variant === "card"
           ? cn(
@@ -1595,9 +1497,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     : "text-secondary-label/70",
             ),
         isRegeneratingTitle && "opacity-55",
+        thread.persistent && "italic",
       )}
     >
-      {thread.title}
+      {thread.persistent ? (
+        <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+      ) : null}
+      <span className="truncate">{thread.title}</span>
     </span>
   );
 
@@ -2019,6 +1925,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <span aria-hidden className="size-2 shrink-0 rounded-full bg-warning" />
                           ) : topStatus.icon === "done" ? (
                             <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "question" ? (
+                            <span
+                              aria-hidden
+                              className="inline-flex h-4 w-2.5 shrink-0 items-center justify-center text-sm font-semibold leading-none"
+                            >
+                              ?
+                            </span>
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
@@ -2157,7 +2070,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       }
                       accentColor={providerEntry?.accentColor}
                       showBadge={showInstanceBadge}
-                      // Glyph dims, badge stays saturated; offset matches the composer trigger.
                       iconClassName="size-3.5 opacity-60"
                       badgeClassName="right-[-0.1875rem] bottom-[-0.1875rem] h-3 min-w-3 px-0.5 text-3xs"
                     />
@@ -2307,11 +2219,17 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           }
         >
           {props.project ? (
-            <ProjectFavicon project={props.project} className="size-4 shrink-0" />
+            <ProjectFavicon
+              project={props.project}
+              className="size-4 shrink-0"
+              fallbackIcon={thread.persistent ? MessageSquareLockIcon : MessageSquareIcon}
+            />
           ) : null}
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="flex min-w-0 items-center gap-2.5">
-              <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+              <span className={cn("min-w-0 flex-1 truncate", thread.persistent && "italic")}>
+                {thread.title}
+              </span>
               <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
                 {threadTimeLabel(thread)}
               </span>
@@ -2329,7 +2247,10 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
         </TooltipTrigger>
         <SidebarThreadTooltip
           thread={thread}
-          project={props.project}
+          projectTitle={props.project?.title ?? null}
+          projectCwd={props.project?.workspaceRoot ?? null}
+          projectFaviconPath={props.project?.faviconPath ?? null}
+          projectIcon={props.project?.projectIcon ?? null}
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentIconKind={thread.environmentId === primaryEnvironmentId ? "laptop" : "server"}
@@ -2358,6 +2279,8 @@ export default function Sidebar() {
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+  const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
+  const openHandoff = useOpenHandoff();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
@@ -2374,6 +2297,7 @@ export default function Sidebar() {
     setThreadAutoSettle,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -2592,6 +2516,19 @@ export default function Sidebar() {
   const showProjectEnvironments = useMemo(
     () => projectGroupsSpanEnvironments(projectGroups),
     [projectGroups],
+  );
+  const environmentMachineById = useMemo(
+    () =>
+      new Map(
+        environments.map(
+          (environment) =>
+            [
+              environment.environmentId,
+              resolveEnvironmentMachineKind(environment.serverConfig),
+            ] as const,
+        ),
+      ),
+    [environments],
   );
   const projectGroupByScopeKey = useMemo(
     () => new Map(projectGroups.map((project) => [project.projectKey, project] as const)),
@@ -4072,6 +4009,7 @@ export default function Sidebar() {
       const unpinMenuItem = buildBulkUnpinContextMenuItem({
         pinnedCount: pinnedSelectedThreads.length,
       });
+      const hasPersistentThread = selectedThreads.some((thread) => thread.persistent === true);
       const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
       const clicked = await settlePromise(() =>
         api.contextMenu.show(
@@ -4095,7 +4033,7 @@ export default function Sidebar() {
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
             { id: "mark-unread", label: `Mark unread (${count})` },
-            { id: "delete", label: `Delete (${count})`, destructive: true },
+            buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
           ],
           position,
         ),
@@ -4196,6 +4134,9 @@ export default function Sidebar() {
         return;
       }
       if (clicked.value !== "delete") return;
+      // Keep the handler safe if a platform context-menu implementation ever
+      // returns a disabled item.
+      if (hasPersistentThread) return;
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
           api.dialogs.confirm(
@@ -4208,18 +4149,36 @@ export default function Sidebar() {
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
-      const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
-        entries: threadKeys.map((threadKey) => ({ threadKey })),
-        delete: async ({ threadKey }, deletedThreadKeys) => {
+      // The menu and confirmation dialog may stay open while another client
+      // changes persistence. Rebuild from live shell state immediately before
+      // the destructive batch so an ordinary thread cannot be deleted before
+      // reaching a newly protected selection member.
+      const deleteEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: (threadKey) => {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (!thread) return null;
-          return deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-            deletedThreadKeys,
-          });
+          return thread ? { threadKey, thread } : undefined;
         },
       });
-      if (firstFailure !== null) {
-        const firstError = squashAtomCommandFailure(firstFailure);
+      if (!deleteEntries) return;
+      // Grown as deletions actually land, never seeded with the whole batch:
+      // orphaned-worktree detection must only discount threads that are
+      // really gone, or the first delete would treat still-alive batch mates
+      // as deleted and remove a worktree they still point at.
+      const deletedThreadKeys = new Set<string>();
+      let firstError: unknown = null;
+      for (const { threadKey, thread } of deleteEntries) {
+        const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
+          deletedThreadKeys,
+        });
+        if (result._tag === "Failure") {
+          if (isAtomCommandInterrupted(result)) break;
+          firstError ??= squashAtomCommandFailure(result);
+          continue;
+        }
+        deletedThreadKeys.add(threadKey);
+      }
+      if (firstError !== null) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -4297,6 +4256,8 @@ export default function Sidebar() {
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const handoffs = readThreadHandoffs(threadRef);
+        const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -4308,6 +4269,7 @@ export default function Sidebar() {
                   }
                 : null,
               isPinned,
+              isPersistent: thread.persistent === true,
               isSettled,
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
@@ -4321,14 +4283,37 @@ export default function Sidebar() {
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
+                persistence:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                    .threadPersistence === true,
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
+              handoffs: handoffDescriptors,
+              handoffsOverflow: handoffs.length > handoffDescriptors.length,
             }),
             position,
           ),
         );
         if (clicked._tag === "Failure") return;
+        if (clicked.value === "handoff-show-all") {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          useRightPanelStore.getState().open(threadRef, "handoffs");
+          return;
+        }
+        if (clicked.value?.startsWith("handoff:")) {
+          const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === clicked.value);
+          if (!entry) return;
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          await openHandoff(threadRef, entry);
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -4402,6 +4387,24 @@ export default function Sidebar() {
                 stackedThreadToast({
                   type: "error",
                   title: "Failed to update auto-settle",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "mark-persistent":
+          case "disable-persistence": {
+            const result = await setThreadPersistence(
+              threadRef,
+              clicked.value === "mark-persistent",
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to update persistent thread",
                   description: error instanceof Error ? error.message : "An error occurred.",
                 }),
               );
@@ -4538,10 +4541,13 @@ export default function Sidebar() {
       copyThreadIdToClipboard,
       deleteThread,
       handleMultiSelectContextMenu,
+      handoffsMenuLimit,
       markThreadUnread,
       openProjectSettings,
       projectScopeKey,
+      openHandoff,
       projectByKey,
+      setThreadPersistence,
       serverConfigs,
       setProjectScopeKey,
       setThreadAutoSettle,
@@ -4998,8 +5004,10 @@ export default function Sidebar() {
                             environmentLabel={
                               environmentLabelById.get(thread.environmentId) ?? null
                             }
-                            environmentMachine={
-                              environmentMachineById.get(thread.environmentId) ?? "server"
+                            environmentKnown={environmentLabelById.has(thread.environmentId)}
+                            showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                            configuredEnvironmentIconColor={
+                              environmentIconColors[thread.environmentId]
                             }
                             project={
                               projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ??

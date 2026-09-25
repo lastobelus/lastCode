@@ -12,11 +12,6 @@
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
-    "scripts": {
-      // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts", "setup-worktree.ts"],
-    },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
       "entry": [
@@ -57,6 +52,9 @@
     "scripts": {
       // Spawned by filename, or declarations paired with JavaScript tooling.
       "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
         "fixtures/lastcode-docs-install.mjs",
         "fixtures/lastcode-docs-local-update.mjs",
         "lastcode-packaged-server-supervisor.mjs!",

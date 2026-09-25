@@ -17,6 +17,7 @@ import {
   runGit,
 } from "./lastcode-local-ci.ts";
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import {
   carrySquashBody,
   preserveCarrySource,
@@ -236,20 +237,35 @@ function main(argv: ReadonlyArray<string>): void {
     return;
   }
 
-  if (carrySource) {
-    preserveCarrySource(repoRoot, carrySource);
-    runCommand(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
-    assertMergeBaseUnchanged(repoRoot, baseCommit, "while preserving the carry source");
-  }
-  const squashBody = writeSquashBody(
-    carrySource
-      ? carrySquashBody(confirmedPullRequest.body, carrySource)
-      : confirmedPullRequest.body,
-  );
+  const lock = acquireMainWriteLock(repoRoot, LASTCODE_ORIGIN_REMOTE, baseCommit, "merge");
   try {
-    runCommand(repoRoot, "gh", squashMergeArguments(pullRequest.number, commit, squashBody.path));
+    // Check again after acquiring the cross-machine main-write lock. No CI or
+    // review wait holds it; a checkpoint that won the race invalidates this run.
+    runCommand(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
+    assertMergeBaseUnchanged(repoRoot, baseCommit, "before acquiring the main-write lock");
+    const lockedPullRequest = readPullRequest(repoRoot, branch);
+    if (lockedPullRequest.number !== pullRequest.number) {
+      throw new Error("The current branch resolves to a different pull request.");
+    }
+    validatePullRequestForMerge(lockedPullRequest, commit, baseCommit);
+    validateGithubCiForMerge(
+      readGithubCi(
+        LASTCODE_GITHUB_REPOSITORY,
+        lockedPullRequest,
+        <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
+      ),
+    );
+    if (carrySource) preserveCarrySource(repoRoot, carrySource);
+    const squashBody = writeSquashBody(
+      carrySource ? carrySquashBody(lockedPullRequest.body, carrySource) : lockedPullRequest.body,
+    );
+    try {
+      lock.merge(squashMergeArguments(pullRequest.number, commit, squashBody.path));
+    } finally {
+      squashBody.cleanup();
+    }
   } finally {
-    squashBody.cleanup();
+    lock.release();
   }
   try {
     runCommand(repoRoot, process.execPath, postMergeCheckpointArguments());
