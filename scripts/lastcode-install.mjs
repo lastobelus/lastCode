@@ -19,6 +19,7 @@ const LAUNCH_POLL_INTERVAL_MS = 250;
 const LAUNCH_RETRY_INTERVAL_MS = 2_000;
 const LAUNCH_STABILITY_MS = 3_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
+const TCC_RESET_TIMEOUT_MS = 10_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
 function shellQuote(value) {
@@ -185,6 +186,7 @@ function run(command, args, options = {}) {
   const result = NodeChildProcess.spawnSync(command, args, {
     encoding: "utf8",
     ...(options.environment ? { env: options.environment } : {}),
+    ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
     stdio: options.inherit ? "inherit" : ["ignore", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
@@ -259,7 +261,9 @@ export function shouldResetScreenRecordingPermission(currentApp, replacementApp,
 }
 
 export function resetScreenRecordingPermission(runCommand = run) {
-  runCommand("tccutil", ["reset", "ScreenCapture", APP_BUNDLE_ID]);
+  runCommand("tccutil", ["reset", "ScreenCapture", APP_BUNDLE_ID], {
+    timeoutMs: TCC_RESET_TIMEOUT_MS,
+  });
 }
 
 function appIsRunning() {

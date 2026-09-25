@@ -44,15 +44,46 @@ it("waits for the installer to finish resetting before showing the reminder", as
   }
 });
 
-it("clears a pending marker stranded by a stopped installer", async () => {
+it("waits for a near-deadline installer to finish", async () => {
   const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-permission-test-"));
   try {
     const marker = screenRecordingResetMarker(home);
     NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
     NodeFS.writeFileSync(marker, "pending\n");
-    const expired = new Date(Date.now() - 31_000);
+    const nearLaunchDeadline = new Date(Date.now() - 31_000);
+    NodeFS.utimesSync(marker, nearLaunchDeadline, nearLaunchDeadline);
+    const reminder = waitForScreenRecordingReminder(home, () => false);
+    NodeFS.writeFileSync(marker, "ready\n");
+    expect(await reminder).toBe(true);
+  } finally {
+    NodeFS.rmSync(home, { force: true, recursive: true });
+  }
+});
+
+it("reminds when an installer stops after installing a build without permission", async () => {
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-permission-test-"));
+  try {
+    const marker = screenRecordingResetMarker(home);
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "pending\n");
+    const expired = new Date(Date.now() - 61_000);
     NodeFS.utimesSync(marker, expired, expired);
-    expect(await waitForScreenRecordingReminder(home, () => false)).toBe(false);
+    expect(await waitForScreenRecordingReminder(home, () => false)).toBe(true);
+    expect(NodeFS.readFileSync(marker, "utf8")).toBe("ready\n");
+  } finally {
+    NodeFS.rmSync(home, { force: true, recursive: true });
+  }
+});
+
+it("clears an expired pending marker when the installed app already has permission", async () => {
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-permission-test-"));
+  try {
+    const marker = screenRecordingResetMarker(home);
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "pending\n");
+    const expired = new Date(Date.now() - 61_000);
+    NodeFS.utimesSync(marker, expired, expired);
+    expect(await waitForScreenRecordingReminder(home, () => true)).toBe(false);
     expect(NodeFS.existsSync(marker)).toBe(false);
   } finally {
     NodeFS.rmSync(home, { force: true, recursive: true });

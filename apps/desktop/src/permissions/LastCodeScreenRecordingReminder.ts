@@ -4,7 +4,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 
-const PENDING_RESET_TIMEOUT_MS = 30_000;
+// The installer may use 30 seconds to launch and 10 more to reset TCC.
+const PENDING_RESET_TIMEOUT_MS = 60_000;
 
 export function screenRecordingResetMarker(home: string): string {
   return NodePath.join(home, ".lastcode", "local-updates", "screen-recording-reset");
@@ -47,11 +48,8 @@ export function waitForScreenRecordingReminder(
   );
   if (remaining === 0) {
     const current = markerState(marker);
-    if (current === "ready\n") {
-      return Promise.resolve(screenRecordingReminderPending(home, isGranted));
-    }
-    if (current === "pending\n") NodeFS.rmSync(marker, { force: true });
-    return Promise.resolve(false);
+    if (current === "pending\n") NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
+    return Promise.resolve(screenRecordingReminderPending(home, isGranted));
   }
   return new Promise((resolve) => {
     let settled = false;
@@ -83,11 +81,9 @@ export function waitForScreenRecordingReminder(
     }).then(
       () => {
         const current = markerState(marker);
-        if (current === "ready\n") check();
-        else {
-          if (current === "pending\n") NodeFS.rmSync(marker, { force: true });
-          finish(false);
-        }
+        if (current === "pending\n") NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
+        if (current === "ready\n" || current === "pending\n") check();
+        else finish(false);
       },
       () => {},
     );
