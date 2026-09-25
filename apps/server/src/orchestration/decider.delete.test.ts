@@ -490,6 +490,33 @@ it.layer(NodeServices.layer)("decider deletion flows", (it) => {
     }),
   );
 
+  it.effect("rejects force-deleting a project containing the persistent thread", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedReadModel;
+      const readModel = {
+        ...seeded,
+        threads: seeded.threads.map((thread) =>
+          thread.id === asThreadId("thread-delete-2") ? { ...thread, persistent: true } : thread,
+        ),
+      };
+
+      const error = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.delete",
+            commandId: asCommandId("cmd-project-delete-persistent"),
+            projectId: asProjectId("project-delete"),
+            force: true,
+          },
+          readModel,
+        }),
+      );
+
+      expect(error.message).toContain("thread-delete-2");
+      expect(error.message).toContain("Disable persistence or move it to another thread first");
+    }),
+  );
+
   it.effect("rejects project deletion while a deleted thread is cleaning up its worktree", () =>
     Effect.gen(function* () {
       const seeded = yield* seedReadModel;

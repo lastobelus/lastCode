@@ -53,6 +53,7 @@ const thread = {
   interactionMode: "plan",
   branch: null,
   worktreePath: null,
+  pullRequests: [],
   latestTurn: null,
   createdAt: now,
   updatedAt: now,

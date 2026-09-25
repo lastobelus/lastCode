@@ -124,6 +124,7 @@ the build helper directly or poll build logs. The action builds only; installati
 and restart remain separate decisions. If another Action continuation is pending,
 end the turn so its result can arrive, then list Actions again. An automated
 message alone does not make Actions unavailable; use the actual disabled reason.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
