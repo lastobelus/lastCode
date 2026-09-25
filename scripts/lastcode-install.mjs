@@ -241,6 +241,27 @@ export function validateAppBundle(appPath, options = {}) {
   return version;
 }
 
+export function shouldResetScreenRecordingPermission(currentApp, replacementApp, options = {}) {
+  if (!NodeFS.statSync(currentApp, { throwIfNoEntry: false })?.isDirectory()) return false;
+  const runCommand = options.runCommand ?? run;
+  const requirement = (appPath) => {
+    const output = runCommand("codesign", ["-d", "-r-", appPath]);
+    return /^\s*#?\s*designated =>\s*(.+)$/mu.exec(output)?.[1];
+  };
+  try {
+    const current = requirement(currentApp);
+    const replacement = requirement(replacementApp);
+    return !current || !replacement || current !== replacement;
+  } catch {
+    // An unreadable existing signature cannot prove that its TCC grant still applies.
+    return true;
+  }
+}
+
+export function resetScreenRecordingPermission(runCommand = run) {
+  runCommand("tccutil", ["reset", "ScreenCapture", APP_BUNDLE_ID]);
+}
+
 function appIsRunning() {
   return run("osascript", ["-e", `application id "${APP_BUNDLE_ID}" is running`]) === "true";
 }
@@ -507,14 +528,33 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
 
 export async function replacePreparedApp(prepared, options = {}) {
   const launch = options.launchApp ?? ((appPath) => launchApp(appPath, options));
-  if (NodeFS.existsSync(prepared.targetPath)) {
-    NodeFS.renameSync(prepared.targetPath, prepared.backup);
-    prepared.oldAppMoved = true;
+  const needsPermissionReset =
+    (prepared.targetPath === DEFAULT_APP_PATH || options.resetScreenRecordingPermission) &&
+    shouldResetScreenRecordingPermission(prepared.targetPath, prepared.staging, options);
+  const marker = NodePath.join(
+    options.reminderHome ?? NodeOS.homedir(),
+    ".lastcode",
+    "local-updates",
+    "screen-recording-reset",
+  );
+  const previousMarker =
+    needsPermissionReset && NodeFS.existsSync(marker) ? NodeFS.readFileSync(marker) : null;
+  if (needsPermissionReset) {
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "pending\n", { mode: 0o600 });
   }
   try {
+    if (NodeFS.existsSync(prepared.targetPath)) {
+      NodeFS.renameSync(prepared.targetPath, prepared.backup);
+      prepared.oldAppMoved = true;
+    }
     NodeFS.renameSync(prepared.staging, prepared.targetPath);
     await launch(prepared.targetPath);
   } catch (error) {
+    if (needsPermissionReset) {
+      if (previousMarker) NodeFS.writeFileSync(marker, previousMarker);
+      else NodeFS.rmSync(marker, { force: true });
+    }
     NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
     if (prepared.oldAppMoved) {
       NodeFS.renameSync(prepared.backup, prepared.targetPath);
@@ -528,6 +568,17 @@ export async function replacePreparedApp(prepared, options = {}) {
       }
     }
     throw error;
+  }
+  if (needsPermissionReset) {
+    try {
+      (options.resetScreenRecordingPermission ?? resetScreenRecordingPermission)();
+      console.log("LastCode Screen Recording permission was reset for the replacement app.");
+    } catch (error) {
+      console.error(
+        `Warning: could not reset LastCode Screen Recording permission: ${error.message}. Remove any existing LastCode entry in System Settings before adding this build.`,
+      );
+    }
+    NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
   }
   NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
   prepared.oldAppMoved = false;

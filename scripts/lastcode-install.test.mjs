@@ -19,6 +19,8 @@ import {
   replacePreparedApp,
   renderDmgChoices,
   renderLauncher,
+  resetScreenRecordingPermission,
+  shouldResetScreenRecordingPermission,
   temporaryAppPaths,
   uninstallCommand,
   validateAppBundle,
@@ -139,6 +141,104 @@ describe("LastCode userland install command", () => {
       backup: "/Applications/.LastCode.previous-42.app",
       staging: "/Applications/.LastCode.install-42.app",
     });
+  });
+
+  it("resets Screen Recording only when the installed app's code requirement changes", () => {
+    const root = temporaryDirectory();
+    const current = NodePath.join(root, "current.app");
+    const replacement = NodePath.join(root, "replacement.app");
+    NodeFS.mkdirSync(current);
+    NodeFS.mkdirSync(replacement);
+    let nextRequirement = 'cdhash H"old"';
+    const runCommand = (_command, args, options) => {
+      expect(options).toBeUndefined(); // codesign writes the requirement to stdout.
+      return `Executable=${args[2]}\n# designated => ${args[2] === current ? 'cdhash H"old"' : nextRequirement}`;
+    };
+    expect(shouldResetScreenRecordingPermission(current, replacement, { runCommand })).toBe(false);
+    nextRequirement = 'cdhash H"new"';
+    expect(shouldResetScreenRecordingPermission(current, replacement, { runCommand })).toBe(true);
+    expect(
+      shouldResetScreenRecordingPermission(NodePath.join(root, "not-installed.app"), replacement, {
+        runCommand,
+      }),
+    ).toBe(false);
+
+    const commands = [];
+    resetScreenRecordingPermission((command, args) => {
+      commands.push([command, args]);
+    });
+    expect(commands).toEqual([
+      ["tccutil", ["reset", "ScreenCapture", "codes.lastobelus.lastcode"]],
+    ]);
+    expect(() =>
+      resetScreenRecordingPermission(() => {
+        throw new Error("tccutil failed");
+      }),
+    ).toThrow("tccutil failed");
+  });
+
+  it("resets the permission only after the replacement has launched", async () => {
+    const root = temporaryDirectory();
+    const targetPath = NodePath.join(root, "LastCode.app");
+    const staging = NodePath.join(root, ".LastCode.install.app");
+    const backup = NodePath.join(root, ".LastCode.previous.app");
+    NodeFS.mkdirSync(targetPath);
+    NodeFS.mkdirSync(staging);
+    const steps = [];
+    const marker = NodePath.join(root, ".lastcode/local-updates/screen-recording-reset");
+    await replacePreparedApp(
+      { targetPath, staging, backup, oldAppMoved: false },
+      {
+        reminderHome: root,
+        runCommand: (_command, args) =>
+          `# designated => cdhash H"${args[2] === targetPath ? "old" : "new"}"`,
+        resetScreenRecordingPermission: () => {
+          expect(NodeFS.readFileSync(marker, "utf8")).toBe("pending\n");
+          steps.push("reset");
+        },
+        launchApp: async () => {
+          expect(NodeFS.readFileSync(marker, "utf8")).toBe("pending\n");
+          steps.push("launch");
+        },
+      },
+    );
+    expect(steps).toEqual(["launch", "reset"]);
+    expect(NodeFS.readFileSync(marker, "utf8")).toBe("ready\n");
+  });
+
+  it("keeps the launched replacement and reminds when tccutil fails", async () => {
+    const root = temporaryDirectory();
+    const targetPath = NodePath.join(root, "LastCode.app");
+    const staging = NodePath.join(root, ".LastCode.install.app");
+    const backup = NodePath.join(root, ".LastCode.previous.app");
+    NodeFS.mkdirSync(targetPath);
+    NodeFS.writeFileSync(NodePath.join(targetPath, "version"), "old");
+    NodeFS.mkdirSync(staging);
+    NodeFS.writeFileSync(NodePath.join(staging, "version"), "new");
+    const marker = NodePath.join(root, ".lastcode/local-updates/screen-recording-reset");
+    const originalError = console.error;
+    const warnings = [];
+    console.error = (message) => warnings.push(message);
+    try {
+      await replacePreparedApp(
+        { targetPath, staging, backup, oldAppMoved: false },
+        {
+          reminderHome: root,
+          runCommand: (_command, args) =>
+            `# designated => cdhash H"${args[2] === targetPath ? "old" : "new"}"`,
+          resetScreenRecordingPermission: () => {
+            throw new Error("tccutil failed");
+          },
+          launchApp: async () => {},
+        },
+      );
+    } finally {
+      console.error = originalError;
+    }
+    expect(warnings[0]).toContain("tccutil failed");
+    expect(NodeFS.readFileSync(NodePath.join(targetPath, "version"), "utf8")).toBe("new");
+    expect(NodeFS.readFileSync(marker, "utf8")).toBe("ready\n");
+    expect(NodeFS.existsSync(backup)).toBe(false);
   });
 
   it("validates certificate-free bundle, version, and exact executable architecture", () => {
@@ -382,10 +482,20 @@ describe("LastCode userland install command", () => {
     NodeFS.mkdirSync(staging);
     NodeFS.writeFileSync(NodePath.join(staging, "version"), "new");
     const prepared = { targetPath, staging, backup, oldAppMoved: false };
+    const marker = NodePath.join(root, ".lastcode/local-updates/screen-recording-reset");
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "ready\n");
 
     const launchAttempts = [];
+    let resetCount = 0;
     await expect(
       replacePreparedApp(prepared, {
+        reminderHome: root,
+        runCommand: (_command, args) =>
+          `# designated => cdhash H"${args[2] === targetPath ? "old" : "new"}"`,
+        resetScreenRecordingPermission: () => {
+          resetCount += 1;
+        },
         launchApp: async (path) => {
           launchAttempts.push(path);
           throw new Error("launch failed");
@@ -395,6 +505,8 @@ describe("LastCode userland install command", () => {
     expect(NodeFS.readFileSync(NodePath.join(targetPath, "version"), "utf8")).toBe("old");
     expect(NodeFS.existsSync(backup)).toBe(false);
     expect(launchAttempts).toEqual([targetPath, targetPath]);
+    expect(resetCount).toBe(0);
+    expect(NodeFS.readFileSync(marker, "utf8")).toBe("ready\n");
   });
 
   it("launches with the repository's pinned Node runtime", () => {
