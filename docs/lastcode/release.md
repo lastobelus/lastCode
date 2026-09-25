@@ -294,6 +294,9 @@ The wrapper requires:
 The app bundle is sealed with Electron Builder's ad-hoc identity, so the bundle
 and its resources pass macOS code-signature verification without an Apple
 Developer certificate. It is not notarized for public distribution.
+The installer compares the installed and replacement code requirements. If they
+differ, it resets the stale Screen Recording grant after the replacement passes
+its launch check. The new app then prompts to grant LastCode access again.
 
 Local builds omit the hosted update feed. The built-in updater remains disabled
 until LastCode intentionally publishes compatible releases.
