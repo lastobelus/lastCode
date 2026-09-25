@@ -135,6 +135,14 @@
       "types": "./src/projectSettings.ts",
       "import": "./src/projectSettings.ts"
     },
+    "./actionResume": {
+      "types": "./src/actionResume.ts",
+      "import": "./src/actionResume.ts"
+    },
+    "./actionResumeProtocol": {
+      "types": "./src/actionResumeProtocol.ts",
+      "import": "./src/actionResumeProtocol.ts"
+    },
     "./t3ProjectFile": {
       "types": "./src/t3ProjectFile.ts",
       "import": "./src/t3ProjectFile.ts"
