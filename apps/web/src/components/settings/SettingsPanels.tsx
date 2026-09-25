@@ -3342,9 +3342,11 @@ export function ArchivedThreadsPanel() {
       }
 
       if (clicked === "delete") {
-        const archivedThreads = archivedGroups
-          .filter((group) => group.project.environmentId === thread.environmentId)
-          .flatMap((group) => group.threads);
+        const archivedThreads = archivedSnapshots
+          .filter((entry) => entry.environmentId === thread.environmentId)
+          .flatMap(({ environmentId, snapshot }) =>
+            snapshot.threads.map((archivedThread) => ({ ...archivedThread, environmentId })),
+          );
         const result = await confirmAndDeleteThread(threadRef, { archivedThreads });
         if (result._tag === "Success") {
           refreshArchivedThreads();
@@ -3360,7 +3362,7 @@ export function ArchivedThreadsPanel() {
         }
       }
     },
-    [archivedGroups, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [archivedSnapshots, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
   );
 
   return (

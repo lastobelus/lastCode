@@ -18,7 +18,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
-import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
@@ -68,7 +68,7 @@ export const logCleanupCauseUnlessInterrupted = <R, E>({
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const gitWorkflow = yield* GitWorkflowService;
-  const projectionProjects = yield* ProjectionProjectRepository;
+  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const projectionThreads = yield* ProjectionThreadRepository;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
@@ -226,7 +226,7 @@ const make = Effect.gen(function* () {
 
     const normalizedWorktreePath = yield* canonicalPathForComparison(deleting.worktreePath);
     const activeProjects = yield* Effect.forEach(
-      yield* projectionProjects.listAll(),
+      yield* projectionSnapshotQuery.getProjectShells(),
       (project) =>
         canonicalPathForComparison(project.workspaceRoot).pipe(
           Effect.map((workspaceRoot) => ({ project, workspaceRoot })),
@@ -234,8 +234,7 @@ const make = Effect.gen(function* () {
       { concurrency: "unbounded" },
     );
     const activeProject = activeProjects.find(
-      ({ project, workspaceRoot }) =>
-        project.deletedAt === null && workspaceRoot === normalizedWorktreePath,
+      ({ workspaceRoot }) => workspaceRoot === normalizedWorktreePath,
     )?.project;
     if (activeProject !== undefined) {
       const failedAt = yield* nowIso;
@@ -243,7 +242,7 @@ const make = Effect.gen(function* () {
         ...deleting,
         status: "failed",
         failedAt,
-        error: `Worktree '${deleting.worktreePath}' is now used as the workspace root of active project '${activeProject.projectId}'.`,
+        error: `Worktree '${deleting.worktreePath}' is now used as the workspace root of active project '${activeProject.id}'.`,
       });
       return;
     }

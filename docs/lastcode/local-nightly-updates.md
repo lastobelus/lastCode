@@ -19,8 +19,10 @@ Code's state.
 Before enabling it, install the checkpoint service and dashboard:
 
 ```bash
-pnpm lastcode:checkpoint:service install \
-  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+pnpm lastcode:checkpoint:service install
 pnpm run lastcode:checkpoints -- --install
 pnpm run lastcode:build -- --install
 pnpm run lastcode:install -- --install
@@ -92,11 +94,20 @@ picker.
    the requested version without Electron's helper-only Node mode, retries a
    forced new app launch when macOS accepts but drops the request, and requires
    the process to remain running before deleting the previous bundle.
+   When the replacement has a different macOS code requirement, the installer
+   resets LastCode's stale Screen Recording entry after the replacement passes
+   its launch check. A failed swap leaves the old grant intact.
 
 The DMG is retained as both the inspectable manual artifact and the in-app
 install source. The paired ZIP and `nightly-mac.yml` remain part of the complete
 desktop build output, but the certificate-free local channel does not hand them
 to Squirrel. Hosted signed releases continue to use `electron-updater`.
+
+After a reset, the new LastCode build opens with a Screen Recording reminder.
+Use it to open **System Settings → Privacy & Security → Screen & System Audio
+Recording**, remove any stale LastCode entry, add the new build, and relaunch it.
+The reminder returns on later
+launches until macOS reports that permission as granted.
 
 ### Release-note grouping
 
@@ -140,8 +151,8 @@ lastcode/revision/v0.0.34-nightly.20260816.1105.1
 The guarded PR merge command requests an immediate daemon run. If that request
 is missed because the service is unavailable, a later managed run repairs it.
 The daemon replays only the newly merged LastCode commits onto the newest
-checkpoint, smoke-tests the result, publishes the revision, and promotes it when
-the PR queue permits. The running app then discovers version
+checkpoint, smoke-tests the result, publishes the revision, and promotes it
+independently of open PRs when main still matches the incorporated source. The running app then discovers version
 `0.0.34-nightly.20260816.1105.1` through the same button and builds it only after
 the first click. A later upstream `1106` still sorts after every `1105.N`
 revision.

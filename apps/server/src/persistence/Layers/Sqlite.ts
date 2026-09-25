@@ -5,7 +5,7 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
 import { ServerConfig } from "../../config.ts";
 
 // Size the -wal file is cut back to on the first commit after a WAL reset.
@@ -21,7 +21,7 @@ const setup = Layer.effectDiscard(
     // PASSIVE checkpoints never shrink the -wal file, so it otherwise keeps its
     // largest size until the last connection closes.
     yield* sql.unsafe(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};`);
-    yield* runMigrations();
+    yield* runDatabaseMigrations();
   }),
 );
 
@@ -44,6 +44,20 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   );
 }, Layer.unwrap);
 
+const makeSqlitePersistenceReadOnly = Effect.fn("makeSqlitePersistenceReadOnly")(function* (
+  dbPath: string,
+) {
+  const path = yield* Path.Path;
+  return NodeSqliteClient.layer({
+    filename: dbPath,
+    readonly: true,
+    spanAttributes: {
+      "db.name": path.basename(dbPath),
+      "service.name": "t3-server",
+    },
+  });
+}, Layer.unwrap);
+
 export const SqlitePersistenceMemory = Layer.provideMerge(
   setup,
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -53,5 +67,12 @@ export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     return makeSqlitePersistenceLive(dbPath);
+  }),
+);
+
+export const layerReadOnlyConfig = Layer.unwrap(
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    return makeSqlitePersistenceReadOnly(dbPath);
   }),
 );

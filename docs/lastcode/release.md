@@ -105,6 +105,11 @@ one stable aggregate `CI Gate`. Head or base drift invalidates the result and
 requires the agent to decide whether to rebase, republish, and request review
 again.
 
+Open feature PRs do not pause checkpoints. When a checkpoint advances their
+base, update the feature branch to incorporate the new `lastcode/main`, push,
+and obtain fresh validation before merging. Rerunning CI from an old base does
+not validate the new one.
+
 This applies to authorized repair PRs opened during checkpoint or build recovery,
 without a separate request to babysit. After handling existing findings, call
 `list_project_actions`, select the eligible **Wait for PR** action (prefer
@@ -121,38 +126,16 @@ pnpm lastcode:merge
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 stale bases, draft or non-clean PRs, and PRs that do not target
-`lastcode/main`. It fetches and checks the base again after reading CI, then
-squash-merges with an exact-head guard and requests an immediate
+`lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
+Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
+head, base, and CI result again, then squash-merges with the exact-head guard.
+The lock is released before requesting an immediate
 checkpoint-daemon run when that service is installed on the current host. Hosts
 without the optional service skip the request silently. The daemon publishes a
 new installable LastCode revision when no new upstream
 nightly is waiting. Failure to start the service is reported without lying about
 the already-completed GitHub merge; the managed checkpoint service remains the
 repair path. The request never terminates a daemon run already in progress.
-### Publishing a revision while newer nightlies are on hold
-
-To include merged LastCode fixes without advancing upstream, explicitly name the
-latest published checkpoint's upstream nightly:
-
-```bash
-pnpm lastcode:checkpoint -- --revision-only v0.0.34-nightly.20260825.1185 --push-tags --promote
-```
-
-This mode rejects an unpublished or older checkpoint base and a source that
-already contains a newer upstream nightly. It keeps the normal validation and
-publication guards, but uses a separate revision worktree and leaves any retained
-nightly repair and recovery selection untouched. It does not change the schedule
-or permanently block future nightlies. A retained selection may need to be
-reconciled with the newly promoted source before it can later resume.
-
-Pinned revision runs use `checkpoint-revision-runs.jsonl` in the automation
-history directory so they do not replace the nightly recovery record. Retrying
-after an interrupted publication cleans up only a clean revision worktree that
-matches the published commit; changed repairs remain available for inspection.
-
-After publication, select the exact revision tag for **Build Local Package**.
-Publishing or building does not install or restart the app.
-
 
 ## Checkpoint CI
 
@@ -167,7 +150,10 @@ List Actions, launch the eligible returned ID with
 The action observes the active local macOS checkpoint service. It does not start
 a checkpoint, rebuild, recover, install, or restart anything. It captures the
 active process and launch count, waits for it to finish, and reports the terminal
-state whose recorded supervisor PID matches that process. A result written while
+state whose recorded launchd PID matches that process (the scheduler for daily
+runs, or the supervisor for interval runs). Reinstall the managed service when
+updating this observer so its state producer records that identity; older state
+without it is rejected. A result written while
 the supervisor is still delivering notifications is accepted after exit. The
 installed supervisor must include this PID field. A missing active run,
 unavailable service, replaced run, missing matching
@@ -202,8 +188,9 @@ Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
 nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
 immutable tag and promotes main together with an atomic push leased against the
-selected source commit. Open LastCode PRs prevent publication in the service's
-normal promotion mode. Selected recovery cannot disable validation or
+selected source commit. Open PRs do not block publication or promotion. A merge
+arriving during validation makes the atomic push fail without publishing the tag
+or changing main. Selected recovery cannot disable validation or
 be automatically superseded. A changed head or source requires inspection and
 selection again. Failed validation retains the worktree and selection.
 
@@ -215,6 +202,30 @@ run afterward to continue remaining nightlies from the repaired main branch.
 If publication succeeded but cleanup was interrupted, a retry recognizes the
 matching immutable tag represented on main and finishes cleanup without
 republishing.
+
+### Publishing a revision while newer nightlies are on hold
+
+To include merged LastCode fixes without advancing upstream, explicitly name the
+latest published checkpoint's upstream nightly:
+
+```bash
+pnpm lastcode:checkpoint -- --revision-only v0.0.34-nightly.20260825.1185 --push-tags --promote
+```
+
+This mode rejects an unpublished or older checkpoint base and a source that
+already contains a newer upstream nightly. It keeps the normal validation and
+publication guards, but uses a separate revision worktree and leaves any retained
+nightly repair and recovery selection untouched. It does not change the schedule
+or permanently block future nightlies. A retained selection may need to be
+reconciled with the newly promoted source before it can later resume.
+
+Pinned revision runs use `checkpoint-revision-runs.jsonl` in the automation
+history directory so they do not replace the nightly recovery record. Retrying
+after an interrupted publication cleans up only a clean revision worktree that
+matches the published commit; changed repairs remain available for inspection.
+
+After publication, select the exact revision tag for **Build Local Package**.
+Publishing or building does not install or restart the app.
 
 ### Validating a checkpoint manually
 

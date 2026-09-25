@@ -53,7 +53,8 @@ Do not open a PR unless the user explicitly asks.
    the upstream PR in both descriptions.
 6. Before merge, require a current-head clean Codex review, zero unresolved
    review threads, and full local CI for the exact head and current base. Merge
-   through `pnpm lastcode:merge`.
+   through `pnpm lastcode:merge`. If the base changes, refresh the branch as
+   needed and obtain fresh validation against the new base before merging.
 
 The LastCode PR does not wait for upstream acceptance. The upstream PR does not
 depend on LastCode. When upstream later lands the change, let the nightly rebase
@@ -64,5 +65,6 @@ existing checkpoint workflow.
 
 Report both branch names and PR URLs, their bases and current heads, validation
 performed for each, review status, and whether either delivery remains local.
-Call out that an open LastCode PR pauses branch promotion while immutable nightly
-checkpoint tags continue.
+Open LastCode PRs do not pause checkpoint creation, repaired-checkpoint
+publication, or branch promotion. Report any validation that needs refreshing
+after the LastCode base changes.

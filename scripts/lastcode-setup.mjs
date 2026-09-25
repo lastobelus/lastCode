@@ -9,7 +9,9 @@ const CANONICAL_UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
 const SERVICE_PLIST_NAME = "codes.lastobelus.lastcode-nightly-checkpoint.plist";
 
 export function parseOptions(argv) {
+  let checkpointDailyAt;
   let checkpointIntervalSeconds;
+  let checkpointTimeZone;
   let dryRun = false;
   let enableNightlyWrites = false;
   let help = false;
@@ -27,6 +29,23 @@ export function parseOptions(argv) {
       }
       checkpointIntervalSeconds = value;
       index += 1;
+    } else if (arg === "--checkpoint-daily-at") {
+      const value = argv[index + 1];
+      if (!value || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value)) {
+        throw new Error("--checkpoint-daily-at requires a 24-hour HH:MM time.");
+      }
+      checkpointDailyAt = value;
+      index += 1;
+    } else if (arg === "--checkpoint-time-zone") {
+      const value = argv[index + 1];
+      if (!value) throw new Error("--checkpoint-time-zone requires an IANA time zone.");
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: value }).format(0);
+      } catch {
+        throw new Error("--checkpoint-time-zone requires an IANA time zone.");
+      }
+      checkpointTimeZone = value;
+      index += 1;
     } else if (arg === "-h" || arg === "--help") help = true;
     else if (arg === "--trusted-project-action") {
       const value = argv[index + 1];
@@ -38,8 +57,22 @@ export function parseOptions(argv) {
     } else throw new Error(`Unknown argument '${arg}'.`);
   }
 
+  if (
+    checkpointIntervalSeconds !== undefined &&
+    (checkpointDailyAt !== undefined || checkpointTimeZone !== undefined)
+  ) {
+    throw new Error("Configure either a checkpoint interval or one daily time, not both.");
+  }
+  if ((checkpointDailyAt === undefined) !== (checkpointTimeZone === undefined)) {
+    throw new Error(
+      "A daily checkpoint schedule requires --checkpoint-daily-at and --checkpoint-time-zone.",
+    );
+  }
+
   return {
+    checkpointDailyAt,
     checkpointIntervalSeconds,
+    checkpointTimeZone,
     dryRun,
     enableNightlyWrites,
     help,
@@ -53,7 +86,7 @@ export function isCanonicalUpstreamUrl(value) {
   );
 }
 
-export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSeconds, options = {}) {
+export function setupCommands(repoRoot, nodeExecutable, checkpointSchedule, options = {}) {
   const home = options.home ?? NodeOS.homedir();
   const trustedProjectActionIds = options.trustedProjectActionIds ?? [];
   return [
@@ -83,8 +116,9 @@ export function setupCommands(repoRoot, nodeExecutable, checkpointIntervalSecond
       args: [
         NodePath.join(repoRoot, "scripts", "lastcode-nightly-service.ts"),
         "install",
-        "--interval-seconds",
-        String(checkpointIntervalSeconds),
+        ...(checkpointSchedule.kind === "interval"
+          ? ["--interval-seconds", String(checkpointSchedule.intervalSeconds)]
+          : ["--daily-at", checkpointSchedule.dailyAt, "--time-zone", checkpointSchedule.timeZone]),
         ...trustedProjectActionIds.flatMap((id) => ["--trusted-project-action", id]),
       ],
       cwd: repoRoot,
@@ -191,7 +225,7 @@ function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log(
-      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes --checkpoint-interval-seconds <seconds> [--trusted-project-action <lc-id>]... [--dry-run]",
+      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes (--checkpoint-interval-seconds <seconds> | --checkpoint-daily-at <HH:MM> --checkpoint-time-zone <IANA-zone>) [--trusted-project-action <lc-id>]... [--dry-run]",
     );
     console.log();
     console.log(
@@ -211,9 +245,17 @@ function main(argv) {
       "Setup installs checkpoint automation that pushes tags and rebased branches to origin. Rerun with --enable-nightly-writes after confirming origin is your writable fork.",
     );
   }
-  if (options.checkpointIntervalSeconds === undefined) {
-    throw new Error("Setup requires --checkpoint-interval-seconds from deployment configuration.");
+  if (options.checkpointIntervalSeconds === undefined && options.checkpointDailyAt === undefined) {
+    throw new Error("Setup requires a checkpoint schedule from deployment configuration.");
   }
+  const checkpointSchedule =
+    options.checkpointIntervalSeconds !== undefined
+      ? { kind: "interval", intervalSeconds: options.checkpointIntervalSeconds }
+      : {
+          kind: "daily",
+          dailyAt: options.checkpointDailyAt,
+          timeZone: options.checkpointTimeZone,
+        };
 
   const repoRoot = run("git", ["rev-parse", "--show-toplevel"], {
     cwd: process.cwd(),
@@ -237,7 +279,7 @@ function main(argv) {
     });
   }
 
-  const commands = setupCommands(repoRoot, process.execPath, options.checkpointIntervalSeconds, {
+  const commands = setupCommands(repoRoot, process.execPath, checkpointSchedule, {
     home: NodeOS.homedir(),
     trustedProjectActionIds: options.trustedProjectActionIds,
   });

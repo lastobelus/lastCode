@@ -40,6 +40,7 @@ export interface ProjectThreadAwarenessInput {
     | "updatedAt"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
+    | "attention"
   >;
 }
 
@@ -81,6 +82,9 @@ function resolveThreadAwarenessPhase(
     return "waiting_for_approval";
   }
   if (thread.hasPendingUserInput) {
+    return "waiting_for_input";
+  }
+  if (thread.attention?.kind === "question") {
     return "waiting_for_input";
   }
   if (thread.session?.status === "error" || thread.latestTurn?.state === "error") {

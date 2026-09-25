@@ -41,6 +41,20 @@ export function isPickedElementPayload(value: unknown): value is PickedElementPa
   if (typeof c["pickedAt"] !== "string") return false;
   if (!isStringOrNull(c["pageTitle"])) return false;
   if (!isStringOrNull(c["selector"])) return false;
+  if (
+    c["framePath"] !== undefined &&
+    (!Array.isArray(c["framePath"]) ||
+      !c["framePath"].every(
+        (frame: unknown) =>
+          typeof frame === "object" &&
+          frame !== null &&
+          "pageUrl" in frame &&
+          typeof frame.pageUrl === "string" &&
+          "selector" in frame &&
+          typeof frame.selector === "string",
+      ))
+  )
+    return false;
   if (!isStringOrNull(c["componentName"])) return false;
   if (c["source"] !== null && !isPickedStackFrame(c["source"])) return false;
   if (!Array.isArray(c["stack"])) return false;
