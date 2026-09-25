@@ -46,7 +46,11 @@ export function waitForScreenRecordingReminder(
     PENDING_RESET_TIMEOUT_MS - (Date.now() - NodeFS.statSync(marker).mtimeMs),
   );
   if (remaining === 0) {
-    if (markerState(marker) === "pending\n") NodeFS.rmSync(marker, { force: true });
+    const current = markerState(marker);
+    if (current === "ready\n") {
+      return Promise.resolve(screenRecordingReminderPending(home, isGranted));
+    }
+    if (current === "pending\n") NodeFS.rmSync(marker, { force: true });
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
@@ -78,8 +82,12 @@ export function waitForScreenRecordingReminder(
       signal: timeoutController.signal,
     }).then(
       () => {
-        if (markerState(marker) === "pending\n") NodeFS.rmSync(marker, { force: true });
-        finish(false);
+        const current = markerState(marker);
+        if (current === "ready\n") check();
+        else {
+          if (current === "pending\n") NodeFS.rmSync(marker, { force: true });
+          finish(false);
+        }
       },
       () => {},
     );

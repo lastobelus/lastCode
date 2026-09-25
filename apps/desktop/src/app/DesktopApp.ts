@@ -336,46 +336,48 @@ const startup = Effect.gen(function* () {
   yield* updates.configure;
   yield* DesktopRemoteUpdates.listen;
   yield* linuxUrlHandler.register;
+  yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
   if (environment.platform === "darwin" && environment.isPackaged) {
-    yield* Effect.gen(function* () {
-      if (
-        !(yield* Effect.promise(() =>
-          waitForScreenRecordingReminder(
-            environment.homeDirectory,
-            () => Electron.systemPreferences.getMediaAccessStatus("screen") === "granted",
-          ),
-        ))
-      )
-        return;
-      const answer = yield* dialog.showMessageBox({
-        type: "warning",
-        title: "LastCode Screen Recording",
-        message: "Enable Screen Recording for this LastCode build",
-        detail:
-          "This update needs a new macOS permission grant. Remove any older LastCode entry in System Settings → Privacy & Security → Screen & System Audio Recording, add this build, then relaunch LastCode.",
-        buttons: ["Open System Settings", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true,
-      });
-      const opened =
-        answer.response === 0 &&
-        (yield* Effect.promise(() =>
-          Electron.shell.openExternal(MAC_PERMISSION_SETTINGS_URLS["screen-recording"]).then(
-            () => true,
-            () => false,
-          ),
-        ));
-      if (opened) {
-        yield* macPermissions.showHelper("screen-recording", null);
-      }
-    }).pipe(
-      Effect.catchCause((cause) =>
-        logStartupWarning("screen recording reminder unavailable", { cause }),
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        if (
+          !(yield* Effect.promise(() =>
+            waitForScreenRecordingReminder(
+              environment.homeDirectory,
+              () => Electron.systemPreferences.getMediaAccessStatus("screen") === "granted",
+            ),
+          ))
+        )
+          return;
+        const answer = yield* dialog.showMessageBox({
+          type: "warning",
+          title: "LastCode Screen Recording",
+          message: "Enable Screen Recording for this LastCode build",
+          detail:
+            "This update needs a new macOS permission grant. Remove any older LastCode entry in System Settings → Privacy & Security → Screen & System Audio Recording, add this build, then relaunch LastCode.",
+          buttons: ["Open System Settings", "Later"],
+          defaultId: 0,
+          cancelId: 1,
+          noLink: true,
+        });
+        const opened =
+          answer.response === 0 &&
+          (yield* Effect.promise(() =>
+            Electron.shell.openExternal(MAC_PERMISSION_SETTINGS_URLS["screen-recording"]).then(
+              () => true,
+              () => false,
+            ),
+          ));
+        if (opened) {
+          yield* macPermissions.showHelper("screen-recording", null);
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          logStartupWarning("screen recording reminder unavailable", { cause }),
+        ),
       ),
     );
   }
-  yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
 }).pipe(Effect.withSpan("desktop.startup"));
 
 const scopedProgram = Effect.scoped(
