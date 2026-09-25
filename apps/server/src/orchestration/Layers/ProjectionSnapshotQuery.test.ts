@@ -1071,6 +1071,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         "None",
       );
       assert.deepEqual(yield* snapshotQuery.getDeletedWorktreeThreads(), []);
+      const archivedOnlyShell = yield* snapshotQuery.getShellSnapshot();
+      assert.deepEqual(archivedOnlyShell.threads, []);
+      assert.deepEqual(
+        archivedOnlyShell.projects.map((project) => project.id),
+        [ProjectId.make("project-archive-test")],
+      );
+      assert.deepEqual(
+        (yield* snapshotQuery.getArchivedShellSnapshot()).projects.map((project) => project.id),
+        [ProjectId.make("project-archive-test")],
+      );
       yield* sql`
         UPDATE projection_threads
         SET branch = 'retained-branch', worktree_path = '/tmp/archived-worktree',
