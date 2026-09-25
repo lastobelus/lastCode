@@ -1,7 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Reads the marker written by the dependency-free installer.
+// @effect-diagnostics globalDate:off -- Marker expiry compares the installer file's wall-clock mtime.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
+
+const PENDING_RESET_TIMEOUT_MS = 30_000;
 
 export function screenRecordingResetMarker(home: string): string {
   return NodePath.join(home, ".lastcode", "local-updates", "screen-recording-reset");
@@ -38,6 +41,14 @@ export function waitForScreenRecordingReminder(
   if (state !== "pending\n") {
     return Promise.resolve(screenRecordingReminderPending(home, isGranted));
   }
+  const remaining = Math.max(
+    0,
+    PENDING_RESET_TIMEOUT_MS - (Date.now() - NodeFS.statSync(marker).mtimeMs),
+  );
+  if (remaining === 0) {
+    if (markerState(marker) === "pending\n") NodeFS.rmSync(marker, { force: true });
+    return Promise.resolve(false);
+  }
   return new Promise((resolve) => {
     let settled = false;
     const timeoutController = new AbortController();
@@ -63,10 +74,13 @@ export function waitForScreenRecordingReminder(
       if (file === NodePath.basename(marker)) check();
     });
     watcher.on("error", () => finish(false));
-    void NodeTimersPromises.setTimeout(30_000, undefined, {
+    void NodeTimersPromises.setTimeout(remaining, undefined, {
       signal: timeoutController.signal,
     }).then(
-      () => finish(false),
+      () => {
+        if (markerState(marker) === "pending\n") NodeFS.rmSync(marker, { force: true });
+        finish(false);
+      },
       () => {},
     );
     check();
