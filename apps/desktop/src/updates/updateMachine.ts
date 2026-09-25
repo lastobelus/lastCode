@@ -1,4 +1,6 @@
 import type {
+  DesktopLocalBuildFailure,
+  DesktopLocalBuildProgress,
   DesktopRuntimeInfo,
   DesktopUpdateChannel,
   DesktopUpdateReleaseNote,
@@ -22,6 +24,7 @@ export function createInitialDesktopUpdateState(
 ): DesktopUpdateState {
   return {
     enabled: false,
+    source: "hosted",
     status: "disabled",
     channel,
     currentVersion,
@@ -33,6 +36,8 @@ export function createInitialDesktopUpdateState(
     releaseNotes: [],
     omittedReleaseCount: 0,
     downloadPercent: null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     checkedAt: null,
     message: null,
     errorContext: null,
@@ -53,6 +58,8 @@ export function reduceDesktopUpdateStateOnCheckStart(
     omittedReleaseCount: hasDownloadedUpdate ? state.omittedReleaseCount : 0,
     message: null,
     downloadPercent: hasDownloadedUpdate ? 100 : null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     errorContext: null,
     canRetry: false,
   };
@@ -81,6 +88,8 @@ export function reduceDesktopUpdateStateOnCheckFailure(
     message,
     checkedAt,
     downloadPercent: null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     errorContext: "check",
     canRetry: true,
   };
@@ -103,6 +112,8 @@ export function reduceDesktopUpdateStateOnUpdateAvailable(
     releaseNotes: preserveReleaseNotes ? state.releaseNotes : releaseNotes,
     omittedReleaseCount: preserveReleaseNotes ? state.omittedReleaseCount : omittedReleaseCount,
     downloadPercent: isDownloadedVersion ? 100 : null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     checkedAt,
     message: null,
     errorContext: null,
@@ -135,6 +146,8 @@ export function reduceDesktopUpdateStateOnNoUpdate(
     releaseNotes: [],
     omittedReleaseCount: 0,
     downloadPercent: null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     checkedAt,
     message: null,
     errorContext: null,
@@ -144,11 +157,14 @@ export function reduceDesktopUpdateStateOnNoUpdate(
 
 export function reduceDesktopUpdateStateOnDownloadStart(
   state: DesktopUpdateState,
+  downloadPercent: number | null = 0,
 ): DesktopUpdateState {
   return {
     ...state,
     status: "downloading",
-    downloadPercent: 0,
+    downloadPercent,
+    localBuildProgress: null,
+    localBuildFailure: null,
     message: null,
     errorContext: null,
     canRetry: false,
@@ -164,6 +180,8 @@ export function reduceDesktopUpdateStateOnDownloadFailure(
     status: nextStatusAfterDownloadFailure(state),
     message,
     downloadPercent: null,
+    localBuildProgress: null,
+    localBuildFailure: null,
     errorContext: "download",
     canRetry: getCanRetryAfterDownloadFailure(state),
   };
@@ -177,6 +195,8 @@ export function reduceDesktopUpdateStateOnDownloadProgress(
     ...state,
     status: "downloading",
     downloadPercent: percent,
+    localBuildProgress: null,
+    localBuildFailure: null,
     message: null,
     errorContext: null,
     canRetry: false,
@@ -193,8 +213,66 @@ export function reduceDesktopUpdateStateOnDownloadComplete(
     availableVersion: version,
     downloadedVersion: version,
     downloadPercent: 100,
+    localBuildProgress: null,
+    localBuildFailure: null,
     message: null,
     errorContext: null,
+    canRetry: true,
+  };
+}
+
+export function reduceDesktopUpdateStateOnLocalBuildStart(
+  state: DesktopUpdateState,
+  progress: DesktopLocalBuildProgress,
+): DesktopUpdateState {
+  return {
+    ...state,
+    status: "downloading",
+    downloadPercent: null,
+    localBuildProgress: progress,
+    localBuildFailure: null,
+    message: null,
+    errorContext: null,
+    canRetry: false,
+  };
+}
+
+export function reduceDesktopUpdateStateOnLocalBuildProgress(
+  state: DesktopUpdateState,
+  progress: DesktopLocalBuildProgress,
+): DesktopUpdateState {
+  if (
+    state.source !== "lastcode-local" ||
+    state.status !== "downloading" ||
+    state.localBuildProgress?.checkpointTag !== progress.checkpointTag ||
+    progress.percent < state.localBuildProgress.percent
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    downloadPercent: null,
+    localBuildProgress: progress,
+  };
+}
+
+export function reduceDesktopUpdateStateOnLocalBuildFailure(
+  state: DesktopUpdateState,
+  failure: DesktopLocalBuildFailure,
+): DesktopUpdateState {
+  return {
+    ...state,
+    status: "error",
+    downloadPercent: null,
+    localBuildProgress: {
+      checkpointTag: failure.checkpointTag,
+      phase: failure.phase,
+      percent: failure.percent,
+      errorKind: failure.errorKind,
+    },
+    localBuildFailure: failure,
+    message: failure.error,
+    errorContext: "download",
     canRetry: true,
   };
 }
