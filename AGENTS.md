@@ -112,9 +112,22 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
+For an already-started LastCode checkpoint service run, use the resumable
+**Wait for Checkpoint** action instead of agent-side sleep/status loops. Follow
+the action handoff and result rules in `docs/lastcode/release.md`; this action
+does not start or repair the service.
+
+For an authorized local Apple Silicon package build, select the exact installable
+tag and use the resumable **Build Local Package** action (`lc-build-local-package`)
+as described in `docs/lastcode/release.md`. End the turn after launch; do not run
+the build helper directly or poll build logs. The action builds only; installation
+and restart remain separate decisions. If another Action continuation is pending,
+end the turn so its result can arrive, then list Actions again. An automated
+message alone does not make Actions unavailable; use the actual disabled reason.
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
+- For LastCode PRs targeting `lastcode/main`, including authorized checkpoint or build repair PRs, follow `.agents/skills/lastcode-pr/SKILL.md`. When CI or review is passive and no current finding needs judgement, list Project Actions, launch the eligible **Wait for PR** action by its returned ID (prefer `lc-wait-for-pr`), and end the turn immediately. Use the action again after a fixing push when another wait is needed; do not spend agent turns polling GitHub or the running action. This applies without a separate “babysit” request and does not authorize creating or merging a PR.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
 - UI changes need before/after images. Motion or timing needs a short video.
