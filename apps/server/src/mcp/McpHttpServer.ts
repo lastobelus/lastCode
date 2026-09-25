@@ -41,6 +41,8 @@ import {
   DeviceScreenshotToolkit,
   DeviceStandardToolkit,
 } from "./toolkits/device/tools.ts";
+import { ActionResumeToolkitHandlersLive } from "./toolkits/actionResume/handlers.ts";
+import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -660,6 +662,10 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
   DeviceScreenshotRegistrationLive,
 );
 
+export const ActionResumeToolkitRegistrationLive = McpServer.toolkit(ActionResumeToolkit).pipe(
+  Layer.provide(ActionResumeToolkitHandlersLive),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -671,4 +677,5 @@ export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
+  ActionResumeToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));

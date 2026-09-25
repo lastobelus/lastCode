@@ -53,11 +53,13 @@ function Alert({
   variant,
   surface,
   controlAlignment = "center",
+  wrapControlsOnNarrow = false,
   children,
   ...props
 }: React.ComponentProps<"div"> &
   VariantProps<typeof alertVariants> & {
     controlAlignment?: "center" | "first-line";
+    wrapControlsOnNarrow?: boolean;
   }) {
   const icon: React.ReactNode[] = [];
   const content: React.ReactNode[] = [];
@@ -93,6 +95,7 @@ function Alert({
           controlAlignment === "first-line" &&
             action.length > 0 &&
             "min-h-7 pt-1 sm:min-h-6 sm:pt-0.5",
+          wrapControlsOnNarrow && "max-sm:flex-wrap",
         )}
       >
         {icon.length > 0 && (
@@ -115,6 +118,8 @@ function Alert({
             className={cn(
               "flex shrink-0 items-center",
               controlAlignment === "first-line" ? "h-lh self-start" : "self-center",
+              wrapControlsOnNarrow &&
+                "max-sm:ms-6 max-sm:basis-[calc(100%-1.5rem)] max-sm:justify-end",
             )}
           >
             {action}

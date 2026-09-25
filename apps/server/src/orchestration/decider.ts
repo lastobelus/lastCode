@@ -1777,7 +1777,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             payload: {
               threadId: command.threadId,
               messageId: command.message.messageId,
-              role: "user",
+              role: command.message.role,
               text: command.message.text,
               attachments: command.message.attachments,
               ...(command.message.context !== undefined
