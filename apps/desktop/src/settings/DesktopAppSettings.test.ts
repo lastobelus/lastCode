@@ -30,6 +30,7 @@ const DesktopSettingsPatch = Schema.Struct({
   tailscaleServePort: Schema.optionalKey(Schema.Number),
   updateChannel: Schema.optionalKey(Schema.Literals(["latest", "nightly"])),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
+  showAndInstallLocalNightlies: Schema.optionalKey(Schema.Boolean),
   wslBackendEnabled: Schema.optionalKey(Schema.Boolean),
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -132,10 +133,15 @@ describe("DesktopSettings", () => {
         tailscaleServePort: 443,
         updateChannel: "nightly",
         updateChannelConfiguredByUser: false,
+        showAndInstallLocalNightlies: false,
         wslBackendEnabled: false,
         wslOnly: false,
         wslDistro: null,
       } satisfies DesktopAppSettings.DesktopSettings,
+    );
+    assert.equal(
+      DesktopAppSettings.resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1.2").updateChannel,
+      "nightly",
     );
   });
 
@@ -150,6 +156,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 8443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          showAndInstallLocalNightlies: false,
         });
 
         assert.deepEqual(yield* settings.load, {
@@ -162,6 +169,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 8443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          showAndInstallLocalNightlies: false,
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -182,6 +190,11 @@ describe("DesktopSettings", () => {
         assert.isTrue(updateChannel.changed);
         assert.equal(updateChannel.settings.updateChannel, "nightly");
         assert.equal(updateChannel.settings.updateChannelConfiguredByUser, true);
+
+        const localNightlies = yield* settings.setShowAndInstallLocalNightlies(true);
+        assert.isTrue(localNightlies.changed);
+        assert.equal(localNightlies.settings.showAndInstallLocalNightlies, true);
+        assert.equal((yield* settings.load).showAndInstallLocalNightlies, true);
       }),
     ),
   );
@@ -270,6 +283,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 8443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
+          showAndInstallLocalNightlies: false,
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -327,6 +341,7 @@ describe("DesktopSettings", () => {
             tailscaleServePort: 8443,
             updateChannel: "nightly",
             updateChannelConfiguredByUser: true,
+            showAndInstallLocalNightlies: false,
             wslBackendEnabled: false,
             wslOnly: false,
             wslDistro: null,
@@ -376,6 +391,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 443,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
+          showAndInstallLocalNightlies: false,
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -393,6 +409,7 @@ describe("DesktopSettings", () => {
           serverExposureMode: "local-only",
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          showAndInstallLocalNightlies: false,
         });
 
         assert.deepEqual(yield* settings.load, {
@@ -405,6 +422,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          showAndInstallLocalNightlies: false,
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -433,6 +451,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
+          showAndInstallLocalNightlies: false,
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
