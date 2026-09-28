@@ -14,13 +14,14 @@ import {
   CommandId,
   EventId,
   MessageId,
+  type OrchestrationProjectShell,
   ProviderDriverKind,
   type ActionProgress,
   type ProviderInstanceId,
   type ProjectScript,
   type ThreadId,
 } from "@t3tools/contracts";
-import { projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
+import { projectScriptRuntimeEnv, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import {
   ACTION_EVENT_TOKEN_ENV,
@@ -43,6 +44,7 @@ import * as Stream from "effect/Stream";
 
 import { ProjectionThreadActivityRepository } from "../persistence/Services/ProjectionThreadActivities.ts";
 import { forkParked } from "../serverActivation.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -309,6 +311,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
+  const serverSettings = yield* ServerSettingsService;
   const activities = yield* ProjectionThreadActivityRepository;
   const registry = yield* ThreadActionResumeService;
   const terminals = yield* TerminalManager.TerminalManager;
@@ -665,13 +668,22 @@ const make = Effect.gen(function* () {
     return { thread: thread.value, project: project.value };
   });
 
+  const resolveActions = Effect.fn("ActionResume.resolveActions")(function* (
+    project: Pick<OrchestrationProjectShell, "id" | "scripts">,
+  ) {
+    // Settings edits change the effective Actions without updating the project shell.
+    const settings = yield* serverSettings.getSettings;
+    return resolveProjectScripts(settings, project);
+  });
+
   const listProjectActionsImpl = Effect.fn("ActionResume.listProjectActions")(function* (
     invocation: ActionResumeInvocation,
   ) {
     const providerSupported = yield* providerSupportsActionResume(invocation.providerInstanceId);
     const { project } = yield* resolveProjectContext(invocation.threadId);
+    const scripts = yield* resolveActions(project);
     const launchBlocked = actionBlocksNewLaunch(registry.getLatest(invocation.threadId));
-    return project.scripts.map((script) => {
+    return scripts.map((script) => {
       const disabledReason = !providerSupported
         ? "Resume-capable Actions are currently available to Codex and Claude providers."
         : script.allowAgentResume !== true
@@ -782,7 +794,8 @@ const make = Effect.gen(function* () {
         });
       }
       const { project } = yield* resolveProjectContext(invocation.threadId);
-      const script = project.scripts.find((entry) => entry.id === actionId);
+      const scripts = yield* resolveActions(project);
+      const script = scripts.find((entry) => entry.id === actionId);
       if (!script) {
         return yield* new ActionResumeError({
           reason: "action_not_found",
