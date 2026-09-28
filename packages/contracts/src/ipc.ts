@@ -1202,6 +1202,7 @@ export interface DesktopBridge {
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentEnabled?: () => boolean;
   setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
+  reportRunningActionCount?: (count: number) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
@@ -1292,7 +1293,9 @@ export interface DesktopBridge {
    * Quit-confirmation hint pushes. Optional: older desktop builds never emit
    * them.
    */
-  onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
+  onQuitShortcut?: (
+    listener: (event: QuitShortcutHintEvent, runningActionCount: number) => void,
+  ) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
