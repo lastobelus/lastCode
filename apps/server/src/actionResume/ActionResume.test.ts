@@ -33,6 +33,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ThreadActionResume from "../orchestration/ThreadActionResume.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ActionResume from "./ActionResume.ts";
@@ -228,6 +229,7 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       } as never,
     ]),
     ThreadActionResume.layer,
+    ServerSettings.layerTest(),
     Layer.mock(UpdateDrainAdmission)({
       admit: (kind, effect) =>
         Effect.sync(() => admittedKinds.push(kind)).pipe(
@@ -558,6 +560,56 @@ it.effect("runs one opted-in Action and delivers exactly one automated follow-up
       outcome: "succeeded",
       delivery: "delivered",
     });
+
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const watcher = {
+      id: "project-watcher",
+      name: "Project Watcher",
+      command: "node scripts/watch.ts watch",
+      icon: "play" as const,
+      runOnWorktreeCreate: false,
+    };
+    yield* settings.updateSettings({
+      projectSettingsOverrides: { [projectId]: { defaultProjectScripts: [watcher] } },
+    });
+    const saved = yield* service.listProjectActions({ threadId, providerInstanceId });
+    assert.deepEqual(saved, [
+      {
+        id: watcher.id,
+        name: watcher.name,
+        resumeEligible: false,
+        disabledReason: "This Action has not been opted in for agent-triggered resume.",
+      },
+    ]);
+    const disabled = yield* service
+      .runProjectActionAndResume({ threadId, providerInstanceId }, watcher.id)
+      .pipe(Effect.flip);
+    assert.equal(disabled.reason, "action_not_enabled");
+    const removed = yield* service
+      .runProjectActionAndResume({ threadId, providerInstanceId }, "qa")
+      .pipe(Effect.flip);
+    assert.equal(removed.reason, "action_not_found");
+
+    yield* settings.updateSettings({
+      projectSettingsOverrides: {
+        [projectId]: { defaultProjectScripts: [{ ...watcher, allowAgentResume: true }] },
+      },
+    });
+    const enabled = yield* service.listProjectActions({ threadId, providerInstanceId });
+    assert.deepEqual(enabled, [
+      { id: watcher.id, name: watcher.name, resumeEligible: true, disabledReason: null },
+    ]);
+    const watcherRun = yield* service.runProjectActionAndResume(
+      { threadId, providerInstanceId },
+      watcher.id,
+    );
+    assert.equal(watcherRun.command, watcher.command);
+    yield* terminalListener!({
+      type: "closed",
+      threadId,
+      terminalId: watcherRun.terminalId,
+      deleteHistory: true,
+    });
   }).pipe(
     Effect.provide(
       ActionResume.layer.pipe(Layer.provideMerge(Layer.merge(dependencies, TestClock.layer()))),
@@ -703,6 +755,7 @@ it.effect("requires an explicit resume after a running Action is found on startu
         } as never,
       ]),
       ThreadActionResume.layer,
+      ServerSettings.layerTest(),
       Layer.mock(UpdateDrainAdmission)({
         admit: (_kind, effect) => effect,
       }),
