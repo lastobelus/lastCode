@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 
 import { readCarryGroupChain } from "./lastcode-carry-replay.ts";
+import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 
 const NIGHTLY_A = "v9.9.9-nightly.20990101.1";
 const NIGHTLY_B = "v9.9.9-nightly.20990102.2";
@@ -37,6 +38,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-migration-history.ts",
   "scripts/lastcode-migration-validation.ts",
   "scripts/lastcode-lock.mjs",
+  "scripts/lastcode-main-write-lock.ts",
   "scripts/lastcode-build-mac.ts",
   "scripts/lastcode-nightly.ts",
   "scripts/lib/lastcode-installable-tag.ts",
@@ -147,6 +149,7 @@ function initFixture(): Fixture {
 function checkpoint(
   fixture: Fixture,
   args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = {},
 ): NodeChildProcess.SpawnSyncReturns<string> {
   const fakeBin = NodePath.join(fixture.root, "bin");
   return NodeChildProcess.spawnSync(process.execPath, ["scripts/lastcode-checkpoint.ts", ...args], {
@@ -155,6 +158,7 @@ function checkpoint(
     env: {
       ...process.env,
       HOME: fixture.home,
+      ...environment,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
     },
   });
@@ -805,6 +809,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
     });
   }
 });
+
 describe("checkpoint carry lifecycle", () => {
   it("publishes compact revisions, folds a new source PR, and completes retained conflict recovery", () => {
     const fixture = initFixture();
@@ -925,6 +930,15 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
 
       checkout(repo, "upstream-main", upstreamB);
+      const skippedNightly = "v9.9.9-nightly.20990103.2";
+      write(
+        repo,
+        "lifecycle-skipped-upstream.txt",
+        "included without an intermediate checkpoint\n",
+      );
+      const skippedUpstream = commit(repo, "intermediate upstream");
+      git(repo, ["tag", skippedNightly, skippedUpstream]);
+      git(repo, ["push", "--quiet", "upstream", skippedNightly]);
       write(repo, "lifecycle-upstream-next.txt", "upstream C\n");
       const upstreamC = commit(repo, "upstream C");
       git(repo, ["tag", NIGHTLY_C, upstreamC]);
@@ -935,6 +949,14 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
       const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
       assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),
+        true,
+      );
+      assert.equal(
+        git(repo, ["show", `${compactC}:lifecycle-skipped-upstream.txt`]),
+        "included without an intermediate checkpoint",
+      );
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainA);
 
       checkout(repo, "source-pr-2", mainA);
@@ -1159,6 +1181,11 @@ describe("checkpoint carry lifecycle", () => {
         mainWithPr,
       ]);
       assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+
+      // A newer release arriving during repair must not replace the selected target.
+      const newerDuringRepair = "v9.9.9-nightly.20990104.5";
+      git(repo, ["tag", newerDuringRepair, upstreamD]);
+      git(repo, ["push", "--quiet", "upstream", newerDuringRepair]);
 
       const published = checkpoint(fixture, ["--push-tags", "--promote"]);
       assert.equal(published.status, 0, published.stderr || published.stdout);

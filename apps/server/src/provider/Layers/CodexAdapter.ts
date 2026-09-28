@@ -37,7 +37,9 @@ import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -46,6 +48,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
@@ -60,6 +63,7 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { canExposeCodexThreadTool, materializeCodexThreadTool } from "../CodexThreadTool.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
@@ -2242,6 +2246,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const hostProcessPlatform = yield* HostProcessPlatform;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* Effect.service(ServerConfig);
@@ -2278,6 +2285,40 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const runtimeEnvironment = options?.environment ?? process.env;
+        const threadTool = !canExposeCodexThreadTool(hostProcessPlatform, runtimeEnvironment)
+          ? null
+          : options?.makeRuntime
+            ? { binDir: path.join(serverConfig.stateDir, "bin") }
+            : yield* materializeCodexThreadTool({
+                stateDir: serverConfig.stateDir,
+                baseDir: serverConfig.baseDir,
+                ...(runtimeEnvironment.ELECTRON_RUN_AS_NODE !== undefined
+                  ? {
+                      electronRunAsNode: runtimeEnvironment.ELECTRON_RUN_AS_NODE,
+                    }
+                  : {}),
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      detail: "Failed to prepare the LastCode thread command.",
+                      cause,
+                    }),
+                ),
+              );
+        const codexEnvironment = {
+          ...runtimeEnvironment,
+          ...(threadTool
+            ? { PATH: `${threadTool.binDir}:${runtimeEnvironment.PATH || "/usr/bin:/bin"}` }
+            : {}),
+          T3CODE_THREAD_ID: input.threadId,
+          T3CODE_HOME: serverConfig.baseDir,
+        };
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -2285,7 +2326,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           binaryPath: codexConfig.binaryPath,
           ...(options?.models ? { models: options.models } : {}),
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
-          ...(options?.environment ? { environment: options.environment } : {}),
+          environment: codexEnvironment,
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
@@ -2298,10 +2339,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(mcpSession
             ? {
                 environment: {
-                  ...McpProviderSession.withAgentDeviceEnvironment(
-                    options?.environment ?? process.env,
-                    mcpSession,
-                  ),
+                  ...McpProviderSession.withAgentDeviceEnvironment(codexEnvironment, mcpSession),
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
