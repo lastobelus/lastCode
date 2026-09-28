@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   assertWaitStart,
   CI_REGISTRATION_TIMEOUT_MS,
+  compareWaitTarget,
   decideWaitForPr,
   decideWaitTimeout,
   deriveReviewState,
@@ -11,7 +12,12 @@ import {
   formatWaitForPrSummary,
   latestCodexReviewTrigger,
   MERGE_RECOMPUTE_TIMEOUT_MS,
+  parseWaitCommand,
+  parseWaitTarget,
+  pullRequestListArgs,
   pullRequestViewArgs,
+  requireExactGithubCi,
+  resolveWaitTarget,
   REVIEW_TIMEOUT_MS,
   requiresReadyConfirmation,
   reviewThreadsArgs,
@@ -19,6 +25,7 @@ import {
   waitProgressKey,
   waitTimeoutClass,
   type ReviewState,
+  type PullRequestState,
   type WaitObservation,
 } from "./lastcode-wait-for-pr.ts";
 
@@ -69,6 +76,7 @@ function observation(
     readonly localHead?: string;
     readonly localBranch?: string;
     readonly clean?: boolean;
+    readonly local?: null;
   } = {},
 ): WaitObservation {
   return {
@@ -88,13 +96,35 @@ function observation(
     ci: input.ci ?? pendingCi,
     review: input.review ?? pendingReview,
     unresolvedReviewThreads: input.unresolvedReviewThreads ?? 0,
-    local: {
-      branch: input.localBranch ?? "lastcode/wait-for-pr",
-      head: input.localHead ?? HEAD,
-      clean: input.clean ?? true,
-    },
+    local:
+      input.local === null
+        ? null
+        : {
+            branch: input.localBranch ?? "lastcode/wait-for-pr",
+            head: input.localHead ?? HEAD,
+            clean: input.clean ?? true,
+          },
   };
 }
+
+const pullRequest = (
+  input: Omit<Partial<PullRequestState>, "number" | "headRefName" | "baseRefName"> &
+    Required<Pick<PullRequestState, "number" | "headRefName" | "baseRefName">>,
+): PullRequestState => ({
+  number: input.number,
+  url: input.url ?? `https://github.com/lastobelus/lastCode/pull/${input.number}`,
+  state: input.state ?? "OPEN",
+  isDraft: input.isDraft ?? false,
+  headRefName: input.headRefName,
+  headRefOid: input.headRefOid ?? HEAD,
+  headRepository: input.headRepository ?? { nameWithOwner: "lastobelus/lastCode" },
+  isCrossRepository: input.isCrossRepository ?? false,
+  baseRefName: input.baseRefName,
+  baseRefOid: input.baseRefOid ?? BASE,
+  mergeable: input.mergeable ?? "MERGEABLE",
+  mergeStateStatus: input.mergeStateStatus ?? "CLEAN",
+  potentialMergeCommit: input.potentialMergeCommit ?? { oid: MERGE },
+});
 
 describe("lastcode-wait-for-pr", () => {
   it("formats a concise final summary for resumable output", () => {
@@ -119,11 +149,149 @@ describe("lastcode-wait-for-pr", () => {
       "--repo",
       "lastobelus/lastCode",
       "--json",
-      "number,url,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,potentialMergeCommit",
+      "number,url,state,isDraft,headRefName,headRefOid,headRepository,isCrossRepository,baseRefOid,baseRefName,mergeable,mergeStateStatus,potentialMergeCommit",
     ]);
     expect(() => pullRequestViewArgs("lastobelus/lastCode", "")).toThrow(
-      "requires a checked-out branch",
+      "requires a pull request number or checked-out branch",
     );
+    expect(pullRequestListArgs("lastobelus/lastCode", "lastcode/parent")).toContain(
+      "lastcode/parent",
+    );
+  });
+
+  it("accepts only the bounded target-selection commands", () => {
+    expect(parseWaitCommand([])).toEqual({ kind: "wait" });
+    expect(parseWaitCommand(["--target", "215"])).toEqual({
+      kind: "target",
+      pullRequestNumber: 215,
+    });
+    expect(parseWaitCommand(["--clear-target"])).toEqual({ kind: "clear-target" });
+    for (const args of [
+      ["--target"],
+      ["--target", "0"],
+      ["--target", "2.5"],
+      ["--clear-target", "215"],
+    ]) {
+      expect(() => parseWaitCommand(args)).toThrow("Usage:");
+    }
+  });
+
+  it("resolves and pins one same-repository parent chain to lastcode/main", () => {
+    const parentHead = "2".repeat(40);
+    const target = pullRequest({
+      number: 215,
+      headRefName: "lastcode/stack-child",
+      baseRefName: "lastcode/stack-parent",
+      headRefOid: "1".repeat(40),
+      baseRefOid: parentHead,
+    });
+    const parent = pullRequest({
+      number: 214,
+      headRefName: "lastcode/stack-parent",
+      baseRefName: "lastcode/main",
+      headRefOid: parentHead,
+      baseRefOid: "3".repeat(40),
+    });
+    const selection = resolveWaitTarget(
+      "lastobelus/lastCode",
+      215,
+      () => target,
+      (_repository, head) => (head === "lastcode/stack-parent" ? [parent] : []),
+    );
+
+    expect(selection).toMatchObject({
+      schemaVersion: 1,
+      repository: "lastobelus/lastCode",
+      pullRequest: { number: 215, baseRefName: "lastcode/stack-parent" },
+      parents: [{ number: 214, baseRefName: "lastcode/main" }],
+    });
+    expect(parseWaitTarget(JSON.stringify(selection))).toEqual(selection);
+    expect(
+      compareWaitTarget(selection, [target, { ...parent, baseRefName: "lastcode/renamed-main" }]),
+    ).toMatchObject({ reason: "parent-drift", detail: expect.stringContaining("baseRefName") });
+    expect(compareWaitTarget(selection, [target, { ...parent, isDraft: true }])).toMatchObject({
+      reason: "parent-drift",
+      detail: expect.stringContaining("isDraft"),
+    });
+  });
+
+  it("rejects open-chain ambiguity, upstream main, cross-repository heads, and cycles", () => {
+    const child = pullRequest({
+      number: 215,
+      headRefName: "child",
+      baseRefName: "parent",
+      baseRefOid: "2".repeat(40),
+    });
+    const parent = pullRequest({
+      number: 214,
+      headRefName: "parent",
+      baseRefName: "lastcode/main",
+      headRefOid: "2".repeat(40),
+    });
+    expect(() =>
+      resolveWaitTarget(
+        "lastobelus/lastCode",
+        215,
+        () => child,
+        () => [],
+      ),
+    ).toThrow("expected exactly one");
+    expect(() =>
+      resolveWaitTarget(
+        "lastobelus/lastCode",
+        215,
+        () => child,
+        () => [parent, parent],
+      ),
+    ).toThrow("expected exactly one");
+    expect(() =>
+      resolveWaitTarget(
+        "lastobelus/lastCode",
+        215,
+        () => ({ ...child, baseRefName: "main" }),
+        () => [],
+      ),
+    ).toThrow("upstream main");
+    expect(() =>
+      resolveWaitTarget(
+        "lastobelus/lastCode",
+        215,
+        () => ({ ...child, isCrossRepository: true }),
+        () => [],
+      ),
+    ).toThrow("not a same-repository");
+    expect(() =>
+      resolveWaitTarget(
+        "lastobelus/lastCode",
+        215,
+        () => child,
+        () => [{ ...child, headRefName: "parent", headRefOid: "2".repeat(40) }],
+      ),
+    ).toThrow("cycle");
+  });
+
+  it("fails closed for malformed target state and detects ref-name drift even at the same SHA", () => {
+    expect(() => parseWaitTarget("not json")).toThrow("not valid JSON");
+    expect(() => parseWaitTarget(JSON.stringify({ schemaVersion: 1 }))).toThrow("malformed");
+
+    const current = pullRequest({
+      number: 215,
+      headRefName: "lastcode/feature",
+      baseRefName: "lastcode/main",
+    });
+    const selection = resolveWaitTarget(
+      "lastobelus/lastCode",
+      215,
+      () => current,
+      () => [],
+    );
+    expect(compareWaitTarget(selection, [current])).toBeNull();
+    expect(
+      compareWaitTarget(selection, [{ ...current, baseRefName: "lastcode/renamed-main" }]),
+    ).toMatchObject({ reason: "target-drift", detail: expect.stringContaining("baseRefName") });
+    expect(
+      compareWaitTarget(selection, [{ ...current, headRefOid: "4".repeat(40) }]),
+    ).toMatchObject({ reason: "target-drift", detail: expect.stringContaining("headRefOid") });
   });
 
   it("discards observations when the exact PR revision changes during collection", () => {
@@ -208,6 +376,32 @@ describe("lastcode-wait-for-pr", () => {
     expect(
       decideWaitForPr(baseline, observation({ ci: satisfiedCi, review: handledReview })),
     ).toMatchObject({ kind: "wake", reason: "ready" });
+  });
+
+  it("reports stacked validation separately and requires an exact CI run for explicit targets", () => {
+    const baseline = observation({
+      review: handledReview,
+      baseRefName: "lastcode/stack-parent",
+      local: null,
+    });
+    expect(
+      decideWaitForPr(
+        baseline,
+        observation({
+          ci: satisfiedCi,
+          review: handledReview,
+          baseRefName: "lastcode/stack-parent",
+          local: null,
+        }),
+        { expectedBase: "lastcode/stack-parent", readiness: "stacked" },
+      ),
+    ).toMatchObject({ kind: "wake", reason: "stacked-ready" });
+    expect(requireExactGithubCi({ state: "satisfied", reason: "not-expected" })).toMatchObject({
+      state: "failure",
+      reason: "configuration",
+    });
+    expect(requireExactGithubCi(satisfiedCi)).toEqual(satisfiedCi);
+    expect(() => assertWaitStart(baseline)).not.toThrow();
   });
 
   it("waits for definitive mergeability before reporting ready", () => {

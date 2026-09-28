@@ -105,6 +105,16 @@ one stable aggregate `CI Gate`. Head or base drift invalidates the result and
 requires the agent to decide whether to rebase, republish, and request review
 again.
 
+For sequential stacked PRs, the Action can observe one explicitly selected PR
+independently of its checkout. Prepare the selection with the bounded
+`scripts/lastcode-wait-for-pr.ts --target PR_NUMBER` command, then launch the
+saved Action as usual. Clear it with `--clear-target` before returning to
+checkout-derived waits. See
+[Sequential Stack Babysitting](../../.agents/skills/_references/stacked-pr-babysit.md)
+for parent pinning, target lifecycle, and ordered squash/restack requirements.
+Passing against a parent branch is stack validation; the final merge guard
+still requires current `lastcode/main` and fresh evidence.
+
 Open feature PRs do not pause checkpoints. When a checkpoint advances their
 base, update the feature branch to incorporate the new `lastcode/main`, push,
 and obtain fresh validation before merging. Rerunning CI from an old base does
@@ -114,8 +124,9 @@ This applies to authorized repair PRs opened during checkpoint or build recovery
 without a separate request to babysit. After handling existing findings, call
 `list_project_actions`, select the eligible **Wait for PR** action (prefer
 `lc-wait-for-pr`), call `run_project_action_and_resume`, and end the turn.
-Executing `scripts/lastcode-wait-for-pr.ts` directly in a shell keeps the agent
-turn open and defeats the quota-saving handoff. On resume, inspect the result
+Executing the script's polling mode directly in a shell keeps the agent turn
+open and defeats the quota-saving handoff. The bounded target preparation and
+clear commands do not poll. On resume, inspect the result
 and recheck the current revision before continuing.
 
 Merge the current ready PR with:
