@@ -95,6 +95,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
@@ -213,6 +214,7 @@ export const layer = Layer.effect(
     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronDialog = yield* ElectronDialog.ElectronDialog;
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
     // Anchor the pool's lifetime to its layer scope so registered
     // instance scopes can be forked off it. Without this, instance
@@ -300,6 +302,11 @@ export const layer = Layer.effect(
           ),
         ),
       onShutdown: () => desktopWindow.handleBackendNotReady,
+      onStartupFailure: (reason) =>
+        electronDialog.showErrorBox(
+          `${environment.displayName} could not start`,
+          `The local server exited before it was ready (${reason}).\n\nDiagnostic log: ${environment.path.join(environment.logDir, "server-child.log")}\n\nThe app will retry in the background. After addressing the error in the log, you can also quit and reopen the app to try again.`,
+        ),
       onPreflightFailed: handlePrimaryPreflightFailure,
     });
 
