@@ -89,7 +89,15 @@ function useResolvedSettingsScope(search: SettingsScopeSearch) {
       targets[0] ??
       null;
     return { scope, groups, ...selected, targets, target, isReady, projectSnapshotsReady };
-  }, [availableEnvironments, groups, isReady, primaryEnvironmentId, projectFiles, projectSnapshotsReady, scope]);
+  }, [
+    availableEnvironments,
+    groups,
+    isReady,
+    primaryEnvironmentId,
+    projectFiles,
+    projectSnapshotsReady,
+    scope,
+  ]);
 }
 
 const SettingsScopeContext = createContext<
