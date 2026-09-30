@@ -2387,7 +2387,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         Effect.gen(function* () {
           const firstMissing = `t3code_codex_first_`;
           const secondMissing = `t3code_codex_second_`;
-          const spawnedCommands: Array<string> = [];
+          const spawnedProviderProbes: Array<string> = [];
           const secondProbeStarted = yield* Deferred.make<void>();
           const releaseSecondProbe = yield* Deferred.make<void>();
           const allowLazySettingsStream = yield* Deferred.make<void>();
@@ -2438,7 +2438,10 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             Layer.updateService(ChildProcessSpawner.ChildProcessSpawner, (spawner) =>
               ChildProcessSpawner.make((command) => {
                 if (command._tag !== "StandardCommand") return spawner.spawn(command);
-                spawnedCommands.push(command.command);
+                // Maintenance discovery may also spawn host package managers.
+                if (command.command === firstMissing || command.command === secondMissing) {
+                  spawnedProviderProbes.push(command.command);
+                }
                 const beforeSpawn =
                   command.command === secondMissing
                     ? Deferred.succeed(secondProbeStarted, undefined).pipe(
@@ -2473,7 +2476,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               currentCodex?.status === "error" ? currentCodex : (yield* firstError)[0];
             assert.strictEqual(initialCodex?.status, "error");
             assert.strictEqual(initialCodex?.installed, false);
-            assert.deepStrictEqual(spawnedCommands, [firstMissing]);
+            assert.deepStrictEqual(spawnedProviderProbes, [firstMissing]);
 
             const pendingRebuild = yield* Stream.toPull(
               codexSnapshots.pipe(
@@ -2498,7 +2501,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             );
             yield* Deferred.succeed(releaseSecondProbe, undefined);
             const [reprobedCodex] = yield* rebuiltError;
-            assert.deepStrictEqual(spawnedCommands, [firstMissing, secondMissing]);
+            assert.deepStrictEqual(spawnedProviderProbes, [firstMissing, secondMissing]);
             assert.strictEqual(reprobedCodex?.status, "error");
             assert.strictEqual(reprobedCodex?.installed, false);
           }).pipe(Effect.provide(runtimeServices));

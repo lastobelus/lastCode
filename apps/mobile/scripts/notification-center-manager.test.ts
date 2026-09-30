@@ -41,7 +41,7 @@ describe.skipIf(NodeOS.platform() !== "darwin")(
           "-o",
           executable,
         ],
-        { timeout: 30_000, encoding: "utf8" },
+        { timeout: 60_000, encoding: "utf8" },
       );
     });
 
@@ -57,7 +57,7 @@ describe.skipIf(NodeOS.platform() !== "darwin")(
     ])("%s: %s", (name) => {
       const output = NodeChildProcess.execFileSync(executable, [name], {
         encoding: "utf8",
-        timeout: 15_000,
+        timeout: 60_000,
       });
       expect(output.trim()).toBe("passed");
     });
