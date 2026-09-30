@@ -57,7 +57,7 @@ export function waitForScreenRecordingReminder(
     const finish = (pending: boolean) => {
       if (settled) return;
       settled = true;
-      watcher.close();
+      NodeFS.unwatchFile(marker, check);
       timeoutController.abort();
       resolve(pending);
     };
@@ -72,10 +72,8 @@ export function waitForScreenRecordingReminder(
         finish(false);
       }
     };
-    const watcher = NodeFS.watch(NodePath.dirname(marker), (_event, file) => {
-      if (file === NodePath.basename(marker)) check();
-    });
-    watcher.on("error", () => finish(false));
+    // macOS can miss an immediate rewrite of this existing file with fs.watch.
+    NodeFS.watchFile(marker, { interval: 250 }, check);
     void NodeTimersPromises.setTimeout(remaining, undefined, {
       signal: timeoutController.signal,
     }).then(
