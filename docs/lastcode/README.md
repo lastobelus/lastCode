@@ -1,0 +1,64 @@
+# LastCode Documentation
+
+LastCode is a personal downstream of T3 Code that rebases its complete fork-only
+[downstream carry set](glossary.md#downstream-carry-set) onto upstream nightly releases. Tracking an upstream nightly and
+building an application are deliberately separate operations: every nightly can
+be checkpointed, merged LastCode work can become an ordered revision, and only
+selected checkpoints need full local CI and a build.
+
+The workflow is described in terms of independent capabilities: GUI/controller
+nodes, server nodes, architecture-specific DMG builders, artifact consumers,
+version sources, checkpoint/release coordinators, and automation-owned
+checkouts. Deployments may co-locate any of these roles or keep them separate;
+this public repository does not prescribe concrete hosts or topology.
+
+This directory is the deliberate namespace for LastCode-only contributor and
+operations documentation. Product documentation and material intended for an
+upstream contribution continue to use T3 Code's audience-based documentation
+directories.
+
+## Documents
+
+- [Glossary](glossary.md): preferred LastCode fork-maintenance terms and their
+  relationship to the current workflow.
+- [Set up alongside T3 Code](setup.md): prerequisites, guarded bootstrap,
+  initial source build, runtime isolation, and daemon operation.
+- [Nightly workflow](nightly-workflow.md): checkpoint tags, rebasing, promotion,
+  scheduling, recovery, and provenance.
+- [Release workflow](release.md): local CI, PR merging, ad-hoc signing, builds,
+  and runtime isolation.
+- [Contribution and fork conventions](fork-conventions.md): the two workstreams,
+  contribution bases, paired upstream/LastCode changes, remotes, branches, and
+  evaluation tags.
+
+## Command Summary
+
+```bash
+# Provision a personal checkout, daemon, and managed helper commands.
+pnpm run lastcode:setup -- \
+  --enable-nightly-writes \
+  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+
+# Inspect what the checkpoint job would do.
+pnpm run lastcode:checkpoint -- --dry-run
+
+# Checkpoint every missing nightly and push immutable tags.
+pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
+
+# Enable managed background checkpointing.
+pnpm lastcode:checkpoint:service install \
+  --interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+
+# Install and inspect the checkpoint dashboard (eight rows by default).
+pnpm run lastcode:checkpoints -- --install
+lastcode-checkpoints
+lastcode-checkpoints -n 20
+lastcode-checkpoints --verbose
+
+# Validate and build one explicit checkpoint.
+pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+pnpm run lastcode:build:mac:arm64 -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
+```
+
+None of the checkpoint commands builds an application. No build is uploaded or
+published unless a separate explicit release operation is added later.
