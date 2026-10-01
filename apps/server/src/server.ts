@@ -72,6 +72,7 @@ import * as ForgejoCli from "./sourceControl/ForgejoCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -164,6 +165,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as UpdateDrain from "./updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import { UpdateDrainRepositoryLive } from "./persistence/Layers/UpdateDrainRepository.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -517,7 +519,7 @@ const ProviderInstallationRefreshLive = Layer.effectDiscard(
   }),
 );
 
-const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+const RuntimeCoreDependenciesBaseLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderInstallationRefreshLive),
   Layer.provideMerge(ReplayMarkers.layer),
   Layer.provideMerge(ProviderAuthServiceLive),
@@ -580,6 +582,14 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
       CloudManagedEndpointRuntimeLive,
     ),
   ),
+);
+
+const RuntimeCoreDependenciesWithDrainAdmissionLive = UpdateDrainAdmission.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesBaseLive),
+);
+
+const RuntimeCoreDependenciesLive = ActionResume.layer.pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesWithDrainAdmissionLive),
 );
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
