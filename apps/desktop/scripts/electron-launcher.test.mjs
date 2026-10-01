@@ -12,10 +12,16 @@ import {
   resolveMacCodeSignArguments,
   resolveMacLauncherIconPaths,
   resolveMacLauncherPaths,
+  resolveMacLauncherProtocolSchemes,
   writeDevelopmentLauncherScript,
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it("registers LastCode return schemes in macOS development and production bundles", () => {
+    assert.deepEqual(resolveMacLauncherProtocolSchemes(true), ["t3code-dev", "lastcode-dev"]);
+    assert.deepEqual(resolveMacLauncherProtocolSchemes(false), ["t3code", "lastcode"]);
+  });
+
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",

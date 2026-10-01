@@ -11,6 +11,9 @@ import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { EnvironmentIcon } from "../../environmentIcons";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
+import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { ThreadPullRequestsMiniList } from "../ThreadStatusIndicators";
+import { MiddleTruncate } from "../ui/middle-truncate";
 
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
@@ -41,6 +44,7 @@ function terminalProcessLabel(count: number): string {
 }
 
 export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps) {
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(props.thread.environmentId);
   const driverKind = props.providerEntry?.driverKind ?? null;
   const projectDisplayName = props.projectDisplayName ?? props.projectTitle;
   const actionPresentation =
@@ -57,11 +61,13 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
-              environmentId={props.thread.environmentId}
-              cwd={props.projectCwd ?? ""}
-              projectName={props.projectTitle ?? ""}
-              faviconPath={props.projectFaviconPath}
-              projectIcon={props.projectIcon ?? null}
+              project={{
+                environmentId: props.thread.environmentId,
+                workspaceRoot: props.projectCwd ?? "",
+                title: props.projectTitle ?? "",
+                faviconPath: props.projectFaviconPath,
+                projectIcon: props.projectIcon ?? null,
+              }}
               className="size-3 shrink-0"
             />
             <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
@@ -81,7 +87,9 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {props.thread.branch ? (
           <div className="flex min-w-0 items-center gap-2">
             <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-            <div className="min-w-0 truncate text-foreground/75">{props.thread.branch}</div>
+            <div className="min-w-0 text-foreground/75">
+              <MiddleTruncate value={props.thread.branch} className="flex" />
+            </div>
           </div>
         ) : null}
         {props.branchMismatch ? (
@@ -147,6 +155,11 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
           </div>
         ) : null}
       </div>
+      {supportsMultiplePullRequests && props.thread.pullRequests.length > 0 ? (
+        <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
+          <ThreadPullRequestsMiniList pullRequests={props.thread.pullRequests} />
+        </div>
+      ) : null}
       {props.showCleanup === false ? null : (
         <SidebarThreadCleanupHoverContent
           thread={props.thread}
