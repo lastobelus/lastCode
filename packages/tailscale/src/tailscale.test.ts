@@ -68,13 +68,14 @@ function assertCarriesNoSecret(error: object, secret: string): void {
 const tailscaleStatusJson = `{"Self":{"DNSName":"desktop.tail.ts.net.","TailscaleIPs":["100.100.100.100","fd7a:115c:a1e0::1","192.168.1.20"]}}`;
 const tailscaleStatusWithSingleIpJson = `{"Self":{"DNSName":"desktop.tail.ts.net.","TailscaleIPs":["100.90.1.2"]}}`;
 const emptyServeStatusJson = `{"TCP":{},"Web":{}}`;
+const serveConfig = (servePort: number, proxy: string) => ({
+  TCP: { [servePort]: { HTTPS: true } },
+  Web: {
+    [`desktop.tail.ts.net:${String(servePort)}`]: { Handlers: { "/": { Proxy: proxy } } },
+  },
+});
 const serveStatusJson = (servePort: number, proxy: string) =>
-  JSON.stringify({
-    TCP: { [servePort]: { HTTPS: true } },
-    Web: {
-      [`desktop.tail.ts.net:${String(servePort)}`]: { Handlers: { "/": { Proxy: proxy } } },
-    },
-  });
+  JSON.stringify(serveConfig(servePort, proxy));
 
 function mockHandle(result: { stdout?: string; stderr?: string; code?: number }) {
   return ChildProcessSpawner.makeHandle({
@@ -384,6 +385,112 @@ describe("tailscale", () => {
       assert.deepEqual(commands, [["serve", "status", "--json"]]);
     });
   });
+
+  it.effect.each([
+    {
+      name: "foreground-only",
+      background: {},
+      foreground: serveConfig(8443, "http://127.0.0.1:13773"),
+    },
+    {
+      name: "foreground overriding an exact background",
+      background: serveConfig(8443, "http://127.0.0.1:13773"),
+      foreground: serveConfig(8443, "http://127.0.0.1:13773"),
+    },
+    {
+      name: "foreground TCP-only",
+      background: {},
+      foreground: { TCP: { 8443: { TCPForward: "127.0.0.1:39831" } } },
+    },
+    {
+      name: "foreground web-only",
+      background: {},
+      foreground: { Web: serveConfig(8443, "http://127.0.0.1:13773").Web },
+    },
+    {
+      name: "foreground Funnel-only",
+      background: {},
+      foreground: { AllowFunnel: { "desktop.tail.ts.net:8443": true } },
+    },
+  ])("refuses to reuse, replace, or disable a $name handler", ({ background, foreground }) => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      return {
+        stdout: JSON.stringify({
+          ...background,
+          Foreground: { "session-id": foreground },
+        }),
+      };
+    });
+
+    return Effect.gen(function* () {
+      const ensureError = yield* ensureTailscaleServe({
+        localPort: 13773,
+        servePort: 8443,
+        replaceVerifiedHandler: true,
+      }).pipe(Effect.flip, Effect.provide(layer));
+      assert.instanceOf(ensureError, TailscaleServePortOccupiedError);
+
+      const disableError = yield* disableTailscaleServe({
+        localPort: 13773,
+        servePort: 8443,
+      }).pipe(Effect.flip, Effect.provide(layer));
+      assert.instanceOf(disableError, TailscaleServePortOccupiedError);
+      assert.deepEqual(commands, [
+        ["serve", "status", "--json"],
+        ["serve", "status", "--json"],
+      ]);
+    });
+  });
+
+  it.effect("configures an unused port while another port has a foreground handler", () => {
+    const commands: ReadonlyArray<string>[] = [];
+    const layer = mockSpawnerLayer((_command, args) => {
+      commands.push(args);
+      return {
+        stdout: JSON.stringify({
+          Foreground: { "session-id": serveConfig(443, "http://127.0.0.1:39831") },
+        }),
+      };
+    });
+
+    return Effect.gen(function* () {
+      yield* ensureTailscaleServe({ localPort: 13773, servePort: 8443 }).pipe(
+        Effect.provide(layer),
+      );
+      assert.deepEqual(commands, [
+        ["serve", "status", "--json"],
+        ["serve", "--bg", "--https=8443", "http://127.0.0.1:13773"],
+      ]);
+    });
+  });
+
+  it.effect(
+    "disables an exact background handler while another port has a foreground handler",
+    () => {
+      const commands: ReadonlyArray<string>[] = [];
+      const layer = mockSpawnerLayer((_command, args) => {
+        commands.push(args);
+        return {
+          stdout: JSON.stringify({
+            ...serveConfig(8443, "http://127.0.0.1:13773"),
+            Foreground: { "session-id": serveConfig(443, "http://127.0.0.1:39831") },
+          }),
+        };
+      });
+
+      return Effect.gen(function* () {
+        yield* disableTailscaleServe({ localPort: 13773, servePort: 8443 }).pipe(
+          Effect.provide(layer),
+        );
+        assert.deepEqual(commands, [
+          ["serve", "status", "--json"],
+          ["serve", "--https=8443", "off"],
+        ]);
+      });
+    },
+  );
 
   it.effect("refuses to replace a configured port even when its backend differs", () => {
     const layer = mockSpawnerLayer(() => ({

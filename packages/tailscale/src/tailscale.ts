@@ -149,7 +149,7 @@ const TailscaleStatusJson = Schema.Struct({
   Self: Schema.optional(TailscaleStatusSelf),
 });
 
-const TailscaleServeStatusJson = Schema.Struct({
+const TailscaleServeConfigJson = Schema.Struct({
   TCP: Schema.optional(
     Schema.Record(
       Schema.String,
@@ -167,6 +167,11 @@ const TailscaleServeStatusJson = Schema.Struct({
     ),
   ),
   AllowFunnel: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+});
+
+const TailscaleServeStatusJson = Schema.Struct({
+  ...TailscaleServeConfigJson.fields,
+  Foreground: Schema.optional(Schema.Record(Schema.String, TailscaleServeConfigJson)),
 });
 
 type TailscaleServeStatusJson = typeof TailscaleServeStatusJson.Type;
@@ -398,6 +403,21 @@ function servePortState(
   status: TailscaleServeStatusJson,
   input: { readonly servePort: number; readonly proxy: string },
 ): TailscaleServePortState {
+  // Foreground handlers belong to their CLI session and override background mappings.
+  if (
+    Object.values(status.Foreground ?? {}).some(
+      (config) =>
+        Object.keys(config.TCP ?? {}).some((port) => Number(port) === input.servePort) ||
+        Object.keys(config.Web ?? {}).some(
+          (authority) => authorityPort(authority) === input.servePort,
+        ) ||
+        Object.entries(config.AllowFunnel ?? {}).some(
+          ([authority, enabled]) => authorityPort(authority) === input.servePort && enabled,
+        ),
+    )
+  ) {
+    return "occupied";
+  }
   const tcpEntries = Object.entries(status.TCP ?? {}).filter(
     ([port]) => Number(port) === input.servePort,
   );
