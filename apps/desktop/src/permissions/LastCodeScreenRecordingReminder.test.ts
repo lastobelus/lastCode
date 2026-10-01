@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import {
   screenRecordingReminderPending,
   screenRecordingResetMarker,
@@ -40,6 +40,27 @@ it("waits for the installer to finish resetting before showing the reminder", as
     expect(await reminder).toBe(true);
     expect(NodeFS.existsSync(marker)).toBe(true);
   } finally {
+    NodeFS.rmSync(home, { force: true, recursive: true });
+  }
+});
+
+it("reads an immediate rewrite without waiting for a file change notification", async () => {
+  vi.useFakeTimers();
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-permission-test-"));
+  try {
+    const marker = screenRecordingResetMarker(home);
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "pending\n");
+    const timestamp = new Date(Date.now() - 1_000);
+    NodeFS.utimesSync(marker, timestamp, timestamp);
+    const reminder = waitForScreenRecordingReminder(home, () => false);
+    NodeFS.writeFileSync(marker, "ready\n");
+    NodeFS.utimesSync(marker, timestamp, timestamp);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await reminder).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
     NodeFS.rmSync(home, { force: true, recursive: true });
   }
 });
