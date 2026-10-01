@@ -180,7 +180,7 @@ function renderComment(input) {
     );
   } else if (!input.baselineRun.matchesBase) {
     notices.push(
-      "> ℹ️ The exact PR base did not have a successful artifact. Baseline uses the latest successful `main` measurement shown below.",
+      "> ℹ️ Impact uses the latest successful `main` measurement shown below, not an exact PR-base comparison.",
     );
   }
   if (ceilingChanges.length > 0) {
@@ -282,7 +282,7 @@ async function resolve({ github, context, core }) {
     owner,
     repo,
     workflow_id: source.workflow_id,
-    branch: pull.base.ref,
+    branch: context.payload.repository.default_branch,
     event: "push",
     status: "success",
     per_page: 100,
