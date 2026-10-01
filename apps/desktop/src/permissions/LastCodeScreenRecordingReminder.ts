@@ -1,7 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Reads the marker written by the dependency-free installer.
 // @effect-diagnostics globalDate:off -- Marker expiry compares the installer file's wall-clock mtime.
+// @effect-diagnostics globalTimers:off -- This Promise-based installer handoff owns and clears its bounded polling timer.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeTimers from "node:timers";
 import * as NodeTimersPromises from "node:timers/promises";
 
 // The installer may use 30 seconds to launch and 10 more to reset TCC.
@@ -57,7 +59,7 @@ export function waitForScreenRecordingReminder(
     const finish = (pending: boolean) => {
       if (settled) return;
       settled = true;
-      watcher.close();
+      NodeTimers.clearInterval(poll);
       timeoutController.abort();
       resolve(pending);
     };
@@ -72,10 +74,8 @@ export function waitForScreenRecordingReminder(
         finish(false);
       }
     };
-    const watcher = NodeFS.watch(NodePath.dirname(marker), (_event, file) => {
-      if (file === NodePath.basename(marker)) check();
-    });
-    watcher.on("error", () => finish(false));
+    // Read contents independently of watcher baselines and macOS change notifications.
+    const poll = NodeTimers.setInterval(check, 250);
     void NodeTimersPromises.setTimeout(remaining, undefined, {
       signal: timeoutController.signal,
     }).then(
