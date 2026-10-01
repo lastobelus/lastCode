@@ -10,10 +10,10 @@ import {
   type DesktopUpdateChannel,
   ProviderDriverKind,
   type ProviderInstanceId,
-  type ScopedThreadRef,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -3387,7 +3387,8 @@ export function ArchivedThreadsPanel() {
   }, [archivedSnapshots, scope]);
 
   const handleArchivedThreadContextMenu = useCallback(
-    async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+    async (thread: EnvironmentThreadShell, position: { x: number; y: number }) => {
+      const threadRef = scopeThreadRef(thread.environmentId, thread.id);
       const api = readLocalApi();
       if (!api) return;
       const clicked = await api.contextMenu.show(
@@ -3416,7 +3417,10 @@ export function ArchivedThreadsPanel() {
       }
 
       if (clicked === "delete") {
-        const result = await confirmAndDeleteThread(threadRef);
+        const archivedThreads = archivedGroups
+          .filter((group) => group.project.environmentId === thread.environmentId)
+          .flatMap((group) => group.threads);
+        const result = await confirmAndDeleteThread(threadRef, { archivedThreads });
         if (result._tag === "Success") {
           refreshArchivedThreads();
         } else if (!isAtomCommandInterrupted(result)) {
@@ -3431,7 +3435,7 @@ export function ArchivedThreadsPanel() {
         }
       }
     },
-    [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [archivedGroups, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
   );
 
   return (
@@ -3483,13 +3487,10 @@ export function ArchivedThreadsPanel() {
                   event.preventDefault();
                   void (async () => {
                     const result = await settlePromise(() =>
-                      handleArchivedThreadContextMenu(
-                        scopeThreadRef(thread.environmentId, thread.id),
-                        {
-                          x: event.clientX,
-                          y: event.clientY,
-                        },
-                      ),
+                      handleArchivedThreadContextMenu(thread, {
+                        x: event.clientX,
+                        y: event.clientY,
+                      }),
                     );
                     if (result._tag === "Failure") {
                       const error = squashAtomCommandFailure(result);
