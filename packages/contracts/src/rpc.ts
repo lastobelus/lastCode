@@ -23,11 +23,13 @@ import {
   ProviderSetupInput,
 } from "./providerSetup.ts";
 import {
+  UpdateDrainAdmissionError,
   UpdateDrainCancelInput,
+  UpdateDrainClaimInput,
   UpdateDrainCommandReceipt,
   UpdateDrainError,
   UpdateDrainStartInput,
-  UpdateDrainState,
+  UpdateDrainStatus,
 } from "./updateDrain.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
@@ -104,6 +106,7 @@ import {
 } from "./review.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
+  ActionResumeError,
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
@@ -122,6 +125,7 @@ import {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
+import { ThreadId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestActionInput,
@@ -360,6 +364,10 @@ export const WS_METHODS = {
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
 
+  // One-shot Project Action continuation methods
+  actionResumeResume: "actionResume.resume",
+  actionResumeDiscard: "actionResume.discard",
+
   // Preview methods
   previewOpen: "preview.open",
   previewNavigate: "preview.navigate",
@@ -409,6 +417,7 @@ export const WS_METHODS = {
   serverRefreshUsageRates: "server.refreshUsageRates",
   serverStartUpdateDrain: "server.startUpdateDrain",
   serverCancelUpdateDrain: "server.cancelUpdateDrain",
+  serverClaimUpdateActivation: "server.claimUpdateActivation",
   serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
   // Cloud environment methods
@@ -750,9 +759,15 @@ export const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpda
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
+export const WsServerClaimUpdateActivationRpc = Rpc.make(WS_METHODS.serverClaimUpdateActivation, {
+  payload: UpdateDrainClaimInput,
+  success: UpdateDrainCommandReceipt,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
 export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
   payload: Schema.Struct({}),
-  success: UpdateDrainState,
+  success: UpdateDrainStatus,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
@@ -1127,7 +1142,12 @@ const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
 const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullRequestThread, {
   payload: GitPreparePullRequestThreadInput,
   success: GitPreparePullRequestThreadResult,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
@@ -1184,19 +1204,34 @@ const WsReviewGetDiffFileContentsRpc = Rpc.make(WS_METHODS.reviewGetDiffFileCont
 const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
   payload: TerminalOpenInput,
   success: TerminalSessionSnapshot,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
   payload: TerminalAttachInput,
   success: TerminalAttachStreamEvent,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
   stream: true,
 });
 
 const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
   payload: TerminalWriteInput,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsTerminalResizeRpc = Rpc.make(WS_METHODS.terminalResize, {
@@ -1212,12 +1247,32 @@ const WsTerminalClearRpc = Rpc.make(WS_METHODS.terminalClear, {
 const WsTerminalRestartRpc = Rpc.make(WS_METHODS.terminalRestart, {
   payload: TerminalRestartInput,
   success: TerminalSessionSnapshot,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   payload: TerminalCloseInput,
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+});
+
+export const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([
+    ActionResumeError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+export const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
 });
 
 const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
@@ -1345,11 +1400,19 @@ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
   stream: true,
 });
 
-const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.dispatchCommand, {
-  payload: ClientOrchestrationCommand,
-  success: OrchestrationRpcSchemas.dispatchCommand.output,
-  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
-});
+const WsOrchestrationDispatchCommandRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.dispatchCommand,
+  {
+    payload: ClientOrchestrationCommand,
+    success: OrchestrationRpcSchemas.dispatchCommand.output,
+    error: Schema.Union([
+      OrchestrationDispatchCommandError,
+      UpdateDrainAdmissionError,
+      UpdateDrainError,
+      EnvironmentAuthorizationError,
+    ]),
+  },
+);
 
 const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getWorkflowScript, {
   payload: OrchestrationRpcSchemas.getWorkflowScript.input,
@@ -1506,6 +1569,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetBackgroundPolicyRpc,
   WsServerStartUpdateDrainRpc,
   WsServerCancelUpdateDrainRpc,
+  WsServerClaimUpdateActivationRpc,
   WsServerGetUpdateDrainStatusRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
@@ -1581,6 +1645,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsActionResumeResumeRpc,
+  WsActionResumeDiscardRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
   WsPreviewOpenRpc,
