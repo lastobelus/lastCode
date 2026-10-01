@@ -29,6 +29,7 @@ import {
   refreshArchivedThreadsForEnvironment,
 } from "../lib/archivedThreadsState";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 import { readLocalApi } from "../localApi";
 import {
   readEnvironmentSupportsAutoSettleOptOut,
@@ -263,6 +264,9 @@ export function useThreadActions() {
   const unarchiveThreadMutation = useAtomCommand(threadEnvironment.unarchive, {
     reportFailure: false,
   });
+  const setThreadPersistenceMutation = useAtomCommand(threadEnvironment.setPersistence, {
+    reportFailure: false,
+  });
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
     reportFailure: false,
   });
@@ -421,6 +425,15 @@ export function useThreadActions() {
     ],
   );
 
+  const setThreadPersistence = useCallback(
+    (target: ScopedThreadRef, persistent: boolean) =>
+      setThreadPersistenceMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, persistent },
+      }),
+    [setThreadPersistenceMutation],
+  );
+
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: DeleteThreadOptions = {}) => {
       const resolved = resolveThreadTargetWithArchivedFallback(
@@ -435,6 +448,7 @@ export function useThreadActions() {
           input: { threadId: target.threadId },
         });
         if (result._tag === "Success") {
+          purgeThreadHandoffs(target);
           refreshArchivedThreadsForEnvironment(target.environmentId);
         }
         return result;
@@ -551,6 +565,7 @@ export function useThreadActions() {
       if (deleteResult._tag === "Failure") {
         return deleteResult;
       }
+      purgeThreadHandoffs(threadRef);
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);
@@ -1008,6 +1023,7 @@ export function useThreadActions() {
     () => ({
       archiveThread,
       unarchiveThread,
+      setThreadPersistence,
       deleteThread,
       confirmAndDeleteThread,
       settleThread,
@@ -1033,6 +1049,7 @@ export function useThreadActions() {
       settleThread,
       snoozeThread,
       unarchiveThread,
+      setThreadPersistence,
       unpinThread,
       unsettleThread,
       unsnoozeThread,

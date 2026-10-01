@@ -211,6 +211,7 @@ describe("environment entity projections", () => {
       ...THREAD_SHELL,
       environmentId: ENVIRONMENT_ID,
       title: "Cached thread",
+      persistent: true,
       branch: "stale-branch",
       worktreePath: "/repo/stale-worktree",
       activeOrderKey: "t",
@@ -225,6 +226,7 @@ describe("environment entity projections", () => {
       ...THREAD_SHELL,
       environmentId: ENVIRONMENT_ID,
       title: "Current thread",
+      persistent: false,
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
       activeOrderKey: "f",
@@ -235,6 +237,7 @@ describe("environment entity projections", () => {
 
     expect(merged).toMatchObject({
       title: "Current thread",
+      persistent: false,
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
       activeOrderKey: "f",
