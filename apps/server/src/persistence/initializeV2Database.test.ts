@@ -15,7 +15,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "./Layers/Sqlite.ts";
 import { runMigrations } from "./Migrations.ts";
-import { runLastCodeMigrations } from "./LastCodeMigrations.ts";
+import { lastcodeMigrationManifest, runLastCodeMigrations } from "./LastCodeMigrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -72,9 +72,10 @@ it.effect(
         assert.equal(shell.thread.annotation?.resolvedAt, "2026-01-02T00:00:00.000Z");
         assert.equal(shell.thread.attention?.kind, "question");
         assert.deepStrictEqual(
-          (yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations ORDER BY migration_id`)
-            .length,
-          10,
+          (yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations ORDER BY migration_id`).map(
+            (row) => [row.migration_id, row.name] as const,
+          ),
+          lastcodeMigrationManifest,
         );
         assert.deepEqual(
           shell.messages.map((message) => message.text),

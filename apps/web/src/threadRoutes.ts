@@ -48,16 +48,6 @@ export function buildThreadRouteParams(ref: ScopedThreadRef): {
   };
 }
 
-export function buildThreadRouteLocation(ref: ScopedThreadRef): {
-  to: "/$environmentId/$threadId";
-  params: ReturnType<typeof buildThreadRouteParams>;
-} {
-  return {
-    to: "/$environmentId/$threadId",
-    params: buildThreadRouteParams(ref),
-  };
-}
-
 export function buildDraftThreadRouteParams(draftId: DraftId): {
   draftId: DraftId;
 } {

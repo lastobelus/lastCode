@@ -244,7 +244,7 @@ export function actionCommandForShell(
   }
 }
 
-export function actionBlocksNewLaunch(state: ActionResumeState | null): boolean {
+function actionBlocksNewLaunch(state: ActionResumeState | null): boolean {
   return (
     state !== null &&
     (state.delivery === "armed" || state.delivery === "pending" || state.delivery === "available")

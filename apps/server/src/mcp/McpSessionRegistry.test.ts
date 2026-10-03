@@ -49,7 +49,7 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
     const resolved = yield* registry.resolve(token);
     expect(resolved?.threadId).toBe(threadId);
     expect(resolved?.capabilities).toEqual(
-      new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+      new Set(["preview", "orchestration", "worktree", "pull-requests", "action-resume"]),
     );
 
     yield* registry.revokeThread(threadId);
@@ -83,6 +83,7 @@ it.effect("always grants pull-requests and gates browser and device access indep
         .pipe(Effect.map((scope) => [...(scope?.capabilities ?? [])].sort()));
 
     expect(yield* capabilitiesOf(withPreview)).toEqual([
+      "action-resume",
       "orchestration",
       "preview",
       "pull-requests",

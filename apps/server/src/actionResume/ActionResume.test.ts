@@ -784,6 +784,39 @@ it.effect("rejects native process launch during update drain without opening a t
   }).pipe(Effect.provide(StoreTestLayer)),
 );
 
+it.effect("rejects MCP Action launch during update drain without opening a terminal", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    h.state.drainClosed = true;
+    yield* Effect.gen(function* () {
+      const toolkit = yield* ActionResumeToolkit.pipe(
+        Effect.provide(ActionResumeToolkitHandlersLive),
+      );
+      const result = yield* toolkit
+        .handle("run_project_action_and_resume", { actionId: "qa" })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            environmentId: EnvironmentId.make("environment-action"),
+            threadId,
+            providerSessionId: "session-action",
+            providerInstanceId,
+            capabilities: new Set(["action-resume"] as const),
+            issuedAt: 0,
+          }),
+          Effect.result,
+        );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.include(String(result.failure), "draining for update 1.0.0");
+      }
+      assert.equal(h.opened.length, 0);
+      assert.equal(h.commands.length, 0);
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
 it.effect.each(["running", "completed"] as const)(
   "preserves %s process history and captured output when its thread is deleted",
   (status) =>
