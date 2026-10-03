@@ -26,6 +26,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { expect } from "vite-plus/test";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 
@@ -97,6 +98,7 @@ const LSOF_TEST_PORT = 43_123;
 const makeLsofScannerLayer = (input: {
   readonly pid: () => number;
   readonly output?: () => string;
+  readonly run?: ProcessRunner.ProcessRunner["Service"]["run"];
   readonly platform?: "linux" | "win32";
   readonly fetch: typeof globalThis.fetch;
 }) =>
@@ -104,17 +106,19 @@ const makeLsofScannerLayer = (input: {
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: () =>
-            Effect.succeed({
-              stdout: input.output?.() ?? `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
-              stderr: "",
-              code: null,
-              timedOut: false,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-              stdoutInvalidUtf8: false,
-              stderrInvalidUtf8: false,
-            }),
+          run:
+            input.run ??
+            (() =>
+              Effect.succeed({
+                stdout: input.output?.() ?? `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              })),
         }),
         Layer.succeed(Net.NetService, {
           canListenOnHost: () => Effect.succeed(true),
@@ -357,6 +361,136 @@ effectIt.effect("requires every Windows listener on a port to have the same term
       threadId: "thread-owned-preview",
       terminalId: "terminal-owned-preview",
       processIds: [ownedProcessId],
+    });
+    const found = yield* scanner.scan([`http://localhost:${port}/preview`]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ port, pid: null, terminal: null });
+  }).pipe(Effect.provide(layer));
+});
+
+const windowsProbeResult = (stdout: string): ProcessRunner.ProcessRunOutput => ({
+  stdout,
+  stderr: "",
+  code: ChildProcessSpawner.ExitCode(0),
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+  stdoutInvalidUtf8: false,
+  stderrInvalidUtf8: false,
+});
+
+for (const failure of ["spawn", "exit", "timeout", "truncated", "invalid-utf8"] as const) {
+  effectIt.effect(
+    `attributes Windows netstat listeners after PowerShell ${failure} failure`,
+    () => {
+      const port = 63_129;
+      const processId = 62_021;
+      const url = `http://localhost:${port}/preview`;
+      const commands: string[] = [];
+      const layer = makeLsofScannerLayer({
+        pid: () => processId,
+        platform: "win32",
+        run: (request) => {
+          commands.push(request.command);
+          if (request.command === "powershell.exe") {
+            if (failure === "spawn") return processProbeFailure(request);
+            return Effect.succeed({
+              ...windowsProbeResult(""),
+              code: ChildProcessSpawner.ExitCode(failure === "exit" ? 1 : 0),
+              timedOut: failure === "timeout",
+              stdoutTruncated: failure === "truncated",
+              stdoutInvalidUtf8: failure === "invalid-utf8",
+            });
+          }
+          expect(request.command).toBe("netstat.exe");
+          expect(request.args).toEqual(["-ano"]);
+          return Effect.succeed(
+            windowsProbeResult(
+              [
+                "Active Connections",
+                "  Proto  Local Address  Foreign Address  State  PID",
+                `  TCP  0.0.0.0:${port}  0.0.0.0:0  LISTENING  ${processId}`,
+                `  TCP  [::]:${port}  [::]:0  LISTENING  ${processId}`,
+                `  TCP  127.0.0.1:63130  127.0.0.1:50000  ESTABLISHED  ${processId}`,
+                `  UDP  0.0.0.0:63131  *:*  ${processId}`,
+                `  TCP  192.0.2.1:63132  0.0.0.0:0  LISTENING  ${processId}`,
+                `  TCP  127.0.0.1:65536  0.0.0.0:0  LISTENING  ${processId}`,
+              ].join("\r\n"),
+            ),
+          );
+        },
+        fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+      });
+
+      return Effect.gen(function* () {
+        const scanner = yield* PortScanner.PortDiscovery;
+        const owner = { threadId: "thread-owned-preview", terminalId: "terminal-owned-preview" };
+        yield* scanner.registerTerminalProcesses({ ...owner, processIds: [processId] });
+        expect(yield* scanner.scan([url])).toEqual([
+          { host: "localhost", port, url, pid: processId, processName: null, terminal: owner },
+        ]);
+        expect(commands).toEqual(["powershell.exe", "netstat.exe"]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+}
+
+effectIt.effect("requires all Windows netstat listener processes to belong to the terminal", () => {
+  const layer = makeLsofScannerLayer({
+    pid: () => 62_031,
+    platform: "win32",
+    run: (request) =>
+      request.command === "powershell.exe"
+        ? processProbeFailure(request)
+        : Effect.succeed(
+            windowsProbeResult(
+              [
+                "TCP 127.0.0.1:63133 0.0.0.0:0 LISTENING 62031",
+                "TCP [::1]:63133 [::]:0 LISTENING 62032",
+                "TCP 127.0.0.1:63134 0.0.0.0:0 LISTENING 62031",
+                "TCP [::]:63134 [::]:0 LISTENING 62033",
+                "TCP 127.0.0.1:63135 0.0.0.0:0 LISTENING 62031",
+                "TCP [::]:63135 [::]:0 LISTENING 0",
+                "TCP [::1]:63136 [::]:0 LISTENING 62033",
+              ].join("\n"),
+            ),
+          ),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    const owner = { threadId: "thread-owned-preview", terminalId: "terminal-owned-preview" };
+    yield* scanner.registerTerminalProcesses({ ...owner, processIds: [62_031, 62_032] });
+    const found = yield* scanner.scan();
+    expect(found.map(({ port, pid, terminal }) => ({ port, pid, terminal }))).toEqual([
+      { port: 63_133, pid: null, terminal: owner },
+      { port: 63_134, pid: null, terminal: null },
+      { port: 63_135, pid: 62_031, terminal: null },
+      { port: 63_136, pid: 62_033, terminal: null },
+    ]);
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("does not claim ownership from truncated Windows netstat output", () => {
+  const port = 63_137;
+  const layer = makeLsofScannerLayer({
+    pid: () => 62_041,
+    platform: "win32",
+    run: (request) =>
+      request.command === "powershell.exe"
+        ? processProbeFailure(request)
+        : Effect.succeed({
+            ...windowsProbeResult(`TCP 127.0.0.1:${port} 0.0.0.0:0 LISTENING 62041`),
+            stdoutTruncated: true,
+          }),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [62_041],
     });
     const found = yield* scanner.scan([`http://localhost:${port}/preview`]);
     expect(found).toHaveLength(1);

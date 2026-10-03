@@ -4,7 +4,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
-import { readPreparedConnection } from "~/state/session";
+import { readPreparedConnection, readConfiguredPreviewEnvironmentUrl } from "~/state/session";
 import { previewEnvironment } from "~/state/preview";
 
 export { selectHostedPreview } from "@t3tools/client-runtime/preview-hosting";
@@ -28,13 +28,12 @@ export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): 
 export async function prepareHostedPreview(threadRef: ScopedThreadRef, url: string) {
   const connection = readPreparedConnection(threadRef.environmentId);
   if (!connection) return { url, managed: false, restored: false };
-  const configuredEndpointUrls =
-    connection.target._tag === "PrimaryConnectionTarget" ? [connection.target.httpBaseUrl] : [];
+  const configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
   return prepareOwnedPreview({
     threadRef,
     url,
     environmentUrl: connection.httpBaseUrl,
-    knownEnvironmentUrls: configuredEndpointUrls,
+    knownEnvironmentUrls: configuredEndpoint === null ? [] : [configuredEndpoint],
     list: async () => {
       const result = await runAtomCommand(
         appAtomRegistry,

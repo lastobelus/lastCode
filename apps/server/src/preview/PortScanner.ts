@@ -6,8 +6,8 @@
  * on).
  *
  * Linux tries `ss` with process attribution when `lsof` is unavailable.
- * Windows / process tools missing: checks a curated list of common dev ports
- * through the shared Net service.
+ * Windows tries PowerShell, then `netstat -ano`, retaining process attribution.
+ * When process tools are missing, checks common dev ports through the Net service.
  *
  * Listening ports are published only after a bounded HTTP(S) probe finds a
  * successful HTML document or a redirect to one.
@@ -332,6 +332,27 @@ const parseWindowsListenerOutput = (
     .toSorted((left, right) => left.port - right.port);
 };
 
+const parseWindowsNetstatOutput = (
+  raw: string,
+  terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner>,
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const listeners: string[] = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const [protocol, localAddress, , state, pid] = line.trim().split(/\s+/u);
+    if (protocol !== "TCP" || state !== "LISTENING" || !localAddress) continue;
+    const lastColon = localAddress.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const host = localAddress.slice(0, lastColon).replace(/^\[(.*)\]$/u, "$1");
+    const port = localAddress.slice(lastColon + 1);
+    listeners.push(`${host}|${port}|${pid ?? ""}|`);
+  }
+  // Aggregate all IPv4/IPv6 listeners before assigning ownership to a port.
+  return parseWindowsListenerOutput(listeners.join("\n"), terminalByProcessId);
+};
+
+const isCompleteWindowsListenerProbe = (result: ProcessRunner.ProcessRunOutput): boolean =>
+  result.code === 0 && !result.timedOut && !result.stdoutTruncated && !result.stdoutInvalidUtf8;
+
 const parseSsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
@@ -629,7 +650,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   });
 
   const recoverProcessProbeFailure =
-    (probe: "lsof" | "ss-listeners" | "windows-listeners") =>
+    (probe: "lsof" | "ss-listeners" | "windows-listeners" | "windows-netstat") =>
     (error: ProcessRunner.ProcessRunError) =>
       Effect.logDebug("preview port process probe failed; trying the next available probe", {
         cause: error,
@@ -660,7 +681,11 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           outputMode: "truncate",
         })
         .pipe(
-          Effect.map((result) => parseWindowsListenerOutput(result.stdout, terminalByProcessId)),
+          Effect.map((result) =>
+            isCompleteWindowsListenerProbe(result)
+              ? parseWindowsListenerOutput(result.stdout, terminalByProcessId)
+              : null,
+          ),
           Effect.catchTags({
             ProcessSpawnError: recoverWindowsProbeFailure,
             ProcessStdinError: recoverWindowsProbeFailure,
@@ -670,6 +695,31 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           }),
         );
       if (listeners !== null) return yield* probeWebServers(listeners, configuredUrls);
+      const recoverNetstatProbeFailure = recoverProcessProbeFailure("windows-netstat");
+      const netstatListeners = yield* processRunner
+        .run({
+          command: "netstat.exe",
+          args: ["-ano"],
+          timeout: Duration.millis(WINDOWS_LISTENER_TIMEOUT_MS),
+          maxOutputBytes: 1024 * 1024,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.map((result) =>
+            isCompleteWindowsListenerProbe(result)
+              ? parseWindowsNetstatOutput(result.stdout, terminalByProcessId)
+              : null,
+          ),
+          Effect.catchTags({
+            ProcessSpawnError: recoverNetstatProbeFailure,
+            ProcessStdinError: recoverNetstatProbeFailure,
+            ProcessOutputLimitError: recoverNetstatProbeFailure,
+            ProcessReadError: recoverNetstatProbeFailure,
+            ProcessTimeoutError: recoverNetstatProbeFailure,
+          }),
+        );
+      if (netstatListeners !== null)
+        return yield* probeWebServers(netstatListeners, configuredUrls);
       return yield* probeWebServers(yield* probeCommonPorts(), configuredUrls);
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");

@@ -38,7 +38,7 @@ import {
 import { resolveWorkspaceFilePath } from "./filePath";
 import { previewEnvironment } from "../../state/preview";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { usePreparedConnection } from "../../state/session";
+import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 interface MarkdownPreviewStyles {
@@ -239,8 +239,7 @@ export function FileMarkdownPreview(props: {
     [props.cwd, props.relativePath],
   );
   const connection = Option.getOrNull(preparedConnection);
-  const knownEnvironmentUrl =
-    connection?.target._tag === "PrimaryConnectionTarget" ? connection.target.httpBaseUrl : null;
+  const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(props.environmentId, connection);
   const prepareMediaUrl = useCallback(
     (href: string) => {
       const threadRef =

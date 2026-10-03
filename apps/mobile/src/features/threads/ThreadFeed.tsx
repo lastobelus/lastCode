@@ -203,7 +203,7 @@ import {
 } from "../../state/assets";
 import { previewEnvironment } from "../../state/preview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
-import { usePreparedConnection } from "../../state/session";
+import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
 import {
   openThreadFeedMarkdownUrl,
   preparedThreadFeedMediaActionsSource,
@@ -2382,11 +2382,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const environmentUrl = Option.isSome(preparedConnection)
     ? preparedConnection.value.httpBaseUrl
     : "";
-  const knownEnvironmentUrl =
-    Option.isSome(preparedConnection) &&
-    preparedConnection.value.target._tag === "PrimaryConnectionTarget"
-      ? preparedConnection.value.target.httpBaseUrl
-      : null;
+  const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(
+    props.environmentId,
+    Option.getOrNull(preparedConnection),
+  );
   const previewPreparationInput = useCallback(
     (url: string) => {
       if (!hasPreparedConnection) return null;

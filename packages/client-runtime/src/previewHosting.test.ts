@@ -6,7 +6,19 @@ import {
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { prepareHostedPreview, selectHostedPreview } from "./previewHosting.ts";
+import * as Option from "effect/Option";
+import {
+  BearerConnectionTarget,
+  RelayConnectionTarget,
+  PrimaryConnectionTarget,
+  type PreparedConnection,
+} from "./connection/model.ts";
+import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./connection/catalog.ts";
+import {
+  configuredPreviewEnvironmentUrl,
+  prepareHostedPreview,
+  selectHostedPreview,
+} from "./previewHosting.ts";
 
 const threadRef = {
   environmentId: EnvironmentId.make("environment-preview"),
@@ -301,5 +313,101 @@ describe("selectHostedPreview", () => {
     expect(
       selectHostedPreview(new URL("http://localhost:5173/unknown"), [lease, another]),
     ).toBeNull();
+  });
+});
+
+describe("configured preview endpoints", () => {
+  const target = new BearerConnectionTarget({
+    environmentId: threadRef.environmentId,
+    label: "Remote environment",
+    connectionId: "saved-connection",
+  });
+  const connection: PreparedConnection = {
+    environmentId: threadRef.environmentId,
+    label: target.label,
+    httpBaseUrl: "http://100.100.12.4:3773/",
+    socketUrl: "ws://100.100.12.4:3773/ws",
+    httpAuthorization: null,
+    target,
+  };
+  const entry: ConnectionCatalogEntry = {
+    target,
+    enabled: true,
+    profile: Option.some(
+      new BearerConnectionProfile({
+        environmentId: threadRef.environmentId,
+        connectionId: target.connectionId,
+        label: target.label,
+        httpBaseUrl: "http://192.168.1.24:3773/",
+        wsBaseUrl: "ws://192.168.1.24:3773/ws",
+      }),
+    ),
+  };
+  it("retains a bearer profile endpoint alongside the resolved transport address", () => {
+    expect(configuredPreviewEnvironmentUrl(connection, entry)).toBe("http://192.168.1.24:3773/");
+  });
+  it("refuses profiles belonging to other environments or connections", () => {
+    expect(
+      configuredPreviewEnvironmentUrl(connection, {
+        ...entry,
+        target: new BearerConnectionTarget({
+          ...target,
+          environmentId: EnvironmentId.make("other-environment"),
+        }),
+      }),
+    ).toBeNull();
+    expect(
+      configuredPreviewEnvironmentUrl(connection, {
+        ...entry,
+        target: new BearerConnectionTarget({ ...target, connectionId: "other-connection" }),
+      }),
+    ).toBeNull();
+    expect(
+      configuredPreviewEnvironmentUrl(connection, { ...entry, profile: Option.none() }),
+    ).toBeNull();
+    expect(
+      configuredPreviewEnvironmentUrl(connection, {
+        ...entry,
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: target.connectionId,
+            label: target.label,
+            httpBaseUrl: "http://192.168.1.24:3773/",
+            wsBaseUrl: "ws://192.168.1.24:3773/ws",
+            environmentId: EnvironmentId.make("other-environment"),
+          }),
+        ),
+      }),
+    ).toBeNull();
+  });
+  it("does not infer private endpoints from relay targets", () => {
+    expect(
+      configuredPreviewEnvironmentUrl(
+        {
+          ...connection,
+          target: new RelayConnectionTarget({
+            environmentId: threadRef.environmentId,
+            label: target.label,
+          }),
+        },
+        entry,
+      ),
+    ).toBeNull();
+  });
+  it("retains a primary target's configured endpoint", () => {
+    expect(
+      configuredPreviewEnvironmentUrl(
+        {
+          ...connection,
+          target: new PrimaryConnectionTarget({
+            environmentId: threadRef.environmentId,
+            label: target.label,
+            httpBaseUrl: "http://192.168.1.24:3773/",
+            wsBaseUrl: "ws://192.168.1.24:3773/ws",
+          }),
+        },
+        undefined,
+      ),
+    ).toBe("http://192.168.1.24:3773/");
   });
 });

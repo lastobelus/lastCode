@@ -1,3 +1,6 @@
+import * as Option from "effect/Option";
+import type { ConnectionCatalogEntry } from "./connection/catalog.ts";
+import type { PreparedConnection } from "./connection/model.ts";
 import type { PreviewHostingLeaseSummary, ScopedThreadRef } from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
@@ -5,6 +8,28 @@ import {
   isPrivateNetworkHost,
   normalizeHostname,
 } from "@t3tools/shared/hostClassification";
+
+/** A configured endpoint is trusted only when it belongs to the prepared environment. */
+export function configuredPreviewEnvironmentUrl(
+  connection: PreparedConnection,
+  entry: ConnectionCatalogEntry | undefined,
+): string | null {
+  if (connection.target._tag === "PrimaryConnectionTarget") return connection.target.httpBaseUrl;
+  if (
+    connection.target._tag !== "BearerConnectionTarget" ||
+    entry?.target._tag !== "BearerConnectionTarget" ||
+    entry.target.environmentId !== connection.environmentId ||
+    entry.target.connectionId !== connection.target.connectionId ||
+    Option.isNone(entry.profile)
+  )
+    return null;
+  const profile = entry.profile.value;
+  return profile._tag === "BearerConnectionProfile" &&
+    profile.environmentId === connection.environmentId &&
+    profile.connectionId === connection.target.connectionId
+    ? profile.httpBaseUrl
+    : null;
+}
 
 export interface PrepareHostedPreviewInput {
   readonly threadRef: ScopedThreadRef;

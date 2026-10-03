@@ -10,12 +10,20 @@ const mocks = vi.hoisted(() => ({
       httpBaseUrl: "http://managed-server.example:3773",
     },
   })),
+  configuredEndpoint: vi.fn<() => string | null>(() => null),
   list: {},
   recover: {},
 }));
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.run }));
 vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
-vi.mock("~/state/session", () => ({ readPreparedConnection: mocks.connection }));
+vi.mock("~/state/session", () => ({
+  readPreparedConnection: mocks.connection,
+  readConfiguredPreviewEnvironmentUrl: () =>
+    mocks.configuredEndpoint() ??
+    (mocks.connection().target._tag === "PrimaryConnectionTarget"
+      ? mocks.connection().target.httpBaseUrl
+      : null),
+}));
 vi.mock("~/state/preview", () => ({
   previewEnvironment: { hostingList: mocks.list, hostingRecover: mocks.recover },
 }));
@@ -41,6 +49,8 @@ const lease: PreviewHostingLeaseSummary = {
 beforeEach(() => {
   mocks.run.mockReset();
   mocks.connection.mockClear();
+  mocks.configuredEndpoint.mockReset();
+  mocks.configuredEndpoint.mockReturnValue(null);
 });
 
 describe("native preview reopening", () => {
@@ -69,6 +79,24 @@ describe("native preview reopening", () => {
       .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
       .mockResolvedValueOnce({ _tag: "Success", value: lease });
 
+    await expect(
+      prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
+    ).resolves.toEqual({
+      url: "http://100.100.12.4:5173/qa?version=1#first",
+      managed: true,
+      restored: true,
+    });
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+  });
+  it("recovers a saved bearer profile URL through its active private endpoint", async () => {
+    mocks.connection.mockReturnValue({
+      httpBaseUrl: "https://100.100.12.4:8443/",
+      target: { _tag: "BearerConnectionTarget", httpBaseUrl: "" },
+    });
+    mocks.configuredEndpoint.mockReturnValue("http://192.168.1.24:3773/");
+    mocks.run
+      .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
+      .mockResolvedValueOnce({ _tag: "Success", value: lease });
     await expect(
       prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
     ).resolves.toEqual({
