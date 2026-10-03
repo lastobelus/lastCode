@@ -376,6 +376,8 @@ describe("PreviewHosting", () => {
       yield* fs.makeDirectory(cwd, { recursive: true });
       // Linked worktrees record their metadata in a `.git` file rather than a directory.
       yield* fs.writeFileString(`${repositoryRoot}/.git`, "gitdir: /git/worktrees/preview-test");
+      const canonicalRepositoryRoot = yield* fs.realPath(repositoryRoot);
+      const canonicalCwd = yield* fs.realPath(cwd);
       const config = yield* Effect.provide(
         ServerConfig.ServerConfig,
         ServerConfig.layerTest(process.cwd(), tempRoot),
@@ -392,22 +394,139 @@ describe("PreviewHosting", () => {
             url: PREVIEW_URL,
           });
 
-          assert.equal(lease.cwd, cwd);
-          assert.equal(lease.worktreePath, repositoryRoot);
+          assert.equal(lease.cwd, canonicalCwd);
+          assert.equal(lease.worktreePath, canonicalRepositoryRoot);
           assert.deepEqual(harness.opens[0], {
             threadId: "thread-nested-preview",
             terminalId: lease.terminalId,
-            cwd,
-            worktreePath: repositoryRoot,
+            cwd: canonicalCwd,
+            worktreePath: canonicalRepositoryRoot,
           });
           assert.include(
             yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
-            `"worktreePath":"${repositoryRoot}"`,
+            `"worktreePath":"${canonicalRepositoryRoot}"`,
           );
-          assert.include(yield* hosting.protectedWorkspacePaths(), repositoryRoot);
+          assert.include(yield* hosting.protectedWorkspacePaths(), canonicalRepositoryRoot);
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("canonicalizes symlinked launch directories and explicit worktree roots", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempRoot = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-symlink-" });
+      const repositoryRoot = `${tempRoot}/real-repository`;
+      const nestedCwd = `${repositoryRoot}/packages/app`;
+      const aliasCwd = `${tempRoot}/unrelated-parent/packages/app`;
+      const aliasRoot = `${tempRoot}/repository-alias`;
+      yield* fs.makeDirectory(nestedCwd, { recursive: true });
+      yield* fs.writeFileString(`${repositoryRoot}/.git`, "gitdir: /git/worktrees/preview-test");
+      yield* fs.makeDirectory(`${tempRoot}/unrelated-parent/packages`, { recursive: true });
+      yield* fs.symlink(nestedCwd, aliasCwd);
+      yield* fs.symlink(repositoryRoot, aliasRoot);
+      const canonicalRepositoryRoot = yield* fs.realPath(repositoryRoot);
+      const canonicalNestedCwd = yield* fs.realPath(nestedCwd);
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), tempRoot),
+      );
+      const harness = testTerminalHarness();
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const inferred = yield* hosting.launch({
+            threadId: "thread-symlink-cwd",
+            command: "pnpm dev --port 5173",
+            cwd: aliasCwd,
+            url: PREVIEW_URL,
+          });
+          const explicit = yield* hosting.launch({
+            threadId: "thread-symlink-root",
+            command: "pnpm dev --port 5174",
+            cwd: nestedCwd,
+            worktreePath: aliasRoot,
+            url: "http://localhost:5174/field-examples",
+          });
+
+          assert.equal(inferred.cwd, canonicalNestedCwd);
+          assert.equal(inferred.worktreePath, canonicalRepositoryRoot);
+          assert.equal(explicit.cwd, canonicalNestedCwd);
+          assert.equal(explicit.worktreePath, canonicalRepositoryRoot);
+          assert.deepEqual(harness.opens, [
+            {
+              threadId: "thread-symlink-cwd",
+              terminalId: inferred.terminalId,
+              cwd: canonicalNestedCwd,
+              worktreePath: canonicalRepositoryRoot,
+            },
+            {
+              threadId: "thread-symlink-root",
+              terminalId: explicit.terminalId,
+              cwd: canonicalNestedCwd,
+              worktreePath: canonicalRepositoryRoot,
+            },
+          ]);
+          const protectedPaths = yield* hosting.protectedWorkspacePaths();
+          assert.include(protectedPaths, canonicalRepositoryRoot);
+          assert.notInclude(protectedPaths, aliasRoot);
+          assert.notInclude(protectedPaths, aliasCwd);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect(
+    "canonicalizes symlinked paths from persisted preview leases for cleanup protection",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const tempRoot = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-saved-alias-",
+        });
+        const repositoryRoot = `${tempRoot}/real-repository`;
+        const nestedCwd = `${repositoryRoot}/packages/app`;
+        const aliasRoot = `${tempRoot}/repository-alias`;
+        const aliasCwd = `${aliasRoot}/packages/app`;
+        yield* fs.makeDirectory(nestedCwd, { recursive: true });
+        yield* fs.writeFileString(`${repositoryRoot}/.git`, "gitdir: /git/worktrees/preview-test");
+        yield* fs.symlink(repositoryRoot, aliasRoot);
+        const canonicalRepositoryRoot = yield* fs.realPath(repositoryRoot);
+        const canonicalNestedCwd = yield* fs.realPath(nestedCwd);
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), tempRoot),
+        );
+        const persistedLease = {
+          id: "saved-symlink-lease",
+          threadId: "thread-saved-symlink",
+          terminalId: "preview-saved-symlink",
+          command: "pnpm dev --port 5173",
+          cwd: aliasCwd,
+          worktreePath: aliasRoot,
+          url: PREVIEW_URL,
+          handedOffAt: "1970-01-01T00:00:00.000Z",
+          expiresAt: "1970-01-02T00:00:00.000Z",
+          status: "active" as const,
+        };
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [persistedLease] }),
+        );
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const protectedPaths = yield* hosting.protectedWorkspacePaths();
+            assert.include(protectedPaths, canonicalNestedCwd);
+            assert.include(protectedPaths, canonicalRepositoryRoot);
+            assert.notInclude(protectedPaths, aliasCwd);
+            assert.notInclude(protectedPaths, aliasRoot);
+          }).pipe(Effect.provide(hostingLayer(config, testTerminalHarness()))),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
   it.effect("rejects canonical URL expansion without damaging existing lease state", () =>

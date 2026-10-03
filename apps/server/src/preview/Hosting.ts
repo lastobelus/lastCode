@@ -553,6 +553,16 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  const canonicalWorkspacePath = (value: string) => {
+    const resolved = path.resolve(value);
+    return fs.realPath(resolved).pipe(
+      Effect.catchTags({
+        PlatformError: (error) =>
+          error.reason._tag === "NotFound" ? Effect.succeed(resolved) : Effect.fail(error),
+      }),
+    );
+  };
+
   const containingWorktree = Effect.fn("PreviewHosting.containingWorktree")(function* (
     cwd: string,
   ) {
@@ -568,23 +578,31 @@ const make = Effect.gen(function* () {
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = (requestedInput) =>
     Effect.gen(function* () {
-      const worktreePath =
-        requestedInput.worktreePath ??
-        (path.isAbsolute(requestedInput.cwd)
-          ? yield* containingWorktree(requestedInput.cwd).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new PreviewHostingError({
-                    operation: "validate",
-                    statePath,
-                    threadId: requestedInput.threadId,
-                    url: requestedInput.url,
-                    cause,
-                  }),
-              ),
-            )
-          : null);
-      const input = { ...requestedInput, worktreePath };
+      const input = yield* Effect.gen(function* () {
+        const cwd = path.isAbsolute(requestedInput.cwd)
+          ? yield* canonicalWorkspacePath(requestedInput.cwd)
+          : requestedInput.cwd;
+        const worktreePath =
+          requestedInput.worktreePath == null
+            ? path.isAbsolute(cwd)
+              ? yield* containingWorktree(cwd)
+              : null
+            : path.isAbsolute(requestedInput.worktreePath)
+              ? yield* canonicalWorkspacePath(requestedInput.worktreePath)
+              : requestedInput.worktreePath;
+        return { ...requestedInput, cwd, worktreePath };
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PreviewHostingError({
+              operation: "validate",
+              statePath,
+              threadId: requestedInput.threadId,
+              url: requestedInput.url,
+              cause,
+            }),
+        ),
+      );
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
         const selected = yield* launchGate.withPermit(
@@ -823,14 +841,19 @@ const make = Effect.gen(function* () {
   const protectedWorkspacePaths: PreviewHosting["Service"]["protectedWorkspacePaths"] = () =>
     Effect.gen(function* () {
       if (startupError !== null) return yield* startupError;
-      return [
-        ...new Set(
-          (yield* SynchronizedRef.get(leasesRef)).flatMap((lease) => [
-            lease.cwd,
-            ...(lease.worktreePath === null ? [] : [lease.worktreePath]),
-          ]),
+      const paths = (yield* SynchronizedRef.get(leasesRef)).flatMap((lease) => [
+        lease.cwd,
+        ...(lease.worktreePath === null ? [] : [lease.worktreePath]),
+      ]);
+      // Cleanup candidates use real paths; retained contexts may contain aliases.
+      const canonicalPaths = yield* Effect.forEach(paths, canonicalWorkspacePath, {
+        concurrency: 4,
+      }).pipe(
+        Effect.mapError(
+          (cause) => new PreviewHostingError({ operation: "validate", statePath, cause }),
         ),
-      ];
+      );
+      return [...new Set(canonicalPaths)];
     });
 
   const expireDueLeases = Effect.fn("PreviewHosting.expireDueLeases")(function* () {
