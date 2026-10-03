@@ -34,6 +34,19 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
       ServerConfig.layerTest(process.cwd(), root),
     );
     const closed = yield* Ref.make<ReadonlyArray<string>>([]);
+    const closeCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const previewLease: PreviewHosting.PreviewHostingLease = {
+      id: "lease-preview",
+      threadId: "thread-1",
+      terminalId: "preview-terminal",
+      command: "pnpm dev --port 5173",
+      cwd: "/workspace",
+      worktreePath: "/workspace",
+      url: "http://localhost:5173/",
+      handedOffAt: "2026-10-03T00:00:00.000Z",
+      expiresAt: "2026-10-04T00:00:00.000Z",
+      status: "active",
+    };
     const layer = ResourceCleanupService.live.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -46,10 +59,14 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
             ]),
             close: ({ terminalId, deleteHistory }) =>
               Ref.update(closed, (values) => [...values, `${terminalId}:${String(deleteHistory)}`]),
+            closeThreadExcept: (threadId, retainedTerminalIds) =>
+              Ref.update(closeCalls, (values) => [
+                ...values,
+                `${threadId}:${retainedTerminalIds.join(",")}`,
+              ]),
           }),
           Layer.mock(PreviewHosting.PreviewHosting)({
-            ownsTerminal: (_threadId, terminalId) =>
-              Effect.succeed(terminalId === "preview-terminal"),
+            list: (threadId) => Effect.succeed(threadId === "thread-1" ? [previewLease] : []),
           }),
         ),
       ),
@@ -58,7 +75,8 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
     yield* Effect.gen(function* () {
       const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
       yield* cleanup.cleanupArchivedTerminals("thread-1");
-      assert.deepStrictEqual(yield* Ref.get(closed), ["shell-terminal:true"]);
+      assert.deepStrictEqual(yield* Ref.get(closed), []);
+      assert.deepStrictEqual(yield* Ref.get(closeCalls), ["thread-1:preview-terminal"]);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

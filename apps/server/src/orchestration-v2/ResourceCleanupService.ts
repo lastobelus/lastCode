@@ -59,38 +59,21 @@ export const live = Layer.effect(
           ),
         ),
       cleanupArchivedTerminals: (threadId: string) =>
-        terminals.metadata.pipe(
-          Effect.flatMap((metadata) =>
-            Effect.forEach(
-              metadata.filter((terminal) => terminal.threadId === threadId),
-              (terminal) =>
-                previews.ownsTerminal(threadId, terminal.terminalId).pipe(
-                  Effect.mapError(
-                    (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
-                  ),
-                  Effect.flatMap((owned) =>
-                    owned
-                      ? Effect.void
-                      : terminals
-                          .close({
-                            threadId,
-                            terminalId: terminal.terminalId,
-                            deleteHistory: true,
-                          })
-                          .pipe(
-                            Effect.mapError(
-                              (cause) =>
-                                new ResourceCleanupError({
-                                  operation: "terminal",
-                                  threadId,
-                                  cause,
-                                }),
-                            ),
-                          ),
-                  ),
+        previews.list(threadId).pipe(
+          Effect.mapError(
+            (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
+          ),
+          Effect.flatMap((leases) =>
+            terminals
+              .closeThreadExcept(
+                threadId,
+                leases.map((lease) => lease.terminalId),
+              )
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
                 ),
-              { discard: true, concurrency: 4 },
-            ),
+              ),
           ),
         ),
       cleanupAttachments: (attachmentIds: ReadonlyArray<string>) =>

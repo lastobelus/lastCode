@@ -1775,6 +1775,60 @@ it.layer(
     }),
   );
 
+  it.effect("archives a thread without deleting retained preview history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const retainedHistoryPath = yield* multiTerminalHistoryLogPath(
+        logsDir,
+        "thread-1",
+        "preview-orphan",
+      );
+      const ordinaryOrphanHistoryPath = yield* multiTerminalHistoryLogPath(
+        logsDir,
+        "thread-1",
+        "shell-orphan",
+      );
+      const defaultHistoryPath = yield* multiTerminalHistoryLogPath(logsDir, "thread-1");
+      const legacyHistoryPath = path.join(logsDir, "thread-1.log");
+      const otherThreadHistoryPath = yield* multiTerminalHistoryLogPath(
+        logsDir,
+        "thread-2",
+        "other-terminal",
+      );
+      yield* fs.writeFileString(retainedHistoryPath, "keep orphan preview output");
+      yield* fs.writeFileString(ordinaryOrphanHistoryPath, "remove orphan shell output");
+      yield* fs.writeFileString(defaultHistoryPath, "remove default output");
+      yield* fs.writeFileString(legacyHistoryPath, "remove legacy default output");
+      yield* fs.writeFileString(otherThreadHistoryPath, "keep other thread output");
+
+      const livePreviewHistoryPath = yield* multiTerminalHistoryLogPath(
+        logsDir,
+        "thread-1",
+        "preview-live",
+      );
+      yield* fs.writeFileString(livePreviewHistoryPath, "keep live preview output\n");
+      yield* manager.open(openInput({ terminalId: "preview-live" }));
+      yield* manager.open(openInput({ terminalId: "shell-live" }));
+      const livePreviewProcess = ptyAdapter.processes[0];
+      const liveShellProcess = ptyAdapter.processes[1];
+      expect(livePreviewProcess).toBeDefined();
+      expect(liveShellProcess).toBeDefined();
+      if (!livePreviewProcess || !liveShellProcess) return;
+      yield* manager.closeThreadExcept("thread-1", ["preview-live", "preview-orphan"]);
+
+      assert.equal(livePreviewProcess.killed, false);
+      assert.equal(liveShellProcess.killed, true);
+      assert.equal(yield* fs.exists(retainedHistoryPath), true);
+      assert.equal(yield* fs.exists(ordinaryOrphanHistoryPath), false);
+      assert.equal(yield* fs.exists(defaultHistoryPath), false);
+      assert.equal(yield* fs.exists(legacyHistoryPath), false);
+      assert.equal(yield* fs.exists(otherThreadHistoryPath), true);
+      assert.equal(yield* fs.exists(livePreviewHistoryPath), true);
+    }),
+  );
+
   it.effect("escalates terminal shutdown to SIGKILL when process does not exit in time", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 10 });

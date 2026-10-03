@@ -210,6 +210,11 @@ export class TerminalManager extends Context.Service<
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    /** Archive cleanup also removes untracked histories, except retained preview terminals. */
+    readonly closeThreadExcept: (
+      threadId: string,
+      retainedTerminalIds: ReadonlyArray<string>,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Close a thread's terminals that wait at an idle shell prompt. A terminal
@@ -1982,7 +1987,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const deleteAllHistoryForThread = Effect.fn("terminal.deleteAllHistoryForThread")(function* (
     threadId: string,
+    retainedTerminalIds: ReadonlyArray<string> = [],
   ) {
+    const retainedPaths = new Set(
+      retainedTerminalIds.flatMap((terminalId) => [
+        historyPath(threadId, terminalId),
+        ...(terminalId === DEFAULT_TERMINAL_ID ? [legacyHistoryPath(threadId)] : []),
+      ]),
+    );
     const threadPrefix = `${toSafeThreadId(threadId)}_`;
     const entries = yield* fileSystem
       .readDirectory(logsDir, { recursive: false })
@@ -1990,9 +2002,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* Effect.forEach(
       entries.filter(
         (name) =>
-          name === `${toSafeThreadId(threadId)}.log` ||
-          name === `${legacySafeThreadId(threadId)}.log` ||
-          name.startsWith(threadPrefix),
+          !retainedPaths.has(path.join(logsDir, name)) &&
+          (name === `${toSafeThreadId(threadId)}.log` ||
+            name === `${legacySafeThreadId(threadId)}.log` ||
+            name.startsWith(threadPrefix)),
       ),
       (name) =>
         fileSystem.remove(path.join(logsDir, name), { force: true }).pipe(
@@ -3216,7 +3229,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
-  const close: TerminalManager["Service"]["close"] = (input) =>
+  const close = (input: TerminalCloseInput, retainedTerminalIds: ReadonlyArray<string> = []) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -3227,13 +3240,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
         const threadSessions = yield* sessionsForThread(input.threadId);
         yield* Effect.forEach(
-          threadSessions,
+          threadSessions.filter((session) => !retainedTerminalIds.includes(session.terminalId)),
           (session) => closeSession(input.threadId, session.terminalId, false),
           { discard: true },
         );
 
         if (input.deleteHistory) {
-          yield* deleteAllHistoryForThread(input.threadId);
+          yield* deleteAllHistoryForThread(input.threadId, retainedTerminalIds);
         }
       }),
     );
@@ -3299,6 +3312,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     history,
     restart,
     close,
+    closeThreadExcept: (threadId, retainedTerminalIds) =>
+      close({ threadId, deleteHistory: true }, retainedTerminalIds),
     closeIdle,
     subscribe,
     subscribeMetadata,
