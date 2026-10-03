@@ -129,6 +129,7 @@ const withTailscalePairing = <A, E, R>(
     readonly handlers: Record<string, { readonly Proxy: string }>;
     readonly funnel?: boolean;
     readonly devUrl?: string;
+    readonly tailscaleProbeError?: Error;
   },
   run: (baseDir: string, commands: Array<ReadonlyArray<string>>) => Effect.Effect<A, E, R>,
 ) =>
@@ -191,6 +192,12 @@ const withTailscalePairing = <A, E, R>(
           "http://127.0.0.1:3773/.well-known/t3/environment",
           "https://desktop.tail.ts.net/.well-known/t3/environment",
         ]).toContain(String(url));
+        if (
+          String(url) === "https://desktop.tail.ts.net/.well-known/t3/environment" &&
+          input.tailscaleProbeError !== undefined
+        ) {
+          return Promise.reject(input.tailscaleProbeError);
+        }
         return Promise.resolve(
           new Response(JSON.stringify(testDescriptor), {
             headers: { "content-type": "application/json" },
@@ -225,6 +232,32 @@ const withDescriptorServer = <A, E, R>(run: (origin: string) => Effect.Effect<A,
   );
 
 describe("t3 pair", () => {
+  it.effect("preserves a foreign handler when the tailnet probe fails DNS resolution", () =>
+    provideCliTestLayers(
+      withTailscalePairing(
+        {
+          handlers: { "/": { Proxy: "http://127.0.0.1:9000" } },
+          tailscaleProbeError: new TypeError("fetch failed", {
+            cause: Object.assign(new Error("getaddrinfo ENOTFOUND desktop.tail.ts.net"), {
+              code: "ENOTFOUND",
+            }),
+          }),
+        },
+        (baseDir, commands) =>
+          Effect.gen(function* () {
+            const error = yield* runCli(["pair", "--base-dir", baseDir, "--tailscale"]).pipe(
+              Effect.flip,
+            );
+            expect(error).toBeInstanceOf(ServePortOccupiedError);
+            expect(commands).toEqual([
+              ["status", "--json"],
+              ["serve", "status", "--json"],
+            ]);
+          }),
+      ),
+    ),
+  );
+
   it.effect.each([
     { name: "Funnel", handlers: { "/": { Proxy: "http://127.0.0.1:3773" } }, funnel: true },
     {
