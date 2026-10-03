@@ -54,4 +54,27 @@ describe("makeDrainableWorker", () => {
       }),
     ),
   );
+
+  it.live("shuts down the worker and queue without retaining later work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const worker = yield* makeDrainableWorker((item: string) =>
+          Effect.sync(() => processed.push(item)),
+        );
+
+        yield* worker.enqueue("before-shutdown");
+        yield* worker.drain;
+        yield* worker.shutdown;
+
+        // Offers after retirement are rejected by the closed queue and must
+        // not make drain wait forever. Closing the parent scope repeats the
+        // queue finalizer, proving shutdown is safe to call twice.
+        yield* worker.enqueue("after-shutdown");
+        yield* worker.drain;
+
+        expect(processed).toEqual(["before-shutdown"]);
+      }),
+    ),
+  );
 });

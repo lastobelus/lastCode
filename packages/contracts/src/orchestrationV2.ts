@@ -2472,6 +2472,25 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.delete"),
     commandId: CommandId,
     threadId: ThreadId,
+    deleteWorktree: Schema.optional(Schema.Boolean),
+    repositoryKey: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.retry"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.abandon"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expectedCleanup: ThreadWorktreeCleanup,
+    cleanup: Schema.NullOr(ThreadWorktreeCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.settle"),
