@@ -53,24 +53,36 @@ export type OpenPreviewMutation<E = unknown> = (input: {
   readonly input: PreviewOpenInput;
 }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
 
-export async function openUrlInPreview<E>(input: {
+interface OpenUrlInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly onOpened?: (tabId: string) => void;
-}): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+}
+
+export async function openUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
+  return openPreparedUrlInPreview(input, prepared.url);
+}
+
+/** Open an already recovered destination while retaining the authored URL. */
+export async function openPreparedUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+  destinationUrl: string,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
   );
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const prepared = await prepareHostedPreview(input.threadRef, input.url);
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: prepared.url,
+      url: destinationUrl,
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.
