@@ -14,10 +14,13 @@ that preview. It uses the ordinary thread-message path and the thread's saved
 provider settings. A sent confirmation means the server accepted the message;
 it does not mean the preview is already restored. Reload after restoration.
 
-Repeated clicks and remounting the preview do not resend an accepted request.
-A failed send can be retried with the same request identity. Loading the URL
-successfully permits a new recovery request for a later failure. The action
-does not replace the composer draft or choose a different thread.
+Repeated clicks, reopening the preview, and requests from another client share
+one server-saved request identity for the owning thread and exact URL. A failed
+send can be retried with that identity, including after an app or server restart.
+A confirmed page load releases the identity, including when the original URL
+redirects, so a later failure can request recovery again. Merely changing the
+address bar does not confirm a page load. The action does not replace the
+composer draft or choose a different thread.
 
 When receiving a restoration request, inspect the exact link and the original
 launch context before restarting anything. Preserve the user's saved work and

@@ -20,6 +20,7 @@ import { randomUUID, newMessageId } from "~/lib/utils";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { readThreadShell } from "~/state/entities";
 import { threadEnvironment } from "~/state/threads";
+import { previewEnvironment } from "~/state/preview";
 
 const REQUEST_IDENTITY_TTL_MS = 24 * 60 * 60 * 1_000;
 const IDLE_REQUEST: PreviewRecoveryRequestState = { status: "idle" };
@@ -147,7 +148,7 @@ const previewRecoveryStorage = createJSONStorage(() => {
   };
 });
 
-export const previewRecoveryRequestStore = create<PreviewRecoveryRequestStore>()(
+export const usePreviewRecoveryRequestStore = create<PreviewRecoveryRequestStore>()(
   persist(
     (set) => ({
       byRequestKey: {},
@@ -208,9 +209,10 @@ function requestKey(threadRef: ScopedThreadRef, url: string): string {
 export function usePreviewRecoveryRequest(
   threadRef: ScopedThreadRef | null,
   url: string,
+  tabId?: string,
 ): PreviewRecoveryRequestState {
   const key = threadRef && url ? requestKey(threadRef, url) : null;
-  const entry = previewRecoveryRequestStore((state) =>
+  const entry = usePreviewRecoveryRequestStore((state) =>
     key ? (state.byRequestKey[key] ?? null) : null,
   );
   const createdAt = entry?.createdAt;
@@ -218,27 +220,70 @@ export function usePreviewRecoveryRequest(
     if (!createdAt) return;
     const expiresAt = Date.parse(createdAt) + REQUEST_IDENTITY_TTL_MS;
     const timer = setTimeout(
-      () => previewRecoveryRequestStore.getState().pruneExpired(),
+      () => usePreviewRecoveryRequestStore.getState().pruneExpired(),
       Math.max(0, expiresAt - Date.now() + 1),
     );
     return () => clearTimeout(timer);
   }, [createdAt]);
+  const status = entry?.state.status;
+  const environmentId = threadRef?.environmentId;
+  const threadId = threadRef?.threadId;
+  useEffect(() => {
+    if (!environmentId || !threadId || !tabId || !url || status !== "sent") return;
+    void reconcileAcceptedRequest({ environmentId, threadId }, url, tabId);
+  }, [status, tabId, environmentId, threadId, url]);
   return entry?.state ?? IDLE_REQUEST;
+}
+
+const pendingReconciliations = new Set<string>();
+
+async function reconcileAcceptedRequest(
+  threadRef: ScopedThreadRef,
+  url: string,
+  tabId: string,
+): Promise<void> {
+  const key = requestKey(threadRef, url);
+  if (pendingReconciliations.has(key)) return;
+  const acceptedEntry = usePreviewRecoveryRequestStore.getState().byRequestKey[key];
+  if (acceptedEntry?.state.status !== "sent") return;
+  pendingReconciliations.add(key);
+  try {
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      previewEnvironment.claimRecovery,
+      {
+        environmentId: threadRef.environmentId,
+        input: { threadId: threadRef.threadId, tabId, url },
+      },
+      { reportFailure: false },
+    );
+    if (result._tag === "Failure") return;
+    const current = usePreviewRecoveryRequestStore.getState().byRequestKey[key];
+    if (
+      current?.state.status === "sent" &&
+      (current.commandId !== result.value.commandId || current.messageId !== result.value.messageId)
+    ) {
+      usePreviewRecoveryRequestStore.getState().clear(key);
+    }
+  } catch {
+    // A transient claim failure leaves the previously accepted state intact.
+  } finally {
+    pendingReconciliations.delete(key);
+  }
 }
 
 /** Call after that exact URL loads successfully; failed reloads keep request suppression. */
 export function clearPreviewRecoveryRequest(threadRef: ScopedThreadRef, url: string): void {
-  previewRecoveryRequestStore.getState().clear(requestKey(threadRef, url));
+  usePreviewRecoveryRequestStore.getState().clear(requestKey(threadRef, url));
 }
 
 /** Send one idempotent recovery request to the owning thread. */
 export function requestPreviewRecovery(input: RequestPreviewRecoveryInput): Promise<void> {
   const key = requestKey(input.threadRef, input.url);
-  const store = previewRecoveryRequestStore.getState();
+  const store = usePreviewRecoveryRequestStore.getState();
   store.pruneExpired();
-  const refreshedStore = previewRecoveryRequestStore.getState();
+  const refreshedStore = usePreviewRecoveryRequestStore.getState();
   const current = refreshedStore.byRequestKey[key];
-  if (current?.state.status === "sent") return Promise.resolve();
   const pending = pendingRequests.get(key);
   if (pending) return pending;
 
@@ -251,9 +296,14 @@ export function requestPreviewRecovery(input: RequestPreviewRecoveryInput): Prom
     createdAt: current?.createdAt ?? new Date().toISOString(),
     snapshot: current?.snapshot ?? null,
   };
-  previewRecoveryRequestStore.getState().setEntry(key, initialEntry);
+  usePreviewRecoveryRequestStore.getState().setEntry(key, initialEntry);
 
-  const task = dispatchPreviewRecovery(input, key, initialEntry).finally(() => {
+  const task = dispatchPreviewRecovery(
+    input,
+    key,
+    initialEntry,
+    current?.state.status === "sent",
+  ).finally(() => {
     pendingRequests.delete(key);
   });
   pendingRequests.set(key, task);
@@ -264,22 +314,56 @@ async function dispatchPreviewRecovery(
   input: RequestPreviewRecoveryInput,
   key: string,
   entry: PreviewRecoveryRequestEntry,
+  wasAlreadySent: boolean,
 ): Promise<void> {
+  let recoveryEntry = entry;
   try {
     const shell = readThreadShell(input.threadRef);
     if (!shell) {
       throw new Error("This thread is no longer available to restore the preview.");
     }
+    if (!input.tabId) {
+      throw new Error("This preview tab is no longer available to restore the preview.");
+    }
 
-    const snapshot = entry.snapshot ?? {
-      text: recoveryMessage(input, shell.title),
-      modelSelection: shell.modelSelection,
-      runtimeMode: shell.runtimeMode,
-      interactionMode: shell.interactionMode,
-      createdAt: entry.createdAt,
+    const claimResult = await runAtomCommand(
+      appAtomRegistry,
+      previewEnvironment.claimRecovery,
+      {
+        environmentId: input.threadRef.environmentId,
+        input: { threadId: input.threadRef.threadId, tabId: input.tabId, url: input.url },
+      },
+      { reportFailure: false },
+    );
+    if (claimResult._tag === "Failure") throw squashAtomCommandFailure(claimResult);
+    const claim = claimResult.value;
+    const changedCanonicalIdentity =
+      entry.commandId !== claim.commandId || entry.messageId !== claim.messageId;
+
+    const snapshot =
+      !changedCanonicalIdentity && entry.snapshot
+        ? entry.snapshot
+        : {
+            text: recoveryMessage(input, shell.title),
+            modelSelection: shell.modelSelection,
+            runtimeMode: shell.runtimeMode,
+            interactionMode: shell.interactionMode,
+            createdAt: changedCanonicalIdentity ? new Date().toISOString() : entry.createdAt,
+          };
+    const nextEntry = {
+      ...entry,
+      commandId: claim.commandId,
+      messageId: claim.messageId,
+      createdAt: snapshot.createdAt,
+      snapshot,
     };
-    const nextEntry = { ...entry, snapshot };
-    previewRecoveryRequestStore.getState().setEntry(key, nextEntry);
+    recoveryEntry = nextEntry;
+    usePreviewRecoveryRequestStore.getState().setEntry(key, nextEntry);
+
+    if (wasAlreadySent && !changedCanonicalIdentity) {
+      updateRequestState(key, nextEntry, { status: "sent" });
+      return;
+    }
 
     const result = await runAtomCommand(
       appAtomRegistry,
@@ -288,9 +372,9 @@ async function dispatchPreviewRecovery(
         environmentId: input.threadRef.environmentId,
         input: {
           threadId: input.threadRef.threadId,
-          commandId: entry.commandId,
+          commandId: nextEntry.commandId,
           message: {
-            messageId: entry.messageId,
+            messageId: nextEntry.messageId,
             role: "user",
             text: snapshot.text,
             attachments: [],
@@ -306,7 +390,7 @@ async function dispatchPreviewRecovery(
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     updateRequestState(key, nextEntry, { status: "sent" });
   } catch (error) {
-    updateRequestState(key, entry, {
+    updateRequestState(key, recoveryEntry, {
       status: "error",
       error: error instanceof Error ? error.message : String(error),
     });
@@ -334,7 +418,7 @@ function updateRequestState(
   expected: PreviewRecoveryRequestEntry,
   state: PreviewRecoveryRequestState,
 ): void {
-  const current = previewRecoveryRequestStore.getState().byRequestKey[key];
+  const current = usePreviewRecoveryRequestStore.getState().byRequestKey[key];
   if (current?.commandId !== expected.commandId || current.messageId !== expected.messageId) return;
-  previewRecoveryRequestStore.getState().setEntry(key, { ...current, state });
+  usePreviewRecoveryRequestStore.getState().setEntry(key, { ...current, state });
 }

@@ -207,6 +207,7 @@ import {
   DiscoveredLocalServerList,
   ConfiguredLocalServerUrls,
   PreviewCloseInput,
+  PreviewClaimRecoveryInput,
   PreviewError,
   PreviewEvent,
   PreviewListInput,
@@ -215,6 +216,7 @@ import {
   PreviewOpenInput,
   PreviewRefreshInput,
   PreviewReportStatusInput,
+  PreviewRecoveryClaim,
   PreviewResizeInput,
   PreviewSessionSnapshot,
 } from "./preview.ts";
@@ -379,6 +381,7 @@ export const WS_METHODS = {
   previewClose: "preview.close",
   previewList: "preview.list",
   previewReportStatus: "preview.reportStatus",
+  previewClaimRecovery: "preview.claimRecovery",
   previewAutomationConnect: "previewAutomation.connect",
   previewAutomationRespond: "previewAutomation.respond",
   previewAutomationFocusHost: "previewAutomation.focusHost",
@@ -1327,6 +1330,12 @@ const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 });
 
+const WsPreviewClaimRecoveryRpc = Rpc.make(WS_METHODS.previewClaimRecovery, {
+  payload: PreviewClaimRecoveryInput,
+  success: PreviewRecoveryClaim,
+  error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewAutomationConnectRpc = Rpc.make(WS_METHODS.previewAutomationConnect, {
   payload: PreviewAutomationHost,
   success: PreviewAutomationStreamEvent,
@@ -1667,6 +1676,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewCloseRpc,
   WsPreviewListRpc,
   WsPreviewReportStatusRpc,
+  WsPreviewClaimRecoveryRpc,
   WsPreviewAutomationConnectRpc,
   WsPreviewAutomationRespondRpc,
   WsPreviewAutomationFocusHostRpc,
