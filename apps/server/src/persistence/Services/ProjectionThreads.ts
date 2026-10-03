@@ -16,6 +16,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadTitleState,
+  ThreadWorktreeCleanup,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -53,6 +54,7 @@ export const ProjectionThread = Schema.Struct({
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
@@ -65,6 +67,14 @@ export const GetProjectionThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type GetProjectionThreadInput = typeof GetProjectionThreadInput.Type;
+
+export const ListPendingWorktreeCleanupThreadsInput = Schema.Void;
+export const ListActiveWorktreeOwnerThreadsInput = Schema.Void;
+export const ActiveWorktreeOwner = Schema.Struct({
+  threadId: ThreadId,
+  worktreePath: Schema.String,
+});
+export type ActiveWorktreeOwner = typeof ActiveWorktreeOwner.Type;
 
 /**
  * ProjectionThreadRepositoryShape - Service API for projected thread records.
@@ -83,6 +93,16 @@ export interface ProjectionThreadRepositoryShape {
   readonly getById: (
     input: GetProjectionThreadInput,
   ) => Effect.Effect<Option.Option<ProjectionThread>, ProjectionRepositoryError>;
+
+  readonly listPendingWorktreeCleanup: () => Effect.Effect<
+    ReadonlyArray<ProjectionThread>,
+    ProjectionRepositoryError
+  >;
+
+  readonly listActiveWorktreeOwners: () => Effect.Effect<
+    ReadonlyArray<ActiveWorktreeOwner>,
+    ProjectionRepositoryError
+  >;
 }
 
 /**
