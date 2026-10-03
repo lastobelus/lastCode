@@ -268,6 +268,10 @@ can break the preview, so save a copy if you need to keep it.
 
 ## Preview links
 
+Managed QA previews stay available for 24 hours after handoff. Opening one
+restarts its temporary server if needed; the server stops automatically when
+that window ends. Viewing does not extend the window.
+
 If a link opened in the integrated browser cannot connect, choose **Ask agent to
 restore preview**. The failed link and error go to the thread that owns the
 preview. After the agent restores it, reload the page.

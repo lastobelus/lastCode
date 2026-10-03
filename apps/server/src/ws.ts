@@ -90,6 +90,7 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  PreviewHostingError as ContractPreviewHostingError,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -182,6 +183,7 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { attachmentRelativePath, createDeterministicAttachmentId } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
@@ -1167,6 +1169,7 @@ const makeWsRpcLayer = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const previewHosting = yield* PreviewHosting.PreviewHosting;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -3529,6 +3532,40 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.previewList, previewManager.list(input), {
             "rpc.aggregate": "preview",
           }),
+        [WS_METHODS.previewHostingList]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.previewHostingList,
+            previewHosting.list(input.threadId).pipe(
+              Effect.map((leases) => leases.map(PreviewHosting.toPreviewHostingLeaseSummary)),
+              Effect.mapError(
+                () =>
+                  new ContractPreviewHostingError({
+                    reason: "unavailable",
+                    message: "Preview hosting is unavailable on this server.",
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.previewHostingRecover]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.previewHostingRecover,
+            previewHosting
+              .recover({ threadId: input.threadId, leaseId: input.leaseId, url: input.url })
+              .pipe(
+                Effect.map((lease) =>
+                  lease === null ? null : PreviewHosting.toPreviewHostingLeaseSummary(lease),
+                ),
+                Effect.mapError(
+                  () =>
+                    new ContractPreviewHostingError({
+                      reason: "unavailable",
+                      message: "Preview hosting is unavailable on this server.",
+                    }),
+                ),
+              ),
+            { "rpc.aggregate": "preview" },
+          ),
         [WS_METHODS.previewReportStatus]: (input) =>
           observeRpcEffect(WS_METHODS.previewReportStatus, previewManager.reportStatus(input), {
             "rpc.aggregate": "preview",

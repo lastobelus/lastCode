@@ -13,12 +13,15 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   clearRecovery: vi.fn(),
+  recoverHostedPreview: vi.fn(async (): Promise<boolean> => false),
+  refresh: vi.fn(async (): Promise<void> => undefined),
   navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" } as
     | { _tag: "Success"; url: string; title: string }
     | { _tag: "LoadFailed"; url: string; code: number; description: string },
   navigate: vi.fn(async (_tabId: string, _url: string): Promise<void> => undefined),
   rememberPreviewUrl: vi.fn(),
   readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
+  reload: null as (() => void) | null,
   submittedUrl: null as ((url: string) => void) | null,
   emptyStateUrl: null as ((url: string) => void) | null,
   togglePictureInPicture: null as (() => void) | null,
@@ -53,6 +56,8 @@ const STUB_BROWSER_DEFAULTS = {
   profiles: BUILT_IN_BROWSER_PROFILES,
   profileId: DEFAULT_BROWSER_PROFILE_ID,
 };
+
+vi.mock("./previewHostingRecovery", () => ({ recoverHostedPreview: mocks.recoverHostedPreview }));
 
 vi.mock("~/browserHistoryStore", () => ({
   recordVisitForThread: mocks.recordVisitForThread,
@@ -212,6 +217,7 @@ vi.mock("~/components/ui/toast", () => ({
 vi.mock("./previewBridge", () => ({
   previewBridge: {
     navigate: mocks.navigate,
+    refresh: mocks.refresh,
     pickElement: mocks.pickElement,
     pictureInPicture: {
       open: mocks.openPictureInPicture,
@@ -223,6 +229,7 @@ vi.mock("./previewBridge", () => ({
 vi.mock("./PreviewChromeRow", () => ({
   PreviewChromeRow: (props: {
     onSubmit: (url: string) => void;
+    onRefresh: () => void;
     onPickElement?: () => void;
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
@@ -231,6 +238,7 @@ vi.mock("./PreviewChromeRow", () => ({
     };
   }) => {
     mocks.submittedUrl = props.onSubmit;
+    mocks.reload = props.onRefresh;
     mocks.toggleAnnotation = props.onPickElement ?? null;
     mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
     mocks.toggleNativePictureInPicture =
@@ -334,12 +342,15 @@ function installTestDom() {
 
 describe("PreviewView navigation", () => {
   beforeEach(() => {
+    mocks.recoverHostedPreview.mockReset().mockResolvedValue(false);
+    mocks.refresh.mockClear();
     mocks.clearRecovery.mockClear();
     mocks.navStatus = { _tag: "Success", url: "http://example.com/", title: "Example" };
     mocks.navigate.mockClear();
     mocks.rememberPreviewUrl.mockClear();
     mocks.readPreparedConnection.mockClear();
     mocks.submittedUrl = null;
+    mocks.reload = null;
     mocks.emptyStateUrl = null;
     mocks.togglePictureInPicture = null;
     mocks.toggleNativePictureInPicture = null;
@@ -362,6 +373,64 @@ describe("PreviewView navigation", () => {
     mocks.recordingTabIds = new Set();
     mocks.recordingRuntimeTabId = null;
     mocks.recordVisitForThread.mockClear();
+  });
+
+  it("restores a failed managed preview once, then reloads without an agent message", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    let complete!: (restored: boolean) => void;
+    mocks.recoverHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const original = "http://localhost:5173/qa";
+    mocks.navStatus = { _tag: "LoadFailed", url: original, code: -102, description: "refused" };
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      // A new snapshot of the same failed URL must not cancel or duplicate restoration.
+      mocks.navStatus = { ...mocks.navStatus };
+      await act(() =>
+        root.render(<PreviewView threadRef={{ ...TEST_THREAD_REF }} tabId="tab-1" visible />),
+      );
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledWith(TEST_THREAD_REF, original);
+      await act(async () => complete(true));
+      expect(mocks.refresh).toHaveBeenCalledTimes(1);
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries a transient native recovery failure when the user reloads", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    const original = "http://localhost:5173/qa";
+    mocks.navStatus = { _tag: "LoadFailed", url: original, code: -102, description: "refused" };
+    mocks.recoverHostedPreview.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+      expect(mocks.refresh).not.toHaveBeenCalled();
+      await act(async () => mocks.reload?.());
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(2);
+      expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 
   it("reenables the original failed link after a redirect, without clearing another thread", async () => {

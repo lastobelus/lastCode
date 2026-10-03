@@ -44,6 +44,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
 import { openPreviewSession } from "./openPreviewSession";
+import { recoverHostedPreview } from "./previewHostingRecovery";
 import { PreviewChromeRow } from "./PreviewChromeRow";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 import { PreviewMoreMenu } from "./PreviewMoreMenu";
@@ -209,6 +210,7 @@ export function PreviewView({
   const navigateToResolvedUrl = useCallback(
     async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
+        await recoverHostedPreview(threadRef, resolvedUrl);
         // The bridge mirrors the resolved URL back to the server.
         await previewBridge.navigate(runtimeTabId, resolvedUrl);
         rememberPreviewUrl(threadRef, resolvedUrl);
@@ -258,9 +260,44 @@ export function PreviewView({
     [navigateToResolvedUrl, threadRef],
   );
 
-  const handleRefresh = useCallback(() => {
+  const refreshNativePreview = useCallback(() => {
     if (previewBridge && runtimeTabId) void previewBridge.refresh(runtimeTabId);
   }, [runtimeTabId]);
+  const hostingEnvironmentId = threadRef.environmentId;
+  const hostingThreadId = threadRef.threadId;
+  const handleRefresh = useCallback(() => {
+    void recoverHostedPreview(
+      { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+      url,
+    ).then(refreshNativePreview);
+  }, [hostingEnvironmentId, hostingThreadId, url, refreshNativePreview]);
+
+  const hostingAttemptedByTab = useRef(new Map<string, string>());
+  const [restoringHostedPreview, setRestoringHostedPreview] = useState(false);
+  const navKind = navStatus._tag;
+  useEffect(() => {
+    if (!runtimeTabId) return;
+    if (navKind !== "LoadFailed") {
+      setRestoringHostedPreview(false);
+      if (navKind === "Success") hostingAttemptedByTab.current.delete(runtimeTabId);
+      return;
+    }
+    if (hostingAttemptedByTab.current.get(runtimeTabId) === url) return;
+    hostingAttemptedByTab.current.set(runtimeTabId, url);
+    let cancelled = false;
+    setRestoringHostedPreview(true);
+    void recoverHostedPreview(
+      { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+      url,
+    ).then((restored) => {
+      if (cancelled) return;
+      setRestoringHostedPreview(false);
+      if (restored) refreshNativePreview();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshNativePreview, navKind, url, runtimeTabId, hostingEnvironmentId, hostingThreadId]);
 
   const handleZoomIn = useCallback(() => {
     if (previewBridge && runtimeTabId) void previewBridge.zoomIn(runtimeTabId);
@@ -838,6 +875,7 @@ export function PreviewView({
               description={navStatus.description}
               onReload={handleRefresh}
               recoveryRequest={recoveryRequest}
+              restoringHostedPreview={restoringHostedPreview}
               onRequestRecovery={() => {
                 void requestPreviewRecovery({
                   threadRef,
