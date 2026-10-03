@@ -5,23 +5,29 @@ import * as Data from "effect/Data";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-export interface NightlyTag {
-  readonly tag: string;
-  readonly major: number;
-  readonly minor: number;
-  readonly patch: number;
-  readonly date: number;
-  readonly runNumber: number;
-}
+import {
+  LASTCODE_CHECKPOINT_TAG_PREFIX,
+  LASTCODE_REVISION_TAG_PREFIX,
+  nightlyTagFromCheckpointTag,
+  parseLastCodeInstallableTag,
+  parseNightlyTag,
+  versionFromLastCodeInstallableTag,
+  type LastCodeInstallableTag,
+  type NightlyTag,
+} from "./lib/lastcode-installable-tag.ts";
 
-export interface LastCodeInstallableTag {
-  readonly tag: string;
-  readonly nightly: NightlyTag;
-  readonly revision: number;
-}
+export {
+  LASTCODE_CHECKPOINT_TAG_PREFIX,
+  LASTCODE_REVISION_TAG_PREFIX,
+  nightlyTagFromCheckpointTag,
+  parseLastCodeInstallableTag,
+  parseNightlyTag,
+  versionFromLastCodeInstallableTag,
+  versionFromNightlyTag,
+  type LastCodeInstallableTag,
+  type NightlyTag,
+} from "./lib/lastcode-installable-tag.ts";
 
-export const LASTCODE_CHECKPOINT_TAG_PREFIX = "lastcode/checkpoint/";
-export const LASTCODE_REVISION_TAG_PREFIX = "lastcode/revision/";
 export const LASTCODE_BUILD_TAG_PREFIX = "lastcode/build/";
 
 export class LastCodeNightlyError extends Data.TaggedError("LastCodeNightlyError")<{
@@ -58,23 +64,6 @@ export function cleanGitEnvironment(
   );
 }
 
-export function parseNightlyTag(tag: string): NightlyTag | undefined {
-  const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(tag);
-  if (!match) return undefined;
-
-  const [, major, minor, patch, date, runNumber] = match;
-  if (!major || !minor || !patch || !date || !runNumber) return undefined;
-
-  return {
-    tag,
-    major: Number(major),
-    minor: Number(minor),
-    patch: Number(patch),
-    date: Number(date),
-    runNumber: Number(runNumber),
-  };
-}
-
 export function compareNightlyTags(left: NightlyTag, right: NightlyTag): number {
   if (left.major !== right.major) return left.major - right.major;
   if (left.minor !== right.minor) return left.minor - right.minor;
@@ -90,21 +79,11 @@ export function resolveLatestNightlyTag(tags: ReadonlyArray<string>): NightlyTag
     .toSorted((left, right) => compareNightlyTags(right, left))[0];
 }
 
-export function versionFromNightlyTag(tag: string): string {
-  return tag.startsWith("v") ? tag.slice(1) : tag;
-}
-
 export function checkpointTagFromNightlyTag(tag: string): string {
   if (!parseNightlyTag(tag)) {
     throw new Error(`Invalid upstream nightly tag '${tag}'.`);
   }
   return `${LASTCODE_CHECKPOINT_TAG_PREFIX}${tag}`;
-}
-
-export function nightlyTagFromCheckpointTag(tag: string): string | undefined {
-  if (!tag.startsWith(LASTCODE_CHECKPOINT_TAG_PREFIX)) return undefined;
-  const nightlyTag = tag.slice(LASTCODE_CHECKPOINT_TAG_PREFIX.length);
-  return parseNightlyTag(nightlyTag) ? nightlyTag : undefined;
 }
 
 export function revisionTagFromNightlyTag(tag: string, revision: number): string {
@@ -117,35 +96,12 @@ export function revisionTagFromNightlyTag(tag: string, revision: number): string
   return `${LASTCODE_REVISION_TAG_PREFIX}${tag}.${revision}`;
 }
 
-export function parseLastCodeInstallableTag(tag: string): LastCodeInstallableTag | undefined {
-  const checkpointNightly = nightlyTagFromCheckpointTag(tag);
-  if (checkpointNightly) {
-    return { tag, nightly: parseNightlyTag(checkpointNightly)!, revision: 0 };
-  }
-  if (!tag.startsWith(LASTCODE_REVISION_TAG_PREFIX)) return undefined;
-  const value = tag.slice(LASTCODE_REVISION_TAG_PREFIX.length);
-  const match = /^(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)\.(\d+)$/.exec(value);
-  if (!match) return undefined;
-  const [, nightlyValue, revisionValue] = match;
-  const nightly = nightlyValue ? parseNightlyTag(nightlyValue) : undefined;
-  const revision = Number(revisionValue);
-  if (!nightly || !Number.isSafeInteger(revision) || revision < 1) return undefined;
-  return { tag, nightly, revision };
-}
-
 export function compareLastCodeInstallableTags(
   left: LastCodeInstallableTag,
   right: LastCodeInstallableTag,
 ): number {
   const nightlyOrder = compareNightlyTags(left.nightly, right.nightly);
   return nightlyOrder === 0 ? left.revision - right.revision : nightlyOrder;
-}
-
-export function versionFromLastCodeInstallableTag(tag: string): string {
-  const installable = parseLastCodeInstallableTag(tag);
-  if (!installable) throw new Error(`Invalid LastCode installable tag '${tag}'.`);
-  const nightlyVersion = versionFromNightlyTag(installable.nightly.tag);
-  return installable.revision === 0 ? nightlyVersion : `${nightlyVersion}.${installable.revision}`;
 }
 
 export function buildTagFromInstallableTag(installableTag: string, buildNumber: number): string {
