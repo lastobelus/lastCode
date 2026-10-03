@@ -418,7 +418,7 @@ jobs:
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
     if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -469,46 +469,15 @@ jobs:
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
 
-  # Branch protection requires this job by its name, `Check`. It fails when any
-  # other job fails, is cancelled, or is skipped without a reason, so splitting
-  # or resharding jobs needs no ruleset change. Add every new job to `needs`.
-  # `always()` rather than `!cancelled()`: a skipped job reports success to
-  # branch protection, so a cancelled run must still produce a failing check.
-  check:
-    name: Check
-    if: ${{ always() }}
-    needs:
-      [
-        lint,
-        typecheck,
-        build,
-        test,
-        test_web,
-        test_server,
-        rust,
-        mobile_native_changes,
-        mobile_native_static_analysis,
-        release_smoke,
-      ]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require every job to pass
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          # Only the macOS lint skips on purpose, when no native mobile code changed.
-          echo "$RESULTS" | jq -e 'all(to_entries[];
-            .value.result == "success"
-            or (.key == "mobile_native_static_analysis" and .value.result == "skipped"))' > /dev/null
-
   ci_gate:
     name: CI Gate
     if: ${{ always() }}
     needs:
-      - check
+      - lint
+      - typecheck
+      - build
       - test
+      - test_web
       - test_server
       - rust
       - mobile_native_changes
@@ -520,8 +489,11 @@ jobs:
     steps:
       - name: Verify required jobs
         env:
-          CHECK_RESULT: ${{ needs.check.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          TEST_WEB_RESULT: ${{ needs.test_web.result }}
           TEST_SERVER_RESULT: ${{ needs.test_server.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           MOBILE_CHANGES_RESULT: ${{ needs.mobile_native_changes.result }}
@@ -530,8 +502,11 @@ jobs:
           RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
         run: |
           set -euo pipefail
-          test "$CHECK_RESULT" = success
+          test "$LINT_RESULT" = success
+          test "$TYPECHECK_RESULT" = success
+          test "$BUILD_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$TEST_WEB_RESULT" = success
           test "$TEST_SERVER_RESULT" = success
           test "$RUST_RESULT" = success
           test "$MOBILE_CHANGES_RESULT" = success
