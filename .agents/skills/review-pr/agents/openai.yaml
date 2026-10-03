@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review PR"
+  short_description: "Review and improve LastCode pull requests"
+  default_prompt: "Use $review-pr to review PR #<number>."
