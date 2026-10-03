@@ -53,6 +53,63 @@ describe("prepareHostedPreview", () => {
     });
   });
 
+  it("recovers a saved private-address URL through the owning lease and current private host", async () => {
+    const savedUrl = "http://192.168.1.24:5173/preview/index.html?theme=dark#top";
+    const savedLease = { ...lease, url: "http://localhost:5173/preview/index.html?theme=dark#top" };
+    const recover = vi.fn(async () => savedLease);
+
+    const result = await prepareHostedPreview({
+      threadRef,
+      url: savedUrl,
+      environmentUrl: "https://100.100.12.4:8443/",
+      list: async () => [savedLease],
+      recover,
+    });
+
+    expect(result).toEqual({
+      url: "http://100.100.12.4:5173/preview/index.html?theme=dark#top",
+      managed: true,
+      restored: true,
+    });
+    expect(recover).toHaveBeenCalledWith(savedLease);
+  });
+
+  it("keeps unrelated private addresses when no exact lease for this thread matches", async () => {
+    const url = "http://10.8.0.42:5173/preview/index.html?theme=dark#top";
+    const recover = vi.fn(async () => lease);
+    const otherThreadLease = {
+      ...lease,
+      threadId: ThreadId.make("other-preview-thread"),
+    };
+
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://100.100.12.4:8443/",
+      list: async () => [otherThreadLease],
+      recover,
+    });
+
+    expect(result).toEqual({ url, managed: false, restored: false });
+    expect(recover).not.toHaveBeenCalled();
+  });
+
+  it("does not adopt a private URL by port alone when the saved path differs", async () => {
+    const url = "http://10.8.0.42:5173/another-app?theme=dark";
+    const recover = vi.fn(async () => lease);
+
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://100.100.12.4:8443/",
+      list: async () => [lease],
+      recover,
+    });
+
+    expect(result).toEqual({ url, managed: false, restored: false });
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("keeps a loopback URL unchanged when the environment requires an unavailable public gateway", async () => {
     const result = await prepareHostedPreview({
       threadRef,

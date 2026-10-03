@@ -1,7 +1,7 @@
 import { prepareHostedPreview as prepareOwnedPreview } from "@t3tools/client-runtime/preview-hosting";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { isLoopbackHost } from "@t3tools/shared/preview";
+import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { readPreparedConnection } from "~/state/session";
@@ -17,7 +17,7 @@ export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): 
     const parsed = new URL(url);
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      (isLoopbackHost(parsed.hostname) ||
+      (isPrivateNetworkHost(parsed.hostname) ||
         parsed.hostname === new URL(connection.httpBaseUrl).hostname)
     );
   } catch {

@@ -6,6 +6,7 @@ import {
   EnvironmentId,
   FILL_PREVIEW_VIEWPORT,
   ThreadId,
+  type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { act, createElement, Profiler, StrictMode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -13,7 +14,11 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   clearRecovery: vi.fn(),
-  recoverHostedPreview: vi.fn(async (): Promise<boolean> => false),
+  recoverHostedPreview: vi.fn(
+    async (_ref: ScopedThreadRef, _url: string): Promise<boolean> => false,
+  ),
+  preparedRecoveryUrl: null as string | null,
+  environmentUrl: "http://172.25.85.75:3773",
   refresh: vi.fn(async (): Promise<void> => undefined),
   navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" } as
     | { _tag: "Success"; url: string; title: string }
@@ -62,7 +67,11 @@ vi.mock("./previewHostingRecovery", () => ({
   prepareHostedPreview: async (
     _ref: Parameters<typeof import("./previewHostingRecovery").prepareHostedPreview>[0],
     url: string,
-  ) => ({ url, managed: false, restored: await mocks.recoverHostedPreview() }),
+  ) => ({
+    url: mocks.preparedRecoveryUrl ?? url,
+    managed: mocks.preparedRecoveryUrl !== null,
+    restored: await mocks.recoverHostedPreview(_ref, url),
+  }),
 }));
 
 vi.mock("~/browserHistoryStore", () => ({
@@ -155,7 +164,7 @@ vi.mock("~/previewStateStore", () => ({
 
 vi.mock("~/state/environments", () => ({
   useEnvironment: () => ({ label: "WSL" }),
-  useEnvironmentHttpBaseUrl: () => "http://172.25.85.75:3773",
+  useEnvironmentHttpBaseUrl: () => mocks.environmentUrl,
 }));
 
 vi.mock("~/state/preview", () => ({
@@ -352,6 +361,8 @@ function installTestDom() {
 describe("PreviewView navigation", () => {
   beforeEach(() => {
     mocks.recoverHostedPreview.mockReset().mockResolvedValue(false);
+    mocks.preparedRecoveryUrl = null;
+    mocks.environmentUrl = "http://172.25.85.75:3773";
     mocks.refresh.mockClear();
     mocks.clearRecovery.mockClear();
     mocks.navStatus = { _tag: "Success", url: "http://example.com/", title: "Example" };
@@ -487,6 +498,63 @@ describe("PreviewView navigation", () => {
       await act(async () => mocks.reload?.());
       expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(2);
       expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries an already failed tab when its environment reconnects at a new address", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    mocks.navStatus = {
+      _tag: "LoadFailed",
+      url: "http://192.168.1.30:5173/qa",
+      code: -102,
+      description: "refused",
+    };
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+      mocks.environmentUrl = "http://managed-server.ts.net:3773";
+      mocks.preparedRecoveryUrl = "http://managed-server.ts.net:5173/qa";
+      mocks.recoverHostedPreview.mockResolvedValue(true);
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(2);
+      expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(
+        TEST_RUNTIME_TAB_ID,
+        mocks.preparedRecoveryUrl,
+      );
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("navigates failed tabs to the current environment address after recovery and on reload", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    const original = "http://192.168.1.30:5173/qa?q=1#part";
+    const current = "http://managed-server.ts.net:5173/qa?q=1#part";
+    mocks.navStatus = { _tag: "LoadFailed", url: original, code: -102, description: "refused" };
+    mocks.preparedRecoveryUrl = current;
+    mocks.recoverHostedPreview.mockResolvedValue(true);
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(TEST_RUNTIME_TAB_ID, current);
+      expect(mocks.refresh).not.toHaveBeenCalled();
+      mocks.navigate.mockClear();
+      await act(async () => mocks.reload?.());
+      expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(TEST_RUNTIME_TAB_ID, current);
+      expect(mocks.refresh).not.toHaveBeenCalled();
     } finally {
       await act(() => root.unmount());
       vi.unstubAllGlobals();

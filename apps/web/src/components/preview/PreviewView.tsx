@@ -44,7 +44,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
 import { openPreviewSession } from "./openPreviewSession";
-import { prepareHostedPreview, recoverHostedPreview } from "./previewHostingRecovery";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 import { PreviewChromeRow } from "./PreviewChromeRow";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 import { PreviewMoreMenu } from "./PreviewMoreMenu";
@@ -265,19 +265,30 @@ export function PreviewView({
   }, [runtimeTabId]);
   const hostingEnvironmentId = threadRef.environmentId;
   const hostingThreadId = threadRef.threadId;
+  const refreshPreparedPreview = useCallback(
+    (prepared: { url: string }) => {
+      if (previewBridge && runtimeTabId && prepared.url !== url) {
+        void previewBridge.navigate(runtimeTabId, prepared.url);
+      } else {
+        refreshNativePreview();
+      }
+    },
+    [runtimeTabId, url, refreshNativePreview],
+  );
   const handleRefresh = useCallback(() => {
-    void recoverHostedPreview(
+    void prepareHostedPreview(
       { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
       url,
-    ).then(refreshNativePreview);
-  }, [hostingEnvironmentId, hostingThreadId, url, refreshNativePreview]);
+    ).then(refreshPreparedPreview);
+  }, [hostingEnvironmentId, hostingThreadId, url, refreshPreparedPreview]);
 
   const hostingAttemptedByTab = useRef(
     new Map<
       string,
       {
         url: string;
-        recovery: Promise<boolean>;
+        environmentUrl: string | null;
+        recovery: ReturnType<typeof prepareHostedPreview>;
         completed: boolean;
       }
     >(),
@@ -292,33 +303,43 @@ export function PreviewView({
       return;
     }
     const previous = hostingAttemptedByTab.current.get(runtimeTabId);
-    if (previous?.url === url && previous.completed) return;
+    const sameDestination =
+      previous?.url === url && previous.environmentUrl === environmentHttpBaseUrl;
+    if (sameDestination && previous.completed) return;
     // Effect replay reattaches to pending recovery; completed failures wait for a
     // deliberate reload or a successful navigation before trying again.
-    const attempt =
-      previous?.url === url
-        ? previous
-        : {
+    const attempt = sameDestination
+      ? previous
+      : {
+          url,
+          environmentUrl: environmentHttpBaseUrl,
+          recovery: prepareHostedPreview(
+            { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
             url,
-            recovery: recoverHostedPreview(
-              { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
-              url,
-            ),
-            completed: false,
-          };
+          ),
+          completed: false,
+        };
     hostingAttemptedByTab.current.set(runtimeTabId, attempt);
     let cancelled = false;
     setRestoringHostedPreview(true);
-    void attempt.recovery.then((restored) => {
+    void attempt.recovery.then((prepared) => {
       if (cancelled) return;
       attempt.completed = true;
       setRestoringHostedPreview(false);
-      if (restored) refreshNativePreview();
+      if (prepared.restored) refreshPreparedPreview(prepared);
     });
     return () => {
       cancelled = true;
     };
-  }, [refreshNativePreview, navKind, url, runtimeTabId, hostingEnvironmentId, hostingThreadId]);
+  }, [
+    refreshPreparedPreview,
+    navKind,
+    url,
+    runtimeTabId,
+    hostingEnvironmentId,
+    hostingThreadId,
+    environmentHttpBaseUrl,
+  ]);
 
   const handleZoomIn = useCallback(() => {
     if (previewBridge && runtimeTabId) void previewBridge.zoomIn(runtimeTabId);

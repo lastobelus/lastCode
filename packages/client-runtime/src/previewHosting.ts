@@ -57,11 +57,18 @@ export function prepareHostedPreview(
   } catch {
     return Promise.resolve(original);
   }
+  const targetIsLoopback = isLoopbackHost(target.hostname);
+  const targetIsCurrentEnvironment =
+    normalizeHostname(target.hostname) === normalizeHostname(environment.hostname);
+  const targetIsPreviousPrivateAddress =
+    !targetIsLoopback &&
+    !targetIsCurrentEnvironment &&
+    isPrivateNetworkHost(target.hostname) &&
+    isPrivateNetworkHost(environment.hostname);
   if (
     (target.protocol !== "http:" && target.protocol !== "https:") ||
     (environment.protocol !== "http:" && environment.protocol !== "https:") ||
-    (!isLoopbackHost(target.hostname) &&
-      normalizeHostname(target.hostname) !== normalizeHostname(environment.hostname))
+    (!targetIsLoopback && !targetIsCurrentEnvironment && !targetIsPreviousPrivateAddress)
   ) {
     return Promise.resolve(original);
   }
@@ -82,10 +89,10 @@ export function prepareHostedPreview(
     } catch {
       return original;
     }
-    const owned = selectHostedPreview(
-      target,
-      leases.filter((lease) => lease.threadId === input.threadRef.threadId),
-    );
+    const threadLeases = leases.filter((lease) => lease.threadId === input.threadRef.threadId);
+    const owned = targetIsPreviousPrivateAddress
+      ? selectExactPrivateHostedPreview(target, threadLeases)
+      : selectHostedPreview(target, threadLeases);
     if (!owned) return original;
     let restored = false;
     try {
@@ -94,7 +101,7 @@ export function prepareHostedPreview(
       // Keep the managed destination when the best-effort restore request fails.
     }
     return {
-      url: resolveOwnedPreviewUrl(target, environment),
+      url: resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress),
       managed: true,
       restored,
     };
@@ -105,8 +112,37 @@ export function prepareHostedPreview(
   return preparation;
 }
 
-function resolveOwnedPreviewUrl(target: URL, environment: URL): string {
-  if (!isLoopbackHost(target.hostname) || !isPrivateNetworkHost(environment.hostname)) {
+function selectExactPrivateHostedPreview(
+  url: URL,
+  leases: ReadonlyArray<PreviewHostingLeaseSummary>,
+): PreviewHostingLeaseSummary | null {
+  const exact = leases.filter((lease) => {
+    try {
+      const canonical = new URL(lease.url);
+      return (
+        (canonical.protocol === "http:" || canonical.protocol === "https:") &&
+        (isLoopbackHost(canonical.hostname) || isPrivateNetworkHost(canonical.hostname)) &&
+        canonical.protocol === url.protocol &&
+        canonical.port === url.port &&
+        canonical.pathname === url.pathname &&
+        canonical.search === url.search
+      );
+    } catch {
+      return false;
+    }
+  });
+  return exact.length === 1 ? exact[0]! : null;
+}
+
+function resolveOwnedPreviewUrl(
+  target: URL,
+  environment: URL,
+  targetIsPreviousPrivateAddress: boolean,
+): string {
+  if (
+    (!isLoopbackHost(target.hostname) && !targetIsPreviousPrivateAddress) ||
+    !isPrivateNetworkHost(environment.hostname)
+  ) {
     return target.toString();
   }
   const resolvedHost = isLocalLoopbackHost(environment.hostname)
