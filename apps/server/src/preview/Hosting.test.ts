@@ -45,6 +45,7 @@ interface TerminalHarness {
     readonly data: string;
   }>;
   readonly closes: Array<{ readonly threadId: string; readonly terminalId: string }>;
+  readonly historyDeletes: Array<{ readonly threadId: string; readonly terminalId: string }>;
   readonly summaries: TerminalSummary[];
   readonly liveSummaries?: TerminalSummary[];
   readonly failWrite?: boolean;
@@ -142,6 +143,12 @@ function terminalLayer(harness: TerminalHarness) {
     },
     close: (input) => {
       harness.closes.push({ threadId: input.threadId, terminalId: input.terminalId ?? "" });
+      if (input.deleteHistory === true) {
+        harness.historyDeletes.push({
+          threadId: input.threadId,
+          terminalId: input.terminalId ?? "",
+        });
+      }
       const attempt = harness.onCloseAttempt?.(input) ?? Effect.void;
       if (
         harness.failClose === true ||
@@ -219,6 +226,7 @@ function testTerminalHarness(overrides: Partial<TerminalHarness> = {}): Terminal
     opens: [],
     writes: [],
     closes: [],
+    historyDeletes: [],
     summaries: [],
     ...overrides,
   };
@@ -1019,7 +1027,21 @@ describe("PreviewHosting", () => {
         ServerConfig.layerTest(process.cwd(), root),
       );
       const closed = yield* Deferred.make<void>();
+      const ordinaryTerminal: TerminalSummary = {
+        threadId: "thread-1",
+        terminalId: "ordinary-shell",
+        cwd: "/workspace",
+        worktreePath: "/workspace",
+        status: "running",
+        pid: 99,
+        exitCode: null,
+        exitSignal: null,
+        hasRunningSubprocess: false,
+        label: "zsh",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
       const harness = testTerminalHarness({
+        summaries: [ordinaryTerminal],
         onClose: () => Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
       });
       const layer = hostingLayer(config, harness);
@@ -1033,12 +1055,17 @@ describe("PreviewHosting", () => {
             cwd: "/workspace",
             url: PREVIEW_URL,
           });
+          assert.deepEqual(harness.historyDeletes, []);
           assert.isTrue(yield* hosting.ownsTerminal("thread-1", lease.terminalId));
           yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS));
           yield* Deferred.await(closed);
           assert.deepEqual(harness.closes, [
             { threadId: "thread-1", terminalId: lease.terminalId },
           ]);
+          assert.deepEqual(harness.historyDeletes, [
+            { threadId: "thread-1", terminalId: lease.terminalId },
+          ]);
+          assert.deepEqual(harness.summaries, [ordinaryTerminal]);
           assert.isFalse(yield* hosting.ownsTerminal("thread-1", lease.terminalId));
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.isNull(

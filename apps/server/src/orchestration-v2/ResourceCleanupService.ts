@@ -44,20 +44,32 @@ export const live = Layer.effect(
     const config = yield* ServerConfig.ServerConfig;
     return {
       cleanupTerminals: (threadId: string) =>
-        previews.removeThread(threadId).pipe(
-          Effect.mapError(
-            (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
-          ),
-          Effect.andThen(
-            terminals
-              .close({ threadId, deleteHistory: true })
-              .pipe(
-                Effect.mapError(
-                  (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
-                ),
-              ),
-          ),
-        ),
+        Effect.gen(function* () {
+          const preview = yield* Effect.result(previews.removeThread(threadId));
+          // Deleted threads must lose ordinary terminals even when preview state needs retry.
+          const terminal = yield* Effect.result(terminals.close({ threadId, deleteHistory: true }));
+          if (preview._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "preview",
+                threadId,
+                cause:
+                  terminal._tag === "Failure"
+                    ? { preview: preview.failure, terminal: terminal.failure }
+                    : preview.failure,
+              }),
+            );
+          }
+          if (terminal._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "terminal",
+                threadId,
+                cause: terminal.failure,
+              }),
+            );
+          }
+        }),
       cleanupArchivedTerminals: (threadId: string) =>
         previews.list(threadId).pipe(
           Effect.mapError(

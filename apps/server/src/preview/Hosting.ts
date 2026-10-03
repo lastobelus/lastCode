@@ -448,7 +448,11 @@ const make = Effect.gen(function* () {
     });
 
   const closeOwnedTerminal = (lease: PreviewHostingLease) =>
-    terminals.close({ threadId: lease.threadId, terminalId: lease.terminalId });
+    terminals.close({
+      threadId: lease.threadId,
+      terminalId: lease.terminalId,
+      deleteHistory: true,
+    });
 
   const expireLocked = (lease: PreviewHostingLease) =>
     Effect.gen(function* () {

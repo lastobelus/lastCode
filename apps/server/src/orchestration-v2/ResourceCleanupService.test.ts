@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { TerminalSummary } from "@t3tools/contracts";
+import { TerminalHistoryError, type TerminalSummary } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -81,52 +81,86 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect("removes preview leases before closing terminals and propagates stop failures", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-delete-" });
-    const config = yield* Effect.provide(
-      ServerConfig.ServerConfig,
-      ServerConfig.layerTest(process.cwd(), root),
-    );
-    const operations = yield* Ref.make<ReadonlyArray<string>>([]);
-    const previewStopError = new PreviewHosting.PreviewHostingError({
-      operation: "persist",
-      statePath: "/state/preview-hosting.json",
-      cause: new Error("preview terminal did not stop"),
-    });
-    const layer = ResourceCleanupService.live.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          NodeServices.layer,
-          ServerConfig.layer(config),
-          Layer.mock(TerminalManager.TerminalManager)({
-            close: ({ threadId }) =>
-              Ref.update(operations, (values) => [...values, `terminals:${threadId}`]),
-          }),
-          Layer.mock(PreviewHosting.PreviewHosting)({
-            removeThread: (threadId) =>
-              Ref.update(operations, (values) => [...values, `preview:${threadId}`]).pipe(
-                Effect.andThen(Effect.fail(previewStopError)),
-              ),
-          }),
+it.effect(
+  "closes all deleted-thread terminals despite preview failure and retains the retry error",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-delete-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const operations = yield* Ref.make<ReadonlyArray<string>>([]);
+      const previewStopError = new PreviewHosting.PreviewHostingError({
+        operation: "persist",
+        statePath: "/state/preview-hosting.json",
+        cause: new Error("preview terminal did not stop"),
+      });
+      const terminalError = new TerminalHistoryError({
+        operation: "truncate",
+        threadId: "thread-both-fail",
+        terminalId: "shell",
+      });
+      const layer = ResourceCleanupService.live.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            ServerConfig.layer(config),
+            Layer.mock(TerminalManager.TerminalManager)({
+              close: ({ threadId, deleteHistory }) =>
+                Ref.update(operations, (values) => [
+                  ...values,
+                  `terminals:${threadId}:${String(deleteHistory)}`,
+                ]).pipe(
+                  Effect.andThen(
+                    threadId === "thread-both-fail" ? Effect.fail(terminalError) : Effect.void,
+                  ),
+                ),
+            }),
+            Layer.mock(PreviewHosting.PreviewHosting)({
+              removeThread: (threadId) =>
+                Ref.update(operations, (values) => [...values, `preview:${threadId}`]).pipe(
+                  Effect.andThen(Effect.fail(previewStopError)),
+                ),
+            }),
+          ),
         ),
-      ),
-    );
+      );
 
-    yield* Effect.gen(function* () {
-      const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
-      const result = yield* Effect.result(cleanup.cleanupTerminals("thread-1"));
-      assert.equal(result._tag, "Failure");
-      if (result._tag === "Failure") {
-        assert.equal(result.failure._tag, "ResourceCleanupError");
-        if (result.failure._tag === "ResourceCleanupError") {
-          assert.equal(result.failure.operation, "preview");
+      yield* Effect.gen(function* () {
+        const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
+        const result = yield* Effect.result(cleanup.cleanupTerminals("thread-1"));
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "ResourceCleanupError");
+          if (result.failure._tag === "ResourceCleanupError") {
+            assert.equal(result.failure.operation, "preview");
+          }
         }
-      }
-      assert.deepStrictEqual(yield* Ref.get(operations), ["preview:thread-1"]);
-    }).pipe(Effect.provide(layer));
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        assert.deepStrictEqual(yield* Ref.get(operations), [
+          "preview:thread-1",
+          "terminals:thread-1:true",
+        ]);
+        // A retained startup error must not block cleanup for an unrelated deleted thread.
+        const retry = yield* Effect.result(cleanup.cleanupTerminals("thread-without-preview"));
+        assert.equal(retry._tag, "Failure");
+        assert.deepStrictEqual(yield* Ref.get(operations), [
+          "preview:thread-1",
+          "terminals:thread-1:true",
+          "preview:thread-without-preview",
+          "terminals:thread-without-preview:true",
+        ]);
+        const both = yield* Effect.result(cleanup.cleanupTerminals("thread-both-fail"));
+        assert.equal(both._tag, "Failure");
+        if (both._tag === "Failure") {
+          assert.deepStrictEqual(both.failure.cause, {
+            preview: previewStopError,
+            terminal: terminalError,
+          });
+        }
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("removes preview leases before closing all terminals on deletion", () =>
