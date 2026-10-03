@@ -13,10 +13,10 @@
         "docs/user/resumable-project-actions-for-agents.md",
         "docs/user/project-settings.md",
         "apps/server/src/actionResume/",
-        "apps/server/src/orchestration/ThreadActionResume.ts",
+        "apps/server/src/orchestration-v2/ThreadManagementService.ts",
         "apps/web/src/components/chat/ComposerActionResume.tsx",
         "apps/mobile/src/features/threads/ActionResumeNotice.tsx",
-        "packages/contracts/src/orchestration.ts"
+        "packages/contracts/src/orchestrationV2.ts"
       ],
       "captureRecipeIds": ["resumable-actions", "workspace-overview"]
     },
@@ -30,7 +30,7 @@
         "docs/user/codex-thread-tools.md",
         "apps/server/src/cli/thread.ts",
         "apps/server/src/provider/CodexThreadTool.ts",
-        "apps/server/src/provider/Layers/CodexAdapter.ts"
+        "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts"
       ],
       "captureRecipeIds": ["codex-thread-tools"]
     },
@@ -44,9 +44,9 @@
         "docs/user/thread-sidebar.md",
         "apps/web/src/components/thread-annotation/",
         "apps/web/src/components/LegacySidebar.tsx",
-        "apps/server/src/orchestration/decider.ts",
-        "apps/server/src/orchestration/projector.ts",
-        "packages/contracts/src/orchestration.ts"
+        "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
+        "apps/server/src/orchestration-v2/ProjectionStore.ts",
+        "packages/contracts/src/orchestrationV2.ts"
       ],
       "captureRecipeIds": ["thread-annotations", "workspace-overview"]
     },
