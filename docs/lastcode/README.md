@@ -38,6 +38,8 @@ directories.
   one-owner crash-safe app, plist, and database selection transaction.
 - [Settings import](settings-import.md): the one-time, selective migration from
   T3 Code into an independent LastCode profile, including exclusions and backups.
+- [QA preview handoffs](preview-handoffs.md): recovery requests and the required
+  24-hour hosting and automatic cleanup contract for agent-delivered previews.
 
 ## Command Summary
 

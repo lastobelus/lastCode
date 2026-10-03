@@ -4011,6 +4011,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.previewReportStatus, previewManager.reportStatus(input), {
             "rpc.aggregate": "preview",
           }),
+        [WS_METHODS.previewClaimRecovery]: (input) =>
+          observeRpcEffect(WS_METHODS.previewClaimRecovery, previewManager.claimRecovery(input), {
+            "rpc.aggregate": "preview",
+          }),
         [WS_METHODS.previewAutomationConnect]: (input) =>
           observeRpcStreamEffect(
             WS_METHODS.previewAutomationConnect,

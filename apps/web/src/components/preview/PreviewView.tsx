@@ -55,6 +55,11 @@ import { browserResponsiveViewportForToggle, useBrowserDefaults } from "~/browse
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { PreviewUnreachable } from "./PreviewUnreachable";
+import {
+  clearPreviewRecoveryRequest,
+  requestPreviewRecovery,
+  usePreviewRecoveryRequest,
+} from "./previewRecoveryRequest";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { Badge } from "~/components/ui/badge";
@@ -153,6 +158,7 @@ export function PreviewView({
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
+  const recoveryRequest = usePreviewRecoveryRequest(threadRef, url, tabId ?? undefined);
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
   const canGoBack = desktopOverlay?.canGoBack ?? snapshot?.canGoBack ?? false;
   const canGoForward = desktopOverlay?.canGoForward ?? snapshot?.canGoForward ?? false;
@@ -176,8 +182,23 @@ export function PreviewView({
 
   const navUrl = navStatus._tag === "Success" ? navStatus.url : null;
   const navTitle = navStatus._tag === "Success" ? navStatus.title : null;
+  const failedUrlsByTab = useRef(new Map<string, string>());
   const latestHistoryUrl = recentHistoryEntries[0]?.url;
   const threadKey = scopedThreadKey(threadRef);
+  useEffect(() => {
+    if (!runtimeTabId) return;
+    if (navStatus._tag === "LoadFailed") {
+      failedUrlsByTab.current.set(runtimeTabId, navStatus.url);
+      return;
+    }
+    if (navStatus._tag !== "Success") return;
+    const owner = { environmentId: threadRef.environmentId, threadId: threadRef.threadId };
+    const failedUrl = failedUrlsByTab.current.get(runtimeTabId);
+    // A restored URL can redirect; the final destination is not the request key.
+    if (failedUrl) clearPreviewRecoveryRequest(owner, failedUrl);
+    clearPreviewRecoveryRequest(owner, navStatus.url);
+    failedUrlsByTab.current.delete(runtimeTabId);
+  }, [navStatus, runtimeTabId, threadRef.environmentId, threadRef.threadId]);
   useEffect(() => {
     if (!navUrl || !navTitle || !latestHistoryUrl) return;
     // Agent-driven pages only enrich an existing requested URL.
@@ -816,6 +837,17 @@ export function PreviewView({
               code={navStatus.code}
               description={navStatus.description}
               onReload={handleRefresh}
+              recoveryRequest={recoveryRequest}
+              onRequestRecovery={() => {
+                void requestPreviewRecovery({
+                  threadRef,
+                  url: navStatus.url,
+                  code: navStatus.code,
+                  description: navStatus.description,
+                  title: navStatus.title,
+                  ...(tabId ? { tabId } : {}),
+                });
+              }}
             />
           </div>
         ) : null}
