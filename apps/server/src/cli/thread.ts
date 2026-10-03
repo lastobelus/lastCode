@@ -676,7 +676,7 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   });
 });
 
-export function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
+function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
   const selectedRuns = projection.runs
     .toSorted((left, right) => right.ordinal - left.ordinal)
     .slice(0, turnLimit);
@@ -780,10 +780,7 @@ export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
 });
 
 // Inspection never initializes, migrates, or writes either database.
-export const ThreadCliOfflineRuntimeLive = Layer.mergeAll(
-  ProjectionStore.layer,
-  ProjectStore.layer,
-).pipe(
+const ThreadCliOfflineRuntimeLive = Layer.mergeAll(ProjectionStore.layer, ProjectStore.layer).pipe(
   Layer.provide(
     Layer.unwrap(
       Effect.gen(function* () {
