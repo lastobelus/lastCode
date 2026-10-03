@@ -1483,6 +1483,35 @@ function makeThread(overrides: ThreadFixtureOverrides = {}): Thread {
 }
 
 describe("getFallbackThreadIdAfterDelete", () => {
+  it.each(["created_at", "updated_at"] as const)(
+    "keeps archived worktree owners out of navigation candidates for %s",
+    (sortOrder) => {
+      const deleted = makeThread({ id: ThreadId.make("deleted") });
+      const activeSibling = makeThread({ id: ThreadId.make("active-sibling") });
+      const archivedSibling = makeThread({
+        id: ThreadId.make("archived-sibling"),
+        createdAt: "2026-09-09T10:00:00.000Z",
+        updatedAt: "2026-09-09T10:00:00.000Z",
+        archivedAt: "2026-09-09T11:00:00.000Z",
+      });
+
+      expect(
+        getFallbackThreadIdAfterDelete({
+          threads: [deleted, activeSibling, archivedSibling],
+          deletedThreadId: deleted.id,
+          sortOrder,
+        }),
+      ).toBe(activeSibling.id);
+      expect(
+        getFallbackThreadIdAfterDelete({
+          threads: [deleted, archivedSibling],
+          deletedThreadId: deleted.id,
+          sortOrder,
+        }),
+      ).toBeNull();
+    },
+  );
+
   it("returns the top remaining thread in the deleted thread's project sidebar order", () => {
     const fallbackThreadId = getFallbackThreadIdAfterDelete({
       threads: [
