@@ -249,6 +249,10 @@ share** and **Open in file viewer**. Pictures, videos and PDFs keep their native
 other document formats such as Word or Pages open in the device's own viewer when it has one.
 If nothing on the device can show a format, save or share it to open it elsewhere.
 
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
+
 ## Images and videos in messages
 
 Select an image or video attachment or link to preview it. Playback support depends
@@ -261,6 +265,12 @@ return to the thumbnail to open this menu after watching a full-screen video.
 File links refer to the environment's machine, including when you connect remotely.
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
+
+## Preview links
+
+If a link opened in the integrated browser cannot connect, choose **Ask agent to
+restore preview**. The failed link and error go to the thread that owns the
+preview. After the agent restores it, reload the page.
 
 ## Files outside the workspace
 

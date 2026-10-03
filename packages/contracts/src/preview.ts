@@ -9,7 +9,14 @@
  * @module Preview
  */
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  CommandId,
+  MessageId,
+  NonNegativeInt,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { BrowserProfileId } from "./browserProfile.ts";
 
 export const PREVIEW_URL_MAX_LENGTH = 2_048;
@@ -213,6 +220,29 @@ export const PreviewReportStatusInput = Schema.Struct({
 });
 export type PreviewReportStatusInput = typeof PreviewReportStatusInput.Type;
 
+/** Claim a recovery dispatch identity for one exact failed URL in a thread. */
+export const PreviewClaimRecoveryInput = Schema.Struct({
+  threadId: ThreadId,
+  tabId: PreviewTabId,
+  url: Url,
+});
+export type PreviewClaimRecoveryInput = typeof PreviewClaimRecoveryInput.Type;
+
+export const PreviewRecoveryClaim = Schema.Struct({
+  commandId: CommandId,
+  messageId: MessageId,
+});
+export type PreviewRecoveryClaim = typeof PreviewRecoveryClaim.Type;
+
+export class PreviewRecoveryStorageError extends Schema.TaggedError<PreviewRecoveryStorageError>()(
+  "PreviewRecoveryStorageError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not persist the preview recovery request identity.";
+  }
+}
+
 export const PreviewRefreshInput = Schema.Struct({
   threadId: ThreadId,
   tabId: PreviewTabId,
@@ -350,5 +380,9 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
   }
 }
 
-export const PreviewError = Schema.Union([PreviewSessionLookupError, PreviewInvalidUrlError]);
+export const PreviewError = Schema.Union([
+  PreviewSessionLookupError,
+  PreviewInvalidUrlError,
+  PreviewRecoveryStorageError,
+]);
 export type PreviewError = typeof PreviewError.Type;

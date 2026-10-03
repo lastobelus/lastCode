@@ -23,6 +23,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import * as ServerOwnerLease from "./serverOwnerLease.ts";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
@@ -663,6 +664,10 @@ const makeRoutesLayer = Layer.mergeAll(
 const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    yield* Effect.acquireRelease(
+      ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+      (lease) => lease.release,
+    );
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const activationLayer = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);

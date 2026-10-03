@@ -37,6 +37,15 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
 import {
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
+  setThreadAttention,
+  clearThreadAttention,
+  deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
   archiveThread,
   cancelQueuedRun,
   createProject,
@@ -148,6 +157,43 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("dispatches durable LastCode controls through V2 without fetching history", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: ThreadId[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+      const attention = { kind: "question" as const, raisedAt: "2026-06-20T00:00:00.000Z" };
+      yield* Effect.all([
+        setThreadPersistence({ threadId: v2ThreadId, persistent: true }),
+        upsertThreadAnnotation({ threadId: v2ThreadId, body: "Keep this review open" }),
+        resolveThreadAnnotation({ threadId: v2ThreadId }),
+        reopenThreadAnnotation({ threadId: v2ThreadId }),
+        setThreadAttention({ threadId: v2ThreadId, attention }),
+        clearThreadAttention({ threadId: v2ThreadId }),
+        deleteThread({ threadId: v2ThreadId, deleteWorktree: true, repositoryKey: "repository-1" }),
+        retryThreadWorktreeCleanup({ threadId: v2ThreadId }),
+        abandonThreadWorktreeCleanup({ threadId: v2ThreadId }),
+      ]).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands.map(({ commandId: _id, ...command }) => command)).toEqual([
+        { type: "thread.persistence.set", threadId: v2ThreadId, persistent: true },
+        { type: "thread.annotation.upsert", threadId: v2ThreadId, body: "Keep this review open" },
+        { type: "thread.annotation.resolve", threadId: v2ThreadId },
+        { type: "thread.annotation.reopen", threadId: v2ThreadId },
+        { type: "thread.attention.set", threadId: v2ThreadId, attention },
+        { type: "thread.attention.clear", threadId: v2ThreadId },
+        {
+          type: "thread.delete",
+          threadId: v2ThreadId,
+          deleteWorktree: true,
+          repositoryKey: "repository-1",
+        },
+        { type: "thread.worktree-cleanup.retry", threadId: v2ThreadId },
+        { type: "thread.worktree-cleanup.abandon", threadId: v2ThreadId },
+      ]);
+      expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("routes projects through the event-sourced project transport", () =>
     Effect.gen(function* () {
       const projects: ProjectMutation[] = [];
