@@ -1,7 +1,11 @@
 import * as Option from "effect/Option";
 import type { ConnectionCatalogEntry } from "./connection/catalog.ts";
 import type { PreparedConnection } from "./connection/model.ts";
-import type { PreviewHostingLeaseSummary, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  PREVIEW_URL_MAX_LENGTH,
+  type PreviewHostingLeaseSummary,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
   isLocalLoopbackHost,
@@ -29,6 +33,15 @@ export function configuredPreviewEnvironmentUrl(
     profile.connectionId === connection.target.connectionId
     ? profile.httpBaseUrl
     : null;
+}
+
+export class HostedPreviewUrlTooLongError extends Error {
+  constructor() {
+    super(
+      `The preview URL exceeds ${PREVIEW_URL_MAX_LENGTH} characters after resolving the environment address. Use a shorter preview path or query.`,
+    );
+    this.name = "HostedPreviewUrlTooLongError";
+  }
 }
 
 export interface PrepareHostedPreviewInput {
@@ -135,6 +148,8 @@ export function prepareHostedPreview(
       ? selectExactPrivateHostedPreview(target, threadLeases)
       : selectHostedPreview(target, threadLeases);
     if (!owned) return original;
+    const destination = resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress);
+    if (destination.length > PREVIEW_URL_MAX_LENGTH) throw new HostedPreviewUrlTooLongError();
     let restored = false;
     try {
       restored =
@@ -147,7 +162,7 @@ export function prepareHostedPreview(
       // Keep the managed destination when the best-effort restore request fails.
     }
     return {
-      url: resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress),
+      url: destination,
       managed: true,
       restored,
     };

@@ -16,6 +16,7 @@ import {
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./connection/catalog.ts";
 import {
   configuredPreviewEnvironmentUrl,
+  HostedPreviewUrlTooLongError,
   prepareHostedPreview,
   selectHostedPreview,
 } from "./previewHosting.ts";
@@ -409,5 +410,56 @@ describe("configured preview endpoints", () => {
         undefined,
       ),
     ).toBe("http://192.168.1.24:3773/");
+  });
+});
+
+describe("rewritten preview URL limits", () => {
+  it.each([2047, 2048])("accepts an unchanged %i-character destination", async (length) => {
+    const prefix = "http://localhost:5173/";
+    const url = prefix + "x".repeat(length - prefix.length);
+    const found = { ...lease, url };
+    const recover = vi.fn(async () => found);
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "http://localhost:3773/",
+        list: async () => [found],
+        recover,
+      }),
+    ).resolves.toMatchObject({ url, managed: true, restored: true });
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+  it("rejects hostname growth beyond the wire limit before restarting the server", async () => {
+    const prefix = "http://localhost:5173/";
+    const url = prefix + "x".repeat(2048 - prefix.length);
+    const found = { ...lease, url };
+    const recover = vi.fn(async () => found);
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "http://192.168.100.100:3773/",
+        list: async () => [found],
+        recover,
+      }),
+    ).rejects.toBeInstanceOf(HostedPreviewUrlTooLongError);
+    expect(recover).not.toHaveBeenCalled();
+  });
+  it("preserves a rewritten destination at the exact limit including query and fragment", async () => {
+    const prefix = "http://localhost:5173/";
+    const suffix = "?q=original#section";
+    const growth = "192.168.100.100".length - "localhost".length;
+    const url = prefix + "x".repeat(2048 - prefix.length - suffix.length - growth) + suffix;
+    const found = { ...lease, url };
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "http://192.168.100.100:3773/",
+      list: async () => [found],
+      recover: async () => found,
+    });
+    expect(result.url).toBe(url.replace("localhost", "192.168.100.100"));
+    expect(result.url).toHaveLength(2048);
   });
 });

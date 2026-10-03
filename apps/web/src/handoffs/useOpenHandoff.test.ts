@@ -1,3 +1,4 @@
+import { HostedPreviewUrlTooLongError } from "@t3tools/client-runtime/preview-hosting";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -323,6 +324,16 @@ describe("opening a saved handoff", () => {
     await opening;
     expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).toHaveBeenCalledTimes(1);
+  });
+  it("does not open or navigate a handoff when its prepared destination exceeds the limit", async () => {
+    const ops = operations();
+    const entry = recordHandoff(ref, { kind: "url", url: "http://localhost:8123/long" });
+    hosting.prepare.mockRejectedValue(new HostedPreviewUrlTooLongError());
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadHandoffs(ref)).toEqual([entry]);
   });
   it("opens unknown URLs unchanged without inferring an asset identity", async () => {
     const ops = operations();

@@ -1,3 +1,4 @@
+import { HostedPreviewUrlTooLongError } from "@t3tools/client-runtime/preview-hosting";
 import { EnvironmentId, PreviewHostingLeaseId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -219,4 +220,26 @@ describe("preparedThreadFeedMediaActionsSource", () => {
 
     expect(preparedThreadFeedMediaActionsSource(source, lease.url)).toBe(source);
   });
+});
+
+it("does not open the authored loopback URL after a rewritten destination exceeds the limit", async () => {
+  const prefix = "http://localhost:5173/";
+  const url = prefix + "x".repeat(2048 - prefix.length);
+  const found = { ...lease, url };
+  const open = vi.fn();
+  const recover = vi.fn(async () => found);
+  await expect(
+    prepareThenOpenThreadFeedUrl(
+      {
+        threadRef,
+        url,
+        environmentUrl: "http://192.168.100.100:3773/",
+        list: async () => [found],
+        recover,
+      },
+      open,
+    ),
+  ).rejects.toBeInstanceOf(HostedPreviewUrlTooLongError);
+  expect(open).not.toHaveBeenCalled();
+  expect(recover).not.toHaveBeenCalled();
 });
