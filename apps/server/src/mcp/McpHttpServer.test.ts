@@ -175,7 +175,14 @@ it.effect("returns the Action service's update drain rejection over MCP", () =>
 
     expect(result.isError).toBe(true);
     expect(requestedAction).toBe("qa");
-    expect(JSON.stringify(result.content)).toContain(maintenance.message);
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining(maintenance.message),
+        }),
+      ]),
+    );
   }),
 );
 
