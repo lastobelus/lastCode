@@ -23,7 +23,13 @@ vi.mock("~/state/entities", () => ({
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
-  readPreparedConnection: () => ({ httpBaseUrl: "https://environment.example" }),
+  readPreparedConnection: () => ({
+    httpBaseUrl: "https://environment.example",
+    target: {
+      _tag: "PrimaryConnectionTarget",
+      httpBaseUrl: "https://environment.example",
+    },
+  }),
 }));
 vi.mock("~/components/ui/toast", () => ({
   stackedThreadToast: (input: unknown) => input,

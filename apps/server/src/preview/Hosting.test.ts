@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as Duration from "effect/Duration";
@@ -228,17 +229,54 @@ function hostingLayer(
   ready = true,
   scannedServers: ReadonlyArray<DiscoveredLocalServer> = [],
   attributeTerminal = true,
+  fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>,
 ) {
-  return PreviewHosting.layer.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(
-        NodeServices.layer,
-        ServerConfig.layer(config),
-        terminalLayer(harness),
-        discoveryLayer(ready, scannedServers, harness, attributeTerminal),
-      ),
-    ),
+  const dependencies = Layer.mergeAll(
+    NodeServices.layer,
+    ServerConfig.layer(config),
+    terminalLayer(harness),
+    discoveryLayer(ready, scannedServers, harness, attributeTerminal),
+    ...(fileSystemLayer === undefined ? [] : [fileSystemLayer]),
   );
+  return PreviewHosting.layer.pipe(Layer.provideMerge(dependencies));
+}
+
+function failFirstExpiredStateWriteLayer(failedWrite: Deferred.Deferred<void>) {
+  return Layer.effect(
+    FileSystem.FileSystem,
+    Effect.map(FileSystem.FileSystem, (fs) => {
+      let failedOnce = false;
+      return new Proxy(fs, {
+        get(target, property) {
+          if (property === "writeFileString") {
+            return (filePath: string, data: string, options?: { readonly mode?: number }) => {
+              if (!failedOnce && data.includes('"status":"expired"')) {
+                failedOnce = true;
+                return Deferred.succeed(failedWrite, undefined).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new PlatformError.PlatformError(
+                        new PlatformError.SystemError({
+                          _tag: "PermissionDenied",
+                          module: "FileSystem",
+                          method: "writeFileString",
+                          pathOrDescriptor: filePath,
+                          description: "synthetic transient expiry write failure",
+                        }),
+                      ),
+                    ),
+                  ),
+                );
+              }
+              return target.writeFileString(filePath, data, options);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as FileSystem.FileSystem;
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
 }
 
 describe("PreviewHosting", () => {
@@ -905,6 +943,77 @@ describe("PreviewHosting", () => {
               url: second.url,
             }),
           );
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("keeps expiry cleanup running after one lease state write fails", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(10_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-expiry-persist-retry-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const failedWrite = yield* Deferred.make<void>();
+      const bothClosed = yield* Deferred.make<void>();
+      const closedIds = new Set<string>();
+      const harness = testTerminalHarness({
+        onCloseAttempt: (input) =>
+          Effect.gen(function* () {
+            closedIds.add(input.terminalId ?? "");
+            if (closedIds.size >= 2) yield* Deferred.succeed(bothClosed, undefined);
+          }),
+      });
+      const layer = hostingLayer(
+        config,
+        harness,
+        true,
+        [],
+        true,
+        failFirstExpiredStateWriteLayer(failedWrite),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const first = yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace/one",
+            url: PREVIEW_URL,
+          });
+          yield* TestClock.adjust(Duration.seconds(30));
+          const second = yield* hosting.launch({
+            threadId: "thread-2",
+            command: "pnpm dev --port 5174",
+            cwd: "/workspace/two",
+            url: "http://localhost:5174/preview",
+          });
+          assert.equal(Date.parse(second.expiresAt) - Date.parse(first.expiresAt), 30_000);
+
+          yield* TestClock.adjust(
+            Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS - 30_000),
+          );
+          yield* Deferred.await(failedWrite);
+
+          // A failed due lease is retried later, without a zero-delay worker loop;
+          // the second lease's nearer fixed deadline still wakes cleanup first.
+          yield* TestClock.adjust(0);
+          yield* Effect.yieldNow;
+          assert.deepEqual(harness.closes, []);
+          yield* TestClock.adjust(Duration.seconds(30));
+          yield* Deferred.await(bothClosed);
+
+          assert.deepEqual(
+            new Set(harness.closes.map((close) => close.terminalId)),
+            new Set([first.terminalId, second.terminalId]),
+          );
+          assert.deepEqual(yield* hosting.list(), []);
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),

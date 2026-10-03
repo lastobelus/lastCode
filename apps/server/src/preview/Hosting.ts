@@ -806,10 +806,20 @@ const make = Effect.gen(function* () {
     const due = (yield* SynchronizedRef.get(leasesRef)).filter(
       (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime,
     );
-    yield* Effect.forEach(due, (lease) => withLeaseLock(lease.id, expireLocked(lease)), {
-      concurrency: "unbounded",
-      discard: true,
-    });
+    yield* Effect.forEach(
+      due,
+      (lease) =>
+        withLeaseLock(lease.id, expireLocked(lease)).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to expire preview lease; cleanup will retry", {
+              threadId: lease.threadId,
+              terminalId: lease.terminalId,
+              error: error.message,
+            }),
+          ),
+        ),
+      { concurrency: "unbounded", discard: true },
+    );
   });
 
   const expiryWorker = Effect.forever(
@@ -818,12 +828,14 @@ const make = Effect.gen(function* () {
       const now = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
       const activeExpiry = leases
-        .filter((lease) => lease.status !== "expired")
+        .filter((lease) => lease.status !== "expired" && Date.parse(lease.expiresAt) > now)
         .map((lease) => Date.parse(lease.expiresAt));
-      const failedClosePending = leases.some((lease) => lease.status === "expired");
+      const failedCleanupPending = leases.some(
+        (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= now,
+      );
       const activeDelayMs =
         activeExpiry.length === 0 ? undefined : Math.max(0, Math.min(...activeExpiry) - now);
-      const delayMs = failedClosePending
+      const delayMs = failedCleanupPending
         ? Math.min(EXPIRED_TERMINAL_RETRY_MS, activeDelayMs ?? EXPIRED_TERMINAL_RETRY_MS)
         : activeDelayMs;
       if (delayMs === undefined) {
