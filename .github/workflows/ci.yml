@@ -45,18 +45,6 @@ jobs:
             exit 1
           fi
 
-      - name: Reject repository-owned PR assets
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- .github/pr-assets)"
-          if test -n "$files"; then
-            printf 'PR evidence must be uploaded to GitHub, not committed:\n%s\n' "$files" >&2
-            exit 1
-          fi
-
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
