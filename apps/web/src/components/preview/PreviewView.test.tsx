@@ -402,6 +402,89 @@ describe("PreviewView navigation", () => {
     mocks.recordVisitForThread.mockClear();
   });
 
+  it.each(["submit", "reload", "automatic"])(
+    "does not let a pending %s recovery replace a newer submitted address",
+    async (action) => {
+      const document = installTestDom();
+      const { createRoot } = await import("react-dom/client");
+      const root = createRoot(document.createElement("div") as unknown as Element);
+      let complete!: (restored: boolean) => void;
+      mocks.recoverHostedPreview.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      if (action === "automatic") {
+        mocks.navStatus = {
+          _tag: "LoadFailed",
+          url: "http://localhost:5173/first",
+          code: -102,
+          description: "refused",
+        };
+      }
+      try {
+        await act(() =>
+          root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+        );
+        await act(() => {
+          if (action === "submit") void mocks.submittedUrl?.("http://localhost:5173/first");
+          else if (action === "reload") mocks.reload?.();
+        });
+        expect(mocks.navigate).not.toHaveBeenCalled();
+        await act(async () => mocks.submittedUrl?.("https://example.com/newer"));
+        expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(
+          TEST_RUNTIME_TAB_ID,
+          "https://example.com/newer",
+        );
+        await act(async () => complete(true));
+        expect(mocks.navigate).toHaveBeenCalledTimes(1);
+        expect(mocks.refresh).not.toHaveBeenCalled();
+        expect(mocks.recordVisitForThread).toHaveBeenCalledExactlyOnceWith(
+          TEST_THREAD_REF,
+          "https://example.com/newer",
+        );
+      } finally {
+        await act(() => root.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+  it("does not navigate an old tab after it changes while address recovery is pending", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    let complete!: (restored: boolean) => void;
+    mocks.recoverHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      await act(() => {
+        void mocks.submittedUrl?.("http://localhost:5173/first");
+      });
+      mocks.navStatus = {
+        _tag: "Success",
+        url: "https://example.com/agent-navigation",
+        title: "New destination",
+      };
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      await act(async () => complete(true));
+      expect(mocks.navigate).not.toHaveBeenCalled();
+      expect(mocks.recordVisitForThread).not.toHaveBeenCalled();
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("waits for toolbar recovery before opening the prepared external destination", async () => {
     const document = installTestDom();
     Object.defineProperty(window, "desktopBridge", { value: {}, configurable: true });

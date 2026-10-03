@@ -216,10 +216,21 @@ export function PreviewView({
     // threadKey stands in for threadRef, whose identity churns on every thread update.
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
+  // Recovery must not override a newer address, tab, or environment.
+  const navigationSequence = useRef(0);
+  useEffect(() => {
+    navigationSequence.current += 1;
+    return () => {
+      navigationSequence.current += 1;
+    };
+  }, [runtimeTabId, url, environmentHttpBaseUrl]);
+
   const navigateToResolvedUrl = useCallback(
     async (resolvedUrl: string) => {
+      const sequence = ++navigationSequence.current;
       if (runtimeTabId && previewBridge) {
         const prepared = await prepareHostedPreview(threadRef, resolvedUrl);
+        if (sequence !== navigationSequence.current) return false;
         // The bridge mirrors the resolved URL back to the server.
         await previewBridge.navigate(runtimeTabId, prepared.url);
         rememberPreviewUrl(threadRef, prepared.url);
@@ -285,10 +296,18 @@ export function PreviewView({
     [runtimeTabId, url, refreshNativePreview],
   );
   const handleRefresh = useCallback(() => {
+    const sequence = ++navigationSequence.current;
     void prepareHostedPreview(
       { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
       url,
-    ).then(refreshPreparedPreview, reportHostedPreviewFailure);
+    ).then(
+      (prepared) => {
+        if (sequence === navigationSequence.current) refreshPreparedPreview(prepared);
+      },
+      (cause: unknown) => {
+        if (sequence === navigationSequence.current) reportHostedPreviewFailure(cause);
+      },
+    );
   }, [hostingEnvironmentId, hostingThreadId, url, refreshPreparedPreview]);
 
   const hostingAttemptedByTab = useRef(
@@ -330,19 +349,21 @@ export function PreviewView({
         };
     hostingAttemptedByTab.current.set(runtimeTabId, attempt);
     let cancelled = false;
+    const sequence = navigationSequence.current;
     setRestoringHostedPreview(true);
     void attempt.recovery.then(
       (prepared) => {
         if (cancelled) return;
         attempt.completed = true;
         setRestoringHostedPreview(false);
-        if (prepared.restored) refreshPreparedPreview(prepared);
+        if (sequence === navigationSequence.current && prepared.restored)
+          refreshPreparedPreview(prepared);
       },
       (cause: unknown) => {
         if (cancelled) return;
         attempt.completed = true;
         setRestoringHostedPreview(false);
-        reportHostedPreviewFailure(cause);
+        if (sequence === navigationSequence.current) reportHostedPreviewFailure(cause);
       },
     );
     return () => {
