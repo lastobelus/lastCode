@@ -158,6 +158,18 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    resumeAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:resumeAction",
+      tag: WS_METHODS.actionResumeResume,
+      scheduler,
+      concurrency,
+    }),
+    discardAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:discardAction",
+      tag: WS_METHODS.actionResumeDiscard,
+      scheduler,
+      concurrency,
+    }),
     archive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:archive",
       execute: (input: ArchiveThreadInput) => archiveThread(input),
