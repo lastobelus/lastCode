@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { parse } from "yaml";
@@ -78,7 +79,6 @@ describe("LastCode GitHub CI workflow", () => {
     expect(checkBlock).toContain(
       "# Carry validation inspects every commit in the exact PR range.\n          fetch-depth: 0",
     );
-    expect(workflow).toContain('files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"');
     expect(checkBlock).toContain("- name: Validate carry group assignments");
     expect(checkBlock).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
     expect(checkBlock).toContain("HEAD_SHA: ${{ github.event.pull_request.head.sha }}");
@@ -87,6 +87,42 @@ describe("LastCode GitHub CI workflow", () => {
     expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");
+  });
+
+  it("rejects tracked PR evidence but permits removing it", () => {
+    const steps = asRecord(asRecord(asRecord(parse(workflow))?.jobs)?.lint)?.steps;
+    if (!Array.isArray(steps)) throw new Error("CI lint job is missing its steps.");
+    const assetChecks = steps
+      .map(asRecord)
+      .filter((step) => step?.name === "Reject repository-owned PR assets");
+    expect(assetChecks).toHaveLength(1);
+    const assetCheck = assetChecks[0];
+    expect(assetCheck?.if).toBeUndefined();
+    const script = assetCheck?.run;
+    if (typeof script !== "string") throw new Error("PR asset check is missing its script.");
+
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pr-assets-"));
+    const git = (args: ReadonlyArray<string>) =>
+      NodeChildProcess.execFileSync("git", args, { cwd: directory, stdio: "ignore" });
+    const runCheck = () =>
+      NodeChildProcess.spawnSync("bash", ["-e", "-c", script], {
+        cwd: directory,
+        encoding: "utf8",
+      });
+    try {
+      git(["init", "--quiet"]);
+      NodeFS.mkdirSync(NodePath.join(directory, ".github/pr-assets"), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(directory, ".github/pr-assets/evidence.txt"), "evidence");
+      git(["add", ".github/pr-assets/evidence.txt"]);
+      const rejected = runCheck();
+      expect(rejected.status).toBe(1);
+      expect(rejected.stderr).toContain(".github/pr-assets/evidence.txt");
+
+      git(["rm", "--force", ".github/pr-assets/evidence.txt"]);
+      expect(runCheck().status).toBe(0);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("validates topic bases and retargeted PRs without enabling upstream mirror pushes", () => {

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Compiles and runs the native dependency regression directly.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
@@ -24,6 +25,13 @@ describe.skipIf(NodeOS.platform() !== "darwin")(
         "utf8",
       );
       const manager = NodePath.join(directory, "NotificationCenterManager.swift");
+      const expoRequire = NodeModule.createRequire(
+        NodeFS.realpathSync(new URL("../node_modules/expo/package.json", import.meta.url)),
+      );
+      const mutex = NodePath.join(
+        NodePath.dirname(expoRequire.resolve("expo-modules-core/package.json")),
+        "ios/Utilities/Mutex.swift",
+      );
       NodeFS.writeFileSync(
         manager,
         source.replace(/^import (ExpoModulesCore|UserNotifications)\n/gm, ""),
@@ -35,6 +43,7 @@ describe.skipIf(NodeOS.platform() !== "darwin")(
           "5",
           "-sanitize=thread",
           manager,
+          mutex,
           NodeURL.fileURLToPath(
             new URL("./fixtures/NotificationCenterManagerRegression.swift", import.meta.url),
           ),
