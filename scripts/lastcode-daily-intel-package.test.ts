@@ -60,6 +60,21 @@ describe("lastcode-daily-intel-package", () => {
     expect(workflow).toContain("sparse-checkout-cone-mode: false");
   });
 
+  it("installs the scripts workspace and its dependencies before starting the dispatcher", () => {
+    const workflow = NodeFS.readFileSync(
+      new URL("../.github/workflows/lastcode-daily-intel-package.yml", import.meta.url),
+      "utf8",
+    );
+    const setup = workflow.indexOf("uses: voidzero-dev/setup-vp@v1");
+    const dispatch = workflow.indexOf("run: node scripts/lastcode-daily-intel-package.ts");
+
+    expect(setup).toBeGreaterThanOrEqual(0);
+    expect(dispatch).toBeGreaterThan(setup);
+    expect(workflow.slice(setup, dispatch)).toMatch(
+      /run-install: \|\s+args:\s+- --filter=@t3tools\/scripts\.\.\./u,
+    );
+  });
+
   it("selects the newest strict installable and peels annotated tags", () => {
     const checkpoint = "lastcode/checkpoint/v0.0.36-nightly.20260827.1206";
     const revision = "lastcode/revision/v0.0.36-nightly.20260827.1206.2";
