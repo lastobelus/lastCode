@@ -1078,4 +1078,40 @@ describe("PreviewHosting", () => {
       assert.deepEqual(harness.writes, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+  it.effect("does not accept an unattributed HTTP response as managed readiness", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(10_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-unattributed-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const wrote = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* Effect.forkScoped(
+            Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command: "pnpm dev --port 5173",
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+              }),
+            ),
+          );
+          yield* Deferred.await(wrote);
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(Duration.seconds(31));
+          assert.equal((yield* Fiber.join(pending))._tag, "Failure");
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.equal(harness.closes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness, true, [], false))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

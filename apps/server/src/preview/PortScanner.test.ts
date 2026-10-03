@@ -122,6 +122,43 @@ const makeLsofScannerLayer = (input: {
     ),
   );
 
+const makeLinuxSsScannerLayer = (input: {
+  readonly ssOutput: string;
+  readonly fetch: typeof globalThis.fetch;
+}) =>
+  PortScanner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(ProcessRunner.ProcessRunner, {
+          run: (request) =>
+            request.command === "lsof"
+              ? processProbeFailure(request)
+              : Effect.succeed({
+                  stdout: input.ssOutput,
+                  stderr: "",
+                  code: null,
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                }),
+        }),
+        Layer.succeed(Net.NetService, {
+          canListenOnHost: () => Effect.succeed(true),
+          isPortAvailableOnLoopback: () => Effect.succeed(true),
+          hasListenerOnHost: () => Effect.succeed(false),
+          reserveLoopbackPort: () => Effect.succeed(40_000),
+          findAvailablePort: (preferred) => Effect.succeed(preferred),
+        }),
+        Layer.succeed(HostProcessPlatform, "linux"),
+        FetchHttpClient.layer.pipe(
+          Layer.provide(Layer.succeed(FetchHttpClient.Fetch, input.fetch)),
+        ),
+      ),
+    ),
+  );
+
 const openServer = (
   port: number,
   onConnection: (socket: NodeNet.Socket) => void,
@@ -199,6 +236,66 @@ const commonNonHttpServer = Effect.acquireRelease(
       ),
     ),
 );
+
+effectIt.effect("attributes an owned listener from ss when Linux has no lsof", () => {
+  const port = 63_123;
+  const threadId = "thread-owned-preview";
+  const terminalId = "terminal-owned-preview";
+  const processId = 51_321;
+  const url = `http://localhost:${port}/preview/index.html`;
+  const layer = makeLinuxSsScannerLayer({
+    ssOutput: `LISTEN 0 128 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=${processId},fd=18))\n`,
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({ threadId, terminalId, processIds: [processId] });
+    const found = yield* scanner.scan([url]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      port,
+      url,
+      pid: processId,
+      terminal: { threadId, terminalId },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("leaves foreign and unattributed ss listeners without terminal ownership", () => {
+  const foreignPort = 63_124;
+  const unattributedPort = 63_125;
+  const sharedPort = 63_126;
+  const foreignProcessId = 61_001;
+  const url = `http://localhost:${foreignPort}/preview`;
+  const layer = makeLinuxSsScannerLayer({
+    ssOutput: [
+      `LISTEN 0 128 127.0.0.1:${foreignPort} 0.0.0.0:* users:(("node",pid=${foreignProcessId},fd=9))`,
+      `LISTEN 0 128 127.0.0.1:${unattributedPort} 0.0.0.0:*`,
+      `LISTEN 0 128 127.0.0.1:${sharedPort} 0.0.0.0:* users:(("node",pid=61002,fd=10))`,
+      `LISTEN 0 128 127.0.0.1:${sharedPort} 0.0.0.0:* users:(("node",pid=61003,fd=11))`,
+    ].join("\n"),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [61_002],
+    });
+    const found = yield* scanner.scan([
+      url,
+      `http://localhost:${unattributedPort}/preview`,
+      `http://localhost:${sharedPort}/preview`,
+    ]);
+    expect(found).toHaveLength(3);
+    expect(found.find((server) => server.port === foreignPort)?.terminal).toBeNull();
+    expect(found.find((server) => server.port === unattributedPort)?.terminal).toBeNull();
+    expect(found.find((server) => server.port === sharedPort)?.terminal).toBeNull();
+  }).pipe(Effect.provide(layer));
+});
 
 /**
  * Integration tests against a real TCP listener. We provide the Windows host

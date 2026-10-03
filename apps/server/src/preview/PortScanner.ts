@@ -5,8 +5,9 @@
  * stable line-prefixed field format; this is the only `lsof` flag set we rely
  * on).
  *
- * Windows / lsof missing: checks a curated list of common dev ports through
- * the shared Net service.
+ * Linux tries `ss` with process attribution when `lsof` is unavailable.
+ * Windows / process tools missing: checks a curated list of common dev ports
+ * through the shared Net service.
  *
  * Listening ports are published only after a bounded HTTP(S) probe finds a
  * successful HTML document or a redirect to one.
@@ -72,6 +73,7 @@ export const COMMON_DEV_PORTS: ReadonlyArray<number> = Object.freeze([
 
 const POLL_INTERVAL = Duration.seconds(3);
 const LSOF_TIMEOUT_MS = 5_000;
+const SS_TIMEOUT_MS = 5_000;
 const WINDOWS_LISTENER_TIMEOUT_MS = 5_000;
 const WEB_PROBE_TIMEOUT = Duration.seconds(1);
 const WEB_PROBE_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(15));
@@ -263,6 +265,80 @@ const parseWindowsListenerOutput = (
     });
   }
   return [...seen.values()].toSorted((left, right) => left.port - right.port);
+};
+
+const parseSsListenerOutput = (
+  raw: string,
+  terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
+
+  for (const line of raw.split(/\r?\n/u)) {
+    const fields = line.trim().split(/\s+/u);
+    if (fields[0] !== "LISTEN") continue;
+    const localAddress = fields[3];
+    if (!localAddress) continue;
+    const lastColon = localAddress.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const host = localAddress.slice(0, lastColon);
+    const port = Number(localAddress.slice(lastColon + 1));
+    if (
+      !LSOF_LOCAL_HOST_TOKENS.has(host) ||
+      !Number.isInteger(port) ||
+      port <= 0 ||
+      port >= 65536
+    ) {
+      continue;
+    }
+
+    const entry = listeners.get(port) ?? {
+      processIds: new Set<number>(),
+      processNames: new Set<string>(),
+      unattributed: false,
+    };
+    const processIds = [...line.matchAll(/pid=(\d+)/gu)]
+      .map((match) => Number(match[1]))
+      .filter((processId) => Number.isInteger(processId) && processId > 0);
+    const processNames = [...line.matchAll(/\(\("([^"]+)"/gu)].map((match) => match[1]!);
+    if (processIds.length === 0) entry.unattributed = true;
+    for (const processId of processIds) entry.processIds.add(processId);
+    for (const processName of processNames) entry.processNames.add(processName);
+    listeners.set(port, entry);
+  }
+
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
 };
 
 const serversEqual = (
@@ -471,8 +547,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   });
 
   const recoverProcessProbeFailure =
-    (probe: "lsof" | "windows-listeners") => (error: ProcessRunner.ProcessRunError) =>
-      Effect.logDebug("preview port process probe failed; falling back to common-port probes", {
+    (probe: "lsof" | "ss-listeners" | "windows-listeners") =>
+    (error: ProcessRunner.ProcessRunError) =>
+      Effect.logDebug("preview port process probe failed; trying the next available probe", {
         cause: error,
         probe,
         platform: hostPlatform,
@@ -533,6 +610,28 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         }),
       );
     if (lsofResult !== null) return yield* probeWebServers(lsofResult, configuredUrls);
+    if (hostPlatform === "linux") {
+      const recoverSsProbeFailure = recoverProcessProbeFailure("ss-listeners");
+      const ssResult = yield* processRunner
+        .run({
+          command: "ss",
+          args: ["-H", "-ltnp"],
+          timeout: Duration.millis(SS_TIMEOUT_MS),
+          maxOutputBytes: 1024 * 1024,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.map((result) => parseSsListenerOutput(result.stdout, terminalByProcessId)),
+          Effect.catchTags({
+            ProcessSpawnError: recoverSsProbeFailure,
+            ProcessStdinError: recoverSsProbeFailure,
+            ProcessOutputLimitError: recoverSsProbeFailure,
+            ProcessReadError: recoverSsProbeFailure,
+            ProcessTimeoutError: recoverSsProbeFailure,
+          }),
+        );
+      if (ssResult !== null) return yield* probeWebServers(ssResult, configuredUrls);
+    }
     return yield* probeWebServers(yield* probeCommonPorts(), configuredUrls);
   });
 
