@@ -2,6 +2,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -50,7 +51,7 @@ interface TerminalHarness {
   readonly failClose?:
     | boolean
     | ((input: { readonly threadId: string; readonly terminalId?: string | undefined }) => boolean);
-  readonly onWrite?: () => Effect.Effect<void>;
+  readonly onWrite?: () => Effect.Effect<void, TerminalManager.TerminalError>;
   readonly onOpen?: (input: TerminalOpenInput) => Effect.Effect<void>;
   readonly onRefreshMetadata?: () => Effect.Effect<void>;
   readonly onCloseAttempt?: (input: {
@@ -1122,6 +1123,82 @@ describe("PreviewHosting", () => {
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("retires a persisted starting lease when its retried launch fails", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-starting-retry-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const saved = {
+        id: "unfinished-lease",
+        threadId: "thread-1",
+        terminalId: "preview-unfinished",
+        command: "broken-command",
+        cwd: "/workspace",
+        worktreePath: null,
+        url: PREVIEW_URL,
+        handedOffAt: DateTime.formatIso(DateTime.makeUnsafe(1_000)),
+        expiresAt: DateTime.formatIso(
+          DateTime.makeUnsafe(1_000 + PreviewHosting.PREVIEW_HOSTING_LEASE_MS),
+        ),
+        status: "starting" as const,
+      };
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [saved] }),
+      );
+      let failWrite = true;
+      const harness = testTerminalHarness({
+        onWrite: () =>
+          failWrite
+            ? Effect.fail(
+                new TerminalManager.TerminalWriteError({
+                  threadId: saved.threadId,
+                  terminalId: saved.terminalId,
+                  terminalPid: 100,
+                  cause: new Error("synthetic retry write failure"),
+                }),
+              )
+            : Effect.void,
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const failed = yield* Effect.result(
+            hosting.launch({
+              threadId: saved.threadId,
+              command: saved.command,
+              cwd: saved.cwd,
+              url: saved.url,
+            }),
+          );
+          assert.equal(failed._tag, "Failure");
+          assert.deepEqual(yield* hosting.list(), []);
+          assert.deepEqual(harness.closes, [
+            { threadId: saved.threadId, terminalId: saved.terminalId },
+          ]);
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            `${encodePersistedHostingState({ version: 1, leases: [] })}\n`,
+          );
+          failWrite = false;
+          const corrected = yield* hosting.launch({
+            threadId: saved.threadId,
+            command: "corrected-command",
+            cwd: saved.cwd,
+            url: saved.url,
+          });
+          assert.equal(corrected.status, "active");
+          assert.notEqual(corrected.id, saved.id);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
   it.effect("retries failed preview cleanup after restart and removes the lease", () =>

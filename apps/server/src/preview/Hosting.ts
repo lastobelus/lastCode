@@ -639,6 +639,9 @@ const make = Effect.gen(function* () {
                       "A live preview lease already owns this URL with a different launch command.",
                   });
                 }
+                if (sameLease.status === "starting") {
+                  yield* SynchronizedRef.set(leaseForCleanup, sameLease);
+                }
                 return { lease: sameLease } as const;
               }
               if (portConflict !== undefined) {
