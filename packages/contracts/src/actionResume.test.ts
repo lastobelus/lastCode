@@ -6,7 +6,7 @@ import {
   ActionReport,
   ActionResumeState,
   ActionRunInspection,
-} from "./orchestration.ts";
+} from "./actionResume.ts";
 
 const decodeActionProgress = Schema.decodeUnknownSync(ActionProgress);
 const decodeActionReport = Schema.decodeUnknownSync(ActionReport);

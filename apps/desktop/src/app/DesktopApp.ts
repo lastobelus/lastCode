@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Electron from "electron";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
@@ -11,6 +12,9 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
+import { MAC_PERMISSION_SETTINGS_URLS } from "../permissions/MacPermission.ts";
+import * as MacPermissions from "../permissions/MacPermissions.ts";
+import { waitForScreenRecordingReminder } from "../permissions/LastCodeScreenRecordingReminder.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
@@ -67,8 +71,11 @@ export class DesktopDevelopmentBackendPortRequiredError extends Schema.TaggedErr
 const { logInfo: logBootstrapInfo, logWarning: logBootstrapWarning } =
   DesktopObservability.makeComponentLogger("desktop-bootstrap");
 
-const { logInfo: logStartupInfo, logError: logStartupError } =
-  DesktopObservability.makeComponentLogger("desktop-startup");
+const {
+  logInfo: logStartupInfo,
+  logError: logStartupError,
+  logWarning: logStartupWarning,
+} = DesktopObservability.makeComponentLogger("desktop-startup");
 
 const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(function* (
   configuredPort: Option.Option<number>,
@@ -270,6 +277,8 @@ const startup = Effect.gen(function* () {
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const dialog = yield* ElectronDialog.ElectronDialog;
+  const macPermissions = yield* MacPermissions.MacPermissions;
 
   yield* shellEnvironment.installIntoProcess;
   const hasCommandLinePasswordStore =
@@ -328,6 +337,47 @@ const startup = Effect.gen(function* () {
   yield* DesktopRemoteUpdates.listen;
   yield* linuxUrlHandler.register;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
+  if (environment.platform === "darwin" && environment.isPackaged) {
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        if (
+          !(yield* Effect.promise(() =>
+            waitForScreenRecordingReminder(
+              environment.homeDirectory,
+              () => Electron.systemPreferences.getMediaAccessStatus("screen") === "granted",
+            ),
+          ))
+        )
+          return;
+        const answer = yield* dialog.showMessageBox({
+          type: "warning",
+          title: "LastCode Screen Recording",
+          message: "Enable Screen Recording for this LastCode build",
+          detail:
+            "This update needs a new macOS permission grant. Remove any older LastCode entry in System Settings → Privacy & Security → Screen & System Audio Recording, add this build, then relaunch LastCode.",
+          buttons: ["Open System Settings", "Later"],
+          defaultId: 0,
+          cancelId: 1,
+          noLink: true,
+        });
+        const opened =
+          answer.response === 0 &&
+          (yield* Effect.promise(() =>
+            Electron.shell.openExternal(MAC_PERMISSION_SETTINGS_URLS["screen-recording"]).then(
+              () => true,
+              () => false,
+            ),
+          ));
+        if (opened) {
+          yield* macPermissions.showHelper("screen-recording", null);
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          logStartupWarning("screen recording reminder unavailable", { cause }),
+        ),
+      ),
+    );
+  }
 }).pipe(Effect.withSpan("desktop.startup"));
 
 const scopedProgram = Effect.scoped(

@@ -431,6 +431,17 @@ export const executorLayer: Layer.Layer<
                   }),
               ),
             );
+          case "terminal.archive-cleanup":
+            return resourceCleanup.cleanupArchivedTerminals(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "attachment.cleanup":
             return resourceCleanup.cleanupAttachments(effect.request.attachmentIds).pipe(
               Effect.mapError(

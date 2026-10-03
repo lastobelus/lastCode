@@ -335,6 +335,10 @@
       "types": "./src/filePreview.ts",
       "default": "./src/filePreview.ts"
     },
+    "./preview-hosting": {
+      "types": "./src/previewHosting.ts",
+      "default": "./src/previewHosting.ts"
+    },
     "./device/frame": {
       "types": "./src/device/frame.ts",
       "default": "./src/device/frame.ts"
