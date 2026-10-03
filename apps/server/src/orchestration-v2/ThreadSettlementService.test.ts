@@ -16,6 +16,7 @@ import {
   type PullRequestSummary,
   type ServerSettings as ContractServerSettings,
   type ServerSettingsPatch,
+  type TerminalSummary,
 } from "@t3tools/contracts";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import * as Crypto from "effect/Crypto";
@@ -34,6 +35,7 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerActivation from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -443,6 +445,8 @@ interface HarnessOptions {
   readonly onDispatch?: (command: AutoSettleCommand) => Effect.Effect<void>;
   /** Threads `getThread` returns when a `thread.settled` event is handled. */
   readonly currentThreads?: ReadonlyArray<OrchestrationV2AppThread>;
+  readonly terminalSummaries?: ReadonlyArray<TerminalSummary>;
+  readonly ownedPreviewTerminalIds?: ReadonlyArray<string>;
 }
 
 const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options: HarnessOptions) {
@@ -468,7 +472,26 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const summaryRecovery = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
   const invalidatedCwds = yield* Ref.make<ReadonlyArray<string>>([]);
   const domainEvents = yield* PubSub.unbounded<OrchestrationV2DomainEvent>();
-  const closedIdle = yield* Queue.unbounded<{ readonly threadId: string }>();
+  const closedIdle = yield* Queue.unbounded<{
+    readonly threadId: string;
+    readonly terminalId?: string;
+  }>();
+  const terminalSummaries =
+    options.terminalSummaries ??
+    (options.currentThreads ?? []).map((thread, index) => ({
+      threadId: thread.id,
+      terminalId: `idle-${index}`,
+      cwd: "/workspace",
+      worktreePath: null,
+      status: "running" as const,
+      pid: 100 + index,
+      exitCode: null,
+      exitSignal: null,
+      hasRunningSubprocess: false,
+      label: "shell",
+      updatedAt: NOW,
+    }));
+  const ownedPreviewTerminalIds = new Set(options.ownedPreviewTerminalIds ?? []);
 
   const updateSettings = (patch: ServerSettingsPatch) =>
     Effect.gen(function* () {
@@ -555,6 +578,16 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     }),
     Layer.mock(TerminalManager.TerminalManager)({
       closeIdle: (input) => Queue.offer(closedIdle, input).pipe(Effect.asVoid),
+      metadata: Effect.succeed(terminalSummaries),
+    }),
+    Layer.mock(PreviewHosting.PreviewHosting)({
+      launch: () => Effect.die("Unexpected preview launch"),
+      recover: () => Effect.die("Unexpected preview recovery"),
+      list: () => Effect.succeed([]),
+      ownsTerminal: (_threadId, terminalId) =>
+        Effect.succeed(ownedPreviewTerminalIds.has(terminalId)),
+      removeThread: () => Effect.void,
+      protectedWorkspacePaths: () => Effect.succeed([]),
     }),
     Layer.mock(GitManager.GitManager)({
       branchPullRequest,
@@ -1012,7 +1045,10 @@ describe("ThreadSettlementServiceV2 terminals", () => {
           const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
           yield* startHarness(service, fixture.activation, fixture.snapshotReads);
           yield* fixture.publishEvent(settledEvent(thread));
-          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), { threadId: thread.id });
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: thread.id,
+            terminalId: "idle-0",
+          });
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
@@ -1036,7 +1072,62 @@ describe("ThreadSettlementServiceV2 terminals", () => {
           // Events run in order, so the first close belongs to the later
           // event only if the re-engaged thread was skipped.
           yield* fixture.publishEvent(settledEvent(marker));
-          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), { threadId: marker.id });
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: marker.id,
+            terminalId: "idle-1",
+          });
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("keeps a managed preview terminal when a thread settles", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = appThread("settled-preview-thread", "settled");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([]),
+          currentThreads: [thread],
+          terminalSummaries: [
+            {
+              threadId: thread.id,
+              terminalId: "preview-terminal",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 101,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "preview",
+              updatedAt: NOW,
+            },
+            {
+              threadId: thread.id,
+              terminalId: "idle-shell",
+              cwd: "/workspace",
+              worktreePath: null,
+              status: "running",
+              pid: 102,
+              exitCode: null,
+              exitSignal: null,
+              hasRunningSubprocess: false,
+              label: "shell",
+              updatedAt: NOW,
+            },
+          ],
+          ownedPreviewTerminalIds: ["preview-terminal"],
+        });
+
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          yield* fixture.publishEvent(settledEvent(thread));
+          assert.deepStrictEqual(yield* Queue.take(fixture.closedIdle), {
+            threadId: thread.id,
+            terminalId: "idle-shell",
+          });
+          assert.equal(yield* Queue.size(fixture.closedIdle), 0);
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),

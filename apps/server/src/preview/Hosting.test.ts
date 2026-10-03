@@ -236,9 +236,12 @@ function hostingLayer(
     ServerConfig.layer(config),
     terminalLayer(harness),
     discoveryLayer(ready, scannedServers, harness, attributeTerminal),
-    ...(fileSystemLayer === undefined ? [] : [fileSystemLayer]),
   );
-  return PreviewHosting.layer.pipe(Layer.provideMerge(dependencies));
+  const hosting =
+    fileSystemLayer === undefined
+      ? PreviewHosting.layer
+      : PreviewHosting.layer.pipe(Layer.provide(fileSystemLayer));
+  return hosting.pipe(Layer.provideMerge(dependencies));
 }
 
 function failFirstExpiredStateWriteLayer(failedWrite: Deferred.Deferred<void>) {

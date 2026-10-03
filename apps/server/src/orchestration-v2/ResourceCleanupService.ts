@@ -6,12 +6,13 @@ import * as Schema from "effect/Schema";
 
 import { resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 
 export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupError>()(
   "ResourceCleanupError",
   {
-    operation: Schema.Literals(["terminal", "attachment"]),
+    operation: Schema.Literals(["preview", "terminal", "attachment"]),
     threadId: Schema.optional(Schema.String),
     attachmentId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
@@ -20,12 +21,16 @@ export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupErro
 
 export class ResourceCleanupService extends Context.Reference<{
   readonly cleanupTerminals: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
+  readonly cleanupArchivedTerminals: (
+    threadId: string,
+  ) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupAttachments: (
     attachmentIds: ReadonlyArray<string>,
   ) => Effect.Effect<void, ResourceCleanupError>;
 }>("t3/orchestration-v2/ResourceCleanupService", {
   defaultValue: () => ({
     cleanupTerminals: () => Effect.void,
+    cleanupArchivedTerminals: () => Effect.void,
     cleanupAttachments: () => Effect.void,
   }),
 }) {}
@@ -34,17 +39,60 @@ export const live = Layer.effect(
   ResourceCleanupService,
   Effect.gen(function* () {
     const terminals = yield* TerminalManager.TerminalManager;
+    const previews = yield* PreviewHosting.PreviewHosting;
     const fileSystem = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
     return {
       cleanupTerminals: (threadId: string) =>
-        terminals
-          .close({ threadId, deleteHistory: true })
-          .pipe(
-            Effect.mapError(
-              (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
+        previews.removeThread(threadId).pipe(
+          Effect.mapError(
+            (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
+          ),
+          Effect.andThen(
+            terminals
+              .close({ threadId, deleteHistory: true })
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
+                ),
+              ),
+          ),
+        ),
+      cleanupArchivedTerminals: (threadId: string) =>
+        terminals.metadata.pipe(
+          Effect.flatMap((metadata) =>
+            Effect.forEach(
+              metadata.filter((terminal) => terminal.threadId === threadId),
+              (terminal) =>
+                previews.ownsTerminal(threadId, terminal.terminalId).pipe(
+                  Effect.mapError(
+                    (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
+                  ),
+                  Effect.flatMap((owned) =>
+                    owned
+                      ? Effect.void
+                      : terminals
+                          .close({
+                            threadId,
+                            terminalId: terminal.terminalId,
+                            deleteHistory: true,
+                          })
+                          .pipe(
+                            Effect.mapError(
+                              (cause) =>
+                                new ResourceCleanupError({
+                                  operation: "terminal",
+                                  threadId,
+                                  cause,
+                                }),
+                            ),
+                          ),
+                  ),
+                ),
+              { discard: true, concurrency: 4 },
             ),
           ),
+        ),
       cleanupAttachments: (attachmentIds: ReadonlyArray<string>) =>
         Effect.forEach(
           attachmentIds,

@@ -19,6 +19,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -255,6 +256,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const git = yield* GitManager.GitManager;
+  const previews = yield* PreviewHosting.PreviewHosting;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -514,7 +516,23 @@ export const make = Effect.gen(function* () {
       // A thread re-engaged before this event ran keeps its shells.
       const thread = yield* projections.getThread(threadId);
       if (thread.settledOverride !== "settled") return;
-      yield* terminals.closeIdle({ threadId });
+      const threadTerminals = (yield* terminals.metadata).filter(
+        (terminal) => terminal.threadId === threadId,
+      );
+      yield* Effect.forEach(
+        threadTerminals,
+        (terminal) =>
+          previews
+            .ownsTerminal(threadId, terminal.terminalId)
+            .pipe(
+              Effect.flatMap((owned) =>
+                owned
+                  ? Effect.void
+                  : terminals.closeIdle({ threadId, terminalId: terminal.terminalId }),
+              ),
+            ),
+        { discard: true, concurrency: 4 },
+      );
     },
     (effect, threadId) =>
       effect.pipe(
