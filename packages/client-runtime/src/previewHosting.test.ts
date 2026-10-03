@@ -1,4 +1,9 @@
-import { EnvironmentId, PreviewHostingLeaseId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  PreviewHostingLeaseId,
+  ThreadId,
+  type PreviewHostingLeaseSummary,
+} from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { prepareHostedPreview, selectHostedPreview } from "./previewHosting.ts";
@@ -176,7 +181,12 @@ describe("prepareHostedPreview", () => {
 
   it("coalesces concurrent preparation for the same scoped URL", async () => {
     let finishList!: (leases: (typeof lease)[]) => void;
-    const list = vi.fn(() => new Promise<(typeof lease)[]>((resolve) => (finishList = resolve)));
+    let listStarted!: () => void;
+    const started = new Promise<void>((resolve) => (listStarted = resolve));
+    const list = vi.fn(() => {
+      listStarted();
+      return new Promise<(typeof lease)[]>((resolve) => (finishList = resolve));
+    });
     const input = {
       threadRef,
       url: lease.url,
@@ -188,10 +198,82 @@ describe("prepareHostedPreview", () => {
     const second = prepareHostedPreview(input);
 
     expect(second).toBe(first);
+    await started;
     finishList([lease]);
     expect(await first).toMatchObject({ managed: true, restored: true });
     expect(list).toHaveBeenCalledTimes(1);
     expect(input.recover).toHaveBeenCalledTimes(1);
+  });
+  it("shares one listing and recovery across different assets while retaining each URL", async () => {
+    let finishList!: (leases: (typeof lease)[]) => void;
+    let listStarted!: () => void;
+    const listed = new Promise<void>((resolve) => (listStarted = resolve));
+    let finishRecovery!: (value: typeof lease) => void;
+    let recoveryStarted!: () => void;
+    const recovering = new Promise<void>((resolve) => (recoveryStarted = resolve));
+    const list = vi.fn(() => {
+      listStarted();
+      return new Promise<(typeof lease)[]>((resolve) => (finishList = resolve));
+    });
+    const recover = vi.fn(() => {
+      recoveryStarted();
+      return new Promise<typeof lease>((resolve) => (finishRecovery = resolve));
+    });
+    const input = { threadRef, environmentUrl: "http://192.168.1.30:8080/", list, recover };
+    const urls = ["/a.png?run=1#first", "/b.png", "/c.mp4"];
+    const preparations = urls.map((path) =>
+      prepareHostedPreview({ ...input, url: `http://localhost:5173${path}` }),
+    );
+    await listed;
+    expect(list).toHaveBeenCalledTimes(1);
+    finishList([lease]);
+    await recovering;
+    expect(recover).toHaveBeenCalledTimes(1);
+    finishRecovery(lease);
+    expect(await Promise.all(preparations)).toEqual(
+      urls.map((path) => ({
+        url: `http://192.168.1.30:5173${path}`,
+        managed: true,
+        restored: true,
+      })),
+    );
+    const laterRecover = vi.fn(async () => lease);
+    await prepareHostedPreview({
+      ...input,
+      url: "http://localhost:5173/a.png",
+      list: async () => [lease],
+      recover: laterRecover,
+    });
+    expect(laterRecover).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps recovery separate for other owners, environments, and leases", async () => {
+    const otherThread = ThreadId.make("other-preview-thread");
+    const secondLease = {
+      ...lease,
+      leaseId: PreviewHostingLeaseId.make("second-lease"),
+      url: "http://localhost:5174/",
+    };
+    const list = vi.fn(async () => [lease, secondLease]);
+    const recover = vi.fn(async (owned: PreviewHostingLeaseSummary) => owned);
+    const input = { threadRef, environmentUrl: "http://localhost:8080/", list, recover };
+    const result = await Promise.all([
+      prepareHostedPreview({ ...input, url: "http://localhost:5173/a.png" }),
+      prepareHostedPreview({ ...input, url: "http://localhost:5174/b.png" }),
+      prepareHostedPreview({
+        ...input,
+        threadRef: { ...threadRef, threadId: otherThread },
+        url: "http://localhost:5173/c.png",
+      }),
+      prepareHostedPreview({
+        ...input,
+        threadRef: { ...threadRef, environmentId: EnvironmentId.make("other-environment") },
+        url: "http://localhost:5173/d.png",
+      }),
+    ]);
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(recover).toHaveBeenCalledTimes(3);
+    expect(result.map((value) => value.managed)).toEqual([true, true, false, true]);
   });
 });
 

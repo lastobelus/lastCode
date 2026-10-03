@@ -25,6 +25,19 @@ export interface PreparedHostedPreview {
 }
 
 const inFlightPreparations = new Map<string, Promise<PreparedHostedPreview>>();
+const inFlightListings = new Map<string, Promise<ReadonlyArray<PreviewHostingLeaseSummary>>>();
+const inFlightRecoveries = new Map<string, Promise<PreviewHostingLeaseSummary | null>>();
+
+/** Share pending work only; a later opening must check the server again. */
+function sharePending<A>(pending: Map<string, Promise<A>>, key: string, run: () => Promise<A>) {
+  const existing = pending.get(key);
+  if (existing) return existing;
+  const result = Promise.resolve()
+    .then(run)
+    .finally(() => pending.delete(key));
+  pending.set(key, result);
+  return result;
+}
 
 /** Pick the sole lease on this port, preferring an exact path and query match. */
 export function selectHostedPreview(
@@ -75,20 +88,20 @@ export function prepareHostedPreview(
     return Promise.resolve(original);
   }
 
-  const key = JSON.stringify([
+  const scope = JSON.stringify([
     input.threadRef.environmentId,
     input.threadRef.threadId,
-    input.url,
     input.environmentUrl,
     input.knownEnvironmentUrls ?? [],
   ]);
+  const key = JSON.stringify([scope, input.url]);
   const existing = inFlightPreparations.get(key);
   if (existing) return existing;
 
   const preparation = (async (): Promise<PreparedHostedPreview> => {
     let leases: ReadonlyArray<PreviewHostingLeaseSummary>;
     try {
-      leases = await input.list();
+      leases = await sharePending(inFlightListings, scope, input.list);
     } catch {
       return original;
     }
@@ -99,7 +112,12 @@ export function prepareHostedPreview(
     if (!owned) return original;
     let restored = false;
     try {
-      restored = (await input.recover(owned)) !== null;
+      restored =
+        (await sharePending(
+          inFlightRecoveries,
+          JSON.stringify([scope, owned.leaseId, owned.url]),
+          () => input.recover(owned),
+        )) !== null;
     } catch {
       // Keep the managed destination when the best-effort restore request fails.
     }

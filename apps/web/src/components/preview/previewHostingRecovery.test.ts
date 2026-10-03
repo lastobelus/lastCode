@@ -100,16 +100,20 @@ describe("native preview reopening", () => {
   });
   it("coalesces simultaneous opens and supports a later recovery", async () => {
     let finish!: (value: unknown) => void;
+    let listStarted!: () => void;
+    const started = new Promise<void>((resolve) => (listStarted = resolve));
     mocks.run
       .mockImplementationOnce(
         () =>
           new Promise((resolve) => {
             finish = resolve;
+            listStarted();
           }),
       )
       .mockResolvedValue({ _tag: "Success", value: lease });
     const first = recoverHostedPreview(owner, "http://localhost:5173/qa");
     const second = recoverHostedPreview(owner, "http://localhost:5173/qa");
+    await started;
     expect(mocks.run).toHaveBeenCalledTimes(1);
     finish({ _tag: "Success", value: [lease] });
     expect(await first).toBe(true);
