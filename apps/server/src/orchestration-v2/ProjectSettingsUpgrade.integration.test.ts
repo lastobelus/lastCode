@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import { assert, it } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -152,6 +153,7 @@ const makeRuntimeLayer = (dbPath: string) => {
       }),
     ),
     Layer.provide(McpSessionRegistryTestkit.layer),
+    Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
     Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
     Layer.provide(checkpointStore),
     Layer.provide(serverConfig),

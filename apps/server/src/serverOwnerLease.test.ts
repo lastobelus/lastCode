@@ -3,6 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 
 import { assert, it } from "@effect/vitest";
@@ -11,7 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "./config.ts";
-import { makeServerLayer } from "./server.ts";
+import { runServer } from "./server.ts";
 import {
   acquireServerOwnerLease,
   getServerOwnerLeaseLockPath,
@@ -40,7 +41,10 @@ const makeServerConfig = (baseDir: string) => {
     traceMaxFiles: 10,
     otlpTracesUrl: undefined,
     otlpMetricsUrl: undefined,
-    otlpExportIntervalMs: 10_000,
+    otlpLogsUrl: undefined,
+    otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+    otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+    otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
     otlpServiceName: "t3-server",
     otelEnvironment: OtelEnvironment.none,
     mode: "web",
@@ -56,6 +60,7 @@ const makeServerConfig = (baseDir: string) => {
     providerStatusCacheDir: NodePath.join(baseDir, "caches"),
     worktreesDir: NodePath.join(baseDir, "worktrees"),
     attachmentsDir: NodePath.join(stateDir, "attachments"),
+    browserArtifactsDir: NodePath.join(stateDir, "browser-artifacts"),
     logsDir,
     serverLogPath: NodePath.join(logsDir, "server.log"),
     serverTracePath: NodePath.join(logsDir, "server.trace.ndjson"),
@@ -191,7 +196,7 @@ it.effect("fails before the server can construct persistence or listen", () => {
       if (process.platform !== "darwin") return;
       const config = makeServerConfig(home);
       yield* acquireScopedLease(config.stateDir);
-      const error = yield* Layer.build(makeServerLayer).pipe(
+      const error = yield* runServer.pipe(
         Effect.provide(Layer.mergeAll(ServerConfig.layer(config), NodeServices.layer)),
         Effect.flip,
       );
