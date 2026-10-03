@@ -18,6 +18,10 @@ import {
   PreviewAutomationTabTargetInput,
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
+  PreviewAutomationUnavailableError,
+  PreviewHostingError,
+  PreviewHostingLaunchInput,
+  PreviewHostingLeaseSummary,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
@@ -26,6 +30,7 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -62,6 +67,18 @@ const PreviewStatusTool = Tool.make("preview_status", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
+
+const PreviewHostTool = Tool.make("preview_host", {
+  description:
+    "Start or recover a thread-owned local web preview in a managed terminal for 24 hours. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Opening the link in its owning thread restores a stopped server automatically within the fixed lease; viewing or recovering does not extend expiry.",
+  parameters: PreviewHostingLaunchInput,
+  success: PreviewHostingLeaseSummary,
+  failure: Schema.Union([PreviewHostingError, PreviewAutomationUnavailableError]),
+  dependencies: [McpInvocationContext.McpInvocationContext, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Host a local preview")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true);
 
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
@@ -242,6 +259,7 @@ const PreviewRecordingStopTool = safeBrowserTool(
 );
 
 export const PreviewToolkit = Toolkit.make(
+  PreviewHostTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
@@ -259,6 +277,7 @@ export const PreviewToolkit = Toolkit.make(
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
+  PreviewHostTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,

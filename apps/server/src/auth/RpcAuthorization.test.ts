@@ -3,6 +3,7 @@ import {
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthTerminalOperateScope,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -54,6 +55,15 @@ describe("RPC authorization scopes", () => {
       AuthRelayReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
+  });
+
+  it("keeps hosted preview recovery read-only for listing and terminal-authorized for launch", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingList)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
+      AuthTerminalOperateScope,
+    );
   });
 
   it("requires permission to operate on a thread before uploading feedback", () => {

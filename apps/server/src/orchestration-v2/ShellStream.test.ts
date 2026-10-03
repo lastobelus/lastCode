@@ -113,6 +113,21 @@ describe("coalesceStoredThreadEvents", () => {
 });
 
 describe("shellStreamItemFromThreadShell", () => {
+  it("puts archived cleanup tombstones in active recovery without changing archivedAt", () => {
+    const shell = shellFixture({
+      archivedAt: "2026-07-30T00:00:00.000Z" as never,
+      deletedAt: "2026-07-31T00:00:00.000Z" as never,
+      worktreeCleanup: {
+        status: "deleting",
+        repositoryRoot: "/example/repository",
+        worktreePath: "/example/worktree",
+        startedAt: "2026-07-31T00:00:00.000Z",
+      },
+    });
+    expect(
+      shellStreamItemFromThreadShell({ stored: storedThreadEvent(4, "thread-a"), shell }),
+    ).toEqual({ kind: "thread.updated", sequence: 4, location: "active", thread: shell });
+  });
   it("emits an active thread update when the shell is not archived", () => {
     const shell = shellFixture({ archivedAt: null });
     expect(
@@ -173,6 +188,28 @@ describe("shellStreamItemFromThreadShell", () => {
 });
 
 describe("archivedShellStreamItemFromThreadShell", () => {
+  it("removes archived tombstones on deletion and on a coalesced cleanup failure", () => {
+    const shell = shellFixture({
+      archivedAt: "2026-07-30T00:00:00.000Z" as never,
+      deletedAt: "2026-07-31T00:00:00.000Z" as never,
+      worktreeCleanup: {
+        status: "failed",
+        repositoryRoot: "/example/repository",
+        worktreePath: "/example/worktree",
+        startedAt: "2026-07-31T00:00:00.000Z",
+        failedAt: "2026-07-31T00:00:01.000Z",
+        error: "Busy worktree",
+      },
+    });
+    for (const type of ["thread.deleted", "thread.metadata-updated"]) {
+      expect(
+        archivedShellStreamItemFromThreadShell({
+          stored: storedThreadEvent(4, "thread-a", { type, payload: shell }),
+          shell,
+        }),
+      ).toEqual({ kind: "thread.removed", sequence: 4, threadId: "thread-a" });
+    }
+  });
   it("emits an update for an archived shell", () => {
     const shell = shellFixture({ archivedAt: "2026-07-30T00:00:00.000Z" as never });
     expect(

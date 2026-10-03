@@ -1,3 +1,6 @@
+import { ActionResumeState } from "./actionResume.ts";
+import { ThreadAnnotation, ThreadAttention, ThreadWorktreeCleanup } from "./threadMetadata.ts";
+export * from "./threadMetadata.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -373,6 +376,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
+  persistent: Schema.optional(Schema.Boolean),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
+  actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -1521,6 +1529,12 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
+      "thread.persistence-changed",
+      "thread.annotation-upserted",
+      "thread.annotation-resolved",
+      "thread.annotation-reopened",
+      "thread.attention-set",
+      "thread.attention-cleared",
       "thread.pull-request-synced",
       "thread.runtime-mode-updated",
       "thread.interaction-mode-updated",
@@ -1702,6 +1716,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
+  persistent: Schema.optional(Schema.Boolean),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
+  actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2313,6 +2332,12 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.marked-unread",
       "thread.pull-request-synced",
       "thread.metadata-updated",
+      "thread.persistence-changed",
+      "thread.annotation-upserted",
+      "thread.annotation-resolved",
+      "thread.annotation-reopened",
+      "thread.attention-set",
+      "thread.attention-cleared",
       "thread.runtime-mode-updated",
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
@@ -2460,6 +2485,34 @@ export const OrchestrationV2Command = Schema.Union([
     ),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread.persistence.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    persistent: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.annotation.upsert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    body: ThreadAnnotation.fields.body,
+  }),
+  Schema.Struct({
+    type: Schema.Literals(["thread.annotation.resolve", "thread.annotation.reopen"]),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.attention.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    attention: ThreadAttention,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.attention.clear"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.archive"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -2584,6 +2637,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),

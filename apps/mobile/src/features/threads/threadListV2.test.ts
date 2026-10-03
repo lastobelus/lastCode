@@ -32,6 +32,7 @@ import {
   buildThreadListV2ListItems,
   getThreadListV2OrderedSection,
   isThreadListV2ListItem,
+  resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
@@ -41,6 +42,12 @@ import {
   threadHasUnseenCompletion,
   type ThreadListV2ListItem,
 } from "./threadListV2";
+
+import {
+  resolveThreadStatus,
+  resolveWorktreeCleanupStatus,
+  shouldShowActionWaitingIndicator,
+} from "./thread-status";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -2157,4 +2164,229 @@ describe("buildThreadListV2ListItems row-state stamps", () => {
     expect(shelfLoaded.type === "v2-settled-shelf" && shelfLoaded.disabled).toBe(false);
     expect(threadListV2ListItemsAreEqual(shelfLoading, shelfLoaded)).toBe(false);
   });
+});
+
+describe("LastCode mobile thread state", () => {
+  const actionResume = {
+    runId: "action-1",
+    threadId: ThreadId.make("action-thread"),
+    projectId: ProjectId.make("project-1"),
+    actionId: "wait-for-pr",
+    actionName: "Wait for PR",
+    terminalId: "action-terminal",
+    outcome: "running" as const,
+    delivery: "pending" as const,
+    startedAt: NOW,
+    finishedAt: null,
+    exitCode: null,
+    exitSignal: null,
+  };
+
+  it("keeps Action waiting/progress visible behind question and runtime priorities", () => {
+    const thread = makeThread({ id: actionResume.threadId, title: "Action", actionResume });
+    expect(resolveThreadListV2Status(thread)).toBe("waiting");
+    expect(resolveThreadStatus(thread)?.kind).toBe("waiting");
+    expect(shouldShowActionWaitingIndicator(thread, "waiting")).toBe(false);
+    expect(
+      resolveThreadListV2Status({
+        ...thread,
+        actionResume: {
+          ...actionResume,
+          progress: { version: 1, state: "working", summary: "Checking reviews", updatedAt: NOW },
+        },
+      }),
+    ).toBe("working");
+    const question = { ...thread, attention: { kind: "question" as const, raisedAt: NOW } };
+    expect(resolveThreadListV2Status(question)).toBe("question");
+    expect(resolveThreadListV2Status({ ...question, hasPendingApprovals: true })).toBe("approval");
+    expect(resolveThreadListV2Status({ ...question, hasPendingUserInput: true })).toBe("input");
+    const runtime = {
+      status: "running" as const,
+      activeRunId: RunId.make("run-1"),
+      providerName: "Codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      lastError: null,
+      updatedAt: NOW,
+    };
+    expect(resolveThreadListV2Status({ ...thread, runtime })).toBe("working");
+    expect(resolveThreadStatus({ ...thread, runtime })?.kind).toBe("working");
+    expect(shouldShowActionWaitingIndicator(thread, "working")).toBe(true);
+    const workingAction = {
+      ...thread,
+      actionResume: {
+        ...actionResume,
+        progress: {
+          version: 1 as const,
+          state: "working" as const,
+          summary: "Checking reviews",
+          updatedAt: NOW,
+        },
+      },
+    };
+    expect(resolveThreadStatus(workingAction)?.kind).toBe("working");
+    expect(shouldShowActionWaitingIndicator(workingAction, "working")).toBe(false);
+    expect(
+      resolveThreadListV2Status({ ...thread, runtime: { ...runtime, status: "failed" } }),
+    ).toBe("failed");
+  });
+
+  it("surfaces cleanup recovery ahead of stale settled, snooze and pin metadata", () => {
+    const cleanup = {
+      status: "failed" as const,
+      repositoryRoot: "/workspace/project",
+      worktreePath: "/workspace/worktree",
+      startedAt: NOW,
+      failedAt: NOW,
+      error: "Worktree is busy",
+    };
+    const thread = makeThread({
+      id: ThreadId.make("cleanup"),
+      title: "Cleanup",
+      worktreeCleanup: cleanup,
+      settledOverride: "settled",
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+      pinnedAt: NOW,
+    });
+    expect(resolveThreadStatus({ ...thread, hasPendingApprovals: true })).toMatchObject({
+      kind: "cleanup-failed",
+      pulse: false,
+    });
+    expect(resolveWorktreeCleanupStatus(thread)?.label).toBe("Cleanup failed");
+    expect(
+      resolveWorktreeCleanupStatus({
+        ...thread,
+        worktreeCleanup: {
+          status: "deleting",
+          repositoryRoot: cleanup.repositoryRoot,
+          worktreePath: cleanup.worktreePath,
+          startedAt: NOW,
+        },
+      })?.label,
+    ).toBe("Deleting");
+    const queuedCleanup = {
+      status: "queued" as const,
+      repositoryRoot: cleanup.repositoryRoot,
+      worktreePath: cleanup.worktreePath,
+      queuedAt: NOW,
+      blockedByThreadId: ThreadId.make("cleanup-blocker"),
+    };
+    expect(resolveWorktreeCleanupStatus({ ...thread, worktreeCleanup: queuedCleanup })?.label).toBe(
+      "Deleting (Queued)",
+    );
+    expect(resolveThreadListV2CleanupActions(queuedCleanup)).toEqual([]);
+    const layout = buildThreadListV2Items({
+      threads: [thread],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+    expect(layout.items.map(({ thread, variant }) => [thread.id, variant])).toEqual([
+      ["cleanup", "card"],
+    ]);
+    expect(layout.settledCount).toBe(0);
+    expect(layout.snoozedCount).toBe(0);
+    expect(resolveThreadListV2CleanupActions(cleanup)).toEqual([
+      "retry-worktree-cleanup",
+      "keep-worktree",
+    ]);
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "deleting",
+        repositoryRoot: cleanup.repositoryRoot,
+        worktreePath: cleanup.worktreePath,
+        startedAt: NOW,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("archived cleanup recovery", () => {
+  const cleanupBase = {
+    repositoryRoot: "/workspace/project",
+    worktreePath: "/workspace/worktree",
+  };
+
+  it.each([
+    {
+      ...cleanupBase,
+      status: "queued" as const,
+      queuedAt: NOW,
+      blockedByThreadId: ThreadId.make("cleanup-blocker"),
+    },
+    { ...cleanupBase, status: "deleting" as const, startedAt: NOW },
+    {
+      ...cleanupBase,
+      status: "failed" as const,
+      startedAt: NOW,
+      failedAt: NOW,
+      error: "Worktree is busy",
+    },
+  ])(
+    "retains archived $status recovery before ordinary archive and subagent filters",
+    (cleanup) => {
+      const thread = makeThread({
+        id: ThreadId.make("cleanup"),
+        title: "Cleanup",
+        archivedAt: NOW,
+        deletedAt: NOW,
+        worktreeCleanup: cleanup,
+        settledOverride: "settled",
+        pinnedAt: NOW,
+        snoozedUntil: "2026-06-03T00:00:00.000Z",
+      });
+      const subagent = makeThread({
+        ...thread,
+        id: ThreadId.make("cleanup-subagent"),
+        lineage: {
+          rootThreadId: ThreadId.make("root"),
+          parentThreadId: ThreadId.make("root"),
+          relationshipToParent: "subagent",
+        },
+      });
+      const threads = [
+        thread,
+        subagent,
+        makeThread({ id: ThreadId.make("archived"), title: "Archived", archivedAt: NOW }),
+        makeThread({
+          id: ThreadId.make("ordinary-subagent"),
+          title: "Subagent",
+          lineage: subagent.lineage,
+        }),
+        makeThread({ ...thread, id: ThreadId.make("cleanup-cleared"), worktreeCleanup: null }),
+        makeThread({
+          ...thread,
+          id: ThreadId.make("unarchived-deleted"),
+          archivedAt: null,
+          worktreeCleanup: null,
+        }),
+      ];
+      const input = { threads, environmentId: null, searchQuery: "", now: NOW };
+      const layout = buildThreadListV2Items(input);
+      expect(layout.items.map(({ thread, variant }) => [thread.id, variant]).sort()).toEqual([
+        ["cleanup", "card"],
+        ["cleanup-subagent", "card"],
+      ]);
+      expect(layout.settledCount).toBe(0);
+      expect(layout.snoozedCount).toBe(0);
+      expect(
+        getThreadListV2OrderedSection({ ...input, section: "active" })
+          .map(({ id }) => id)
+          .sort(),
+      ).toEqual(["cleanup", "cleanup-subagent"]);
+      expect(getThreadListV2OrderedSection({ ...input, section: "pinned" })).toEqual([]);
+      expect(resolveThreadListV2CleanupActions(cleanup)).toEqual(
+        cleanup.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [],
+      );
+      expect(layout.items.map(({ thread }) => [thread.archivedAt, thread.deletedAt])).toEqual([
+        [NOW, NOW],
+        [NOW, NOW],
+      ]);
+      expect(
+        buildThreadListV2Items({
+          ...input,
+          threads: [thread, subagent].map((thread) => ({ ...thread, worktreeCleanup: null })),
+        }).items,
+      ).toEqual([]);
+    },
+  );
 });

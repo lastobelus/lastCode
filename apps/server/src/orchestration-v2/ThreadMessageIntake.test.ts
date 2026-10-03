@@ -7,9 +7,14 @@ import {
   ChatAttachmentId,
   CommandId,
   EventId,
+  MessageId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
+  UpdateDrainAdmissionError,
+  UpdateDrainError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   type OrchestrationV2Command,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
@@ -317,6 +322,60 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
       entry.startsWith("thread-ambiguous-"),
     );
     expect(threadFiles).toHaveLength(1);
+    expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
+  }).pipe(Effect.provide(intakeTestLayer)),
+);
+
+it.effect.each([
+  new UpdateDrainAdmissionError({
+    reason: "update_draining",
+    requestId: UpdateDrainRequestId.make("update-request"),
+    targetVersion: UpdateDrainTargetVersion.make("test-version"),
+    message: "Update intake is closed.",
+  }),
+  new UpdateDrainError({ reason: "internal_error", message: "Cannot read update admission." }),
+])("releases claimed copies when intake fails with $_tag", (cause) =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const pendingId = ChatAttachmentId.make(createPendingAttachmentId()!);
+    NodeFS.writeFileSync(
+      NodePath.join(config.attachmentsDir, `${pendingId}.png`),
+      new Uint8Array([1, 2, 3]),
+    );
+    const result = yield* dispatchCommand({
+      type: "message.dispatch",
+      commandId: CommandId.make("message-draining"),
+      threadId: ThreadId.make("thread-draining"),
+      messageId: MessageId.make("message-draining"),
+      createdBy: "user",
+      creationSource: "server",
+      dispatchMode: { type: "defer_start" },
+      text: "Read this attachment",
+      attachments: [
+        { type: "image", id: pendingId, name: "screen.png", mimeType: "image/png", sizeBytes: 3 },
+      ],
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          dispatch: (command) =>
+            Effect.fail(
+              new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
+            ),
+        }),
+      ),
+      Effect.result,
+    );
+    expect(result._tag).toBe("Failure");
+    expect(
+      NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+        entry.startsWith("thread-draining-"),
+      ),
+    ).toEqual([]);
+    // Preserve the original upload so the user can retry after admission opens.
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
   }).pipe(Effect.provide(intakeTestLayer)),
 );

@@ -19,6 +19,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -137,7 +138,7 @@ export function isAutoSettlementCandidate(
   if (thread.archivedAt !== null || thread.settledOverride !== null) return false;
   if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
   // Blocked-on-you work must never park behind a settled override.
-  if (thread.pendingRuntimeRequest !== null) return false;
+  if (thread.attention != null || thread.pendingRuntimeRequest !== null) return false;
   // A live run — or post-settlement background work — is not staleness.
   if (thread.activityRunStatus != null) return false;
   if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) return false;
@@ -255,6 +256,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const git = yield* GitManager.GitManager;
+  const previews = yield* PreviewHosting.PreviewHosting;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -514,7 +516,28 @@ export const make = Effect.gen(function* () {
       // A thread re-engaged before this event ran keeps its shells.
       const thread = yield* projections.getThread(threadId);
       if (thread.settledOverride !== "settled") return;
-      yield* terminals.closeIdle({ threadId });
+      const managedTerminalIds = yield* previews.list(threadId).pipe(
+        Effect.map((leases) => leases.map((preview) => preview.terminalId)),
+        Effect.catch((error) =>
+          terminals.metadata.pipe(
+            Effect.map((summaries) =>
+              summaries
+                .filter(
+                  (terminal) =>
+                    terminal.threadId === threadId && terminal.terminalId.startsWith("preview-"),
+                )
+                .map((terminal) => terminal.terminalId),
+            ),
+            Effect.tap(() =>
+              Effect.logWarning("preview leases unavailable while settling thread", {
+                threadId,
+                error: error.message,
+              }),
+            ),
+          ),
+        ),
+      );
+      yield* terminals.closeIdle({ threadId, excludedTerminalIds: managedTerminalIds });
     },
     (effect, threadId) =>
       effect.pipe(

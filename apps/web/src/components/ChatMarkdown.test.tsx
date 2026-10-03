@@ -1,16 +1,33 @@
 import { Window } from "happy-dom";
 import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+const markdownOpenMocks = vi.hoisted(() => ({
+  prepareHostedPreview: vi.fn(),
+  localApi: undefined as unknown,
+}));
+
+vi.mock("../localApi", () => ({
+  readLocalApi: () => markdownOpenMocks.localApi,
+  ensureLocalApi: () => markdownOpenMocks.localApi,
+}));
+vi.mock("./preview/previewHostingRecovery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./preview/previewHostingRecovery")>()),
+  prepareHostedPreview: markdownOpenMocks.prepareHostedPreview,
+  mayBeHostedPreviewUrl: (_ref: unknown, url: string) => url.startsWith("http://localhost:4173/"),
+}));
+
+import { readThreadHandoffs, useHandoffsStore } from "../handoffs/handoffsStore";
+import { useRightPanelStore, selectThreadRightPanelState } from "../rightPanelStore";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
-import { setMarkdownTaskChecked } from "./files/filePreviewMode";
 import { MediaActions } from "./media/MediaActions";
+import { setMarkdownTaskChecked } from "../markdownTaskList";
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
@@ -55,11 +72,12 @@ vi.mock("../editorPreferences", () => ({
   useOpenInPreferredEditor: () => vi.fn(),
   usePreferredEditor: () => [null, vi.fn()],
 }));
+const handoffPrMocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("~/lib/openPullRequestLink", () => ({
   findProjectOnChangeRequestHost: () => undefined,
   parseChangeRequestUrl: () => null,
   resolvePullRequestPreviewTarget: () => null,
-  useOpenChangeRequestLink: () => vi.fn(),
+  useOpenChangeRequestLink: () => handoffPrMocks.open,
 }));
 
 import ChatMarkdown, {
@@ -140,6 +158,287 @@ describe("ChatMarkdown context references", () => {
         renderer?.unmount();
       });
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("ChatMarkdown system-browser links", () => {
+  it.each([
+    [
+      "http://localhost:4173/docs?mode=preview",
+      "https://workstation.example:4173/docs?mode=preview",
+    ],
+    ["https://example.com/docs?mode=public", "https://example.com/docs?mode=public"],
+  ])("opens a context-menu link at its prepared destination", async (href, preparedUrl) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("window", { desktopBridge: {} });
+    let opened!: () => void;
+    const didOpen = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const openExternal = vi.fn(async () => {
+      opened();
+    });
+    const show = vi.fn().mockResolvedValue("open-external");
+    markdownOpenMocks.localApi = {
+      contextMenu: { show },
+      shell: { openExternal },
+    };
+    let entered!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let renderer: ReactTestRenderer | undefined;
+
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd={undefined} threadRef={threadRef} text={`[docs](${href})`} />,
+        );
+      });
+      const link = renderer!.root.findByType("a");
+      await act(async () => {
+        link.props.onContextMenu({
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+          clientX: 4,
+          clientY: 8,
+        });
+        await preparing;
+        expect(openExternal).not.toHaveBeenCalled();
+        finish({ url: preparedUrl, managed: preparedUrl !== href, restored: preparedUrl !== href });
+        await didOpen;
+      });
+
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+      expect(openExternal).toHaveBeenCalledWith(preparedUrl);
+    } finally {
+      await act(async () => renderer?.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      markdownOpenMocks.localApi = undefined;
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("ChatMarkdown managed media links", () => {
+  it.each(["png", "mp4"])("waits for recovery before opening a %s link", async (extension) => {
+    const window = new Window();
+    vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const href = `http://localhost:4173/preview.${extension}`;
+    const preparedUrl = `https://workstation.example:4173/preview.${extension}`;
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let entered!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    let opened!: () => void;
+    const didOpen = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const onImageExpand = vi.fn(() => {
+      opened();
+    });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd={undefined}
+            text={`[media](${href})`}
+            threadRef={threadRef}
+            onImageExpand={onImageExpand}
+          />,
+        );
+      });
+      await act(async () => {
+        renderer!.root.findByType("a").props.onClick({
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+          target: window.document.createElement("a"),
+          currentTarget: window.document.createElement("a"),
+        });
+        await preparing;
+        expect(onImageExpand).not.toHaveBeenCalled();
+        finish({ url: preparedUrl, managed: true, restored: true });
+        await didOpen;
+      });
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+      expect(onImageExpand).toHaveBeenCalledExactlyOnceWith({
+        index: 0,
+        images: [
+          expect.objectContaining({
+            src: preparedUrl,
+            originalUrl: preparedUrl,
+            actionsSource: expect.objectContaining({ src: preparedUrl }),
+          }),
+        ],
+      });
+    } finally {
+      await act(async () => renderer?.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+});
+
+describe("ChatMarkdown embedded managed media", () => {
+  it.each(["png", "mp4"])(
+    "waits for preparation before loading an embedded %s",
+    async (extension) => {
+      const window = new Window();
+      vi.stubGlobal("window", window);
+      vi.stubGlobal("document", window.document);
+      vi.stubGlobal("HTMLElement", window.HTMLElement);
+      vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const { createRoot } = await import("react-dom/client");
+      const container = window.document.createElement("div");
+      const root = createRoot(container as unknown as Element);
+      const source = `http://localhost:4173/report.${extension}`;
+      const destination = `https://workstation.example:4173/report.${extension}`;
+      const threadRef = {
+        environmentId: EnvironmentId.make("markdown-env"),
+        threadId: ThreadId.make("markdown-thread"),
+      };
+      let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+      markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      try {
+        await act(() =>
+          root.render(
+            <ChatMarkdown cwd="/workspace" text={`![report](${source})`} threadRef={threadRef} />,
+          ),
+        );
+        expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, source);
+        expect(container.querySelector("img[src], video[src]")).toBeNull();
+        await act(() => finish({ url: destination, managed: true, restored: true }));
+        expect(container.querySelector("img[src], video[src]")?.getAttribute("src")).toBe(
+          destination,
+        );
+        expect(container.querySelector(`[src="${source}"]`)).toBeNull();
+        if (source.endsWith(".mp4")) {
+          markdownOpenMocks.prepareHostedPreview.mockResolvedValueOnce({
+            url: destination,
+            managed: true,
+            restored: true,
+          });
+          await act(() => {
+            const play = container.querySelector('button[aria-label="Play report"]');
+            expect(play).not.toBeNull();
+            play?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+          });
+          expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenNthCalledWith(
+            2,
+            threadRef,
+            source,
+          );
+        }
+      } finally {
+        await act(() => root.unmount());
+        markdownOpenMocks.prepareHostedPreview.mockReset();
+        vi.unstubAllGlobals();
+        window.close();
+      }
+    },
+  );
+
+  it("ignores a previous source's preparation after the embedded image changes", async () => {
+    const window = new Window();
+    vi.stubGlobal("window", window);
+    vi.stubGlobal("document", window.document);
+    vi.stubGlobal("HTMLElement", window.HTMLElement);
+    vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const { createRoot } = await import("react-dom/client");
+    const container = window.document.createElement("div");
+    const root = createRoot(container as unknown as Element);
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let first!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    let second!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            first = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            second = resolve;
+          }),
+      );
+    try {
+      await act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd="/workspace"
+            text="![report](http://localhost:4173/first.png)"
+            threadRef={threadRef}
+          />,
+        ),
+      );
+      await act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd="/workspace"
+            text="![report](http://localhost:4173/second.png)"
+            threadRef={threadRef}
+          />,
+        ),
+      );
+      await act(() =>
+        first({ url: "https://workstation.example:4173/first.png", managed: true, restored: true }),
+      );
+      expect(container.querySelector("img[src]")).toBeNull();
+      await act(() =>
+        second({
+          url: "https://workstation.example:4173/second.png",
+          managed: true,
+          restored: true,
+        }),
+      );
+      expect(container.querySelector("img[src]")?.getAttribute("src")).toBe(
+        "https://workstation.example:4173/second.png",
+      );
+    } finally {
+      await act(() => root.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      vi.unstubAllGlobals();
+      window.close();
     }
   });
 });
@@ -620,8 +919,9 @@ describe("ChatMarkdown streaming", () => {
         cwd="/tmp/project"
         text={text}
         onTaskListChange={({ markerOffset, checked }) => {
-          editedText = setMarkdownTaskChecked(text, markerOffset, checked);
-          renderer!.update(message(editedText));
+          const nextText = setMarkdownTaskChecked(text, markerOffset, checked);
+          editedText = nextText;
+          renderer!.update(message(nextText));
         }}
       />
     );
@@ -1159,5 +1459,102 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+describe("chat file handoffs", () => {
+  it("captures the actual PR surface, retaining host and reusing its tab", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const ref = {
+      environmentId: EnvironmentId.make("pr-env"),
+      threadId: ThreadId.make("pr-thread"),
+    };
+    useHandoffsStore.setState({ byThreadKey: {} });
+    const target = {
+      projectId: "host-fallback-project",
+      host: "github.example",
+      repository: "other/repo",
+      number: 8,
+      url: "https://github.example/other/repo/pull/8",
+    };
+    handoffPrMocks.open.mockImplementationOnce(() => {
+      useRightPanelStore.getState().openPullRequest(ref, target);
+      return true;
+    });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/repo" threadRef={ref} text={`[Review this PR](${target.url})`} />,
+        );
+      });
+      const link = renderer!.root
+        .findAllByType("a")
+        .find((item) => item.props.href === target.url)!;
+      await act(async () =>
+        link.props.onClick({
+          preventDefault() {},
+          stopPropagation() {},
+          metaKey: false,
+          ctrlKey: false,
+        }),
+      );
+      expect(readThreadHandoffs(ref)[0]).toMatchObject({
+        markdownLabel: "Review this PR",
+        target: { kind: "pull-request", ...target },
+      });
+      expect(readThreadHandoffs(ref)[0]?.target).not.toHaveProperty("environmentId");
+    } finally {
+      handoffPrMocks.open.mockReset();
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("records the authored label and resolved path, preserving it on a bare reopen", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const ref = {
+      environmentId: EnvironmentId.make("test-env"),
+      threadId: ThreadId.make("handoff-thread"),
+    };
+    useHandoffsStore.setState({ byThreadKey: {} });
+    let renderer: ReactTestRenderer | undefined;
+    const renderLink = async (text: string) => {
+      await act(async () => {
+        if (renderer) renderer.update(<ChatMarkdown cwd="/repo" threadRef={ref} text={text} />);
+        else renderer = create(<ChatMarkdown cwd="/repo" threadRef={ref} text={text} />);
+      });
+      const link = renderer!.root
+        .findAllByType("a")
+        .find((item) => item.props.href === "/repo/docs/report.md")!;
+      await act(async () =>
+        link.props.onClick({
+          preventDefault() {},
+          stopPropagation() {},
+          metaKey: false,
+          ctrlKey: false,
+          altKey: false,
+          shiftKey: false,
+        }),
+      );
+    };
+    try {
+      await renderLink("[Final report](/repo/docs/report.md)");
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+      expect(readThreadHandoffs(ref)[0]).toMatchObject({
+        markdownLabel: "Final report",
+        target: { kind: "file", path: "/repo/docs/report.md" },
+      });
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+      ).toBe("file:docs/report.md");
+      await renderLink("[report.md](/repo/docs/report.md)");
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+      expect(readThreadHandoffs(ref)[0]?.markdownLabel).toBe("Final report");
+      expect(readThreadHandoffs(ref)[0]?.sequence).toBe(2);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 });
