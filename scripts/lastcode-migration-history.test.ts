@@ -49,6 +49,44 @@ function fixture(
 }
 
 describe("checkpoint migration history", () => {
+  it("accepts comments between literal entries without stripping identity text", () => {
+    const source = registry(["First", "Second"]);
+    const commented = source
+      .replace('  [1, "First"', '  // Released in previews.\n  [1, "First"')
+      .replace(
+        '  [2, "Second"',
+        '  /* Preserve the ledger.\n     Append future migrations. */\n  [2, "Second"',
+      )
+      .replace("\n] as const;", " // Trailing comment\n/* End of registry */\n] as const;");
+    assert.deepStrictEqual(
+      readMigrationIdentities(commented, "migrationEntries"),
+      readMigrationIdentities(source, "migrationEntries"),
+    );
+    assert.equal(
+      readMigrationIdentities(
+        source.replace('"First",', '"First///*literal*/",'),
+        "migrationEntries",
+      )[0]?.name,
+      "First///*literal*/",
+    );
+    assert.throws(
+      () =>
+        readMigrationIdentities(
+          source.replace("  [2,", "  /* unfinished\n  [2,"),
+          "migrationEntries",
+        ),
+      /Unsupported entry/,
+    );
+    assert.throws(
+      () =>
+        readMigrationIdentities(
+          source.replace("  [2,", "  // comment\n  ...makeRegistry(),\n  [2,"),
+          "migrationEntries",
+        ),
+      /Unsupported entry/,
+    );
+  });
+
   it("reads private and exported literal registries identically", () => {
     const exported = registry(["First", "Second"]);
     const privateRegistry = exported.replace(
@@ -107,6 +145,48 @@ describe("checkpoint migration history", () => {
       /Unsupported entry/,
     );
   });
+
+  it("checks feature-owned migrations and rejects imports outside server source", () =>
+    fixture((repo, git, write) => {
+      const commit = () => {
+        git("add", ".");
+        git("commit", "-qm", "Fixture migration history");
+        return git("rev-parse", "HEAD");
+      };
+      write(`${ROOT}Migrations.ts`, registry(["Initial"]));
+      write(`${ROOT}Migrations/Initial.ts`, 'export default "initial";\n');
+      const upstream = commit();
+      const featureRegistry = registry(["ActionResumeRuns"], true).replace(
+        "./Migrations/ActionResumeRuns.ts",
+        "../actionResume/ActionRunMigration.ts",
+      );
+      write(`${ROOT}LastCodeMigrations.ts`, featureRegistry);
+      write("apps/server/src/actionResume/ActionRunMigration.ts", 'export default "runs";\n');
+      write(`${ROOT}LegacyMigrationHistories.ts`, legacyHistories());
+      write(`${ROOT}DatabaseMigrations.ts`, "// conversion\n");
+      write(`${ROOT}DatabaseMigrations.test.ts`, "// upgrade fixtures\n");
+      const previous = commit();
+      const check = () =>
+        assertMigrationHistory({
+          repoRoot: repo,
+          candidateRef: "HEAD",
+          upstreamRef: upstream,
+          previousRef: previous,
+        });
+      assert.doesNotThrow(check);
+      write("apps/server/src/actionResume/ActionRunMigration.ts", 'export default "changed";\n');
+      commit();
+      assert.throws(check, /changed after release/);
+      write(
+        `${ROOT}LastCodeMigrations.ts`,
+        featureRegistry.replace(
+          "../actionResume/ActionRunMigration.ts",
+          "../../../../scripts/outside.ts",
+        ),
+      );
+      commit();
+      assert.throws(check, /escapes server source/);
+    }));
 
   it("reconstructs successive upstream checkpoints without renumbering LastCode migrations", () =>
     fixture((repo, git, write) => {

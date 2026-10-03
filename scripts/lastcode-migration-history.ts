@@ -33,6 +33,9 @@ export function readMigrationIdentities(
   const identities: Array<MigrationIdentity> = [];
   let remaining = body.trim();
   while (remaining.length > 0) {
+    // Skip comments only between entries, never inside an identity's string.
+    remaining = remaining.replace(/^(?:\s+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)+/u, "");
+    if (remaining.length === 0) break;
     const match = /^\[(\d+),\s*"([^"]+)",\s*(\w+)\],?\s*/u.exec(remaining);
     if (!match) throw new Error(`Unsupported entry in ${exportName}: ${remaining.slice(0, 80)}`);
     const implementation = imports.get(match[3]!);
@@ -123,8 +126,9 @@ function migrationPath(registry: string, implementation: string): string {
   const resolved = NodePath.posix.normalize(
     NodePath.posix.join(NodePath.posix.dirname(registry), implementation),
   );
-  if (!resolved.startsWith("apps/server/src/persistence/") || !resolved.endsWith(".ts")) {
-    throw new Error(`Migration implementation escapes persistence source: ${implementation}`);
+  // Feature-owned migrations may live beside their service, but never outside server source.
+  if (!resolved.startsWith("apps/server/src/") || !resolved.endsWith(".ts")) {
+    throw new Error(`Migration implementation escapes server source: ${implementation}`);
   }
   return resolved;
 }
