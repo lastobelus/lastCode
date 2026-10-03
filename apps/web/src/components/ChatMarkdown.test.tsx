@@ -18,6 +18,7 @@ vi.mock("../localApi", () => ({
 vi.mock("./preview/previewHostingRecovery", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./preview/previewHostingRecovery")>()),
   prepareHostedPreview: markdownOpenMocks.prepareHostedPreview,
+  mayBeHostedPreviewUrl: (_ref: unknown, url: string) => url.startsWith("http://localhost:4173/"),
 }));
 
 import { readThreadHandoffs, useHandoffsStore } from "../handoffs/handoffsStore";
@@ -299,6 +300,142 @@ describe("ChatMarkdown managed media links", () => {
       });
     } finally {
       await act(async () => renderer?.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+});
+
+describe("ChatMarkdown embedded managed media", () => {
+  it.each(["png", "mp4"])(
+    "waits for preparation before loading an embedded %s",
+    async (extension) => {
+      const window = new Window();
+      vi.stubGlobal("window", window);
+      vi.stubGlobal("document", window.document);
+      vi.stubGlobal("HTMLElement", window.HTMLElement);
+      vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const { createRoot } = await import("react-dom/client");
+      const container = window.document.createElement("div");
+      const root = createRoot(container as unknown as Element);
+      const source = `http://localhost:4173/report.${extension}`;
+      const destination = `https://workstation.example:4173/report.${extension}`;
+      const threadRef = {
+        environmentId: EnvironmentId.make("markdown-env"),
+        threadId: ThreadId.make("markdown-thread"),
+      };
+      let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+      markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      try {
+        await act(() =>
+          root.render(
+            <ChatMarkdown cwd="/workspace" text={`![report](${source})`} threadRef={threadRef} />,
+          ),
+        );
+        expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, source);
+        expect(container.querySelector("img[src], video[src]")).toBeNull();
+        await act(() => finish({ url: destination, managed: true, restored: true }));
+        expect(container.querySelector("img[src], video[src]")?.getAttribute("src")).toBe(
+          destination,
+        );
+        expect(container.querySelector(`[src="${source}"]`)).toBeNull();
+        if (source.endsWith(".mp4")) {
+          markdownOpenMocks.prepareHostedPreview.mockResolvedValueOnce({
+            url: destination,
+            managed: true,
+            restored: true,
+          });
+          await act(() => {
+            const play = container.querySelector('button[aria-label="Play report"]');
+            expect(play).not.toBeNull();
+            play?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+          });
+          expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenNthCalledWith(
+            2,
+            threadRef,
+            source,
+          );
+        }
+      } finally {
+        await act(() => root.unmount());
+        markdownOpenMocks.prepareHostedPreview.mockReset();
+        vi.unstubAllGlobals();
+        window.close();
+      }
+    },
+  );
+
+  it("ignores a previous source's preparation after the embedded image changes", async () => {
+    const window = new Window();
+    vi.stubGlobal("window", window);
+    vi.stubGlobal("document", window.document);
+    vi.stubGlobal("HTMLElement", window.HTMLElement);
+    vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const { createRoot } = await import("react-dom/client");
+    const container = window.document.createElement("div");
+    const root = createRoot(container as unknown as Element);
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let first!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    let second!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            first = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            second = resolve;
+          }),
+      );
+    try {
+      await act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd="/workspace"
+            text="![report](http://localhost:4173/first.png)"
+            threadRef={threadRef}
+          />,
+        ),
+      );
+      await act(() =>
+        root.render(
+          <ChatMarkdown
+            cwd="/workspace"
+            text="![report](http://localhost:4173/second.png)"
+            threadRef={threadRef}
+          />,
+        ),
+      );
+      await act(() =>
+        first({ url: "https://workstation.example:4173/first.png", managed: true, restored: true }),
+      );
+      expect(container.querySelector("img[src]")).toBeNull();
+      await act(() =>
+        second({
+          url: "https://workstation.example:4173/second.png",
+          managed: true,
+          restored: true,
+        }),
+      );
+      expect(container.querySelector("img[src]")?.getAttribute("src")).toBe(
+        "https://workstation.example:4173/second.png",
+      );
+    } finally {
+      await act(() => root.unmount());
       markdownOpenMocks.prepareHostedPreview.mockReset();
       vi.unstubAllGlobals();
       window.close();

@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   openThreadFeedMarkdownUrl,
   prepareThenOpenThreadFeedUrl,
+  preparedThreadFeedMediaActionsSource,
+  startPreparingThreadFeedMediaUrl,
 } from "./prepareThreadFeedPreview";
 
 const threadRef = {
@@ -126,4 +128,95 @@ describe("prepareThenOpenThreadFeedUrl", () => {
       expect(openViewer).toHaveBeenCalledOnce();
     },
   );
+});
+
+describe("startPreparingThreadFeedMediaUrl", () => {
+  it("keeps local media sources immediate", () => {
+    const prepare = vi.fn(async (url: string) => url);
+    const publish = vi.fn();
+
+    startPreparingThreadFeedMediaUrl("file:///workspace/image.png", prepare, publish);
+
+    expect(publish).toHaveBeenCalledWith("file:///workspace/image.png");
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a media source until owned preview recovery finishes", async () => {
+    let finishRecovery!: (url: string) => void;
+    let recoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => (recoveryStarted = resolve));
+    const published: string[] = [];
+    const cancel = startPreparingThreadFeedMediaUrl(
+      lease.url,
+      () => {
+        recoveryStarted();
+        return new Promise<string>((resolve) => (finishRecovery = resolve));
+      },
+      (url) => published.push(url),
+    );
+
+    await started;
+    expect(published).toEqual([]);
+    finishRecovery("http://192.168.1.30:5173/report/index.html?run=7#chart");
+    await vi.waitFor(() =>
+      expect(published).toEqual(["http://192.168.1.30:5173/report/index.html?run=7#chart"]),
+    );
+    cancel();
+  });
+
+  it("ignores a late media URL after the component source is replaced or unmounted", async () => {
+    let finishRecovery!: (url: string) => void;
+    let recoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => (recoveryStarted = resolve));
+    const publish = vi.fn();
+    const cancel = startPreparingThreadFeedMediaUrl(
+      lease.url,
+      () => {
+        recoveryStarted();
+        return new Promise<string>((resolve) => (finishRecovery = resolve));
+      },
+      publish,
+    );
+
+    await started;
+    cancel();
+    finishRecovery("http://192.168.1.30:5173/report/index.html?run=7#chart");
+    await Promise.resolve();
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe("preparedThreadFeedMediaActionsSource", () => {
+  it("uses the prepared remote URL for direct image actions and URL references", () => {
+    expect(
+      preparedThreadFeedMediaActionsSource(
+        {
+          uri: lease.url,
+          name: "Preview image",
+          mimeType: "image/png",
+          reference: { kind: "url", url: lease.url },
+        },
+        "http://192.168.1.30:5173/report.png?run=7#chart",
+      ),
+    ).toEqual({
+      uri: "http://192.168.1.30:5173/report.png?run=7#chart",
+      name: "Preview image",
+      mimeType: "image/png",
+      reference: {
+        kind: "url",
+        url: "http://192.168.1.30:5173/report.png?run=7#chart",
+      },
+    });
+  });
+
+  it("leaves environment-backed media actions unchanged", () => {
+    const source = {
+      environmentId: threadRef.environmentId,
+      resource: { _tag: "media-file" as const, threadId: threadRef.threadId, path: "image.png" },
+      name: "Workspace image",
+      mimeType: "image/png",
+    };
+
+    expect(preparedThreadFeedMediaActionsSource(source, lease.url)).toBe(source);
+  });
 });

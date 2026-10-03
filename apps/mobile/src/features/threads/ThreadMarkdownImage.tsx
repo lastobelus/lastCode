@@ -1,5 +1,5 @@
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
-import { createContext, useContext, useEffect, useId, useState } from "react";
+import { createContext, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -15,6 +15,7 @@ import { MediaActionsMenu } from "../../components/MediaActionsMenu";
 import { PresentationSource } from "../../components/NativePresentation";
 import { useMediaActions, type MediaActionsSource } from "../../lib/mediaActions";
 import { useAssetUrlState } from "../../state/assets";
+import { startPreparingThreadFeedMediaUrl } from "../../lib/prepareThreadFeedPreview";
 import {
   MARKDOWN_IMAGE_MAX_WIDTH,
   type MarkdownImageDisplaySize,
@@ -30,6 +31,34 @@ import {
  * width takes over once it is known.
  */
 export const MarkdownImageAvailableWidthContext = createContext(0);
+
+/** Keeps remote media unloaded until its owning thread's managed preview is ready. */
+export function ThreadMarkdownPreparedUri(props: {
+  readonly uri: string;
+  readonly sourceKey: string;
+  readonly prepareUrl?: ((url: string) => Promise<string>) | undefined;
+  readonly children: (uri: string | null) => ReactNode;
+}) {
+  const [prepared, setPrepared] = useState<{
+    readonly sourceKey: string;
+    readonly uri: string;
+  } | null>(null);
+  const requiresPreparation = props.prepareUrl !== undefined && /^https?:\/\//i.test(props.uri);
+
+  useEffect(() => {
+    if (!props.prepareUrl || !/^https?:\/\//i.test(props.uri)) return;
+    return startPreparingThreadFeedMediaUrl(props.uri, props.prepareUrl, (uri) =>
+      setPrepared({ sourceKey: props.sourceKey, uri }),
+    );
+  }, [props.prepareUrl, props.sourceKey, props.uri]);
+
+  const preparedUri = requiresPreparation
+    ? prepared?.sourceKey === props.sourceKey
+      ? prepared.uri
+      : null
+    : props.uri;
+  return props.children(preparedUri);
+}
 
 export function ThreadMarkdownImageView(props: {
   readonly uri: string | null;

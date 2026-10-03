@@ -204,7 +204,11 @@ import {
 import { previewEnvironment } from "../../state/preview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { usePreparedConnection } from "../../state/session";
-import { prepareThenOpenThreadFeedUrl } from "../../lib/prepareThreadFeedPreview";
+import {
+  openThreadFeedMarkdownUrl,
+  preparedThreadFeedMediaActionsSource,
+  prepareThenOpenThreadFeedUrl,
+} from "../../lib/prepareThreadFeedPreview";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
@@ -226,6 +230,7 @@ import {
   MarkdownImageAvailableWidthContext,
   ThreadMarkdownImage,
   ThreadMarkdownImageUnavailable,
+  ThreadMarkdownPreparedUri,
   ThreadMarkdownImageView,
 } from "./ThreadMarkdownImage";
 
@@ -686,7 +691,11 @@ function ThreadMediaVisibility(props: { readonly children: ReactNode }) {
   return <ThreadMediaVisibleContext value={visible}>{props.children}</ThreadMediaVisibleContext>;
 }
 
-function ThreadMarkdownVideo(props: { readonly source: MediaVideoPreviewSource }) {
+function ThreadMarkdownVideo(props: {
+  readonly source: MediaVideoPreviewSource;
+  readonly recoveryUrl?: string;
+  readonly prepareUrl?: (url: string) => Promise<string>;
+}) {
   const { source } = props;
   const visible = useContext(ThreadMediaVisibleContext);
   const thumbnailKey = mediaVideoThumbnailKey(source);
@@ -698,6 +707,8 @@ function ThreadMarkdownVideo(props: { readonly source: MediaVideoPreviewSource }
     "environmentId" in source ? source.environmentId : null,
     "resource" in source ? source.resource : null,
   );
+  const prepareUrl = props.prepareUrl;
+  const recoveryUrl = props.recoveryUrl;
   const uri = mediaVideoPreviewUri(source, asset._tag === "Success" ? asset.url : null);
   return (
     <MediaVideoPlayer
@@ -706,7 +717,9 @@ function ThreadMarkdownVideo(props: { readonly source: MediaVideoPreviewSource }
       resolvePlaybackUri={
         "resource" in source
           ? async () => mediaVideoPreviewUri(source, await refreshAssetUrl())
-          : undefined
+          : prepareUrl && recoveryUrl
+            ? () => prepareUrl(recoveryUrl)
+            : undefined
       }
       name={source.name}
       thumbnailKey={thumbnailKey}
@@ -714,6 +727,17 @@ function ThreadMarkdownVideo(props: { readonly source: MediaVideoPreviewSource }
       unavailable={"resource" in source && asset._tag === "Failure"}
       actionsSource={source.actionsSource}
     />
+  );
+}
+
+function ThreadMarkdownMediaPending() {
+  return (
+    <View
+      className="items-center justify-center rounded-[10px] bg-md-code-bg"
+      style={{ height: 180 }}
+    >
+      <ActivityIndicator />
+    </View>
   );
 }
 
@@ -2354,6 +2378,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(props.environmentId);
+  const hasPreparedConnection = Option.isSome(preparedConnection);
   const environmentUrl = Option.isSome(preparedConnection)
     ? preparedConnection.value.httpBaseUrl
     : "";
@@ -2362,6 +2387,55 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     preparedConnection.value.target._tag === "PrimaryConnectionTarget"
       ? preparedConnection.value.target.httpBaseUrl
       : null;
+  const previewPreparationInput = useCallback(
+    (url: string) => {
+      if (!hasPreparedConnection) return null;
+      return {
+        threadRef: { environmentId: props.environmentId, threadId: props.threadId },
+        url,
+        environmentUrl,
+        knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+        list: async () => {
+          const result = await listHostedPreviews({
+            environmentId: props.environmentId,
+            input: { threadId: props.threadId },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+        recover: async (lease: PreviewHostingLeaseSummary) => {
+          const result = await recoverHostedPreviewLease({
+            environmentId: props.environmentId,
+            input: {
+              threadId: props.threadId,
+              leaseId: lease.leaseId,
+              url: lease.url,
+            },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+      };
+    },
+    [
+      environmentUrl,
+      knownEnvironmentUrl,
+      listHostedPreviews,
+      hasPreparedConnection,
+      props.environmentId,
+      props.threadId,
+      recoverHostedPreviewLease,
+    ],
+  );
+  const prepareMarkdownMediaUrl = useCallback(
+    (url: string) => {
+      const input = previewPreparationInput(url);
+      return input
+        ? prepareThenOpenThreadFeedUrl(input, (preparedUrl) => preparedUrl)
+        : Promise.resolve(url);
+    },
+    [previewPreparationInput],
+  );
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
@@ -2484,32 +2558,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = useCallback(
     (href: string) => {
-      const previewPreparationInput = (url: string) => ({
-        threadRef: { environmentId: props.environmentId, threadId: props.threadId },
-        url,
-        environmentUrl,
-        knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
-        list: async () => {
-          const result = await listHostedPreviews({
-            environmentId: props.environmentId,
-            input: { threadId: props.threadId },
-          });
-          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-          return result.value;
-        },
-        recover: async (lease: PreviewHostingLeaseSummary) => {
-          const result = await recoverHostedPreviewLease({
-            environmentId: props.environmentId,
-            input: {
-              threadId: props.threadId,
-              leaseId: lease.leaseId,
-              url: lease.url,
-            },
-          });
-          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-          return result.value;
-        },
-      });
       const presentation = resolveMarkdownLinkPresentation(href);
       if (presentation.kind === "file") {
         const relativePath = resolveWorkspaceRelativeFilePath(
@@ -2556,8 +2604,15 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             setExpandedVideo((current) => current ?? source);
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void prepareThenOpenThreadFeedUrl(previewPreparationInput(mediaUrl), (url) =>
-              openVideo({ ...media.source, uri: url }),
+            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
+              openVideo({
+                ...media.source,
+                uri: url,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  url,
+                ),
+              }),
             );
           } else {
             openVideo(media.source);
@@ -2567,8 +2622,15 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             setExpandedFile((current) => current ?? source);
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void prepareThenOpenThreadFeedUrl(previewPreparationInput(mediaUrl), (url) =>
-              openImage({ ...media.source, uri: url }),
+            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
+              openImage({
+                ...media.source,
+                uri: url,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  url,
+                ),
+              }),
             );
           } else {
             openImage(media.source);
@@ -2608,29 +2670,23 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
       if (presentation.kind !== "file" && presentation.href) {
         if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
-          void prepareThenOpenThreadFeedUrl(previewPreparationInput(presentation.href), (url) =>
-            setExpandedFile(
-              (current) => current ?? { kind: "pdf", uri: url, name: "Document.pdf" },
-            ),
+          void openThreadFeedMarkdownUrl(
+            previewPreparationInput(presentation.href),
+            presentation.href,
+            (url) =>
+              setExpandedFile(
+                (current) => current ?? { kind: "pdf", uri: url, name: "Document.pdf" },
+              ),
           );
           return;
         }
         const linkUrl = presentation.href;
-        void prepareThenOpenThreadFeedUrl(previewPreparationInput(linkUrl), (url) =>
+        void openThreadFeedMarkdownUrl(previewPreparationInput(linkUrl), linkUrl, (url) =>
           tryOpenExternalUrl(url, "markdown-link"),
         );
       }
     },
-    [
-      environmentUrl,
-      knownEnvironmentUrl,
-      listHostedPreviews,
-      navigation,
-      props.environmentId,
-      props.threadId,
-      props.workspaceRoot,
-      recoverHostedPreviewLease,
-    ],
+    [navigation, previewPreparationInput, props.environmentId, props.threadId, props.workspaceRoot],
   );
   const markdownLinkHandlers = useMemo<MarkdownLinkHandlers>(
     () => ({
@@ -2669,24 +2725,76 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         imageEmbed: true,
       });
       if (media?.kind === "video") {
-        return (
-          <ThreadMarkdownVideo
-            key={image.href}
-            source={{ ...media.source, name: image.alt ?? media.source.name }}
-          />
-        );
+        const source = { ...media.source, name: image.alt ?? media.source.name };
+        if ("uri" in source && /^https?:\/\//i.test(source.uri)) {
+          return (
+            <ThreadMarkdownPreparedUri
+              key={image.href}
+              uri={source.uri}
+              sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
+              prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+            >
+              {(uri) =>
+                uri === null ? (
+                  <ThreadMarkdownMediaPending />
+                ) : (
+                  <ThreadMarkdownVideo
+                    source={{
+                      ...source,
+                      uri,
+                      actionsSource: preparedThreadFeedMediaActionsSource(
+                        source.actionsSource,
+                        uri,
+                      ),
+                    }}
+                    recoveryUrl={source.uri}
+                    prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+                  />
+                )
+              }
+            </ThreadMarkdownPreparedUri>
+          );
+        }
+        return <ThreadMarkdownVideo key={image.href} source={source} />;
       }
       const imageSource = classifyMarkdownImageSource(image.href, props.workspaceRoot ?? null);
       if (imageSource._tag === "Direct") {
+        const uri = normalizeNativeMarkdownUrl(imageSource.uri);
         return (
-          <ThreadMarkdownImageView
-            uri={normalizeNativeMarkdownUrl(imageSource.uri)}
-            sourceKey={imageSource.uri}
-            unavailable={false}
-            alt={image.alt}
-            actionsSource={media?.source.actionsSource}
-            onPressPreview={(source) => setExpandedFile((current) => current ?? source)}
-          />
+          <ThreadMarkdownPreparedUri
+            key={image.href}
+            uri={uri}
+            sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
+            prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+          >
+            {(preparedUri) => (
+              <ThreadMarkdownImageView
+                uri={preparedUri}
+                sourceKey={imageSource.uri}
+                unavailable={false}
+                alt={image.alt}
+                actionsSource={preparedThreadFeedMediaActionsSource(
+                  media?.source.actionsSource,
+                  preparedUri ?? uri,
+                )}
+                onPressPreview={(source) => {
+                  void prepareMarkdownMediaUrl(uri).then((preparedUri) =>
+                    setExpandedFile(
+                      (current) =>
+                        current ?? {
+                          ...source,
+                          uri: preparedUri,
+                          actionsSource: preparedThreadFeedMediaActionsSource(
+                            media?.source.actionsSource,
+                            preparedUri,
+                          ),
+                        },
+                    ),
+                  );
+                }}
+              />
+            )}
+          </ThreadMarkdownPreparedUri>
         );
       }
       if (imageSource._tag === "Blocked") {
@@ -2707,7 +2815,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         />
       );
     },
-    [props.environmentId, props.threadId, props.workspaceRoot],
+    [
+      hasPreparedConnection,
+      environmentUrl,
+      prepareMarkdownMediaUrl,
+      props.environmentId,
+      props.threadId,
+      props.workspaceRoot,
+    ],
   );
   const renderViewedImage = useCallback<MarkdownImageRenderer>(
     (image) => {
