@@ -228,6 +228,80 @@ describe("ChatMarkdown system-browser links", () => {
   });
 });
 
+describe("ChatMarkdown managed media links", () => {
+  it.each(["png", "mp4"])("waits for recovery before opening a %s link", async (extension) => {
+    const window = new Window();
+    vi.stubGlobal("HTMLImageElement", window.HTMLImageElement);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const href = `http://localhost:4173/preview.${extension}`;
+    const preparedUrl = `https://workstation.example:4173/preview.${extension}`;
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let entered!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    let opened!: () => void;
+    const didOpen = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const onImageExpand = vi.fn(() => {
+      opened();
+    });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd={undefined}
+            text={`[media](${href})`}
+            threadRef={threadRef}
+            onImageExpand={onImageExpand}
+          />,
+        );
+      });
+      await act(async () => {
+        renderer!.root.findByType("a").props.onClick({
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+          target: window.document.createElement("a"),
+          currentTarget: window.document.createElement("a"),
+        });
+        await preparing;
+        expect(onImageExpand).not.toHaveBeenCalled();
+        finish({ url: preparedUrl, managed: true, restored: true });
+        await didOpen;
+      });
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+      expect(onImageExpand).toHaveBeenCalledExactlyOnceWith({
+        index: 0,
+        images: [
+          expect.objectContaining({
+            src: preparedUrl,
+            originalUrl: preparedUrl,
+            actionsSource: expect.objectContaining({ src: preparedUrl }),
+          }),
+        ],
+      });
+    } finally {
+      await act(async () => renderer?.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      vi.unstubAllGlobals();
+      window.close();
+    }
+  });
+});
+
 describe("ChatMarkdown file-link labels", () => {
   it.each([
     [String.raw`read \] here`, "read ] here"],

@@ -2455,18 +2455,24 @@ function useChatMarkdownState({
   const openMarkdownMedia = useCallback(
     (source: string, resolvedFilePath?: string, clickedImage?: HTMLImageElement | null) => {
       const requestId = ++mediaRequestId.current;
-      void resolveMarkdownMediaPreview({
-        source,
-        resolvedFilePath,
-        cwd,
-        threadRef,
-        httpBaseUrl:
-          preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : undefined,
-        createAssetUrl,
-        onOpenFile: threadRef
-          ? (path) => useRightPanelStore.getState().openFile(threadRef, path)
-          : undefined,
-      }).then(
+      void (async () => {
+        const preparedSource =
+          threadRef && resolveExternalWebLinkHost(source) !== null
+            ? (await prepareHostedPreview(threadRef, resolveProtocolRelativeMediaUrl(source))).url
+            : source;
+        return resolveMarkdownMediaPreview({
+          source: preparedSource,
+          resolvedFilePath,
+          cwd,
+          threadRef,
+          httpBaseUrl:
+            preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : undefined,
+          createAssetUrl,
+          onOpenFile: threadRef
+            ? (path) => useRightPanelStore.getState().openFile(threadRef, path)
+            : undefined,
+        });
+      })().then(
         (preview) => {
           if (preview && mediaRequestId.current === requestId) {
             const selected = preview.images[preview.index];
