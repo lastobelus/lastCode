@@ -6,6 +6,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+const markdownOpenMocks = vi.hoisted(() => ({
+  prepareHostedPreview: vi.fn(),
+  localApi: undefined as unknown,
+}));
+
+vi.mock("../localApi", () => ({ readLocalApi: () => markdownOpenMocks.localApi }));
+vi.mock("./preview/previewHostingRecovery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./preview/previewHostingRecovery")>()),
+  prepareHostedPreview: markdownOpenMocks.prepareHostedPreview,
+}));
+
 import { readThreadHandoffs, useHandoffsStore } from "../handoffs/handoffsStore";
 import { useRightPanelStore, selectThreadRightPanelState } from "../rightPanelStore";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
@@ -142,6 +153,76 @@ describe("ChatMarkdown context references", () => {
       await act(async () => {
         renderer?.unmount();
       });
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("ChatMarkdown system-browser links", () => {
+  it.each([
+    [
+      "http://localhost:4173/docs?mode=preview",
+      "https://workstation.example:4173/docs?mode=preview",
+    ],
+    ["https://example.com/docs?mode=public", "https://example.com/docs?mode=public"],
+  ])("opens a context-menu link at its prepared destination", async (href, preparedUrl) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let opened!: () => void;
+    const didOpen = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const openExternal = vi.fn(async () => {
+      opened();
+    });
+    const show = vi.fn().mockResolvedValue("open-external");
+    markdownOpenMocks.localApi = {
+      contextMenu: { show },
+      shell: { openExternal },
+    };
+    let entered!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    const threadRef = {
+      environmentId: EnvironmentId.make("markdown-env"),
+      threadId: ThreadId.make("markdown-thread"),
+    };
+    let renderer: ReactTestRenderer | undefined;
+
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd={undefined} threadRef={threadRef} text={`[docs](${href})`} />,
+        );
+      });
+      const link = renderer!.root.findByType("a");
+      await act(async () => {
+        link.props.onContextMenu({
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+          clientX: 4,
+          clientY: 8,
+        });
+        await preparing;
+        expect(openExternal).not.toHaveBeenCalled();
+        finish({ url: preparedUrl, managed: preparedUrl !== href, restored: preparedUrl !== href });
+        await didOpen;
+      });
+
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+      expect(openExternal).toHaveBeenCalledWith(preparedUrl);
+    } finally {
+      await act(async () => renderer?.unmount());
+      markdownOpenMocks.prepareHostedPreview.mockReset();
+      markdownOpenMocks.localApi = undefined;
       vi.unstubAllGlobals();
     }
   });

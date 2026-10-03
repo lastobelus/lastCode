@@ -272,7 +272,16 @@ export function PreviewView({
     ).then(refreshNativePreview);
   }, [hostingEnvironmentId, hostingThreadId, url, refreshNativePreview]);
 
-  const hostingAttemptedByTab = useRef(new Map<string, string>());
+  const hostingAttemptedByTab = useRef(
+    new Map<
+      string,
+      {
+        url: string;
+        recovery: Promise<boolean>;
+        completed: boolean;
+      }
+    >(),
+  );
   const [restoringHostedPreview, setRestoringHostedPreview] = useState(false);
   const navKind = navStatus._tag;
   useEffect(() => {
@@ -282,15 +291,27 @@ export function PreviewView({
       if (navKind === "Success") hostingAttemptedByTab.current.delete(runtimeTabId);
       return;
     }
-    if (hostingAttemptedByTab.current.get(runtimeTabId) === url) return;
-    hostingAttemptedByTab.current.set(runtimeTabId, url);
+    const previous = hostingAttemptedByTab.current.get(runtimeTabId);
+    if (previous?.url === url && previous.completed) return;
+    // Effect replay reattaches to pending recovery; completed failures wait for a
+    // deliberate reload or a successful navigation before trying again.
+    const attempt =
+      previous?.url === url
+        ? previous
+        : {
+            url,
+            recovery: recoverHostedPreview(
+              { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+              url,
+            ),
+            completed: false,
+          };
+    hostingAttemptedByTab.current.set(runtimeTabId, attempt);
     let cancelled = false;
     setRestoringHostedPreview(true);
-    void recoverHostedPreview(
-      { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
-      url,
-    ).then((restored) => {
+    void attempt.recovery.then((restored) => {
       if (cancelled) return;
+      attempt.completed = true;
       setRestoringHostedPreview(false);
       if (restored) refreshNativePreview();
     });

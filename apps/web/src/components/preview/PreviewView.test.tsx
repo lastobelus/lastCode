@@ -7,7 +7,7 @@ import {
   FILL_PREVIEW_VIEWPORT,
   ThreadId,
 } from "@t3tools/contracts";
-import { act, createElement, Profiler } from "react";
+import { act, createElement, Profiler, StrictMode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -266,7 +266,10 @@ vi.mock("./PreviewMoreMenu", () => ({
     return null;
   },
 }));
-vi.mock("./PreviewUnreachable", () => ({ PreviewUnreachable: () => null }));
+vi.mock("./PreviewUnreachable", () => ({
+  PreviewUnreachable: ({ restoringHostedPreview }: { restoringHostedPreview: boolean }) =>
+    createElement(restoringHostedPreview ? "recovery-pending" : "recovery-available"),
+}));
 vi.mock("./ZoomIndicator", () => ({ ZoomIndicator: () => null }));
 vi.mock("./AgentBrowserCursor", () => ({
   AgentBrowserCursor: () => createElement("agent-cursor"),
@@ -416,6 +419,57 @@ describe("PreviewView navigation", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each([false, true])(
+    "completes failed-page recovery under StrictMode (restored=%s)",
+    async (restored) => {
+      const document = installTestDom();
+      const { createRoot } = await import("react-dom/client");
+      const container = document.createElement("div");
+      const root = createRoot(container as unknown as Element);
+      let complete!: (restored: boolean) => void;
+      mocks.recoverHostedPreview.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      mocks.navStatus = {
+        _tag: "LoadFailed",
+        url: "http://localhost:5173/qa",
+        code: -102,
+        description: "refused",
+      };
+      const contains = (node: TestNode, name: string): boolean =>
+        node.nodeName === name || node.childNodes.some((child) => contains(child, name));
+      try {
+        await act(() =>
+          root.render(
+            <StrictMode>
+              <PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />
+            </StrictMode>,
+          ),
+        );
+        expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+        expect(contains(container, "RECOVERY-PENDING")).toBe(true);
+        await act(async () => complete(restored));
+        expect(contains(container, "RECOVERY-PENDING")).toBe(false);
+        expect(contains(container, "RECOVERY-AVAILABLE")).toBe(true);
+        expect(mocks.refresh).toHaveBeenCalledTimes(restored ? 1 : 0);
+        await act(() =>
+          root.render(
+            <StrictMode>
+              <PreviewView threadRef={{ ...TEST_THREAD_REF }} tabId="tab-1" visible />
+            </StrictMode>,
+          ),
+        );
+        expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(() => root.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("retries a transient native recovery failure when the user reloads", async () => {
     const document = installTestDom();

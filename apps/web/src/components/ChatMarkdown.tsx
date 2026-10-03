@@ -205,7 +205,7 @@ import {
   BrowserPreviewUnavailableError,
   BrowserSettingsReadError,
 } from "../browser/openFileInPreview";
-import { mayBeHostedPreviewUrl } from "./preview/previewHostingRecovery";
+import { mayBeHostedPreviewUrl, prepareHostedPreview } from "./preview/previewHostingRecovery";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
 
@@ -2659,6 +2659,10 @@ function useChatMarkdownState({
     },
     [openPreview, threadRef],
   );
+  const prepareExternalMarkdownUrl = useCallback(
+    async (url: string) => (threadRef ? (await prepareHostedPreview(threadRef, url)).url : url),
+    [threadRef],
+  );
   const openMarkdownFileInPreview = useCallback(
     (path: string, label?: string) => {
       if (!threadRef || preparedConnection._tag === "None") {
@@ -2862,6 +2866,7 @@ function useChatMarkdownState({
       openChangeRequestLink,
       openDeferredMarkdownLink,
       openExternalLinkInPreview,
+      prepareExternalMarkdownUrl,
       openMarkdownMedia,
       projects,
       linkedThreadPullRequestFor,
@@ -2894,6 +2899,7 @@ function useChatMarkdownState({
       openChangeRequestLink,
       openDeferredMarkdownLink,
       openExternalLinkInPreview,
+      prepareExternalMarkdownUrl,
       openMarkdownMedia,
       projects,
       linkedThreadPullRequestFor,
@@ -3055,6 +3061,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       openDeferredMarkdownLink,
       linkTargetPreference,
       openExternalLinkInPreview,
+      prepareExternalMarkdownUrl,
       projects,
       linkedThreadPullRequestFor,
       resolveThreadPullRequest,
@@ -3191,7 +3198,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
                   result.cause,
                 );
                 if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
-                void readLocalApi()?.shell.openExternal(href);
+                const api = readLocalApi();
+                if (api) {
+                  void prepareExternalMarkdownUrl(href).then((url) => api.shell.openExternal(url));
+                }
               },
             );
           }}
@@ -3225,7 +3235,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
                   );
                 }
               },
-              openExternal: (target) => api.shell.openExternal(target),
+              openExternal: async (target) =>
+                api.shell.openExternal(await prepareExternalMarkdownUrl(target)),
               copyLink: (target) => writeTextToClipboard(target, "link"),
               updateThreadLink: updateThreadPullRequestLink,
               reportFailure: (operation, cause) => {
