@@ -23,6 +23,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import * as ServerOwnerLease from "./serverOwnerLease.ts";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
@@ -74,6 +75,7 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -395,6 +397,11 @@ const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(NativeTelemetryLayerLive),
 );
 
+const PreviewHostingLayerLive = PreviewHosting.layer.pipe(
+  Layer.provideMerge(TerminalLayerLive),
+  Layer.provideMerge(PortScannerLayerLive),
+);
+
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
   Layer.provideMerge(PortScannerLayerLive),
@@ -536,7 +543,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   Layer.provideMerge(Layer.mergeAll(SourceControlProviderRegistryLayerLive, GitHubCli.layer)),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
+  Layer.provideMerge(Layer.mergeAll(PreviewHostingLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
@@ -663,6 +670,10 @@ const makeRoutesLayer = Layer.mergeAll(
 const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    yield* Effect.acquireRelease(
+      ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+      (lease) => lease.release,
+    );
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const activationLayer = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);

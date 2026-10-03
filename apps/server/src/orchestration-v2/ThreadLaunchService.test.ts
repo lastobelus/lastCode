@@ -145,6 +145,7 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
+      reconcileScripts: () => Effect.die("unused reconcileScripts"),
       getById: (id) =>
         Effect.succeed(
           id === projectId

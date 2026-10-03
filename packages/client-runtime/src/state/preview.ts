@@ -23,12 +23,23 @@ export function createPreviewEnvironmentAtoms<R, E>(
   const lifecycleScheduler = createAtomCommandScheduler();
   const statusScheduler = createAtomCommandScheduler();
   const automationScheduler = createAtomCommandScheduler();
+  const hostingScheduler = createAtomCommandScheduler();
   const lifecycleConcurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    hostingList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-list",
+      tag: WS_METHODS.previewHostingList,
+      scheduler: hostingScheduler,
+    }),
+    hostingRecover: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-recover",
+      tag: WS_METHODS.previewHostingRecover,
+      scheduler: hostingScheduler,
+    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",
       tag: WS_METHODS.previewList,
@@ -92,6 +103,10 @@ export function createPreviewEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) =>
           JSON.stringify([environmentId, input.threadId, input.tabId]),
       },
+    }),
+    claimRecovery: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:claim-recovery",
+      tag: WS_METHODS.previewClaimRecovery,
     }),
     respondToAutomation: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:automation-respond",

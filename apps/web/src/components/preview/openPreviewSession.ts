@@ -16,6 +16,7 @@ import {
 } from "~/browser/browserDefaults";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 
 interface OpenPreviewSessionInput<E> {
   openPreview: (input: {
@@ -41,11 +42,15 @@ export async function openPreviewSession<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
+  const url =
+    input.url === undefined
+      ? undefined
+      : (await prepareHostedPreview(input.threadRef, input.url)).url;
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      ...(input.url === undefined ? {} : { url: input.url }),
+      ...(url === undefined ? {} : { url }),
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
     },

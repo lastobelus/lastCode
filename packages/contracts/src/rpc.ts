@@ -7,6 +7,8 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import { ActionResumeError } from "./actionResume.ts";
+import { ThreadId } from "./baseSchemas.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -25,10 +27,12 @@ import {
 } from "./providerSetup.ts";
 import {
   UpdateDrainCancelInput,
+  UpdateDrainClaimInput,
+  UpdateDrainAdmissionError,
   UpdateDrainCommandReceipt,
   UpdateDrainError,
   UpdateDrainStartInput,
-  UpdateDrainState,
+  UpdateDrainStatus,
 } from "./updateDrain.ts";
 
 import {
@@ -239,6 +243,7 @@ import {
   DiscoveredLocalServerList,
   ConfiguredLocalServerUrls,
   PreviewCloseInput,
+  PreviewClaimRecoveryInput,
   PreviewError,
   PreviewEvent,
   PreviewListInput,
@@ -247,6 +252,7 @@ import {
   PreviewOpenInput,
   PreviewRefreshInput,
   PreviewReportStatusInput,
+  PreviewRecoveryClaim,
   PreviewResizeInput,
   PreviewSessionSnapshot,
 } from "./preview.ts";
@@ -272,6 +278,13 @@ import {
   PreviewAutomationResponse,
   PreviewAutomationStreamEvent,
 } from "./previewAutomation.ts";
+import {
+  PreviewHostingError,
+  PreviewHostingLeaseSummary,
+  PreviewHostingListInput,
+  PreviewHostingRecoverInput,
+  PreviewHostingRecoverResult,
+} from "./previewHosting.ts";
 import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
@@ -414,6 +427,9 @@ export const WS_METHODS = {
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
 
+  actionResumeResume: "actionResume.resume",
+  actionResumeDiscard: "actionResume.discard",
+
   // Preview methods
   previewOpen: "preview.open",
   previewNavigate: "preview.navigate",
@@ -421,7 +437,10 @@ export const WS_METHODS = {
   previewRefresh: "preview.refresh",
   previewClose: "preview.close",
   previewList: "preview.list",
+  previewHostingList: "previewHosting.list",
+  previewHostingRecover: "previewHosting.recover",
   previewReportStatus: "preview.reportStatus",
+  previewClaimRecovery: "preview.claimRecovery",
   previewAutomationConnect: "previewAutomation.connect",
   previewAutomationRespond: "previewAutomation.respond",
   previewAutomationFocusHost: "previewAutomation.focusHost",
@@ -474,6 +493,7 @@ export const WS_METHODS = {
   serverRefreshUsageRates: "server.refreshUsageRates",
   serverStartUpdateDrain: "server.startUpdateDrain",
   serverCancelUpdateDrain: "server.cancelUpdateDrain",
+  serverClaimUpdateActivation: "server.claimUpdateActivation",
   serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
   // Scheduled tasks
@@ -904,7 +924,13 @@ const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain
 
 const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
   payload: Schema.Struct({}),
-  success: UpdateDrainState,
+  success: UpdateDrainStatus,
+  error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
+});
+
+const WsServerClaimUpdateActivationRpc = Rpc.make(WS_METHODS.serverClaimUpdateActivation, {
+  payload: UpdateDrainClaimInput,
+  success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
@@ -1361,19 +1387,34 @@ const WsReviewGetDiffFileContentsRpc = Rpc.make(WS_METHODS.reviewGetDiffFileCont
 const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
   payload: TerminalOpenInput,
   success: TerminalSessionSnapshot,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    EnvironmentAuthorizationError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+  ]),
 });
 
 const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
   payload: TerminalAttachInput,
   success: TerminalAttachStreamEvent,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    EnvironmentAuthorizationError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+  ]),
   stream: true,
 });
 
 const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
   payload: TerminalWriteInput,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    EnvironmentAuthorizationError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+  ]),
 });
 
 const WsTerminalResizeRpc = Rpc.make(WS_METHODS.terminalResize, {
@@ -1389,12 +1430,32 @@ const WsTerminalClearRpc = Rpc.make(WS_METHODS.terminalClear, {
 const WsTerminalRestartRpc = Rpc.make(WS_METHODS.terminalRestart, {
   payload: TerminalRestartInput,
   success: TerminalSessionSnapshot,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    TerminalError,
+    EnvironmentAuthorizationError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+  ]),
 });
 
 const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   payload: TerminalCloseInput,
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+});
+
+const WsActionResumeResumeRpc = Rpc.make(WS_METHODS.actionResumeResume, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([
+    ActionResumeError,
+    UpdateDrainAdmissionError,
+    UpdateDrainError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+const WsActionResumeDiscardRpc = Rpc.make(WS_METHODS.actionResumeDiscard, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  error: Schema.Union([ActionResumeError, EnvironmentAuthorizationError]),
 });
 
 const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
@@ -1431,8 +1492,26 @@ const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
   error: EnvironmentAuthorizationError,
 });
 
+const WsPreviewHostingListRpc = Rpc.make(WS_METHODS.previewHostingList, {
+  payload: PreviewHostingListInput,
+  success: Schema.Array(PreviewHostingLeaseSummary),
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
+
+const WsPreviewHostingRecoverRpc = Rpc.make(WS_METHODS.previewHostingRecover, {
+  payload: PreviewHostingRecoverInput,
+  success: PreviewHostingRecoverResult,
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
+  error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+});
+
+const WsPreviewClaimRecoveryRpc = Rpc.make(WS_METHODS.previewClaimRecovery, {
+  payload: PreviewClaimRecoveryInput,
+  success: PreviewRecoveryClaim,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
 });
 
@@ -1770,6 +1849,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerStartUpdateDrainRpc,
   WsServerCancelUpdateDrainRpc,
   WsServerGetUpdateDrainStatusRpc,
+  WsServerClaimUpdateActivationRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
@@ -1848,6 +1928,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsActionResumeResumeRpc,
+  WsActionResumeDiscardRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
   WsPreviewOpenRpc,
@@ -1856,7 +1938,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewRefreshRpc,
   WsPreviewCloseRpc,
   WsPreviewListRpc,
+  WsPreviewHostingListRpc,
+  WsPreviewHostingRecoverRpc,
   WsPreviewReportStatusRpc,
+  WsPreviewClaimRecoveryRpc,
   WsPreviewAutomationConnectRpc,
   WsPreviewAutomationRespondRpc,
   WsPreviewAutomationFocusHostRpc,

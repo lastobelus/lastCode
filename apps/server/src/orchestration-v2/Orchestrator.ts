@@ -1,3 +1,5 @@
+import * as WorktreeCleanupPolicy from "./WorktreeCleanupPolicy.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import {
   latestExecutedRun,
   latestRootProviderFailure,
@@ -59,6 +61,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -351,6 +354,15 @@ const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLin
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
+    case "thread.worktree-cleanup.retry":
+    case "thread.worktree-cleanup.abandon":
+    case "thread.worktree-cleanup.update":
+    case "thread.persistence.set":
+    case "thread.annotation.upsert":
+    case "thread.annotation.resolve":
+    case "thread.annotation.reopen":
+    case "thread.attention.set":
+    case "thread.attention.clear":
     case "thread.create":
     case "thread.archive":
     case "thread.unarchive":
@@ -710,6 +722,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const runtimePolicy = yield* RuntimePolicyV2;
   const threadForkService = yield* ThreadForkServiceV2;
   const threadDispatch = yield* ThreadCommandExecutor;
+  const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
 
   const mapDispatchError =
     (command: OrchestrationV2ServerCommand) =>
@@ -2145,6 +2158,192 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
+  const dispatchWorktreeCleanup = Effect.fn("orchestrationV2.dispatch.worktreeCleanup")(function* (
+    command: Extract<
+      OrchestrationV2Command,
+      {
+        readonly type:
+          | "thread.worktree-cleanup.retry"
+          | "thread.worktree-cleanup.abandon"
+          | "thread.worktree-cleanup.update";
+      }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(mapDispatchError(command));
+    const now = yield* DateTime.now;
+    const result = WorktreeCleanupPolicy.planWorktreeCleanupTransition({
+      thread,
+      command,
+      now: DateTime.formatIso(now),
+      cleanupOwners: (yield* projectionStore.getWorktreeCleanupThreads.pipe(
+        mapDispatchError(command),
+      )).map((thread) => ({ id: thread.id, worktreeCleanup: thread.worktreeCleanup ?? null })),
+    });
+    if (Result.isFailure(result)) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: result.failure,
+      });
+    }
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.metadata-updated",
+      threadId: thread.id,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: { ...thread, worktreeCleanup: result.success, updatedAt: now },
+    });
+  });
+
+  const dispatchThreadMetadata = Effect.fn("orchestrationV2.dispatch.threadMetadata")(function* (
+    command: Extract<
+      OrchestrationV2Command,
+      {
+        readonly type:
+          | "thread.persistence.set"
+          | "thread.annotation.upsert"
+          | "thread.annotation.resolve"
+          | "thread.annotation.reopen"
+          | "thread.attention.set"
+          | "thread.attention.clear";
+      }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(mapDispatchError(command));
+    if (thread.deletedAt !== null || thread.archivedAt !== null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is not active.`,
+      });
+    }
+    const now = yield* DateTime.now;
+    const nowIso = DateTime.formatIso(now);
+    const emitThread = (
+      type:
+        | "thread.persistence-changed"
+        | "thread.annotation-upserted"
+        | "thread.annotation-resolved"
+        | "thread.annotation-reopened"
+        | "thread.attention-set"
+        | "thread.attention-cleared",
+      payload: OrchestrationV2AppThread,
+    ) =>
+      emit(
+        events,
+        command,
+      )({
+        type,
+        threadId: payload.id,
+        providerInstanceId: payload.providerInstanceId,
+        occurredAt: now,
+        payload,
+      });
+    if (command.type === "thread.persistence.set") {
+      const previous = yield* projectionStore.getPersistentThreads.pipe(mapDispatchError(command));
+      if (!command.persistent && !thread.persistent) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} does not own persistent protection.`,
+        });
+      }
+      for (const owner of previous.filter((owner) => owner.id !== thread.id)) {
+        yield* emitThread("thread.persistence-changed", {
+          ...owner,
+          persistent: false,
+          updatedAt: now,
+        });
+      }
+      yield* emitThread("thread.persistence-changed", {
+        ...thread,
+        persistent: command.persistent,
+        updatedAt: now,
+      });
+      return;
+    }
+    if (command.type === "thread.attention.set" || command.type === "thread.attention.clear") {
+      const attention =
+        command.type === "thread.attention.set"
+          ? thread.attention?.kind === command.attention.kind
+            ? thread.attention
+            : command.attention
+          : null;
+      yield* emitThread(
+        command.type === "thread.attention.set"
+          ? "thread.attention-set"
+          : "thread.attention-cleared",
+        {
+          ...thread,
+          attention,
+          updatedAt: now,
+          ...(attention === null
+            ? {}
+            : {
+                settledOverride: null,
+                settledAt: null,
+                unsettledAt: null,
+                snoozedUntil: null,
+                snoozedAt: null,
+              }),
+        },
+      );
+      return;
+    }
+    const records = yield* projectionStore
+      .getThreadRecords(thread.id, ["messages"], { messageRoles: ["user"] })
+      .pipe(mapDispatchError(command));
+    const latestUser = records.messages.toSorted(
+      (a, b) =>
+        DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt) ||
+        String(b.id).localeCompare(String(a.id)),
+    )[0];
+    const anchorMessageId = latestUser?.id ?? thread.annotation?.anchorMessageId;
+    if (
+      anchorMessageId === undefined ||
+      (command.type !== "thread.annotation.upsert" && thread.annotation == null)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} has no annotation or user message to anchor a note.`,
+      });
+    }
+    const annotation = {
+      body: command.type === "thread.annotation.upsert" ? command.body : thread.annotation!.body,
+      anchorMessageId,
+      createdAt: thread.annotation?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+      resolvedAt:
+        command.type === "thread.annotation.resolve"
+          ? nowIso
+          : command.type === "thread.annotation.reopen"
+            ? null
+            : (thread.annotation?.resolvedAt ?? null),
+    };
+    yield* emitThread(
+      command.type === "thread.annotation.upsert"
+        ? "thread.annotation-upserted"
+        : command.type === "thread.annotation.resolve"
+          ? "thread.annotation-resolved"
+          : "thread.annotation-reopened",
+      {
+        ...thread,
+        annotation,
+        updatedAt: now,
+      },
+    );
+  });
+
   const dispatchThreadVisit = Effect.fn("orchestrationV2.dispatch.threadVisit")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.visit" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -2260,6 +2459,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: `Thread ${command.threadId} is no longer empty.`,
         });
+    }
+    if (command.type === "thread.archive" && thread.persistent === true) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is persistent. Disable or replace its protection before archiving it.`,
+      });
     }
     if (command.type === "thread.archive" && thread.archivedAt !== null) {
       return yield* new OrchestratorDispatchError({
@@ -2508,7 +2714,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} snooze wake time ${command.snoozedUntil} is not in the future.`,
         });
       }
-      if (projection.runtimeRequests.some((request) => request.status === "pending")) {
+      if (
+        thread.attention != null ||
+        projection.runtimeRequests.some((request) => request.status === "pending")
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -2551,6 +2760,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             thread.settledOverride === "settled" && thread.settledAt !== null && !wasPinned;
           return {
             ...thread,
+            attention: null,
             settledOverride: "settled",
             settledAt: alreadySettled ? thread.settledAt : (command.settledAt ?? now),
             unsettledAt: null,
@@ -2676,6 +2886,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
+            ...(command.actionResume === undefined ? {} : { actionResume: command.actionResume }),
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
@@ -3113,10 +3324,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
-          id: `effect:${command.commandId}:terminal.cleanup`,
+          id: `effect:${command.commandId}:terminal.archive-cleanup`,
           commandId: command.commandId,
           threadId: command.threadId,
-          request: { type: "terminal.cleanup" },
+          request: { type: "terminal.archive-cleanup" },
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
@@ -4138,6 +4349,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      // Automatic usage recovery carries user provenance but does not answer
+      // an outstanding question.
+      if (
+        command.createdBy === "user" &&
+        command.usageLimitContinuationOfRunId === undefined &&
+        projection.thread.attention != null
+      ) {
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.attention-cleared",
+          threadId: command.threadId,
+          providerInstanceId: projection.thread.providerInstanceId,
+          occurredAt: now,
+          payload: { ...projection.thread, attention: null, updatedAt: now },
+        });
+        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -9047,6 +9278,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       | undefined;
     switch (command.type) {
+      case "thread.worktree-cleanup.retry":
+      case "thread.worktree-cleanup.abandon":
+      case "thread.worktree-cleanup.update":
+        yield* dispatchWorktreeCleanup(command, events);
+        break;
+      case "thread.persistence.set":
+      case "thread.annotation.upsert":
+      case "thread.annotation.resolve":
+      case "thread.annotation.reopen":
+      case "thread.attention.set":
+      case "thread.attention.clear":
+        yield* dispatchThreadMetadata(command, events);
+        break;
       case "thread.create":
         yield* dispatchThreadCreate(command, events);
         break;
@@ -9066,6 +9310,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ),
           );
         if (
+          thread.attention != null ||
           thread.settledOverride !== null ||
           DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt)
         ) {
@@ -9102,14 +9347,65 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        if (projection.thread.persistent === true) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} is persistent. Disable or replace its protection before deleting it.`,
+          });
+        }
+        const now = yield* DateTime.now;
+        let worktreeCleanup = projection.thread.worktreeCleanup ?? null;
+        if (command.deleteWorktree === true && projection.thread.deletedAt === null) {
+          const project = yield* projects
+            .get(projection.thread.projectId)
+            .pipe(mapDispatchError(command));
+          if (Option.isNone(project)) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "The thread project is missing.",
+            });
+          }
+          const shell = yield* projectionStore.getShellSnapshot().pipe(mapDispatchError(command));
+          const activeProjects = yield* projects.list().pipe(mapDispatchError(command));
+          const planned = WorktreeCleanupPolicy.planDeletionWorktreeCleanup({
+            thread: projection.thread,
+            deleteWorktree: true,
+            ...(command.repositoryKey === undefined
+              ? {}
+              : { repositoryKey: command.repositoryKey }),
+            repositoryRoot: project.value.workspaceRoot,
+            projects: activeProjects.map((project) => ({
+              id: project.projectId,
+              workspaceRoot: project.workspaceRoot,
+            })),
+            activeThreads: [...shell.threads, ...shell.archivedThreads],
+            cleanupOwners: (yield* projectionStore.getWorktreeCleanupThreads.pipe(
+              mapDispatchError(command),
+            )).map((thread) => ({
+              id: thread.id,
+              worktreeCleanup: thread.worktreeCleanup ?? null,
+            })),
+            now: DateTime.formatIso(now),
+          });
+          if (Result.isFailure(planned)) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: planned.failure,
+            });
+          }
+          worktreeCleanup = planned.success;
+        }
         return yield* mapDispatchError(command)(
           planThreadDeletion({
             command,
-            projection,
+            projection: { ...projection, thread: { ...projection.thread, worktreeCleanup } },
             attachmentIds: yield* projectionStore
               .getThreadAttachmentIds(command.threadId)
               .pipe(mapDispatchError(command)),
-            now: yield* DateTime.now,
+            now,
             idAllocator,
           }),
         );
@@ -9351,133 +9647,191 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies OrchestratorV2DispatchResult;
     }
 
-    const plan = yield* dispatchOnce(command).pipe(
-      Effect.flatMap((planned) =>
-        // A settle that finds the provider already ended everything has
-        // nothing to record, which is its expected outcome, not a failure.
-        planned.events.length > 0 || command.type === "thread.background-work.settle"
-          ? Effect.succeed(planned)
-          : Effect.fail(
+    const execute = Effect.gen(function* () {
+      const plan = yield* dispatchOnce(command).pipe(
+        Effect.flatMap((planned) =>
+          // A settle that finds the provider already ended everything has
+          // nothing to record, which is its expected outcome, not a failure.
+          planned.events.length > 0 || command.type === "thread.background-work.settle"
+            ? Effect.succeed(planned)
+            : Effect.fail(
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: "Command produced no domain events.",
+                }),
+              ),
+        ),
+        Effect.catch((cause) =>
+          Effect.gen(function* () {
+            const rejectedAt = yield* DateTime.now;
+            const receipt = yield* eventSink
+              .commitRejectedCommand({
+                commandId: command.commandId,
+                threadId: commandThreadId(command),
+                commandType: command.type,
+                rejectedAt,
+                error: cause instanceof Error ? cause.message : String(cause),
+              })
+              .pipe(
+                Effect.mapError(
+                  (receiptCause) =>
+                    new OrchestratorDispatchError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause: receiptCause,
+                    }),
+                ),
+              );
+            if (
+              command.type === "queued-run.edit" &&
+              receipt.status === "rejected" &&
+              cause._tag === "OrchestratorDispatchError"
+            ) {
+              return yield* new OrchestratorCommandRejectedError({
+                commandId: cause.commandId,
+                commandType: cause.commandType,
+                cause: cause.cause,
+              });
+            }
+            return yield* cause;
+          }),
+        ),
+      );
+
+      if (plan.events.length === 0) {
+        // A settle that ended nothing still records its receipt: a replayed Stop
+        // effect then finds it instead of settling work that appeared since.
+        const resultSequence = yield* Effect.gen(function* () {
+          const sequence = yield* eventSink.latestSequence({ threadId: commandThreadId(command) });
+          yield* commandReceipts.insertIfAbsent({
+            commandId: command.commandId,
+            threadId: commandThreadId(command),
+            commandType: command.type,
+            acceptedAt: yield* DateTime.now,
+            resultSequence: sequence,
+            status: "accepted",
+            error: null,
+          });
+          return sequence;
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
               new OrchestratorDispatchError({
                 commandId: command.commandId,
                 commandType: command.type,
-                cause: "Command produced no domain events.",
+                cause,
               }),
-            ),
-      ),
-      Effect.catch((cause) =>
-        Effect.gen(function* () {
-          const rejectedAt = yield* DateTime.now;
-          const receipt = yield* eventSink
-            .commitRejectedCommand({
-              commandId: command.commandId,
-              threadId: commandThreadId(command),
-              commandType: command.type,
-              rejectedAt,
-              error: cause instanceof Error ? cause.message : String(cause),
-            })
-            .pipe(
-              Effect.mapError(
-                (receiptCause) =>
-                  new OrchestratorDispatchError({
-                    commandId: command.commandId,
-                    commandType: command.type,
-                    cause: receiptCause,
-                  }),
-              ),
-            );
-          if (
-            command.type === "queued-run.edit" &&
-            receipt.status === "rejected" &&
-            cause._tag === "OrchestratorDispatchError"
-          ) {
-            return yield* new OrchestratorCommandRejectedError({
-              commandId: cause.commandId,
-              commandType: cause.commandType,
-              cause: cause.cause,
-            });
-          }
-          return yield* cause;
-        }),
-      ),
-    );
-
-    if (plan.events.length === 0) {
-      // A settle that ended nothing still records its receipt: a replayed Stop
-      // effect then finds it instead of settling work that appeared since.
-      const resultSequence = yield* Effect.gen(function* () {
-        const sequence = yield* eventSink.latestSequence({ threadId: commandThreadId(command) });
-        yield* commandReceipts.insertIfAbsent({
+          ),
+        );
+        return {
+          sequence: resultSequence,
+          storedEvents: [],
+        } satisfies OrchestratorV2DispatchResult;
+      }
+      const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
+      const committed = yield* eventSink
+        .commitCommand({
           commandId: command.commandId,
           threadId: commandThreadId(command),
           commandType: command.type,
-          acceptedAt: yield* DateTime.now,
-          resultSequence: sequence,
-          status: "accepted",
-          error: null,
+          acceptedAt,
+          events: plan.events,
+          effects: plan.effects,
+          ...(plan.cancelUnsettledEffects === undefined
+            ? {}
+            : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
+          ),
+        );
+
+      if (committed.receipt.status === "rejected") {
+        return yield* new OrchestratorCommandPreviouslyRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          detail: committed.receipt.error ?? "Previously rejected.",
         });
-        return sequence;
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
-        ),
-      );
-      return { sequence: resultSequence, storedEvents: [] } satisfies OrchestratorV2DispatchResult;
-    }
-    const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
-    const committed = yield* eventSink
-      .commitCommand({
-        commandId: command.commandId,
-        threadId: commandThreadId(command),
-        commandType: command.type,
-        acceptedAt,
-        events: plan.events,
-        effects: plan.effects,
-        ...(plan.cancelUnsettledEffects === undefined
-          ? {}
-          : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
-        ),
-      );
+      }
+      if (command.type === "queue.resume") {
+        yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
+      }
+      if (command.type === "notification.delivery.accept") {
+        yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
+      }
+      if (command.type === "delegated_task.wake-policy") {
+        yield* mapDispatchError(command)(
+          offerDelegatedCompletionDeliveries(command.parentThreadId),
+        );
+      }
 
-    if (committed.receipt.status === "rejected") {
-      return yield* new OrchestratorCommandPreviouslyRejectedError({
-        commandId: command.commandId,
-        commandType: command.type,
-        detail: committed.receipt.error ?? "Previously rejected.",
-      });
-    }
-    if (command.type === "queue.resume") {
-      yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
-    }
-    if (command.type === "notification.delivery.accept") {
-      yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
-    }
-    if (command.type === "delegated_task.wake-policy") {
-      yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
-    }
-
-    return {
-      sequence: committed.receipt.resultSequence,
-      storedEvents: committed.storedEvents,
-    } satisfies OrchestratorV2DispatchResult;
+      return {
+        sequence: committed.receipt.resultSequence,
+        storedEvents: committed.storedEvents,
+      } satisfies OrchestratorV2DispatchResult;
+    });
+    return yield* execute;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
-    threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) => {
+    if (command.type === "thread.persistence.set") {
+      return threadDispatch.withPersistenceLock(
+        Effect.gen(function* () {
+          const owners = yield* projectionStore.getPersistentThreads.pipe(
+            mapDispatchError(command),
+          );
+          const ids = [
+            ...new Set([command.threadId, ...owners.map((owner) => owner.id)]),
+          ].toSorted();
+          // Lock every replacement participant before reading whole snapshots,
+          // so replacing protection cannot overwrite a concurrent metadata edit.
+          return yield* ids.reduceRight(
+            (effect, threadId) => threadDispatch.withLock(threadId, effect),
+            dispatchWithReceiptEffect(command),
+          );
+        }),
+      );
+    }
+    const dispatch = threadDispatch.withLock(
+      commandThreadId(command),
+      dispatchWithReceiptEffect(command),
+    );
+    if (command.type === "message.dispatch" || command.type === "delegated_task.request") {
+      return Effect.gen(function* () {
+        // Replays stay available during drain. Recheck under the thread lock
+        // after admission because another request may commit while we wait.
+        const receipt = yield* commandReceipts
+          .getByCommandId(command.commandId)
+          .pipe(mapDispatchError(command));
+        if (Option.isSome(receipt)) return yield* dispatch;
+        // Admission precedes thread locking: other admitted work can update
+        // metadata without waiting behind a turn that is waiting for intake.
+        return yield* updateDrainAdmission.admit("thread-turn", dispatch).pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
+              ? new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                })
+              : cause,
+          ),
+        );
+      });
+    }
+    return command.type === "thread.archive" ||
+      command.type === "thread.delete" ||
+      command.type.startsWith("thread.worktree-cleanup.")
+      ? threadDispatch.withPersistenceLock(dispatch)
+      : dispatch;
+  };
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
@@ -9733,6 +10087,7 @@ export const layer: Layer.Layer<
   | ProjectionStoreV2
   | RuntimePolicyV2
   | ThreadForkServiceV2
+  | UpdateDrainAdmission.UpdateDrainAdmission
 > = Layer.effect(OrchestratorV2, makeOrchestrator()).pipe(
   Layer.provide(threadCommandExecutorLayer),
 );
