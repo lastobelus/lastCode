@@ -9,6 +9,7 @@ import {
 } from "~/browser/browserDefaults";
 import { isWebUrl, resolveBrowserLinkTargetPreference } from "~/browser/browserLinkTarget";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
+import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { applyPreviewServerSnapshot, isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -47,6 +48,13 @@ interface OpenTerminalLinkInPreviewInput<E> {
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
+  if (typeof window !== "undefined" && !window.desktopBridge) {
+    await openPreparedExternalUrl(
+      input.url,
+      async () => (await prepareHostedPreview(input.threadRef, input.url)).url,
+    );
+    return;
+  }
   const prepared = await prepareHostedPreview(input.threadRef, input.url);
   const supportsPreview =
     !input.forceBrowser &&

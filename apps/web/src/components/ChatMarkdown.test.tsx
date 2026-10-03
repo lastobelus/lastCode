@@ -11,7 +11,10 @@ const markdownOpenMocks = vi.hoisted(() => ({
   localApi: undefined as unknown,
 }));
 
-vi.mock("../localApi", () => ({ readLocalApi: () => markdownOpenMocks.localApi }));
+vi.mock("../localApi", () => ({
+  readLocalApi: () => markdownOpenMocks.localApi,
+  ensureLocalApi: () => markdownOpenMocks.localApi,
+}));
 vi.mock("./preview/previewHostingRecovery", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./preview/previewHostingRecovery")>()),
   prepareHostedPreview: markdownOpenMocks.prepareHostedPreview,
@@ -167,6 +170,7 @@ describe("ChatMarkdown system-browser links", () => {
     ["https://example.com/docs?mode=public", "https://example.com/docs?mode=public"],
   ])("opens a context-menu link at its prepared destination", async (href, preparedUrl) => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("window", { desktopBridge: {} });
     let opened!: () => void;
     const didOpen = new Promise<void>((resolve) => {
       opened = resolve;

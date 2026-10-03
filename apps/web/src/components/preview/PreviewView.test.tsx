@@ -403,6 +403,7 @@ describe("PreviewView navigation", () => {
 
   it("waits for toolbar recovery before opening the prepared external destination", async () => {
     const document = installTestDom();
+    Object.defineProperty(window, "desktopBridge", { value: {}, configurable: true });
     const { createRoot } = await import("react-dom/client");
     const root = createRoot(document.createElement("div") as unknown as Element);
     const original = "http://localhost:5173/qa";
@@ -520,6 +521,7 @@ describe("PreviewView navigation", () => {
 
   it("retries a transient native recovery failure when the user reloads", async () => {
     const document = installTestDom();
+    Object.defineProperty(window, "desktopBridge", { value: {}, configurable: true });
     const { createRoot } = await import("react-dom/client");
     const root = createRoot(document.createElement("div") as unknown as Element);
     const original = "http://localhost:5173/qa";
@@ -574,6 +576,7 @@ describe("PreviewView navigation", () => {
 
   it("navigates failed tabs to the current environment address after recovery and on reload", async () => {
     const document = installTestDom();
+    Object.defineProperty(window, "desktopBridge", { value: {}, configurable: true });
     const { createRoot } = await import("react-dom/client");
     const root = createRoot(document.createElement("div") as unknown as Element);
     const original = "http://192.168.1.30:5173/qa?q=1#part";
@@ -599,6 +602,7 @@ describe("PreviewView navigation", () => {
 
   it("reenables the original failed link after a redirect, without clearing another thread", async () => {
     const document = installTestDom();
+    Object.defineProperty(window, "desktopBridge", { value: {}, configurable: true });
     const { createRoot } = await import("react-dom/client");
     const root = createRoot(document.createElement("div") as unknown as Element);
     const original = "http://localhost:3000/qa";

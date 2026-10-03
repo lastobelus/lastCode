@@ -1,5 +1,7 @@
 "use client";
 
+import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
+
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
@@ -24,7 +26,6 @@ import {
 } from "~/browserHistoryStore";
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
 import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
-import { ensureLocalApi } from "~/localApi";
 import {
   rememberPreviewUrl,
   updatePreviewServerSnapshot,
@@ -408,9 +409,10 @@ export function PreviewView({
 
   const handleOpenInBrowser = useCallback(() => {
     if (!url) return;
-    void prepareHostedPreview(threadRef, url)
-      .then((prepared) => ensureLocalApi().shell.openExternal(prepared.url))
-      .catch(() => undefined);
+    void openPreparedExternalUrl(
+      url,
+      async () => (await prepareHostedPreview(threadRef, url)).url,
+    ).catch(() => undefined);
   }, [threadRef, url]);
 
   const handlePictureInPicture = useCallback(() => {

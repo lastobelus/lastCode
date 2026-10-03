@@ -1,3 +1,4 @@
+import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -3206,7 +3207,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
                 if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
                 const api = readLocalApi();
                 if (api) {
-                  void prepareExternalMarkdownUrl(href).then((url) => api.shell.openExternal(url));
+                  void openPreparedExternalUrl(href, () => prepareExternalMarkdownUrl(href));
                 }
               },
             );
@@ -3241,8 +3242,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
                   );
                 }
               },
-              openExternal: async (target) =>
-                api.shell.openExternal(await prepareExternalMarkdownUrl(target)),
+              openExternal: (target) =>
+                openPreparedExternalUrl(target, () => prepareExternalMarkdownUrl(target)),
               copyLink: (target) => writeTextToClipboard(target, "link"),
               updateThreadLink: updateThreadPullRequestLink,
               reportFailure: (operation, cause) => {

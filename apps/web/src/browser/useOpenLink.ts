@@ -18,6 +18,7 @@ import {
   resolveLinkTarget,
 } from "./browserLinkTarget";
 import { BrowserSettingsReadError, openUrlInPreview } from "./openFileInPreview";
+import { openPreparedExternalUrl } from "./openPreparedExternalUrl";
 
 const NO_MODIFIER = { metaKey: false, ctrlKey: false } as const;
 
@@ -44,6 +45,13 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
   return useCallback(
     async (url, options = {}) => {
       const targetThreadRef = options.threadRef ?? threadRef;
+      if (!window.desktopBridge) {
+        await openPreparedExternalUrl(url, async () => {
+          await resolveBrowserLinkTargetPreference();
+          return targetThreadRef ? (await prepareHostedPreview(targetThreadRef, url)).url : url;
+        });
+        return;
+      }
       const target = resolveLinkTarget({
         url,
         event: options.event ?? NO_MODIFIER,
