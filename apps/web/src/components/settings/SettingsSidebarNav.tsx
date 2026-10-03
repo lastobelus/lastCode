@@ -20,6 +20,7 @@ import {
   PanelsTopLeftIcon,
   KeyboardIcon,
   Link2Icon,
+  MoonStarIcon,
   PaletteIcon,
   SearchIcon,
   Settings2Icon,
@@ -88,6 +89,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,
+  "/settings/lastcode": MoonStarIcon,
   "/settings/archived": ArchiveIcon,
 };
 
