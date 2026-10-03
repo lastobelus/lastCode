@@ -53,7 +53,7 @@ const makeServerConfig = (baseDir: string) => {
     cwd: process.cwd(),
     baseDir,
     stateDir,
-    dbPath: NodePath.join(stateDir, "state.sqlite"),
+    dbPath: NodePath.join(stateDir, "statev2.sqlite"),
     keybindingsConfigPath: NodePath.join(stateDir, "keybindings.json"),
     settingsPath: NodePath.join(stateDir, "settings.json"),
     environmentThemesDir: NodePath.join(stateDir, "themes"),
