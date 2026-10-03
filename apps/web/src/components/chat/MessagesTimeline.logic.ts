@@ -56,6 +56,18 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
+import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
+
+/** Action results are attributed by the V2 item, so user text cannot become a result card. */
+export function isActionResumeResultMessage(
+  message: Pick<ChatMessage, "role" | "createdBy" | "text">,
+): boolean {
+  return (
+    message.role === "user" &&
+    message.createdBy === "system" &&
+    parseActionResumeFollowUp(message.text) !== null
+  );
+}
 
 function timelineEntryRunId(entry: TimelineEntry): RunId | null {
   if (entry.kind === "message") {
@@ -1956,7 +1968,6 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return a.createdAt === (b as typeof a).createdAt;
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
-
     case "assistant-meta": {
       const bm = b as typeof a;
       return (

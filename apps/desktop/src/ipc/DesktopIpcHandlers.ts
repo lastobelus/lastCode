@@ -50,6 +50,7 @@ import {
   checkSystemPermission,
   pasteAsText,
   probeRemoteEditors,
+  reportRunningActionCount,
   pickFolder,
   pickProjectFavicon,
   pickThemeFiles,
@@ -89,6 +90,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getLocalEnvironmentEnabled);
   yield* ipc.handle(setLocalEnvironmentEnabled);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
+  yield* ipc.handle(reportRunningActionCount);
 
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
