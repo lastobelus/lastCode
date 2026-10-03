@@ -73,7 +73,7 @@ it.effect(
         assert.equal(shell.thread.attention?.kind, "question");
         assert.deepStrictEqual(
           (yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations ORDER BY migration_id`).map(
-            (row) => [row.migration_id, row.name],
+            (row) => [row.migration_id, row.name] as const,
           ),
           lastcodeMigrationManifest,
         );
