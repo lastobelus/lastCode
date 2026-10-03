@@ -1,3 +1,8 @@
+import {
+  parseActionResumeFollowUp,
+  actionResultPresentation,
+  actionResultDetails,
+} from "@t3tools/shared/actionResume";
 import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
@@ -180,6 +185,7 @@ import {
 } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
 import {
+  isActionResumeResultMessage,
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRowsWithState,
   type MessagesTimelineRowsProjection,
@@ -287,6 +293,8 @@ interface TimelineRowSharedState {
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
+  expandedActionMessageIds: ReadonlySet<string>;
+  onToggleActionFollowUp: (rowId: string) => void;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;
@@ -542,6 +550,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   historyControls,
   loadEarlier = null,
 }: MessagesTimelineProps) {
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   const rememberedPosition = useMemo(
     () => readTimelinePosition(listIdentityKey),
@@ -697,6 +708,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           next.delete(attemptId);
         } else {
           next.add(attemptId);
+        }
+        return next;
+      });
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setExpandedActionMessageIds((existing) => {
+        const next = new Set(existing);
+        if (next.has(rowId)) {
+          next.delete(rowId);
+        } else {
+          next.add(rowId);
         }
         return next;
       });
@@ -1131,6 +1158,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       citationRequest: readyCitationRequest,
       listRef,
       timestampFormat,
@@ -1165,6 +1194,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workGroupViewState,
     }),
     [
+      expandedActionMessageIds,
+      onToggleActionFollowUp,
       readyCitationRequest,
       listRef,
       timestampFormat,
@@ -1798,7 +1829,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "user" ? (
+        isActionResumeResultMessage(row.message) ? (
+          <SystemTimelineRow row={row} />
+        ) : (
+          <UserTimelineRow row={row} />
+        )
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -2630,6 +2667,122 @@ function AssistantMessageMeta({
           </TooltipPopup>
         </Tooltip>
       )}
+    </div>
+  );
+}
+
+function SystemTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const actionFollowUp = parseActionResumeFollowUp(row.message.text);
+  const actionOutputExpanded = ctx.expandedActionMessageIds.has(row.id);
+
+  if (actionFollowUp) {
+    const presentation = actionResultPresentation(actionFollowUp);
+    const actionDetails = actionResultDetails(actionFollowUp.report);
+    const actionDetailsAvailable = actionDetails.length > 0;
+    const actionExpandable = !actionFollowUp.detailedOutputAvailable || actionDetailsAvailable;
+    const toneClass =
+      presentation.outcome === "success"
+        ? "border-success/25 bg-success/6 text-success-foreground"
+        : presentation.outcome === "error"
+          ? "border-error/25 bg-error/6 text-error-foreground"
+          : presentation.outcome === "cancelled"
+            ? "border-border bg-muted/30 text-muted-foreground"
+            : presentation.outcome === "blocked"
+              ? "border-info/25 bg-info/6 text-info-foreground"
+              : "border-warning/28 bg-warning/8 text-warning-foreground";
+    const OutcomeIcon =
+      presentation.outcome === "success"
+        ? CheckIcon
+        : presentation.outcome === "cancelled" || presentation.outcome === "error"
+          ? XIcon
+          : CircleAlertIcon;
+    const heading = (
+      <>
+        <OutcomeIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          {presentation.label}: {actionFollowUp.actionName}
+        </span>
+      </>
+    );
+    return (
+      <div className={cn("mx-1 overflow-hidden rounded-lg border", toneClass)}>
+        {actionExpandable ? (
+          <button
+            type="button"
+            aria-expanded={actionOutputExpanded}
+            className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium"
+            onClick={() => ctx.onToggleActionFollowUp(row.id)}
+          >
+            {heading}
+            {actionOutputExpanded ? (
+              <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+            ) : (
+              <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+            )}
+          </button>
+        ) : (
+          <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+            {heading}
+          </div>
+        )}
+        {!actionFollowUp.detailedOutputAvailable && actionOutputExpanded ? (
+          <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-code px-3 py-2.5 font-mono text-xs leading-5 text-code-foreground shadow-inner dark:border-white/10">
+            {actionFollowUp.output}
+          </pre>
+        ) : (
+          <div className="px-3 pb-2.5 pt-1">
+            <p className="truncate text-sm text-foreground/90">{presentation.summary}</p>
+            {actionDetailsAvailable && actionOutputExpanded ? (
+              <dl className="mt-2 space-y-1.5 text-xs text-foreground/90">
+                {actionDetails.map((detail) => (
+                  <div key={detail.id} className="min-w-0">
+                    <dt className="font-medium text-muted-foreground">{detail.label}</dt>
+                    <dd className="break-words">
+                      {detail.href ? (
+                        <a
+                          href={detail.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline underline-offset-2"
+                        >
+                          {detail.value}
+                        </a>
+                      ) : (
+                        detail.value
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+            {actionFollowUp.detailedOutputAvailable && !actionDetailsAvailable ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Detailed output retained in the Action terminal.
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-1 rounded-lg border border-warning/25 bg-warning/6 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-warning-foreground">
+        <BotIcon aria-hidden className="size-3.5" />
+        Automated follow-up
+      </div>
+      <div className="text-sm text-foreground/90">
+        <ChatMarkdown
+          text={row.message.text}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          isStreaming={false}
+          lineBreaks
+          skills={ctx.skills}
+        />
+      </div>
     </div>
   );
 }
