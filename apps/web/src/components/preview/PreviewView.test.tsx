@@ -96,6 +96,12 @@ vi.mock("~/localApi", () => ({
   ensureLocalApi: vi.fn(),
 }));
 
+vi.mock("./previewRecoveryRequest", () => ({
+  clearPreviewRecoveryRequest: vi.fn(),
+  requestPreviewRecovery: vi.fn(),
+  usePreviewRecoveryRequest: () => ({ status: "idle" }),
+}));
+
 vi.mock("~/previewStateStore", () => ({
   rememberPreviewUrl: mocks.rememberPreviewUrl,
   updatePreviewServerSnapshot: vi.fn(),

@@ -228,6 +228,12 @@ File links refer to the environment's machine, including when you connect remote
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
 
+## Preview links
+
+If a link opened in the integrated browser cannot connect, choose **Ask agent to
+restore preview**. The failed link and error go to the thread that owns the
+preview. After the agent restores it, reload the page.
+
 ## Files outside the workspace
 
 Follow an agent's file link to read a report or other file outside the workspace.
