@@ -129,6 +129,13 @@ export class PreviewHosting extends Context.Service<
       threadId: string,
       terminalId: string,
     ) => Effect.Effect<boolean, PreviewHostingError>;
+    readonly removeThread: (
+      threadId: string,
+    ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+    readonly protectedWorkspacePaths: () => Effect.Effect<
+      ReadonlyArray<string>,
+      PreviewHostingError
+    >;
   }
 >()("t3/preview/Hosting/PreviewHosting") {}
 
@@ -260,6 +267,8 @@ const make = Effect.gen(function* () {
   const persistState = (leases: ReadonlyArray<PreviewHostingLease>) =>
     writeFileStringAtomically({
       filePath: statePath,
+      // Launch commands and environment overrides can contain credentials.
+      mode: 0o600,
       contents: `${JSON.stringify({ version: STATE_VERSION, leases } satisfies PersistedPreviewHostingState)}\n`,
     }).pipe(
       Effect.mapError(
@@ -548,9 +557,9 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
-        const selected = yield* withWorkspaceLease(
-          path.resolve(input.worktreePath ?? input.cwd),
-          launchGate.withPermit(
+        const selected = yield* launchGate.withPermit(
+          withWorkspaceLease(
+            path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
               if (startupError !== null) return yield* startupError;
               const normalizedUrl = normalizeLocalHttpUrl(input.url);
@@ -749,6 +758,48 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
+    launchGate.withPermit(
+      Effect.gen(function* () {
+        if (startupError !== null) return yield* startupError;
+        const owned = (yield* SynchronizedRef.get(leasesRef)).filter(
+          (lease) => lease.threadId === threadId,
+        );
+        const results = yield* Effect.forEach(
+          owned,
+          (lease) =>
+            withLeaseLock(
+              lease.id,
+              Effect.gen(function* () {
+                const latest = yield* findLease(lease.id);
+                if (latest === null || latest.threadId !== threadId) return;
+                const expired =
+                  latest.status === "expired" ? latest : { ...latest, status: "expired" as const };
+                if (expired !== latest) yield* setLease(expired);
+                yield* closeOwnedTerminal(expired);
+                yield* removeLease(expired.id);
+              }),
+            ).pipe(Effect.result),
+          { concurrency: "unbounded" },
+        );
+        const failure = results.find((result) => result._tag === "Failure");
+        if (failure?._tag === "Failure") return yield* failure.failure;
+      }),
+    );
+
+  const protectedWorkspacePaths: PreviewHosting["Service"]["protectedWorkspacePaths"] = () =>
+    Effect.gen(function* () {
+      if (startupError !== null) return yield* startupError;
+      return [
+        ...new Set(
+          (yield* SynchronizedRef.get(leasesRef)).flatMap((lease) => [
+            lease.cwd,
+            ...(lease.worktreePath === null ? [] : [lease.worktreePath]),
+          ]),
+        ),
+      ];
+    });
+
   const expireDueLeases = Effect.fn("PreviewHosting.expireDueLeases")(function* () {
     const currentTime = yield* nowMillis;
     const due = (yield* SynchronizedRef.get(leasesRef)).filter(
@@ -785,7 +836,14 @@ const make = Effect.gen(function* () {
   yield* expireDueLeases();
   yield* Effect.forkScoped(expiryWorker);
 
-  return PreviewHosting.of({ launch, recover, list, ownsTerminal });
+  return PreviewHosting.of({
+    launch,
+    recover,
+    list,
+    ownsTerminal,
+    removeThread,
+    protectedWorkspacePaths,
+  });
 });
 
 export const layer = Layer.effect(PreviewHosting, make);

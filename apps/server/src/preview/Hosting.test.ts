@@ -1,3 +1,4 @@
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
@@ -7,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as Duration from "effect/Duration";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
@@ -24,6 +26,14 @@ import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
+const encodePersistedHostingState = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      leases: Schema.Array(PreviewHosting.PreviewHostingLease),
+    }),
+  ),
+);
 
 interface TerminalHarness {
   readonly opens: TerminalOpenInput[];
@@ -271,6 +281,13 @@ describe("PreviewHosting", () => {
           assert.isTrue(yield* hosting.ownsTerminal("thread-1", lease.terminalId));
           assert.isFalse(yield* hosting.ownsTerminal("thread-2", lease.terminalId));
           assert.deepEqual(yield* hosting.list("thread-1"), [lease]);
+          if ((yield* HostProcessPlatform) !== "win32") {
+            const statePath = `${config.stateDir}/preview-hosting.json`;
+            assert.equal((yield* fs.stat(statePath)).mode & 0o777, 0o600);
+            // Each atomic replacement must restore private permissions, even if
+            // an existing state file has been made more permissive.
+            yield* fs.chmod(statePath, 0o644);
+          }
           const repeated = yield* hosting.launch({
             threadId: "thread-1",
             command: "pnpm dev --host 127.0.0.1 --port 5173",
@@ -279,6 +296,12 @@ describe("PreviewHosting", () => {
             env: { FIXTURE_MODE: "preview" },
             url: PREVIEW_URL,
           });
+          if ((yield* HostProcessPlatform) !== "win32") {
+            assert.equal(
+              (yield* fs.stat(`${config.stateDir}/preview-hosting.json`)).mode & 0o777,
+              0o600,
+            );
+          }
           assert.equal(repeated.id, lease.id);
           assert.equal(repeated.expiresAt, lease.expiresAt);
           assert.equal(harness.opens.length, 1);
@@ -286,6 +309,93 @@ describe("PreviewHosting", () => {
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect(
+    "removes deleted-thread leases only after close and keeps failed-close worktrees protected",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-delete-thread-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const deletedThreadLease = {
+          id: "deleted-thread-lease",
+          threadId: "deleted-thread",
+          terminalId: "preview-deleted-thread-lease",
+          command: "pnpm dev --port 5173",
+          cwd: "/workspace/deleted",
+          worktreePath: "/worktrees/deleted",
+          url: "http://localhost:5173/deleted",
+          handedOffAt: "1970-01-01T00:00:00.000Z",
+          expiresAt: "1970-01-02T00:00:00.000Z",
+          status: "active" as const,
+        };
+        const archivedThreadLease = {
+          ...deletedThreadLease,
+          id: "archived-thread-lease",
+          threadId: "archived-thread",
+          terminalId: "preview-archived-thread-lease",
+          cwd: "/workspace/archived",
+          worktreePath: "/worktrees/archived",
+          url: "http://localhost:5174/archived",
+        };
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({
+            version: 1,
+            leases: [deletedThreadLease, archivedThreadLease],
+          }),
+        );
+        let shouldFailClose = true;
+        const harness = testTerminalHarness({ failClose: () => shouldFailClose });
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const firstAttempt = yield* Effect.result(hosting.removeThread("deleted-thread"));
+
+            assert.equal(firstAttempt._tag, "Failure");
+            assert.deepEqual(yield* hosting.list("deleted-thread"), []);
+            assert.isNull(
+              yield* hosting.recover({
+                threadId: "deleted-thread",
+                leaseId: PreviewHostingLeaseId.make(deletedThreadLease.id),
+                url: deletedThreadLease.url,
+              }),
+            );
+            assert.deepEqual(yield* hosting.protectedWorkspacePaths(), [
+              "/workspace/deleted",
+              "/worktrees/deleted",
+              "/workspace/archived",
+              "/worktrees/archived",
+            ]);
+
+            shouldFailClose = false;
+            yield* hosting.removeThread("deleted-thread");
+
+            assert.deepEqual(yield* hosting.list("deleted-thread"), []);
+            assert.deepEqual(yield* hosting.list("archived-thread"), [archivedThreadLease]);
+            assert.deepEqual(yield* hosting.protectedWorkspacePaths(), [
+              "/workspace/archived",
+              "/worktrees/archived",
+            ]);
+            assert.isTrue(
+              harness.closes.some(
+                ({ threadId, terminalId }) =>
+                  threadId === "deleted-thread" && terminalId === deletedThreadLease.terminalId,
+              ),
+            );
+            assert.isTrue(harness.closes.every(({ threadId }) => threadId === "deleted-thread"));
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
   it.effect("reserves a discovery port across threads regardless of path or loopback alias", () =>

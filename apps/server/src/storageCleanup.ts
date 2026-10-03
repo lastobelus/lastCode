@@ -154,21 +154,18 @@ export const make = Effect.gen(function* () {
     function* () {
       // If lease state cannot be trusted, preserve worktrees rather than risk
       // deleting the source of a preview that may still be running.
-      return yield* previewHosting.list().pipe(Effect.orElseSucceed(() => null));
+      return yield* previewHosting.protectedWorkspacePaths().pipe(Effect.orElseSucceed(() => null));
     },
   );
   const previewUsesWorktree = (
     worktreePath: string,
-    leases: ReadonlyArray<PreviewHosting.PreviewHostingLease> | null,
+    protectedPaths: ReadonlyArray<string> | null,
   ) =>
-    leases === null ||
-    leases.some((lease) =>
-      [lease.cwd, lease.worktreePath].some((candidate) => {
-        if (candidate === null) return false;
-        const resolved = path.resolve(candidate);
-        return resolved === worktreePath || inside(worktreePath, resolved);
-      }),
-    );
+    protectedPaths === null ||
+    protectedPaths.some((candidate) => {
+      const resolved = path.resolve(candidate);
+      return resolved === worktreePath || inside(worktreePath, resolved);
+    });
 
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
     const active = yield* projections.getShellSnapshot();

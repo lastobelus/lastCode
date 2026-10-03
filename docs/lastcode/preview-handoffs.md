@@ -39,11 +39,13 @@ working directory and `http://localhost:5173/example.html`.
 The successful tool result establishes a fixed 24-hour lease and returns its
 handoff time and expiry. LastCode owns the terminal and retains the launch
 context across turn completion and server restarts. Opening the link in its
-owning thread, in either the integrated or system browser, restores a stopped server without sending an agent message. A
-failed page load also tries native recovery before offering the request button.
+owning thread, in either the integrated or system browser, restores a stopped
+server without sending an agent message. A failed page load also tries native recovery before offering the request button.
 Repeated launch, viewing, and recovery do not extend the expiry. At expiry,
 LastCode closes only that lease's terminal. It retains the source worktree while
 the lease is active; do not stop the terminal or remove its files at turn end.
+Archiving preserves the lease; deleting the owning thread ends it and stops its
+preview. A failed stop keeps the source files protected until cleanup succeeds.
 If LastCode itself is stopped, no preview server runs; reopening after LastCode
 starts can recover only an unexpired lease.
 
