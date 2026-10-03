@@ -103,6 +103,7 @@ function makeExecutorLayer(input: {
         get: () => Effect.succeed(Option.none()),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
+        teardownThread: () => Effect.die("unused teardownThread"),
         release: () => record("release"),
         detach: () => record("detach"),
       }),

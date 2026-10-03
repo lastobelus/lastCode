@@ -93,6 +93,10 @@ export function createPreviewEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.tabId]),
       },
     }),
+    claimRecovery: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:claim-recovery",
+      tag: WS_METHODS.previewClaimRecovery,
+    }),
     respondToAutomation: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:automation-respond",
       tag: WS_METHODS.previewAutomationRespond,

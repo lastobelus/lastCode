@@ -37,6 +37,7 @@ export const ProjectScript = Schema.Struct({
   async: Schema.optional(Schema.Boolean),
   previewUrl: Schema.optional(TrimmedNonEmptyString),
   autoOpenPreview: Schema.optional(Schema.Boolean),
+  allowAgentResume: Schema.optional(Schema.Boolean),
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
@@ -190,6 +191,13 @@ export const ProjectUpdatePayload = Schema.Struct({
 export type ProjectUpdatePayload = typeof ProjectUpdatePayload.Type;
 
 export const ProjectMutation = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("project.scripts.reconcile"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    expectedScripts: Schema.Array(ProjectScript),
+    scripts: Schema.Array(ProjectScript),
+  }),
   Schema.Struct({
     type: Schema.Literal("project.create"),
     commandId: CommandId,
