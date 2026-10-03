@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -82,7 +83,13 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedError<Project
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
-    operation: Schema.Literals(["resolveProject", "readSettings", "openTerminal", "writeCommand"]),
+    operation: Schema.Literals([
+      "resolveProject",
+      "readSettings",
+      "admitSetupScript",
+      "openTerminal",
+      "writeCommand",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -200,6 +207,7 @@ function wrapCommandForCompletion(
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const completionShell = resolveCompletionShell(
     yield* HostProcessPlatform,
@@ -377,55 +385,73 @@ export const make = Effect.gen(function* () {
           )
         : script.command;
 
-    yield* terminalManager
-      .open({
-        threadId: input.threadId,
-        terminalId,
-        cwd,
-        worktreePath: input.worktreePath,
-        // Setup may run before a terminal client attaches to answer color probes.
-        env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProjectSetupScriptOperationError({
-              ...errorContext,
-              operation: "openTerminal",
-              cause,
-            }),
-        ),
-      );
-    // Subscribe before writing so the sentinel cannot race past the listener.
-    const observed =
-      observe && completionToken
-        ? yield* observeTerminalCompletion({
-            threadId: input.threadId,
-            terminalId,
-            sentinel: completionSentinel(completionToken),
-            sentinelPattern: completionSentinelPattern(completionToken),
-            echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
-            onOutputLine: observe.onOutputLine,
-          })
-        : undefined;
+    const observed = yield* updateDrainAdmission
+      .admit(
+        "setup-script",
+        Effect.gen(function* () {
+          yield* terminalManager
+            .open({
+              threadId: input.threadId,
+              terminalId,
+              cwd,
+              worktreePath: input.worktreePath,
+              // Setup may run before a terminal client attaches to answer color probes.
+              env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectSetupScriptOperationError({
+                    ...errorContext,
+                    operation: "openTerminal",
+                    cause,
+                  }),
+              ),
+            );
+          // Subscribe before writing so the sentinel cannot race past the listener.
+          const observed =
+            observe && completionToken
+              ? yield* observeTerminalCompletion({
+                  threadId: input.threadId,
+                  terminalId,
+                  sentinel: completionSentinel(completionToken),
+                  sentinelPattern: completionSentinelPattern(completionToken),
+                  echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
+                  onOutputLine: observe.onOutputLine,
+                })
+              : undefined;
 
-    yield* terminalManager
-      .write({
-        threadId: input.threadId,
-        terminalId,
-        data: `${commandLine}\r`,
-      })
+          yield* terminalManager
+            .write({
+              threadId: input.threadId,
+              terminalId,
+              data: `${commandLine}\r`,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectSetupScriptOperationError({
+                    ...errorContext,
+                    operation: "writeCommand",
+                    cause,
+                  }),
+              ),
+              // Nothing will ever settle the completion if the command never ran.
+              Effect.tapError(() => Effect.sync(() => observed?.unsubscribe())),
+            );
+          return observed;
+        }),
+      )
       .pipe(
-        Effect.mapError(
-          (cause) =>
+        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
+          Effect.fail(
             new ProjectSetupScriptOperationError({
               ...errorContext,
-              operation: "writeCommand",
+              operation: "admitSetupScript",
               cause,
             }),
+          ),
         ),
-        // Nothing will ever settle the completion if the command never ran.
-        Effect.tapError(() => Effect.sync(() => observed?.unsubscribe())),
       );
 
     // A clean run leaves only an idle prompt behind; its output stays in the

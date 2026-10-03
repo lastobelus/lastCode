@@ -4,8 +4,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeUtil from "node:util";
+import { ApplicationProjectEvent, OrchestrationV2DomainEventJson } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+const decodeProjectEvent = Schema.decodeSync(ApplicationProjectEvent);
 
 export const SHOWCASE_PROJECT_ID = "t3code";
 export const SHOWCASE_THREAD_ID = "remote-command-center";
@@ -20,18 +23,6 @@ export const SHOWCASE_SCENES = [
   "agent-activity",
 ] as const;
 export type ShowcaseScene = (typeof SHOWCASE_SCENES)[number];
-
-const PROJECTOR_NAMES = [
-  "projection.projects",
-  "projection.threads",
-  "projection.thread-messages",
-  "projection.thread-proposed-plans",
-  "projection.thread-activities",
-  "projection.thread-sessions",
-  "projection.thread-turns",
-  "projection.checkpoints",
-  "projection.pending-approvals",
-] as const;
 
 const MODEL_SELECTION = JSON.stringify({ instanceId: "codex", model: "gpt-5.4" });
 const PROJECT_SCRIPTS = JSON.stringify([
@@ -48,6 +39,25 @@ const PROJECT_SCRIPTS = JSON.stringify([
     command: "pnpm test",
     icon: "test",
     runOnWorktreeCreate: false,
+  },
+]);
+
+const PUBLIC_DOCS_PROJECT_SCRIPTS = JSON.stringify([
+  {
+    id: "preview-docs",
+    name: "Preview documentation",
+    command: "node fixture-action.mjs",
+    icon: "play",
+    runOnWorktreeCreate: false,
+    allowAgentResume: true,
+  },
+  {
+    id: "check-links",
+    name: "Check links",
+    command: "node fixture-action.mjs",
+    icon: "test",
+    runOnWorktreeCreate: false,
+    allowAgentResume: true,
   },
 ]);
 
@@ -269,19 +279,135 @@ export const SHOWCASE_THREADS = [
   },
 ] as const;
 
+export const PUBLIC_DOCS_PROJECT_ID = "lastcode-docs-demo";
+export const PUBLIC_DOCS_THREAD_ID = "document-resumable-actions";
+
+export const PUBLIC_DOCS_PROJECTS = [
+  {
+    id: PUBLIC_DOCS_PROJECT_ID,
+    title: "LastCode documentation",
+    directory: "lastcode-docs-demo",
+    repositoryUrl: "https://github.com/example/lastcode-docs-demo.git",
+    favicon: PROJECT_FAVICONS.t3code,
+  },
+] as const;
+
+export const PUBLIC_DOCS_THREADS = [
+  {
+    id: PUBLIC_DOCS_THREAD_ID,
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Document resumable project actions",
+    branch: "docs/resumable-actions",
+    minutesAgo: 4,
+    request:
+      "Explain how a Project Action can run while an agent pauses, including how to inspect or cancel it.",
+    response:
+      "The guide now follows the full flow: start the Action, pause the thread, inspect progress, and cancel it when needed.",
+    annotation: "Keep the polling-tax explanation concrete and show the cancellation path.",
+    pinned: true,
+  },
+  {
+    id: "coordinate-thread-tools",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Coordinate work across threads",
+    branch: "docs/thread-tools",
+    minutesAgo: 18,
+    request:
+      "Show how Codex can inspect another thread and send it a tracked follow-up without copying its whole history.",
+    response:
+      "The example lists the available threads, reads a bounded slice of context, and sends one tracked follow-up.",
+  },
+  {
+    id: "annotate-open-questions",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Annotate open documentation questions",
+    branch: "docs/annotations",
+    minutesAgo: 31,
+    state: "approval" as const,
+    request: "Keep the unresolved installation question visible while the guide is reviewed.",
+    response:
+      "The question is attached to the thread and remains visible in chat and the sidebar until it is resolved.",
+    annotation: "Confirm the minimum supported macOS version before publishing.",
+  },
+  {
+    id: "polish-ocean-captures",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Polish the Ocean captures",
+    branch: "docs/ocean-captures",
+    minutesAgo: 56,
+    state: "plan" as const,
+    request: "Prepare the dark Ocean screenshots and keep the light variants ready for follow-up.",
+    response:
+      "The capture plan uses one deterministic recipe per scene and keeps the README panels on the same path.",
+  },
+  {
+    id: "publish-feature-index",
+    projectId: PUBLIC_DOCS_PROJECT_ID,
+    title: "Publish the feature index",
+    branch: "docs/feature-index",
+    minutesAgo: 5 * 60,
+    settled: true,
+    request: "Add a short feature index without turning the front page into marketing copy.",
+    response:
+      "The index now links to the five first-release guides with one plain-language sentence each.",
+  },
+] as const;
+
+export type ShowcaseFixtureProfile = "mobile" | "public-docs";
+
+interface ShowcaseProjectFixture {
+  readonly id: string;
+  readonly title: string;
+  readonly directory: string;
+  readonly repositoryUrl: string;
+  readonly favicon: string;
+}
+
+interface ShowcaseThreadFixture {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly branch: string;
+  readonly minutesAgo: number;
+  readonly state?: "working" | "approval" | "plan";
+  readonly settled?: boolean;
+  readonly snoozeMinutes?: number;
+  readonly request: string;
+  readonly response: string | null;
+  readonly annotation?: string;
+  readonly pinned?: boolean;
+}
+
 function minutesBefore(now: number, minutes: number): string {
   return new Date(now - minutes * 60_000).toISOString();
 }
 
-async function runGit(workspaceRoot: string, args: ReadonlyArray<string>): Promise<void> {
+async function runGit(
+  workspaceRoot: string,
+  args: ReadonlyArray<string>,
+  profile: ShowcaseFixtureProfile = "mobile",
+): Promise<void> {
+  const identity =
+    profile === "public-docs"
+      ? { name: "LastCode Docs Fixture", email: "fixture@example.invalid" }
+      : { name: "Alex Rivera", email: "alex@lumen.test" };
+  const inheritedEnvironment =
+    profile === "public-docs"
+      ? Object.fromEntries(
+          ["PATH", "PATHEXT", "SYSTEMROOT", "ComSpec", "TMPDIR", "TMP", "TEMP"].flatMap((key) =>
+            process.env[key] === undefined ? [] : [[key, process.env[key]]],
+          ),
+        )
+      : process.env;
   await execFile("git", [...args], {
     cwd: workspaceRoot,
     env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: "Alex Rivera",
-      GIT_AUTHOR_EMAIL: "alex@lumen.test",
-      GIT_COMMITTER_NAME: "Alex Rivera",
-      GIT_COMMITTER_EMAIL: "alex@lumen.test",
+      ...inheritedEnvironment,
+      HOME: profile === "public-docs" ? workspaceRoot : process.env.HOME,
+      GIT_AUTHOR_NAME: identity.name,
+      GIT_AUTHOR_EMAIL: identity.email,
+      GIT_COMMITTER_NAME: identity.name,
+      GIT_COMMITTER_EMAIL: identity.email,
     },
   });
 }
@@ -290,11 +416,16 @@ async function initializeRepository(input: {
   readonly workspaceRoot: string;
   readonly repositoryUrl: string;
   readonly commitMessage: string;
+  readonly profile?: ShowcaseFixtureProfile;
 }): Promise<void> {
-  await runGit(input.workspaceRoot, ["init", "-b", "main"]);
-  await runGit(input.workspaceRoot, ["remote", "add", "origin", input.repositoryUrl]);
-  await runGit(input.workspaceRoot, ["add", "."]);
-  await runGit(input.workspaceRoot, ["commit", "-m", input.commitMessage]);
+  await runGit(input.workspaceRoot, ["init", "-b", "main"], input.profile);
+  await runGit(
+    input.workspaceRoot,
+    ["remote", "add", "origin", input.repositoryUrl],
+    input.profile,
+  );
+  await runGit(input.workspaceRoot, ["add", "."], input.profile);
+  await runGit(input.workspaceRoot, ["commit", "-m", input.commitMessage], input.profile);
 }
 
 async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
@@ -326,6 +457,50 @@ async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
   );
 }
 
+async function seedPublicDocsWorkspace(workspaceRoot: string): Promise<void> {
+  await NodeFSP.mkdir(NodePath.join(workspaceRoot, "docs"), { recursive: true });
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "package.json"),
+    `${JSON.stringify({ name: "lastcode-docs-demo", private: true }, null, 2)}\n`,
+  );
+  await NodeFSP.writeFile(NodePath.join(workspaceRoot, "favicon.svg"), PROJECT_FAVICONS.t3code);
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "README.md"),
+    "# LastCode documentation demo\n\nSynthetic workspace for public documentation captures.\n",
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "docs", "resumable-actions.md"),
+    "# Resumable project actions\n\nDocument the running, inspection, and cancellation states.\n",
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(workspaceRoot, "fixture-action.mjs"),
+    `const phases = ["Preparing the preview", "Checking internal links", "Rendering the guide"];
+let index = 0;
+console.log(phases[index]);
+const interval = setInterval(() => {
+  index += 1;
+  if (index < phases.length) {
+    console.log(phases[index]);
+    return;
+  }
+  clearInterval(interval);
+  console.log("Documentation preview ready");
+}, 4_000);
+`,
+  );
+  await initializeRepository({
+    workspaceRoot,
+    repositoryUrl: "https://github.com/example/lastcode-docs-demo.git",
+    commitMessage: "Seed public documentation workspace",
+    profile: "public-docs",
+  });
+  await runGit(workspaceRoot, ["checkout", "-b", "docs/resumable-actions"], "public-docs");
+  await NodeFSP.appendFile(
+    NodePath.join(workspaceRoot, "docs", "resumable-actions.md"),
+    "\nAgents can inspect or cancel the Action while it runs.\n",
+  );
+}
+
 async function seedCompanionWorkspace(input: {
   readonly workspaceRoot: string;
   readonly title: string;
@@ -345,101 +520,45 @@ async function seedCompanionWorkspace(input: {
   });
 }
 
-function insertThread(
-  database: NodeSqlite.DatabaseSync,
-  now: number,
-  input: {
-    readonly id: string;
-    readonly projectId: string;
-    readonly title: string;
-    readonly branch: string;
-    readonly minutesAgo: number;
-    readonly state?: "working" | "approval" | "plan";
-    readonly settled?: boolean;
-    readonly snoozeMinutes?: number;
-    readonly workspaceRoot: string;
-  },
-): void {
-  const turnId = `${input.id}-turn`;
-  const updatedAt = minutesBefore(now, input.minutesAgo);
-  const isWorking = input.state === "working";
-  const snoozedUntil =
-    input.snoozeMinutes === undefined
-      ? null
-      : new Date(now + input.snoozeMinutes * 60_000).toISOString();
-  const snoozedAt =
-    input.snoozeMinutes === undefined
-      ? null
-      : minutesBefore(now, Math.max(1, Math.floor(input.minutesAgo / 2)));
-  database
-    .prepare(
-      `INSERT INTO projection_threads (
-        thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
-        branch, worktree_path, latest_turn_id, latest_user_message_at, pending_approval_count,
-        pending_user_input_count, has_actionable_proposed_plan, created_at, updated_at,
-        archived_at, deleted_at, settled_override, settled_at, snoozed_until, snoozed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.id,
-      input.projectId,
-      input.title,
-      MODEL_SELECTION,
-      "full-access",
-      input.state === "plan" ? "plan" : "default",
-      input.branch,
-      input.workspaceRoot,
-      turnId,
-      minutesBefore(now, input.minutesAgo + 1),
-      input.state === "approval" ? 1 : 0,
-      input.state === "plan" ? 1 : 0,
-      minutesBefore(now, input.minutesAgo + 120),
-      updatedAt,
-      input.settled ? "settled" : null,
-      input.settled ? updatedAt : null,
-      snoozedUntil,
-      snoozedAt,
-    );
-  database
-    .prepare(
-      `INSERT INTO projection_turns (
-        thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
-        started_at, completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
-        checkpoint_files_json, source_proposed_plan_thread_id, source_proposed_plan_id
-      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, '[]', NULL, NULL)`,
-    )
-    .run(
-      input.id,
-      turnId,
-      isWorking ? null : `${input.id}-answer`,
-      isWorking ? "running" : "completed",
-      minutesBefore(now, input.minutesAgo + 2),
-      minutesBefore(now, input.minutesAgo + 2),
-      isWorking ? null : updatedAt,
-    );
-  database
-    .prepare(
-      `INSERT INTO projection_thread_sessions (
-        thread_id, status, provider_name, provider_instance_id, provider_session_id,
-        provider_thread_id, runtime_mode, active_turn_id, last_error, updated_at
-      ) VALUES (?, ?, 'Codex', 'codex', NULL, NULL, 'full-access', ?, NULL, ?)`,
-    )
-    .run(input.id, isWorking ? "running" : "ready", isWorking ? turnId : null, updatedAt);
+export async function seedShowcaseProjectWorkspace(input: {
+  readonly workspaceRoot: string;
+  readonly projectId: string;
+  readonly profile?: ShowcaseFixtureProfile;
+}): Promise<void> {
+  const profile = input.profile ?? "mobile";
+  const projects: ReadonlyArray<ShowcaseProjectFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_PROJECTS : SHOWCASE_PROJECTS;
+  const project = projects.find(({ id }) => id === input.projectId);
+  if (!project) throw new Error(`Unknown ${profile} fixture project '${input.projectId}'.`);
+  if (profile === "public-docs") {
+    await seedPublicDocsWorkspace(input.workspaceRoot);
+    return;
+  }
+  if (project.id === SHOWCASE_PROJECT_ID) {
+    await seedT3CodeWorkspace(input.workspaceRoot);
+    return;
+  }
+  await seedCompanionWorkspace({
+    workspaceRoot: input.workspaceRoot,
+    title: project.title,
+    repositoryUrl: project.repositoryUrl,
+    favicon: project.favicon,
+  });
 }
 
-const SEEDED_PROJECTION_TABLES = [
-  "projection_pending_approvals",
-  "projection_thread_proposed_plans",
-  "projection_thread_activities",
-  "projection_thread_messages",
-  "projection_thread_sessions",
-  "projection_turns",
-  "projection_threads",
+const SEEDED_TABLES = [
+  "orchestration_events",
   "projection_projects",
-  "projection_state",
+  "orchestration_v2_projection_threads",
+  "orchestration_v2_projection_runs",
+  "orchestration_v2_projection_messages",
+  "orchestration_v2_projection_turn_items",
+  "orchestration_v2_projection_plans",
+  "orchestration_v2_projection_runtime_requests",
+  "orchestration_v2_projection_metadata",
+  "orchestration_v2_projection_nodes",
+  "orchestration_v2_turn_item_positions",
 ] as const;
-
-const SEEDED_THREAD_COLUMNS = ["snoozed_until", "snoozed_at"] as const;
 
 function hasSeedableSchema(dbPath: string): boolean {
   let database: NodeSqlite.DatabaseSync;
@@ -449,20 +568,14 @@ function hasSeedableSchema(dbPath: string): boolean {
     return false;
   }
   try {
-    const tableCount = database
+    const row = database
       .prepare(
-        `SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (${SEEDED_PROJECTION_TABLES.map(() => "?").join(", ")})`,
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (" +
+          SEEDED_TABLES.map(() => "?").join(", ") +
+          ")",
       )
-      .get(...SEEDED_PROJECTION_TABLES) as { count: number };
-    if (tableCount.count !== SEEDED_PROJECTION_TABLES.length) return false;
-
-    const threadColumns = database.prepare("PRAGMA table_info(projection_threads)").all() as Array<{
-      name: string;
-    }>;
-    const threadColumnNames = new Set(threadColumns.map((column) => column.name));
-    return SEEDED_THREAD_COLUMNS.every((column) => threadColumnNames.has(column));
-  } catch {
-    return false;
+      .get(...SEEDED_TABLES) as { count: number };
+    return row.count === SEEDED_TABLES.length;
   } finally {
     database.close();
   }
@@ -474,158 +587,488 @@ async function waitForSeedableSchema(dbPath: string, timeoutMs = 60_000): Promis
     if (hasSeedableSchema(dbPath)) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`The environment server did not migrate ${dbPath} within ${timeoutMs}ms.`);
+  throw new Error(
+    "The environment server did not migrate " + dbPath + " within " + timeoutMs + "ms.",
+  );
 }
 
 function seedDatabase(
   dbPath: string,
   workspaceRoots: ReadonlyMap<string, string>,
-  projects: ReadonlyArray<(typeof SHOWCASE_PROJECTS)[number]>,
-  threads: ReadonlyArray<(typeof SHOWCASE_THREADS)[number]>,
+  projects: ReadonlyArray<ShowcaseProjectFixture>,
+  threads: ReadonlyArray<ShowcaseThreadFixture>,
   now: number,
+  profile: ShowcaseFixtureProfile,
 ): void {
-  // The environment server is already running against this file and keeps
-  // writing (migrations, projections) while we seed, so the write lock is
-  // genuinely contended — without a busy timeout `BEGIN IMMEDIATE` fails
-  // instantly with SQLITE_BUSY on a loaded machine.
   const database = new NodeSqlite.DatabaseSync(dbPath, { timeout: 30_000 });
+  const decodeEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson);
+  const encodeEvent = Schema.encodeSync(OrchestrationV2DomainEventJson);
   try {
     database.exec("BEGIN IMMEDIATE");
-    for (const table of SEEDED_PROJECTION_TABLES) {
-      database.exec(`DELETE FROM ${table}`);
-    }
-    const insertProject = database.prepare(
-      `INSERT INTO projection_projects (
-          project_id, title, workspace_root, default_model_selection_json, scripts_json,
-          created_at, updated_at, deleted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+    const existing = database
+      .prepare("SELECT COUNT(*) AS count FROM orchestration_events")
+      .get() as { count: number };
+    if (existing.count !== 0)
+      throw new Error("Showcase fixtures require an empty disposable environment.");
+    const insertEvent = database.prepare(
+      "INSERT INTO orchestration_events (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json, application_event_version) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'system', ?, ?, 2)",
     );
-    for (const [index, project] of projects.entries()) {
+    const streamVersions = new Map<string, number>();
+    const persistEvent = (
+      id: string,
+      aggregate: "project" | "thread",
+      streamId: string,
+      type: string,
+      occurredAt: string,
+      payload: unknown,
+      metadata: Record<string, unknown> = {},
+    ) => {
+      const version = (streamVersions.get(streamId) ?? 0) + 1;
+      streamVersions.set(streamId, version);
+      insertEvent.run(
+        id,
+        aggregate,
+        streamId,
+        version,
+        type,
+        occurredAt,
+        JSON.stringify(payload),
+        JSON.stringify({ applicationEventVersion: 2, ...metadata }),
+      );
+    };
+    for (const project of projects) {
       const workspaceRoot = workspaceRoots.get(project.id);
-      if (!workspaceRoot) throw new Error(`Missing workspace root for ${project.id}.`);
-      const latestThreadMinutes = Math.min(
-        ...threads
-          .filter((thread) => thread.projectId === project.id)
-          .map((thread) => thread.minutesAgo),
-      );
-      insertProject.run(
-        project.id,
-        project.title,
+      if (!workspaceRoot) throw new Error("Missing workspace root for " + project.id);
+      const payload = {
+        projectId: project.id,
+        title: project.title,
         workspaceRoot,
-        MODEL_SELECTION,
-        PROJECT_SCRIPTS,
-        minutesBefore(now, 60 * 24 * (90 - index * 12)),
-        minutesBefore(now, latestThreadMinutes),
-      );
-    }
-
-    for (const thread of threads) {
-      const workspaceRoot = workspaceRoots.get(thread.projectId);
-      if (!workspaceRoot) throw new Error(`Missing workspace root for ${thread.projectId}.`);
-      insertThread(database, now, {
-        ...thread,
-        ...("state" in thread ? { state: thread.state } : {}),
-        workspaceRoot,
+        defaultModelSelection: JSON.parse(MODEL_SELECTION),
+        faviconPath: null,
+        projectIcon: null,
+        scripts: JSON.parse(
+          profile === "public-docs" ? PUBLIC_DOCS_PROJECT_SCRIPTS : PROJECT_SCRIPTS,
+        ),
+        createdAt: minutesBefore(now, 90 * 24 * 60),
+        updatedAt: minutesBefore(now, 1),
+      };
+      decodeProjectEvent({
+        sequence: 0,
+        eventId: project.id + "-created",
+        aggregateKind: "project",
+        aggregateId: project.id,
+        occurredAt: payload.updatedAt,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.created",
+        payload,
       });
-    }
-
-    const insertMessage = database.prepare(
-      `INSERT INTO projection_thread_messages (
-        message_id, thread_id, turn_id, role, text, is_streaming, attachments_json,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
-    );
-    for (const thread of threads) {
-      const turnId = `${thread.id}-turn`;
-      const requestTime = minutesBefore(now, thread.minutesAgo + 5);
-      insertMessage.run(
-        `${thread.id}-request`,
-        thread.id,
-        turnId,
-        "user",
-        thread.request,
-        requestTime,
-        requestTime,
+      persistEvent(
+        project.id + "-created",
+        "project",
+        project.id,
+        "project.created",
+        payload.updatedAt,
+        payload,
       );
-      if (thread.response !== null) {
-        const responseTime = minutesBefore(now, thread.minutesAgo);
-        insertMessage.run(
-          `${thread.id}-answer`,
-          thread.id,
-          turnId,
-          "assistant",
-          thread.response,
-          responseTime,
-          responseTime,
-        );
-      }
-    }
-
-    const turnId = `${SHOWCASE_THREAD_ID}-turn`;
-    const insertActivity = database.prepare(
-      `INSERT INTO projection_thread_activities (
-        activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
-      ) VALUES (?, ?, ?, 'tool', 'tool.completed', ?, ?, ?, ?)`,
-    );
-    insertActivity.run(
-      "trace-remote-handoff",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Traced the remote handoff path",
-      JSON.stringify({
-        itemType: "command_execution",
-        title: "Traced the remote handoff path",
-        detail: "Three environments, one continuous workspace",
-        status: "completed",
-      }),
-      1,
-      minutesBefore(now, 8),
-    );
-    insertActivity.run(
-      "sync-command-center",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Synced the command center",
-      JSON.stringify({
-        itemType: "file_change",
-        title: "Synced the command center",
-        detail: "2 files changed · instant handoffs · calm reconnects",
-        status: "completed",
-      }),
-      2,
-      minutesBefore(now, 6),
-    );
-    insertActivity.run(
-      "run-changed-suite",
-      SHOWCASE_THREAD_ID,
-      turnId,
-      "Ran the changed workspace",
-      JSON.stringify({
-        itemType: "command_execution",
-        title: "Ran the changed workspace",
-        detail: "612 tests passed · 3 environments online",
-        status: "completed",
-      }),
-      3,
-      minutesBefore(now, 4),
-    );
-
-    for (const [index, projector] of PROJECTOR_NAMES.entries()) {
       database
         .prepare(
-          "INSERT INTO projection_state (projector, last_applied_sequence, updated_at) VALUES (?, ?, ?)",
+          "INSERT INTO projection_projects (project_id, title, workspace_root, default_model_selection_json, scripts_json, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
         )
-        .run(projector, index + 1, minutesBefore(now, 1));
+        .run(
+          project.id,
+          project.title,
+          workspaceRoot,
+          MODEL_SELECTION,
+          JSON.stringify(payload.scripts),
+          payload.createdAt,
+          payload.updatedAt,
+        );
     }
+
+    for (const thread of threads) {
+      const updatedAt = minutesBefore(now, thread.minutesAgo);
+      const requestedAt = minutesBefore(now, thread.minutesAgo + 5);
+      const runId = thread.id + "-run";
+      const nodeId = thread.id + "-node";
+      const event = (type: string, payload: unknown, suffix: string) => {
+        // Validate and encode through the native V2 wire contract, including dates.
+        const encoded = encodeEvent(
+          decodeEvent({
+            id: thread.id + "-" + suffix,
+            type,
+            threadId: thread.id,
+            runId,
+            nodeId,
+            occurredAt: updatedAt,
+            payload,
+          }),
+        );
+        persistEvent(
+          encoded.id,
+          "thread",
+          thread.id,
+          encoded.type,
+          encoded.occurredAt,
+          encoded.payload,
+          { runId, nodeId },
+        );
+        return encoded.payload;
+      };
+      const nativeThread = event(
+        "thread.created",
+        {
+          id: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          createdBy: "user",
+          creationSource: "web",
+          providerInstanceId: "codex",
+          modelSelection: JSON.parse(MODEL_SELECTION),
+          runtimeMode: "full-access",
+          interactionMode: thread.state === "plan" ? "plan" : "default",
+          branch: thread.branch,
+          worktreePath: workspaceRoots.get(thread.projectId),
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: thread.id },
+          forkedFrom: null,
+          createdAt: minutesBefore(now, thread.minutesAgo + 120),
+          updatedAt,
+          archivedAt: null,
+          deletedAt: null,
+          settledOverride: thread.settled ? "settled" : null,
+          settledAt: thread.settled ? updatedAt : null,
+          lastVisitedAt: null,
+          snoozedUntil:
+            thread.snoozeMinutes === undefined
+              ? null
+              : new Date(now + thread.snoozeMinutes * 60_000).toISOString(),
+          snoozedAt: thread.snoozeMinutes === undefined ? null : updatedAt,
+          pinnedAt: thread.pinned ? updatedAt : null,
+          pinOrderKey: thread.pinned ? "a0" : null,
+          annotation: thread.annotation
+            ? {
+                body: thread.annotation,
+                anchorMessageId: thread.id + "-answer",
+                createdAt: updatedAt,
+                updatedAt,
+                resolvedAt: null,
+              }
+            : null,
+        },
+        "created",
+      );
+      database
+        .prepare(
+          "INSERT INTO orchestration_v2_projection_threads (thread_id, project_id, title, default_provider, provider_instance_id, runtime_mode, interaction_mode, created_at, updated_at, payload_json) VALUES (?, ?, ?, 'codex', 'codex', 'full-access', ?, ?, ?, ?)",
+        )
+        .run(
+          thread.id,
+          thread.projectId,
+          thread.title,
+          thread.state === "plan" ? "plan" : "default",
+          minutesBefore(now, thread.minutesAgo + 120),
+          updatedAt,
+          JSON.stringify(nativeThread),
+        );
+
+      const nodeStatus =
+        thread.state === "working"
+          ? "running"
+          : thread.state === "approval"
+            ? "waiting"
+            : "completed";
+      const node = event(
+        "node.updated",
+        {
+          id: nodeId,
+          threadId: thread.id,
+          runId,
+          parentNodeId: null,
+          rootNodeId: nodeId,
+          kind: "root_turn",
+          status: nodeStatus,
+          countsForRun: true,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: thread.state === "approval" ? thread.id + "-approval" : null,
+          checkpointScopeId: null,
+          startedAt: requestedAt,
+          completedAt: nodeStatus === "completed" ? updatedAt : null,
+        },
+        "node",
+      );
+      database
+        .prepare(
+          "INSERT INTO orchestration_v2_projection_nodes (node_id, thread_id, run_id, root_node_id, kind, status, started_at, completed_at, runtime_request_id, payload_json) VALUES (?, ?, ?, ?, 'root_turn', ?, ?, ?, ?, ?)",
+        )
+        .run(
+          nodeId,
+          thread.id,
+          runId,
+          nodeId,
+          nodeStatus,
+          requestedAt,
+          nodeStatus === "completed" ? updatedAt : null,
+          thread.state === "approval" ? thread.id + "-approval" : null,
+          JSON.stringify(node),
+        );
+      const status = thread.state === "working" ? "running" : "completed";
+      const run = event(
+        "run.created",
+        {
+          id: runId,
+          threadId: thread.id,
+          ordinal: 1,
+          providerInstanceId: "codex",
+          modelSelection: JSON.parse(MODEL_SELECTION),
+          providerThreadId: null,
+          userMessageId: thread.id + "-request",
+          rootNodeId: nodeId,
+          activeAttemptId: null,
+          status,
+          requestedAt,
+          startedAt: requestedAt,
+          completedAt: status === "running" ? null : updatedAt,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+        "run-created",
+      );
+      database
+        .prepare(
+          "INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, provider_instance_id, status, requested_at, completed_at, payload_json) VALUES (?, ?, 1, 'codex', 'codex', ?, ?, ?, ?)",
+        )
+        .run(
+          runId,
+          thread.id,
+          status,
+          requestedAt,
+          status === "running" ? null : updatedAt,
+          JSON.stringify(run),
+        );
+      for (const [role, text] of [
+        ["user", thread.request],
+        ["assistant", thread.response],
+      ] as const) {
+        if (text === null) continue;
+        const id = thread.id + (role === "user" ? "-request" : "-answer");
+        const time = role === "user" ? requestedAt : updatedAt;
+        const message = event(
+          "message.updated",
+          {
+            id,
+            threadId: thread.id,
+            runId,
+            nodeId: role === "user" ? null : nodeId,
+            createdBy: role === "user" ? "user" : "agent",
+            creationSource: role === "user" ? "web" : "provider",
+            role,
+            text,
+            attachments: [],
+            streaming: false,
+            createdAt: time,
+            updatedAt: time,
+          },
+          id,
+        );
+        database
+          .prepare(
+            "INSERT INTO orchestration_v2_projection_messages (message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at, payload_json) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+          )
+          .run(
+            id,
+            thread.id,
+            runId,
+            role === "user" ? null : nodeId,
+            role,
+            time,
+            time,
+            JSON.stringify(message),
+          );
+      }
+
+      let ordinal = 0;
+      const insertItem = (
+        type: string,
+        fields: Record<string, unknown>,
+        title: string | null = null,
+      ) => {
+        ordinal += 1;
+        const id = thread.id + "-item-" + ordinal;
+        const item = event(
+          "turn-item.updated",
+          {
+            id,
+            threadId: thread.id,
+            runId,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1000000 + ordinal,
+            type,
+            status: "completed",
+            title,
+            startedAt: requestedAt,
+            completedAt: updatedAt,
+            updatedAt,
+            ...fields,
+          },
+          id,
+        );
+        database
+          .prepare(
+            "INSERT INTO orchestration_v2_projection_turn_items (turn_item_id, thread_id, run_id, node_id, ordinal, type, status, updated_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+          )
+          .run(
+            id,
+            thread.id,
+            runId,
+            nodeId,
+            1000000 + ordinal,
+            type,
+            updatedAt,
+            JSON.stringify(item),
+          );
+        database
+          .prepare(
+            "INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal) VALUES (?, ?, ?)",
+          )
+          .run(thread.id, id, 1000000 + ordinal);
+      };
+      insertItem("user_message", {
+        messageId: thread.id + "-request",
+        inputIntent: "turn_start",
+        text: thread.request,
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const primaryThreadId =
+        profile === "public-docs" ? PUBLIC_DOCS_THREAD_ID : SHOWCASE_THREAD_ID;
+      if (thread.id === primaryThreadId) {
+        const activities =
+          profile === "public-docs"
+            ? [
+                ["Inspected the running Project Action", "Preview documentation · still running"],
+                [
+                  "Updated the resumable-actions guide",
+                  "1 file changed · inspection and cancellation documented",
+                ],
+                ["Checked the documentation links", "10 routes passed"],
+              ]
+            : [
+                ["Traced the remote handoff path", "Three environments, one continuous workspace"],
+                [
+                  "Synced the command center",
+                  "2 files changed · instant handoffs · calm reconnects",
+                ],
+                ["Ran the changed workspace", "612 tests passed · 3 environments online"],
+              ];
+        for (const [index, [title, detail]] of activities.entries()) {
+          if (index === 1)
+            insertItem(
+              "file_change",
+              {
+                fileName:
+                  profile === "public-docs"
+                    ? "docs/resumable-actions.md"
+                    : "apps/mobile/src/features/home/environmentPresence.ts",
+                additions: 2,
+                deletions: 1,
+              },
+              title,
+            );
+          else
+            insertItem(
+              "command_execution",
+              { input: title ?? "", output: detail ?? "", exitCode: 0 },
+              title,
+            );
+        }
+      }
+      if (thread.response !== null) {
+        if (thread.state === "plan")
+          insertItem("proposed_plan", {
+            planId: thread.id + "-plan",
+            markdown: thread.response,
+            streaming: false,
+          });
+        else
+          insertItem("assistant_message", {
+            messageId: thread.id + "-answer",
+            text: thread.response,
+            streaming: false,
+            attachments: [],
+          });
+      }
+      if (thread.state === "plan") {
+        const id = thread.id + "-plan";
+        const plan = event(
+          "plan.updated",
+          {
+            id,
+            threadId: thread.id,
+            runId,
+            nodeId,
+            kind: "proposed_plan",
+            status: "active",
+            markdown: thread.response ?? thread.request,
+          },
+          "plan",
+        );
+        database
+          .prepare(
+            "INSERT INTO orchestration_v2_projection_plans (plan_id, thread_id, run_id, node_id, kind, status, payload_json) VALUES (?, ?, ?, ?, 'proposed_plan', 'active', ?)",
+          )
+          .run(id, thread.id, runId, nodeId, JSON.stringify(plan));
+      }
+      if (thread.state === "approval") {
+        const id = thread.id + "-approval";
+        const request = event(
+          "runtime-request.updated",
+          {
+            id,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: updatedAt,
+            resolvedAt: null,
+          },
+          "approval",
+        );
+        database
+          .prepare(
+            "INSERT INTO orchestration_v2_projection_runtime_requests (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json) VALUES (?, ?, ?, 'command', 'pending', ?, ?)",
+          )
+          .run(id, thread.id, nodeId, updatedAt, JSON.stringify(request));
+      }
+    }
+    // Native events preserve the fixture when the server rebuilds projections.
+    const row = database
+      .prepare(
+        "SELECT MAX(sequence) AS sequence FROM orchestration_events WHERE aggregate_kind = 'thread' AND application_event_version = 2",
+      )
+      .get() as { sequence: number };
+    database
+      .prepare(
+        "UPDATE orchestration_v2_projection_metadata SET schema_version = 2, last_sequence = ?, updated_at = ? WHERE projection_name = 'thread-projections'",
+      )
+      .run(row.sequence, minutesBefore(now, 1));
     database.exec("COMMIT");
   } catch (error) {
-    // A failed BEGIN (or an error SQLite already auto-rolled back) leaves no
-    // transaction, and the rollback's own "cannot rollback" error would then
-    // replace the one that actually explains the failure.
     try {
       database.exec("ROLLBACK");
     } catch {
-      // Nothing to roll back.
+      /* No transaction to roll back. */
     }
     throw error;
   } finally {
@@ -637,47 +1080,47 @@ export async function seedShowcaseEnvironment(input: {
   readonly baseDir: string;
   readonly projectIds?: ReadonlyArray<string>;
   readonly now?: number;
+  readonly profile?: ShowcaseFixtureProfile;
 }): Promise<{ readonly dbPath: string; readonly workspaceRoot: string }> {
   const now = input.now ?? Date.now();
+  const profile = input.profile ?? "mobile";
+  const fixtureProjects: ReadonlyArray<ShowcaseProjectFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_PROJECTS : SHOWCASE_PROJECTS;
+  const fixtureThreads: ReadonlyArray<ShowcaseThreadFixture> =
+    profile === "public-docs" ? PUBLIC_DOCS_THREADS : SHOWCASE_THREADS;
+  const primaryProjectId = profile === "public-docs" ? PUBLIC_DOCS_PROJECT_ID : SHOWCASE_PROJECT_ID;
   const selectedProjectIds = new Set(
-    input.projectIds ?? SHOWCASE_PROJECTS.map((project) => project.id),
+    input.projectIds ?? fixtureProjects.map((project) => project.id),
   );
-  const projects = SHOWCASE_PROJECTS.filter((project) => selectedProjectIds.has(project.id));
+  const projects = fixtureProjects.filter((project) => selectedProjectIds.has(project.id));
   if (projects.length === 0) throw new Error("At least one showcase project must be selected.");
-  const threads = SHOWCASE_THREADS.filter((thread) => selectedProjectIds.has(thread.projectId));
+  const threads = fixtureThreads.filter((thread) => selectedProjectIds.has(thread.projectId));
   const workspaceBase = NodePath.join(input.baseDir, "workspace");
   const workspaceRoots = new Map(
     projects.map(
       (project) => [project.id, NodePath.join(workspaceBase, project.directory)] as const,
     ),
   );
-  const primaryProject =
-    projects.find((project) => project.id === SHOWCASE_PROJECT_ID) ?? projects[0];
+  const primaryProject = projects.find((project) => project.id === primaryProjectId) ?? projects[0];
   if (!primaryProject) throw new Error("The primary showcase workspace is not configured.");
   const workspaceRoot = workspaceRoots.get(primaryProject.id);
   if (!workspaceRoot) throw new Error("The primary showcase workspace is not configured.");
   const dbPath = NodePath.join(input.baseDir, "userdata", "statev2.sqlite");
-  if (primaryProject.id === SHOWCASE_PROJECT_ID) {
-    await seedT3CodeWorkspace(workspaceRoot);
-  }
   await Promise.all(
-    projects
-      .filter((project) => project.id !== SHOWCASE_PROJECT_ID)
-      .map(async (project) => {
-        const projectWorkspaceRoot = workspaceRoots.get(project.id);
-        if (!projectWorkspaceRoot) throw new Error(`Missing workspace root for ${project.id}.`);
-        await seedCompanionWorkspace({
-          workspaceRoot: projectWorkspaceRoot,
-          title: project.title,
-          repositoryUrl: project.repositoryUrl,
-          favicon: project.favicon,
-        });
-      }),
+    projects.map(async (project) => {
+      const projectWorkspaceRoot = workspaceRoots.get(project.id);
+      if (!projectWorkspaceRoot) throw new Error(`Missing workspace root for ${project.id}.`);
+      await seedShowcaseProjectWorkspace({
+        workspaceRoot: projectWorkspaceRoot,
+        projectId: project.id,
+        profile,
+      });
+    }),
   );
   // The environment server begins listening before it finishes migrating the
   // database, so wait for the schema before deleting from and reseeding it.
   await waitForSeedableSchema(dbPath);
-  seedDatabase(dbPath, workspaceRoots, projects, threads, now);
+  seedDatabase(dbPath, workspaceRoots, projects, threads, now, profile);
 
   const terminalDirectory = NodePath.join(input.baseDir, "userdata", "logs", "terminals");
   if (selectedProjectIds.has(SHOWCASE_PROJECT_ID)) {
