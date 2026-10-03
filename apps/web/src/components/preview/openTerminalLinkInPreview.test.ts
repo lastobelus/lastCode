@@ -8,6 +8,9 @@ import {
   TerminalLinkPreviewOpenError,
 } from "./openTerminalLinkInPreview";
 
+const hostingMocks = vi.hoisted(() => ({ recover: vi.fn(async (): Promise<boolean> => false) }));
+vi.mock("./previewHostingRecovery", () => ({ recoverHostedPreview: hostingMocks.recover }));
+
 vi.mock("~/previewStateStore", () => ({
   applyPreviewServerSnapshot: vi.fn(),
   isPreviewSupportedInRuntime: () => true,
@@ -58,6 +61,7 @@ const snapshot: PreviewSessionSnapshot = {
 };
 
 beforeEach(() => {
+  hostingMocks.recover.mockReset().mockResolvedValue(false);
   browserDefaultsMocks.resolve.mockReset();
   browserDefaultsMocks.resolve.mockResolvedValue(hydratedDefaults);
   linkTargetMocks.preference.mockReturnValue("app");
@@ -68,6 +72,36 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it("waits for owning-thread recovery before opening a stopped terminal link", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (restored: boolean) => void;
+    hostingMocks.recover.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const url = "http://localhost:5173/qa?case=terminal#first";
+    const opening = openTerminalLinkInPreview({
+      url,
+      threadRef,
+      openPreview,
+      fallbackToBrowser: vi.fn(),
+      forceBrowser: false,
+    });
+    await started;
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(hostingMocks.recover).toHaveBeenCalledWith(threadRef, url);
+    finish(true);
+    await opening;
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
   it.each(["target", "defaults"] as const)(
     "does not open either browser when reading %s fails",
     async (setting) => {

@@ -34,9 +34,15 @@ interface TerminalHarness {
   readonly summaries: TerminalSummary[];
   readonly liveSummaries?: TerminalSummary[];
   readonly failWrite?: boolean;
-  readonly failClose?: boolean;
+  readonly failClose?:
+    | boolean
+    | ((input: { readonly threadId: string; readonly terminalId?: string | undefined }) => boolean);
   readonly onWrite?: () => Effect.Effect<void>;
   readonly onOpen?: (input: TerminalOpenInput) => Effect.Effect<void>;
+  readonly onCloseAttempt?: (input: {
+    readonly threadId: string;
+    readonly terminalId?: string | undefined;
+  }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
 }
 
@@ -121,14 +127,22 @@ function terminalLayer(harness: TerminalHarness) {
     },
     close: (input) => {
       harness.closes.push({ threadId: input.threadId, terminalId: input.terminalId ?? "" });
-      if (harness.failClose) {
-        return Effect.fail(
-          new TerminalManager.TerminalWriteError({
-            threadId: input.threadId,
-            terminalId: input.terminalId ?? "preview-test",
-            terminalPid: 100,
-            cause: new Error("synthetic PTY close failure"),
-          }),
+      const attempt = harness.onCloseAttempt?.(input) ?? Effect.void;
+      if (
+        harness.failClose === true ||
+        (typeof harness.failClose === "function" && harness.failClose(input))
+      ) {
+        return attempt.pipe(
+          Effect.andThen(
+            Effect.fail(
+              new TerminalManager.TerminalWriteError({
+                threadId: input.threadId,
+                terminalId: input.terminalId ?? "preview-test",
+                terminalPid: 100,
+                cause: new Error("synthetic PTY close failure"),
+              }),
+            ),
+          ),
         );
       }
       for (let index = harness.summaries.length - 1; index >= 0; index--) {
@@ -140,7 +154,7 @@ function terminalLayer(harness: TerminalHarness) {
           harness.summaries.splice(index, 1);
         }
       }
-      return harness.onClose?.() ?? Effect.void;
+      return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
     refreshMetadata: Effect.sync(() => harness.summaries),
@@ -490,7 +504,146 @@ describe("PreviewHosting", () => {
             }),
           );
           assert.equal(harness.writes.length, 1);
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '{"version":1,"leases":[]}\n',
+          );
         }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("does not let a failed close retry delay another lease's expiry", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(10_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-retry-deadline-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const firstCloseAttempted = yield* Deferred.make<void>();
+      const secondClosed = yield* Deferred.make<void>();
+      let firstTerminalId = "";
+      const harness = testTerminalHarness({
+        failClose: (input) => input.terminalId === firstTerminalId,
+        onCloseAttempt: (input) =>
+          input.terminalId === firstTerminalId
+            ? Deferred.succeed(firstCloseAttempted, undefined)
+            : Deferred.succeed(secondClosed, undefined),
+      });
+      const layer = hostingLayer(config, harness);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const first = yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace/one",
+            url: PREVIEW_URL,
+          });
+          firstTerminalId = first.terminalId;
+          yield* TestClock.adjust(Duration.seconds(30));
+          const second = yield* hosting.launch({
+            threadId: "thread-2",
+            command: "pnpm dev --port 5174",
+            cwd: "/workspace/two",
+            url: "http://localhost:5174/preview",
+          });
+
+          yield* TestClock.adjust(
+            Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS - 30_000),
+          );
+          yield* Deferred.await(firstCloseAttempted);
+          assert.deepEqual(harness.closes, [
+            { threadId: "thread-1", terminalId: first.terminalId },
+          ]);
+
+          yield* TestClock.adjust(Duration.seconds(30));
+          const secondClose = yield* Deferred.await(secondClosed).pipe(
+            Effect.asSome,
+            Effect.timeoutOption(Duration.millis(1)),
+          );
+          assert.equal(secondClose._tag, "Some");
+          assert.equal(harness.closes.filter((close) => close.threadId === "thread-2").length, 1);
+          assert.isAtLeast(
+            harness.closes.filter((close) => close.threadId === "thread-1").length,
+            1,
+          );
+          assert.isNull(
+            yield* hosting.recover({
+              threadId: "thread-2",
+              leaseId: second.id,
+              url: second.url,
+            }),
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("serializes concurrent recovery cleanup and releases its lease lock", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(10_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-lock-release-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const closeStarted = yield* Deferred.make<void>();
+      const releaseClose = yield* Deferred.make<void>();
+      const firstRecoverStarted = yield* Deferred.make<void>();
+      const secondRecoverStarted = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        onClose: () =>
+          Deferred.succeed(closeStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseClose)),
+          ),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const lease = yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace",
+            url: PREVIEW_URL,
+          });
+          yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS));
+          yield* Deferred.await(closeStarted);
+
+          const first = yield* Effect.forkScoped(
+            Deferred.succeed(firstRecoverStarted, undefined).pipe(
+              Effect.andThen(
+                hosting.recover({ threadId: "thread-1", leaseId: lease.id, url: lease.url }),
+              ),
+            ),
+          );
+          const second = yield* Effect.forkScoped(
+            Deferred.succeed(secondRecoverStarted, undefined).pipe(
+              Effect.andThen(
+                hosting.recover({ threadId: "thread-1", leaseId: lease.id, url: lease.url }),
+              ),
+            ),
+          );
+          yield* Deferred.await(firstRecoverStarted);
+          yield* Deferred.await(secondRecoverStarted);
+          yield* Effect.yieldNow;
+          yield* Deferred.succeed(releaseClose, undefined);
+
+          assert.isNull(yield* Fiber.join(first));
+          assert.isNull(yield* Fiber.join(second));
+          assert.deepEqual(harness.closes, [
+            { threadId: "thread-1", terminalId: lease.terminalId },
+          ]);
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '{"version":1,"leases":[]}\n',
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
@@ -523,12 +676,16 @@ describe("PreviewHosting", () => {
           assert.isTrue(
             harness.closes.every((close) => close.terminalId === harness.opens[0]?.terminalId),
           );
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '{"version":1,"leases":[]}\n',
+          );
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("does not report or retain a lease when the preview never becomes reachable", () =>
+  it.effect("retries failed preview cleanup after restart and removes the lease", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(10_000);
       const fs = yield* FileSystem.FileSystem;
@@ -572,6 +729,8 @@ describe("PreviewHosting", () => {
           );
         }).pipe(Effect.provide(layer)),
       );
+      const failedState = yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`);
+      assert.include(failedState, '"status":"expired"');
 
       const restarted = testTerminalHarness();
       yield* Effect.scoped(
@@ -590,6 +749,10 @@ describe("PreviewHosting", () => {
       assert.equal(restarted.opens.length, 0);
       assert.equal(restarted.writes.length, 0);
       assert.equal(restarted.closes.length, 1);
+      assert.equal(
+        yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+        '{"version":1,"leases":[]}\n',
+      );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
@@ -639,7 +802,7 @@ describe("PreviewHosting", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const persistedLease = (cwd: string, url: string, expiresAt: string) =>
-        `{"version":1,"leases":[{"id":"lease-1","threadId":"thread-1","terminalId":"preview-lease-1","command":"node serve.js","cwd":"${cwd}","worktreePath":null,"url":"${url}","handedOffAt":"2026-09-01T00:00:00.000Z","expiresAt":"${expiresAt}","status":"active","terminalClosed":false}]}`;
+        `{"version":1,"leases":[{"id":"lease-1","threadId":"thread-1","terminalId":"preview-lease-1","command":"node serve.js","cwd":"${cwd}","worktreePath":null,"url":"${url}","handedOffAt":"2026-09-01T00:00:00.000Z","expiresAt":"${expiresAt}","status":"active"}]}`;
       const corruptFiles = [
         " \n\t ",
         persistedLease("/workspace", PREVIEW_URL, "not-a-date"),

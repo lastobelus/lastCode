@@ -13,6 +13,8 @@ import { recordVisitForThread } from "~/browserHistoryStore";
 import { applyPreviewServerSnapshot, isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 
+import { recoverHostedPreview } from "./previewHostingRecovery";
+
 const terminalLinkErrorContext = {
   environmentId: Schema.String,
   threadId: Schema.String,
@@ -64,6 +66,7 @@ export async function openTerminalLinkInPreview<E>(
   };
 
   const defaults = await resolveBrowserDefaults();
+  await recoverHostedPreview(input.threadRef, input.url);
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {

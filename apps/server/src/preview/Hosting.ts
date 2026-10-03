@@ -54,7 +54,6 @@ export const PreviewHostingLease = Schema.Struct({
   handedOffAt: Schema.String,
   expiresAt: Schema.String,
   status: LeaseStatus,
-  terminalClosed: Schema.Boolean,
 });
 export type PreviewHostingLease = typeof PreviewHostingLease.Type;
 
@@ -185,7 +184,9 @@ const make = Effect.gen(function* () {
   const discovery = yield* PortScanner.PortDiscovery;
   const statePath = path.join(config.stateDir, HOSTING_STATE_FILE);
   const persistLock = yield* Semaphore.make(1);
-  const leaseLocks = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+  const leaseLocks = yield* SynchronizedRef.make(
+    new Map<string, { readonly semaphore: Semaphore.Semaphore; readonly users: number }>(),
+  );
   const wakeups = yield* Queue.dropping<void>(1);
 
   const readState = Effect.gen(function* () {
@@ -253,7 +254,6 @@ const make = Effect.gen(function* () {
       ),
     ),
   );
-  const startupError = yield* SynchronizedRef.get(startupErrorRef);
   const leasesRef = yield* SynchronizedRef.make<ReadonlyArray<PreviewHostingLease>>(initialLeases);
 
   const persistState = (leases: ReadonlyArray<PreviewHostingLease>) =>
@@ -277,6 +277,7 @@ const make = Effect.gen(function* () {
     f: (
       current: ReadonlyArray<PreviewHostingLease>,
     ) => readonly [A, ReadonlyArray<PreviewHostingLease>],
+    wakeWorker = true,
   ) =>
     persistLock.withPermit(
       Effect.gen(function* () {
@@ -284,23 +285,43 @@ const make = Effect.gen(function* () {
         const [result, next] = f(current);
         yield* persistState(next);
         yield* SynchronizedRef.set(leasesRef, next);
-        yield* Queue.offer(wakeups, undefined);
+        if (wakeWorker) yield* Queue.offer(wakeups, undefined);
         return result;
       }),
     );
 
-  const withLeaseLock = <A, E, R>(leaseId: string, effect: Effect.Effect<A, E, R>) =>
-    SynchronizedRef.modifyEffect(leaseLocks, (current) => {
+  const withLeaseLock = <A, E, R>(leaseId: string, effect: Effect.Effect<A, E, R>) => {
+    const acquire = SynchronizedRef.modifyEffect(leaseLocks, (current) => {
       const existing = current.get(leaseId);
-      if (existing) return Effect.succeed([existing, current] as const);
+      if (existing) {
+        const next = new Map(current);
+        const entry = { ...existing, users: existing.users + 1 };
+        next.set(leaseId, entry);
+        return Effect.succeed([entry, next] as const);
+      }
       return Semaphore.make(1).pipe(
         Effect.map((created) => {
           const next = new Map(current);
-          next.set(leaseId, created);
-          return [created, next] as const;
+          const entry = { semaphore: created, users: 1 };
+          next.set(leaseId, entry);
+          return [entry, next] as const;
         }),
       );
-    }).pipe(Effect.flatMap((semaphore) => semaphore.withPermit(effect)));
+    });
+    return Effect.acquireUseRelease(
+      acquire,
+      (entry) => entry.semaphore.withPermit(effect),
+      ({ semaphore }) =>
+        SynchronizedRef.update(leaseLocks, (current) => {
+          const entry = current.get(leaseId);
+          if (entry === undefined || entry.semaphore !== semaphore) return current;
+          const next = new Map(current);
+          if (entry.users === 1) next.delete(leaseId);
+          else next.set(leaseId, { ...entry, users: entry.users - 1 });
+          return next;
+        }),
+    );
+  };
 
   const nowMillis = Effect.map(DateTime.now, (now) => DateTime.toEpochMillis(now));
   const findLease = (leaseId: string) =>
@@ -308,11 +329,16 @@ const make = Effect.gen(function* () {
       Effect.map((leases) => leases.find((lease) => lease.id === leaseId) ?? null),
     );
 
-  const setLease = (lease: PreviewHostingLease) =>
-    changeLeases((leases) => [
-      undefined,
-      leases.map((entry) => (entry.id === lease.id ? lease : entry)),
-    ]);
+  const setLease = (lease: PreviewHostingLease, wakeWorker = true) =>
+    changeLeases(
+      (leases) => [undefined, leases.map((entry) => (entry.id === lease.id ? lease : entry))],
+      wakeWorker,
+    );
+
+  const removeLease = (leaseId: string) =>
+    changeLeases((leases) => [undefined, leases.filter((lease) => lease.id !== leaseId)]);
+
+  const startupError = yield* SynchronizedRef.get(startupErrorRef);
 
   const makeReadinessError = (lease: PreviewHostingLease) =>
     new PreviewHostingError({
@@ -422,14 +448,10 @@ const make = Effect.gen(function* () {
       if (Date.parse(latest.expiresAt) > currentTime && latest.status !== "expired") return;
       if (latest.status !== "expired") {
         latest = { ...latest, status: "expired" };
-        yield* setLease(latest);
+        yield* setLease(latest, false);
       }
-      if (latest.terminalClosed) return;
       yield* closeOwnedTerminal(latest).pipe(
-        Effect.tap(() => {
-          const closed = { ...latest!, terminalClosed: true };
-          return setLease(closed);
-        }),
+        Effect.tap(() => removeLease(latest!.id)),
         Effect.catch((error) =>
           Effect.logWarning("failed to close expired preview terminal", {
             threadId: latest!.threadId,
@@ -499,7 +521,7 @@ const make = Effect.gen(function* () {
         yield* SynchronizedRef.update(leasesRef, (leases) =>
           leases.map((entry) => (entry.id === expired.id ? expired : entry)),
         );
-        yield* setLease(expired).pipe(
+        yield* setLease(expired, false).pipe(
           Effect.catch((error) =>
             Effect.logWarning("failed to persist failed preview lease cleanup state", {
               threadId: lease.threadId,
@@ -517,6 +539,7 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
+        yield* Queue.offer(wakeups, undefined);
         return yield* originalError;
       }),
     );
@@ -636,7 +659,6 @@ const make = Effect.gen(function* () {
                 DateTime.makeUnsafe(createdAtMillis + PREVIEW_HOSTING_LEASE_MS),
               ),
               status: "starting",
-              terminalClosed: false,
             };
             yield* changeLeases((leases) => [undefined, [...leases, lease]]);
             return { lease, created: true } as const;
@@ -669,29 +691,18 @@ const make = Effect.gen(function* () {
       if (normalizedUrl === null) return null;
       const leases = yield* SynchronizedRef.get(leasesRef);
       const currentTime = yield* nowMillis;
-      const candidate = leases
-        .filter(
-          (lease) =>
-            lease.threadId === input.threadId &&
-            lease.id === input.leaseId &&
-            lease.url === normalizedUrl &&
-            lease.status !== "expired" &&
-            Date.parse(lease.expiresAt) > currentTime,
-        )
-        .toSorted((left, right) => right.handedOffAt.localeCompare(left.handedOffAt))[0];
-      if (candidate === undefined) {
-        const expired = leases.find(
-          (lease) =>
-            lease.threadId === input.threadId &&
-            lease.id === input.leaseId &&
-            lease.url === normalizedUrl &&
-            lease.status !== "expired" &&
-            Date.parse(lease.expiresAt) <= currentTime,
-        );
-        if (expired !== undefined) yield* withLeaseLock(expired.id, expireLocked(expired));
+      const lease = leases.find(
+        (entry) =>
+          entry.threadId === input.threadId &&
+          entry.id === input.leaseId &&
+          entry.url === normalizedUrl,
+      );
+      if (lease === undefined) return null;
+      if (lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime) {
+        yield* withLeaseLock(lease.id, expireLocked(lease));
         return null;
       }
-      return yield* ensureLeaseReady(candidate.id);
+      return yield* ensureLeaseReady(lease.id);
     });
 
   const list: PreviewHosting["Service"]["list"] = (threadId) =>
@@ -726,9 +737,7 @@ const make = Effect.gen(function* () {
   const expireDueLeases = Effect.fn("PreviewHosting.expireDueLeases")(function* () {
     const currentTime = yield* nowMillis;
     const due = (yield* SynchronizedRef.get(leasesRef)).filter(
-      (lease) =>
-        (lease.status !== "expired" && Date.parse(lease.expiresAt) <= currentTime) ||
-        (lease.status === "expired" && !lease.terminalClosed),
+      (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime,
     );
     yield* Effect.forEach(due, (lease) => withLeaseLock(lease.id, expireLocked(lease)), {
       concurrency: "unbounded",
@@ -744,14 +753,12 @@ const make = Effect.gen(function* () {
       const activeExpiry = leases
         .filter((lease) => lease.status !== "expired")
         .map((lease) => Date.parse(lease.expiresAt));
-      const failedClosePending = leases.some(
-        (lease) => lease.status === "expired" && !lease.terminalClosed,
-      );
+      const failedClosePending = leases.some((lease) => lease.status === "expired");
+      const activeDelayMs =
+        activeExpiry.length === 0 ? undefined : Math.max(0, Math.min(...activeExpiry) - now);
       const delayMs = failedClosePending
-        ? EXPIRED_TERMINAL_RETRY_MS
-        : activeExpiry.length === 0
-          ? undefined
-          : Math.max(0, Math.min(...activeExpiry) - now);
+        ? Math.min(EXPIRED_TERMINAL_RETRY_MS, activeDelayMs ?? EXPIRED_TERMINAL_RETRY_MS)
+        : activeDelayMs;
       if (delayMs === undefined) {
         yield* Queue.take(wakeups);
       } else {
