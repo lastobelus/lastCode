@@ -1,4 +1,6 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import { OrchestrationDispatchCommandError, ActionResumeError } from "@t3tools/contracts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as NodeCrypto from "node:crypto";
@@ -91,6 +93,8 @@ import {
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
+  type UpdateDrainAdmissionError,
+  type UpdateDrainError,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
@@ -1092,6 +1096,8 @@ const makeWsRpcLayer = (
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
+      const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -2438,6 +2444,52 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverUpdateServer, serverSelfUpdate.update(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverStartUpdateDrain]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverStartUpdateDrain,
+            DateTime.now.pipe(
+              Effect.flatMap((now) =>
+                updateDrainAdmission.dispatch({
+                  type: "update-drain.start",
+                  ...input,
+                  createdAt: DateTime.formatIso(now),
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "update-drain" },
+          ),
+        [WS_METHODS.serverCancelUpdateDrain]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverCancelUpdateDrain,
+            DateTime.now.pipe(
+              Effect.flatMap((now) =>
+                updateDrainAdmission.dispatch({
+                  type: "update-drain.cancel",
+                  ...input,
+                  createdAt: DateTime.formatIso(now),
+                }),
+              ),
+              Effect.tap(() =>
+                Option.match(actionResume, {
+                  onNone: () => Effect.void,
+                  onSome: (service) => service.retryPendingFollowUps,
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "update-drain" },
+          ),
+        [WS_METHODS.serverClaimUpdateActivation]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverClaimUpdateActivation,
+            updateDrainAdmission.claimActivation(input),
+            {
+              "rpc.aggregate": "update-drain",
+            },
+          ),
+        [WS_METHODS.serverGetUpdateDrainStatus]: () =>
+          observeRpcEffect(WS_METHODS.serverGetUpdateDrainStatus, updateDrainAdmission.status, {
+            "rpc.aggregate": "update-drain",
+          }),
         [WS_METHODS.serverUpdateServerWithProgress]: (input) =>
           observeRpcStream(
             WS_METHODS.serverUpdateServerWithProgress,
@@ -3346,24 +3398,41 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "review" },
           ),
         [WS_METHODS.terminalOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalOpen,
+            updateDrainAdmission.admit("terminal-open", terminalManager.open(input)),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalAttach]: (input) =>
           observeRpcStream(
             WS_METHODS.terminalAttach,
-            Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-              Effect.acquireRelease(
-                terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
-                (unsubscribe) => Effect.sync(unsubscribe),
-              ),
-            ),
+            Stream.callback<
+              TerminalAttachStreamEvent,
+              TerminalError | UpdateDrainAdmissionError | UpdateDrainError
+            >((queue) => {
+              const attach = (startIfNeeded: boolean) =>
+                Effect.acquireRelease(
+                  terminalManager.attachStream(
+                    input,
+                    (event) => Queue.offer(queue, event),
+                    startIfNeeded,
+                  ),
+                  (unsubscribe) => Effect.sync(unsubscribe),
+                );
+              return updateDrainAdmission.admitOrElse("terminal-open", attach(true), attach(false));
+            }),
             { "rpc.aggregate": "terminal" },
           ),
         [WS_METHODS.terminalWrite]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalWrite,
+            updateDrainAdmission.admit("terminal-write", terminalManager.write(input)),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalResize]: (input) =>
           observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
             "rpc.aggregate": "terminal",
@@ -3373,13 +3442,47 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "terminal",
           }),
         [WS_METHODS.terminalRestart]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalRestart,
+            updateDrainAdmission.admit("terminal-restart", terminalManager.restart(input)),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalClose]: (input) =>
           observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
             "rpc.aggregate": "terminal",
           }),
+        [WS_METHODS.actionResumeResume]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.actionResumeResume,
+            Option.match(actionResume, {
+              onNone: () =>
+                Effect.fail(
+                  new ActionResumeError({
+                    reason: "internal_error",
+                    message: "Action resume is unavailable in this server runtime.",
+                  }),
+                ),
+              onSome: (service) => service.resumeInterrupted(input.threadId),
+            }),
+            { "rpc.aggregate": "action-resume" },
+          ),
+        [WS_METHODS.actionResumeDiscard]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.actionResumeDiscard,
+            Option.match(actionResume, {
+              onNone: () =>
+                Effect.fail(
+                  new ActionResumeError({
+                    reason: "internal_error",
+                    message: "Action resume is unavailable in this server runtime.",
+                  }),
+                ),
+              onSome: (service) => service.discardInterrupted(input.threadId),
+            }),
+            { "rpc.aggregate": "action-resume" },
+          ),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           observeRpcStream(
             WS_METHODS.subscribeTerminalEvents,
@@ -3428,6 +3531,10 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.previewReportStatus]: (input) =>
           observeRpcEffect(WS_METHODS.previewReportStatus, previewManager.reportStatus(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewClaimRecovery]: (input) =>
+          observeRpcEffect(WS_METHODS.previewClaimRecovery, previewManager.claimRecovery(input), {
             "rpc.aggregate": "preview",
           }),
         [WS_METHODS.previewAutomationConnect]: (input) =>

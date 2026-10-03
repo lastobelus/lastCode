@@ -12,6 +12,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
+  clearRecovery: vi.fn(),
+  navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" } as
+    | { _tag: "Success"; url: string; title: string }
+    | { _tag: "LoadFailed"; url: string; code: number; description: string },
   navigate: vi.fn(async (_tabId: string, _url: string): Promise<void> => undefined),
   rememberPreviewUrl: vi.fn(),
   readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
@@ -96,6 +100,12 @@ vi.mock("~/localApi", () => ({
   ensureLocalApi: vi.fn(),
 }));
 
+vi.mock("./previewRecoveryRequest", () => ({
+  clearPreviewRecoveryRequest: mocks.clearRecovery,
+  requestPreviewRecovery: vi.fn(),
+  usePreviewRecoveryRequest: () => ({ status: "idle" }),
+}));
+
 vi.mock("~/previewStateStore", () => ({
   rememberPreviewUrl: mocks.rememberPreviewUrl,
   updatePreviewServerSnapshot: vi.fn(),
@@ -123,11 +133,7 @@ vi.mock("~/previewStateStore", () => ({
           "tab-1": {
             threadId: "thread-1",
             tabId: "tab-1",
-            navStatus: {
-              _tag: "Success",
-              url: "http://example.com/",
-              title: "Example",
-            },
+            navStatus: mocks.navStatus,
             canGoBack: false,
             canGoForward: false,
             updatedAt: "2026-07-13T00:00:00.000Z",
@@ -328,6 +334,8 @@ function installTestDom() {
 
 describe("PreviewView navigation", () => {
   beforeEach(() => {
+    mocks.clearRecovery.mockClear();
+    mocks.navStatus = { _tag: "Success", url: "http://example.com/", title: "Example" };
     mocks.navigate.mockClear();
     mocks.rememberPreviewUrl.mockClear();
     mocks.readPreparedConnection.mockClear();
@@ -354,6 +362,40 @@ describe("PreviewView navigation", () => {
     mocks.recordingTabIds = new Set();
     mocks.recordingRuntimeTabId = null;
     mocks.recordVisitForThread.mockClear();
+  });
+
+  it("reenables the original failed link after a redirect, without clearing another thread", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    const original = "http://localhost:3000/qa";
+    const redirected = "http://localhost:3000/qa/";
+    try {
+      mocks.navStatus = { _tag: "LoadFailed", url: original, code: -102, description: "refused" };
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      mocks.navStatus = { _tag: "Success", url: redirected, title: "QA" };
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.clearRecovery.mock.calls).toEqual([
+        [TEST_THREAD_REF, original],
+        [TEST_THREAD_REF, redirected],
+      ]);
+      mocks.clearRecovery.mockClear();
+      mocks.navStatus = { _tag: "LoadFailed", url: original, code: -102, description: "refused" };
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      const otherThread = { ...TEST_THREAD_REF, threadId: ThreadId.make("other-thread") };
+      mocks.navStatus = { _tag: "Success", url: redirected, title: "QA" };
+      await act(() => root.render(<PreviewView threadRef={otherThread} tabId="tab-1" visible />));
+      expect(mocks.clearRecovery.mock.calls).toEqual([[otherThread, redirected]]);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 
   it("shows the cursor in a replacement browser while the old instance still records", async () => {

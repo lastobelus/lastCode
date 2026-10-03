@@ -75,6 +75,16 @@ import {
   THREAD_HISTORY_MAX_RAW_TURNS,
 } from "./threadHistoryPaging.ts";
 
+// Cleanup recovery stays in navigation even when the deleted thread was archived.
+// Keep archivedAt in the durable payload; only its shell roster changes.
+function isActiveShellThread(
+  thread: Pick<OrchestrationV2AppThread, "archivedAt" | "deletedAt" | "worktreeCleanup">,
+): boolean {
+  return (
+    thread.archivedAt === null || (thread.deletedAt !== null && thread.worktreeCleanup != null)
+  );
+}
+
 export class ProjectionStoreApplyEventError extends Schema.TaggedError<ProjectionStoreApplyEventError>()(
   "ProjectionStoreApplyEventError",
   {
@@ -174,6 +184,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "settledOverride"
   | "pinnedAt"
   | "autoSettleDisabledAt"
+  | "attention"
   | "snoozedUntil"
   | "snoozedAt"
   | "latestRunId"
@@ -334,6 +345,14 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, ProjectionStoreV2Error>;
+  readonly getWorktreeCleanupThreads: Effect.Effect<
+    ReadonlyArray<OrchestrationV2AppThread>,
+    ProjectionStoreV2Error
+  >;
+  readonly getPersistentThreads: Effect.Effect<
+    ReadonlyArray<OrchestrationV2AppThread>,
+    ProjectionStoreV2Error
+  >;
   readonly getThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2AppThread, ProjectionStoreV2Error>;
@@ -650,6 +669,12 @@ export function applyToProjection(
     case "thread.unpinned":
     case "thread.pin-reordered":
     case "thread.active-reordered":
+    case "thread.persistence-changed":
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+    case "thread.attention-set":
+    case "thread.attention-cleared":
     case "thread.metadata-updated":
     case "thread.pull-request-synced":
     case "thread.runtime-mode-updated":
@@ -1346,6 +1371,11 @@ export function threadShellFromProjection(
     interactionMode: projection.thread.interactionMode,
     branch: projection.thread.branch,
     worktreePath: projection.thread.worktreePath,
+    persistent: projection.thread.persistent ?? false,
+    annotation: projection.thread.annotation ?? null,
+    attention: projection.thread.attention ?? null,
+    actionResume: projection.thread.actionResume ?? null,
+    worktreeCleanup: projection.thread.worktreeCleanup ?? null,
     pullRequests: threadPullRequestsOf(projection.thread),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
@@ -1578,6 +1608,11 @@ function shellFromState(input: {
     interactionMode: input.state.thread.interactionMode,
     branch: input.state.thread.branch,
     worktreePath: input.state.thread.worktreePath,
+    persistent: input.state.thread.persistent ?? false,
+    annotation: input.state.thread.annotation ?? null,
+    attention: input.state.thread.attention ?? null,
+    actionResume: input.state.thread.actionResume ?? null,
+    worktreeCleanup: input.state.thread.worktreeCleanup ?? null,
     pullRequests: threadPullRequestsOf(input.state.thread),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
@@ -1676,6 +1711,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "thread.active-reordered":
           case "thread.visited":
           case "thread.marked-unread":
+          case "thread.persistence-changed":
+          case "thread.annotation-upserted":
+          case "thread.annotation-resolved":
+          case "thread.annotation-reopened":
+          case "thread.attention-set":
+          case "thread.attention-cleared":
           case "thread.metadata-updated":
           case "thread.pull-request-synced":
           case "thread.runtime-mode-updated":
@@ -2508,6 +2549,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.visited" &&
           event.type !== "thread.marked-unread" &&
           event.type !== "thread.metadata-updated" &&
+          event.type !== "thread.persistence-changed" &&
+          event.type !== "thread.annotation-upserted" &&
+          event.type !== "thread.annotation-resolved" &&
+          event.type !== "thread.annotation-reopened" &&
+          event.type !== "thread.attention-set" &&
+          event.type !== "thread.attention-cleared" &&
           event.type !== "thread.runtime-mode-updated" &&
           event.type !== "thread.interaction-mode-updated" &&
           event.type !== "thread.model-selection-updated" &&
@@ -4019,6 +4066,34 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
       );
 
+    const getWorktreeCleanupThreads: ProjectionStoreV2Shape["getWorktreeCleanupThreads"] =
+      Effect.gen(function* () {
+        const rows = yield* sql<PayloadRow>`
+        SELECT payload_json FROM orchestration_v2_projection_threads
+        WHERE json_extract(payload_json, '$.worktreeCleanup') IS NOT NULL
+      `;
+        return yield* Effect.forEach(rows, (row) => decodeThreadPayload(row.payload_json));
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProjectionStoreReadError({ threadId: ThreadId.make("thread:shell"), cause }),
+        ),
+      );
+
+    const getPersistentThreads: ProjectionStoreV2Shape["getPersistentThreads"] = Effect.gen(
+      function* () {
+        const rows = yield* sql<PayloadRow>`
+        SELECT payload_json FROM orchestration_v2_projection_threads
+        WHERE deleted_at IS NULL AND json_extract(payload_json, '$.persistent') = 1
+      `;
+        return yield* Effect.forEach(rows, (row) => decodeThreadPayload(row.payload_json));
+      },
+    ).pipe(
+      Effect.mapError(
+        (cause) => new ProjectionStoreReadError({ threadId: ThreadId.make("thread:shell"), cause }),
+      ),
+    );
+
     const getThread: ProjectionStoreV2Shape["getThread"] = (threadId) =>
       Effect.gen(function* () {
         const rows = yield* sql<PayloadRow>`
@@ -4888,11 +4963,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
               ORDER BY candidate.ordinal DESC, candidate.run_id DESC LIMIT 1
             ) AND blocked.status = 'failed'
-            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
+            WHERE (t.deleted_at IS NULL OR json_extract(t.payload_json, '$.worktreeCleanup') IS NOT NULL)${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               location === "active"
-                ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
+                ? sql` AND (json_extract(t.payload_json, '$.archivedAt') IS NULL OR t.deleted_at IS NOT NULL)`
                 : location === "archive"
-                  ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NOT NULL`
+                  ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NOT NULL AND t.deleted_at IS NULL`
                   : sql``
             }${
               unsettledOnly
@@ -5057,6 +5132,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
+              AND json_extract(t.payload_json, '$.attention') IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id
@@ -5086,6 +5162,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   pinnedAt: thread.pinnedAt ?? null,
 
                   autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
+                  attention: thread.attention ?? null,
                   snoozedUntil: thread.snoozedUntil ?? null,
                   snoozedAt: thread.snoozedAt ?? null,
                   status,
@@ -5360,8 +5437,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             return {
               schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
               snapshotSequence: sequenceRows[0]?.snapshot_sequence ?? 0,
-              threads: shells.filter((thread) => thread.archivedAt === null),
-              archivedThreads: shells.filter((thread) => thread.archivedAt !== null),
+              threads: shells.filter(isActiveShellThread),
+              archivedThreads: shells.filter((thread) => !isActiveShellThread(thread)),
             };
           }),
         )
@@ -5377,7 +5454,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     // Per-thread shell for the live shell streams: reads only the target thread
     // plus its fork-source chain instead of materializing every thread. Returns
-    // null when the thread is deleted or unknown.
+    // null when the thread is unknown or deletion has no pending cleanup.
     const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId) =>
       sql
         .withTransaction(
@@ -5444,6 +5521,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       apply,
       getShellSnapshot,
       getThreadShell,
+      getWorktreeCleanupThreads,
+      getPersistentThreads,
       getThread,
       getSettlementCandidates,
       getThreadsWithPullRequests,
@@ -5517,8 +5596,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               ) {
                 return false;
               }
-              if (options?.location === "active") return projection.thread.archivedAt === null;
-              if (options?.location === "archive") return projection.thread.archivedAt !== null;
+              if (options?.location === "active") return isActiveShellThread(projection.thread);
+              if (options?.location === "archive") return !isActiveShellThread(projection.thread);
               return true;
             })
             .map(([threadId]) => threadId);
@@ -5527,12 +5606,14 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             (threadId) =>
               service.getThreadProjection(threadId).pipe(Effect.map(threadShellFromProjection)),
           );
-          const visible = shells.filter((thread) => thread.deletedAt === null);
+          const visible = shells.filter(
+            (thread) => thread.deletedAt === null || thread.worktreeCleanup != null,
+          );
           return {
             schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
             snapshotSequence: yield* Ref.get(sequence),
-            threads: visible.filter((thread) => thread.archivedAt === null),
-            archivedThreads: visible.filter((thread) => thread.archivedAt !== null),
+            threads: visible.filter(isActiveShellThread),
+            archivedThreads: visible.filter((thread) => !isActiveShellThread(thread)),
           };
         }),
       getThreadShell: (threadId) =>
@@ -5544,8 +5625,22 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const shell = yield* service
             .getThreadProjection(threadId)
             .pipe(Effect.map(threadShellFromProjection));
-          return shell.deletedAt === null ? shell : null;
+          return shell.deletedAt === null || shell.worktreeCleanup != null ? shell : null;
         }),
+      getWorktreeCleanupThreads: Ref.get(replayState).pipe(
+        Effect.map((state) =>
+          [...state.projections.values()]
+            .map(({ thread }) => thread)
+            .filter((thread) => thread.worktreeCleanup != null),
+        ),
+      ),
+      getPersistentThreads: Ref.get(replayState).pipe(
+        Effect.map((state) =>
+          [...state.projections.values()]
+            .map(({ thread }) => thread)
+            .filter((thread) => thread.deletedAt === null && thread.persistent === true),
+        ),
+      ),
       getThread: (threadId) =>
         Effect.gen(function* () {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
@@ -5566,6 +5661,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 thread.settledOverride === null &&
                 thread.pinnedAt == null &&
                 thread.autoSettleDisabledAt == null &&
+                thread.attention == null &&
                 !runs.some(isActivityRunForShell) &&
                 !runtimeRequests.some((request) => request.status === "pending"),
             )
