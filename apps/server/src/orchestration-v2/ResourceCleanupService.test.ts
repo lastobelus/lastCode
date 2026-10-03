@@ -82,6 +82,64 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
 );
 
 it.effect(
+  "archive cleanup runs despite failed lease lookup and retains the preview namespace",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-archive-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const closed = yield* Ref.make<ReadonlyArray<string>>([]);
+      const closeCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layer = ResourceCleanupService.live.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            ServerConfig.layer(config),
+            Layer.mock(TerminalManager.TerminalManager)({
+              metadata: Effect.succeed([
+                summary("thread-1", "preview-terminal"),
+                summary("thread-1", "shell-terminal"),
+              ]),
+              close: ({ terminalId, deleteHistory }) =>
+                Ref.update(closed, (values) => [
+                  ...values,
+                  `${terminalId}:${String(deleteHistory)}`,
+                ]),
+              closeThreadExcept: (threadId, retainedTerminalIds, prefixes) =>
+                Ref.update(closeCalls, (values) => [
+                  ...values,
+                  `${threadId}:${retainedTerminalIds.join(",")}:${prefixes?.join(",")}`,
+                ]),
+            }),
+            Layer.mock(PreviewHosting.PreviewHosting)({
+              list: () =>
+                Effect.fail(
+                  new PreviewHosting.PreviewHostingError({
+                    operation: "persist",
+                    statePath: "/state/preview-hosting.json",
+                    cause: new Error("unreadable lease state"),
+                  }),
+                ),
+            }),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
+        const result = yield* Effect.result(cleanup.cleanupArchivedTerminals("thread-1"));
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.equal(result.failure.operation, "preview");
+        assert.deepStrictEqual(yield* Ref.get(closed), []);
+        assert.deepStrictEqual(yield* Ref.get(closeCalls), ["thread-1::preview-"]);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
   "closes all deleted-thread terminals despite preview failure and retains the retry error",
   () =>
     Effect.gen(function* () {

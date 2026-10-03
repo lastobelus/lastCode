@@ -71,23 +71,32 @@ export const live = Layer.effect(
           }
         }),
       cleanupArchivedTerminals: (threadId: string) =>
-        previews.list(threadId).pipe(
-          Effect.mapError(
-            (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
-          ),
-          Effect.flatMap((leases) =>
-            terminals
-              .closeThreadExcept(
-                threadId,
-                leases.map((lease) => lease.terminalId),
-              )
-              .pipe(
-                Effect.mapError(
-                  (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
-                ),
+        Effect.gen(function* () {
+          const previewsResult = yield* Effect.result(previews.list(threadId));
+          // An unreadable lease file cannot identify owners; preserve the managed namespace.
+          yield* terminals
+            .closeThreadExcept(
+              threadId,
+              previewsResult._tag === "Success"
+                ? previewsResult.success.map((lease) => lease.terminalId)
+                : [],
+              previewsResult._tag === "Failure" ? ["preview-"] : [],
+            )
+            .pipe(
+              Effect.mapError(
+                (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
               ),
-          ),
-        ),
+            );
+          if (previewsResult._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "preview",
+                threadId,
+                cause: previewsResult.failure,
+              }),
+            );
+          }
+        }),
       cleanupAttachments: (attachmentIds: ReadonlyArray<string>) =>
         Effect.forEach(
           attachmentIds,

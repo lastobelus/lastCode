@@ -516,23 +516,28 @@ export const make = Effect.gen(function* () {
       // A thread re-engaged before this event ran keeps its shells.
       const thread = yield* projections.getThread(threadId);
       if (thread.settledOverride !== "settled") return;
-      const threadTerminals = (yield* terminals.metadata).filter(
-        (terminal) => terminal.threadId === threadId,
-      );
-      yield* Effect.forEach(
-        threadTerminals,
-        (terminal) =>
-          previews
-            .ownsTerminal(threadId, terminal.terminalId)
-            .pipe(
-              Effect.flatMap((owned) =>
-                owned
-                  ? Effect.void
-                  : terminals.closeIdle({ threadId, terminalId: terminal.terminalId }),
-              ),
+      const managedTerminalIds = yield* previews.list(threadId).pipe(
+        Effect.map((leases) => leases.map((preview) => preview.terminalId)),
+        Effect.catch((error) =>
+          terminals.metadata.pipe(
+            Effect.map((summaries) =>
+              summaries
+                .filter(
+                  (terminal) =>
+                    terminal.threadId === threadId && terminal.terminalId.startsWith("preview-"),
+                )
+                .map((terminal) => terminal.terminalId),
             ),
-        { discard: true, concurrency: 4 },
+            Effect.tap(() =>
+              Effect.logWarning("preview leases unavailable while settling thread", {
+                threadId,
+                error: error.message,
+              }),
+            ),
+          ),
+        ),
       );
+      yield* terminals.closeIdle({ threadId, excludedTerminalIds: managedTerminalIds });
     },
     (effect, threadId) =>
       effect.pipe(
