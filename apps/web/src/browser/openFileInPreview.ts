@@ -15,7 +15,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/unstable/reactivity";
 
-import { recoverHostedPreview } from "~/components/preview/previewHostingRecovery";
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import {
   applyPreviewServerSnapshot,
@@ -65,12 +65,12 @@ export async function openUrlInPreview<E>(input: {
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  await recoverHostedPreview(input.threadRef, input.url);
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: input.url,
+      url: prepared.url,
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.

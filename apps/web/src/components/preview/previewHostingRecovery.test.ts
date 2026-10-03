@@ -79,9 +79,10 @@ describe("native preview reopening", () => {
       .mockResolvedValue({ _tag: "Success", value: lease });
     const first = recoverHostedPreview(owner, "http://localhost:5173/qa");
     const second = recoverHostedPreview(owner, "http://localhost:5173/qa");
-    expect(second).toBe(first);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
     finish({ _tag: "Success", value: [lease] });
     expect(await first).toBe(true);
+    expect(await second).toBe(true);
     expect(mocks.run).toHaveBeenCalledTimes(2);
     mocks.run.mockResolvedValueOnce({ _tag: "Success", value: [lease] });
     expect(await recoverHostedPreview(owner, "http://localhost:5173/qa")).toBe(true);

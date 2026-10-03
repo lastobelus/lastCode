@@ -57,7 +57,13 @@ const STUB_BROWSER_DEFAULTS = {
   profileId: DEFAULT_BROWSER_PROFILE_ID,
 };
 
-vi.mock("./previewHostingRecovery", () => ({ recoverHostedPreview: mocks.recoverHostedPreview }));
+vi.mock("./previewHostingRecovery", () => ({
+  recoverHostedPreview: mocks.recoverHostedPreview,
+  prepareHostedPreview: async (
+    _ref: Parameters<typeof import("./previewHostingRecovery").prepareHostedPreview>[0],
+    url: string,
+  ) => ({ url, managed: false, restored: await mocks.recoverHostedPreview() }),
+}));
 
 vi.mock("~/browserHistoryStore", () => ({
   recordVisitForThread: mocks.recordVisitForThread,

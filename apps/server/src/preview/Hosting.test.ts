@@ -1,7 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -39,6 +41,7 @@ interface TerminalHarness {
     | ((input: { readonly threadId: string; readonly terminalId?: string | undefined }) => boolean);
   readonly onWrite?: () => Effect.Effect<void>;
   readonly onOpen?: (input: TerminalOpenInput) => Effect.Effect<void>;
+  readonly onRefreshMetadata?: () => Effect.Effect<void>;
   readonly onCloseAttempt?: (input: {
     readonly threadId: string;
     readonly terminalId?: string | undefined;
@@ -157,7 +160,9 @@ function terminalLayer(harness: TerminalHarness) {
       return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
-    refreshMetadata: Effect.sync(() => harness.summaries),
+    refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
+      Effect.as(harness.summaries),
+    ),
   });
 }
 
@@ -382,6 +387,166 @@ describe("PreviewHosting", () => {
           assert.isTrue(yield* Deferred.isDone(terminalLockAcquired));
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("cleans up a new durable reservation interrupted before terminal open", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-cancel-before-open-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const refreshStarted = yield* Deferred.make<void>();
+      const holdRefresh = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        onRefreshMetadata: () =>
+          Deferred.succeed(refreshStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(holdRefresh)),
+          ),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* Effect.forkScoped(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+            }),
+          );
+          yield* Deferred.await(refreshStarted);
+          assert.include(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '"status":"starting"',
+          );
+
+          yield* Fiber.interrupt(pending);
+          const exit = yield* Fiber.await(pending);
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+          assert.deepEqual(harness.opens, []);
+          assert.equal(harness.closes.length, 1);
+          assert.match(harness.closes[0]?.terminalId ?? "", /^preview-/);
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '{"version":1,"leases":[]}\n',
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("cleans up a new lease interrupted after command write before readiness", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-cancel-after-write-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const wrote = yield* Deferred.make<void>();
+      const holdWrite = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        onWrite: () =>
+          Deferred.succeed(wrote, undefined).pipe(Effect.andThen(Deferred.await(holdWrite))),
+      });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* Effect.forkScoped(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+            }),
+          );
+          yield* Deferred.await(wrote);
+          assert.equal(harness.opens.length, 1);
+          assert.equal(harness.writes.length, 1);
+          assert.include(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '"status":"starting"',
+          );
+
+          yield* Fiber.interrupt(pending);
+          const exit = yield* Fiber.await(pending);
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+          assert.equal(harness.closes.length, 1);
+          assert.equal(harness.closes[0]?.terminalId, harness.opens[0]?.terminalId);
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.equal(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '{"version":1,"leases":[]}\n',
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness, false))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("does not clean up an existing lease when recovery is interrupted", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-cancel-recover-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const initialHarness = testTerminalHarness();
+      const lease = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          return yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace",
+            url: PREVIEW_URL,
+          });
+        }).pipe(Effect.provide(hostingLayer(config, initialHarness))),
+      );
+
+      const refreshStarted = yield* Deferred.make<void>();
+      const holdRefresh = yield* Deferred.make<void>();
+      const recovering = testTerminalHarness({
+        onRefreshMetadata: () =>
+          Deferred.succeed(refreshStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(holdRefresh)),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* Effect.forkScoped(
+            hosting.recover({ threadId: "thread-1", leaseId: lease.id, url: lease.url }),
+          );
+          yield* Deferred.await(refreshStarted);
+          yield* Fiber.interrupt(pending);
+          const exit = yield* Fiber.await(pending);
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+          assert.deepEqual(yield* hosting.list("thread-1"), [lease]);
+          assert.deepEqual(recovering.closes, []);
+        }).pipe(Effect.provide(hostingLayer(config, recovering))),
+      );
+      assert.include(
+        yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+        '"status":"active"',
+      );
+      assert.deepEqual(recovering.closes, []);
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 

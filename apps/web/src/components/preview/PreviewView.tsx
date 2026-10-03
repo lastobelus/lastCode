@@ -44,7 +44,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
 import { openPreviewSession } from "./openPreviewSession";
-import { recoverHostedPreview } from "./previewHostingRecovery";
+import { prepareHostedPreview, recoverHostedPreview } from "./previewHostingRecovery";
 import { PreviewChromeRow } from "./PreviewChromeRow";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 import { PreviewMoreMenu } from "./PreviewMoreMenu";
@@ -210,10 +210,10 @@ export function PreviewView({
   const navigateToResolvedUrl = useCallback(
     async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
-        await recoverHostedPreview(threadRef, resolvedUrl);
+        const prepared = await prepareHostedPreview(threadRef, resolvedUrl);
         // The bridge mirrors the resolved URL back to the server.
-        await previewBridge.navigate(runtimeTabId, resolvedUrl);
-        rememberPreviewUrl(threadRef, resolvedUrl);
+        await previewBridge.navigate(runtimeTabId, prepared.url);
+        rememberPreviewUrl(threadRef, prepared.url);
         return true;
       }
       const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });

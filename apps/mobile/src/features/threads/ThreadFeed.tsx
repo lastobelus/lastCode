@@ -200,8 +200,10 @@ import {
   useAssetUrlState,
   useRefreshAssetUrl,
 } from "../../state/assets";
+import { previewEnvironment } from "../../state/preview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { usePreparedConnection } from "../../state/session";
+import { openThreadFeedExternalUrl } from "../../lib/openThreadFeedExternalUrl";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
@@ -2344,6 +2346,16 @@ function ThreadFeedPlaceholder(props: {
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const navigation = useNavigation();
+  const listHostedPreviews = useAtomCommand(previewEnvironment.hostingList, {
+    reportFailure: false,
+  });
+  const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
+    reportFailure: false,
+  });
+  const preparedConnection = usePreparedConnection(props.environmentId);
+  const environmentUrl = Option.isSome(preparedConnection)
+    ? preparedConnection.value.httpBaseUrl
+    : "";
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
@@ -2551,10 +2563,44 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           );
           return;
         }
-        void tryOpenExternalUrl(presentation.href, "markdown-link");
+        const linkUrl = presentation.href;
+        void openThreadFeedExternalUrl({
+          threadRef: { environmentId: props.environmentId, threadId: props.threadId },
+          url: linkUrl,
+          environmentUrl,
+          list: async () => {
+            const result = await listHostedPreviews({
+              environmentId: props.environmentId,
+              input: { threadId: props.threadId },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+          recover: async (lease) => {
+            const result = await recoverHostedPreviewLease({
+              environmentId: props.environmentId,
+              input: {
+                threadId: props.threadId,
+                leaseId: lease.leaseId,
+                url: lease.url,
+              },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+          openExternal: (url) => tryOpenExternalUrl(url, "markdown-link"),
+        });
       }
     },
-    [props.environmentId, props.threadId, props.workspaceRoot, navigation],
+    [
+      environmentUrl,
+      listHostedPreviews,
+      navigation,
+      props.environmentId,
+      props.threadId,
+      props.workspaceRoot,
+      recoverHostedPreviewLease,
+    ],
   );
   const markdownLinkHandlers = useMemo<MarkdownLinkHandlers>(
     () => ({

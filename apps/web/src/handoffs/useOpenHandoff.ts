@@ -12,6 +12,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useCallback } from "react";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import {
@@ -101,8 +102,12 @@ export async function openHandoff(
     } else if (target.kind === "url") {
       const existing = findHandoffBrowser(ref, entry);
       if (existing) {
-        if (readThreadPreviewState(ref).sessions[existing]?.navStatus._tag === "LoadFailed") {
-          await navigateHandoffBrowser(ref, existing, target.url, navigatePreview);
+        const prepared = await prepareHostedPreview(ref, target.url);
+        if (
+          prepared.managed ||
+          readThreadPreviewState(ref).sessions[existing]?.navStatus._tag === "LoadFailed"
+        ) {
+          await navigateHandoffBrowser(ref, existing, prepared.url, navigatePreview);
         }
         panels.openBrowser(ref, existing);
       } else {

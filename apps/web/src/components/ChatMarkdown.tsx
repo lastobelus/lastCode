@@ -205,6 +205,7 @@ import {
   BrowserPreviewUnavailableError,
   BrowserSettingsReadError,
 } from "../browser/openFileInPreview";
+import { mayBeHostedPreviewUrl } from "./preview/previewHostingRecovery";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
 
@@ -3151,6 +3152,19 @@ const CHAT_MARKDOWN_COMPONENTS = {
               return;
             }
             if (!href) return;
+            if (!event.defaultPrevented && threadRef && mayBeHostedPreviewUrl(threadRef, href)) {
+              event.preventDefault();
+              event.stopPropagation();
+              void openDeferredMarkdownLink(href, {
+                event: { metaKey: event.metaKey, ctrlKey: event.ctrlKey },
+              }).catch((cause: unknown) =>
+                reportMarkdownActionFailure(
+                  { operation: "open-link-in-preview", target: href },
+                  cause,
+                ),
+              );
+              return;
+            }
             // Anything else follows the "Open links in" setting. The system browser
             // keeps the `_blank` the shell already handles; the in-app browser needs
             // the click intercepted here. A modifier click is the way out of the

@@ -270,7 +270,9 @@ can break the preview, so save a copy if you need to keep it.
 
 Managed QA previews stay available for 24 hours after handoff. Opening one
 restarts its temporary server if needed; the server stops automatically when
-that window ends. Viewing does not extend the window.
+that window ends. Viewing does not extend the window. Open the link from its
+thread so LastCode can restore it before opening either browser. Remote viewing
+still requires the server to be reachable from your device.
 
 If a link opened in the integrated browser cannot connect, choose **Ask agent to
 restore preview**. The failed link and error go to the thread that owns the

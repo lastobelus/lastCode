@@ -5,6 +5,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useCallback } from "react";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
+
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { readLocalApi } from "~/localApi";
 import { previewEnvironment } from "~/state/preview";
@@ -61,7 +63,8 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
       }
       const api = readLocalApi();
       if (!api) throw new Error("Link opening is unavailable.");
-      await api.shell.openExternal(url);
+      const prepared = targetThreadRef ? await prepareHostedPreview(targetThreadRef, url) : { url };
+      await api.shell.openExternal(prepared.url);
     },
     [openPreview, threadRef],
   );

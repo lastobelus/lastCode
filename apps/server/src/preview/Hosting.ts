@@ -14,6 +14,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -510,14 +511,13 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const failNewLease = (
-    lease: PreviewHostingLease,
-    originalError: PreviewHostingError | TerminalManager.TerminalError,
-  ) =>
+  const cleanupFailedLaunch = (lease: PreviewHostingLease) =>
     withLeaseLock(
       lease.id,
       Effect.gen(function* () {
-        const expired = { ...lease, status: "expired" as const };
+        const latest = yield* findLease(lease.id);
+        if (latest === null) return;
+        const expired = { ...latest, status: "expired" as const };
         yield* SynchronizedRef.update(leasesRef, (leases) =>
           leases.map((entry) => (entry.id === expired.id ? expired : entry)),
         );
@@ -540,148 +540,163 @@ const make = Effect.gen(function* () {
           ),
         );
         yield* Queue.offer(wakeups, undefined);
-        return yield* originalError;
       }),
     );
 
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = (input) =>
     Effect.gen(function* () {
-      const selected = yield* withWorkspaceLease(
-        path.resolve(input.worktreePath ?? input.cwd),
-        launchGate.withPermit(
-          Effect.gen(function* () {
-            if (startupError !== null) return yield* startupError;
-            const normalizedUrl = normalizeLocalHttpUrl(input.url);
-            if (normalizedUrl === null) {
-              return yield* new PreviewHostingError({
-                operation: "validate",
-                statePath,
-                threadId: input.threadId,
-                url: input.url,
-                detail: "Preview leases require a valid local HTTP or HTTPS URL.",
-              });
-            }
-            if (input.command.trim().length === 0 || input.cwd.trim().length === 0) {
-              return yield* new PreviewHostingError({
-                operation: "validate",
-                statePath,
-                threadId: input.threadId,
-                url: normalizedUrl,
-                detail: "Preview command and working directory are required.",
-              });
-            }
-            if (
-              !path.isAbsolute(input.cwd) ||
-              (input.worktreePath != null && !path.isAbsolute(input.worktreePath))
-            ) {
-              return yield* new PreviewHostingError({
-                operation: "validate",
-                statePath,
-                threadId: input.threadId,
-                url: normalizedUrl,
-                detail: "Preview working directory and worktree path must be absolute.",
-              });
-            }
-            const cwd = path.resolve(input.cwd);
-            const worktreePath =
-              input.worktreePath == null ? null : path.resolve(input.worktreePath);
-
-            const createdAtMillis = yield* nowMillis;
-            const existing = yield* SynchronizedRef.get(leasesRef).pipe(
-              Effect.map((leases) =>
-                leases
-                  .filter((lease) => lease.status !== "expired")
-                  .filter((lease) => Date.parse(lease.expiresAt) > createdAtMillis)
-                  .toSorted((left, right) => right.handedOffAt.localeCompare(left.handedOffAt)),
-              ),
-            );
-            const sameLease = existing.find(
-              (lease) => lease.threadId === input.threadId && lease.url === normalizedUrl,
-            );
-            const portConflict = existing.find(
-              (lease) => discoveryPortKey(lease.url) === discoveryPortKey(normalizedUrl),
-            );
-            if (sameLease !== undefined) {
-              if (portConflict !== undefined && portConflict.id !== sameLease.id) {
+      const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
+      const operation = Effect.gen(function* () {
+        const selected = yield* withWorkspaceLease(
+          path.resolve(input.worktreePath ?? input.cwd),
+          launchGate.withPermit(
+            Effect.gen(function* () {
+              if (startupError !== null) return yield* startupError;
+              const normalizedUrl = normalizeLocalHttpUrl(input.url);
+              if (normalizedUrl === null) {
+                return yield* new PreviewHostingError({
+                  operation: "validate",
+                  statePath,
+                  threadId: input.threadId,
+                  url: input.url,
+                  detail: "Preview leases require a valid local HTTP or HTTPS URL.",
+                });
+              }
+              if (input.command.trim().length === 0 || input.cwd.trim().length === 0) {
                 return yield* new PreviewHostingError({
                   operation: "validate",
                   statePath,
                   threadId: input.threadId,
                   url: normalizedUrl,
-                  detail: "A live preview lease already owns this discovery port.",
+                  detail: "Preview command and working directory are required.",
                 });
               }
               if (
-                sameLease.command !== input.command ||
-                sameLease.cwd !== cwd ||
-                sameLease.worktreePath !== worktreePath ||
-                sameLease.providerInstanceId !== input.providerInstanceId ||
-                !sameEnvironment(sameLease.env, input.env)
+                !path.isAbsolute(input.cwd) ||
+                (input.worktreePath != null && !path.isAbsolute(input.worktreePath))
               ) {
                 return yield* new PreviewHostingError({
                   operation: "validate",
                   statePath,
                   threadId: input.threadId,
                   url: normalizedUrl,
-                  detail:
-                    "A live preview lease already owns this URL with a different launch command.",
+                  detail: "Preview working directory and worktree path must be absolute.",
                 });
               }
-              return { lease: sameLease, created: false } as const;
-            }
-            if (portConflict !== undefined) {
-              return yield* new PreviewHostingError({
-                operation: "validate",
-                statePath,
-                threadId: input.threadId,
-                url: normalizedUrl,
-                detail: `A live preview lease already owns discovery port ${new URL(normalizedUrl).port || (new URL(normalizedUrl).protocol === "https:" ? "443" : "80")}.`,
-              });
-            }
+              const cwd = path.resolve(input.cwd);
+              const worktreePath =
+                input.worktreePath == null ? null : path.resolve(input.worktreePath);
 
-            const id = NodeCrypto.randomUUID();
-            const handedOffAt = DateTime.formatIso(DateTime.makeUnsafe(createdAtMillis));
-            const lease: PreviewHostingLease = {
-              id,
-              threadId: input.threadId,
-              terminalId: `preview-${id}`,
-              command: input.command,
-              cwd,
-              worktreePath,
-              ...(input.env === undefined ? {} : { env: input.env }),
-              ...(input.providerInstanceId === undefined
-                ? {}
-                : { providerInstanceId: input.providerInstanceId }),
-              url: normalizedUrl,
-              handedOffAt,
-              expiresAt: DateTime.formatIso(
-                DateTime.makeUnsafe(createdAtMillis + PREVIEW_HOSTING_LEASE_MS),
-              ),
-              status: "starting",
-            };
-            yield* changeLeases((leases) => [undefined, [...leases, lease]]);
-            return { lease, created: true } as const;
-          }),
+              const createdAtMillis = yield* nowMillis;
+              const existing = yield* SynchronizedRef.get(leasesRef).pipe(
+                Effect.map((leases) =>
+                  leases
+                    .filter((lease) => lease.status !== "expired")
+                    .filter((lease) => Date.parse(lease.expiresAt) > createdAtMillis)
+                    .toSorted((left, right) => right.handedOffAt.localeCompare(left.handedOffAt)),
+                ),
+              );
+              const sameLease = existing.find(
+                (lease) => lease.threadId === input.threadId && lease.url === normalizedUrl,
+              );
+              const portConflict = existing.find(
+                (lease) => discoveryPortKey(lease.url) === discoveryPortKey(normalizedUrl),
+              );
+              if (sameLease !== undefined) {
+                if (portConflict !== undefined && portConflict.id !== sameLease.id) {
+                  return yield* new PreviewHostingError({
+                    operation: "validate",
+                    statePath,
+                    threadId: input.threadId,
+                    url: normalizedUrl,
+                    detail: "A live preview lease already owns this discovery port.",
+                  });
+                }
+                if (
+                  sameLease.command !== input.command ||
+                  sameLease.cwd !== cwd ||
+                  sameLease.worktreePath !== worktreePath ||
+                  sameLease.providerInstanceId !== input.providerInstanceId ||
+                  !sameEnvironment(sameLease.env, input.env)
+                ) {
+                  return yield* new PreviewHostingError({
+                    operation: "validate",
+                    statePath,
+                    threadId: input.threadId,
+                    url: normalizedUrl,
+                    detail:
+                      "A live preview lease already owns this URL with a different launch command.",
+                  });
+                }
+                return { lease: sameLease } as const;
+              }
+              if (portConflict !== undefined) {
+                return yield* new PreviewHostingError({
+                  operation: "validate",
+                  statePath,
+                  threadId: input.threadId,
+                  url: normalizedUrl,
+                  detail: `A live preview lease already owns discovery port ${new URL(normalizedUrl).port || (new URL(normalizedUrl).protocol === "https:" ? "443" : "80")}.`,
+                });
+              }
+
+              const id = NodeCrypto.randomUUID();
+              const handedOffAt = DateTime.formatIso(DateTime.makeUnsafe(createdAtMillis));
+              const lease: PreviewHostingLease = {
+                id,
+                threadId: input.threadId,
+                terminalId: `preview-${id}`,
+                command: input.command,
+                cwd,
+                worktreePath,
+                ...(input.env === undefined ? {} : { env: input.env }),
+                ...(input.providerInstanceId === undefined
+                  ? {}
+                  : { providerInstanceId: input.providerInstanceId }),
+                url: normalizedUrl,
+                handedOffAt,
+                expiresAt: DateTime.formatIso(
+                  DateTime.makeUnsafe(createdAtMillis + PREVIEW_HOSTING_LEASE_MS),
+                ),
+                status: "starting",
+              };
+              yield* Effect.uninterruptible(
+                SynchronizedRef.set(leaseForCleanup, lease).pipe(
+                  Effect.andThen(changeLeases((leases) => [undefined, [...leases, lease]])),
+                ),
+              );
+              return { lease } as const;
+            }),
+          ),
+        );
+
+        // The durable reservation is visible to cleanup before the workspace lock
+        // is released. TerminalManager.open takes the same lock itself, so readiness
+        // must run after this short reservation section rather than inside it.
+        const ensureReady = ensureLeaseReady(selected.lease.id);
+        const started = yield* ensureReady;
+        if (started === null) {
+          return yield* new PreviewHostingError({
+            operation: "ready",
+            statePath,
+            threadId: input.threadId,
+            url: selected.lease.url,
+          });
+        }
+        return started;
+      });
+      return yield* operation.pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit)
+            ? SynchronizedRef.get(leaseForCleanup).pipe(
+                Effect.flatMap((lease) =>
+                  lease === null ? Effect.void : cleanupFailedLaunch(lease),
+                ),
+              )
+            : Effect.void,
         ),
       );
-
-      // The durable reservation is visible to cleanup before the workspace lock
-      // is released. TerminalManager.open takes the same lock itself, so readiness
-      // must run after this short reservation section rather than inside it.
-      const ensureReady = ensureLeaseReady(selected.lease.id);
-      const started = yield* selected.created
-        ? ensureReady.pipe(Effect.catch((error) => failNewLease(selected.lease, error)))
-        : ensureReady;
-      if (started === null) {
-        return yield* new PreviewHostingError({
-          operation: "ready",
-          statePath,
-          threadId: input.threadId,
-          url: selected.lease.url,
-        });
-      }
-      return started;
     });
 
   const recover: PreviewHosting["Service"]["recover"] = (input) =>

@@ -13,7 +13,7 @@ import { recordVisitForThread } from "~/browserHistoryStore";
 import { applyPreviewServerSnapshot, isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 
-import { recoverHostedPreview } from "./previewHostingRecovery";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 
 const terminalLinkErrorContext = {
   environmentId: Schema.String,
@@ -35,7 +35,7 @@ interface OpenTerminalLinkInPreviewInput<E> {
   readonly url: string;
   readonly threadRef: ScopedThreadRef;
   readonly openPreview: OpenPreviewMutation<E>;
-  readonly fallbackToBrowser: () => void;
+  readonly fallbackToBrowser: (url: string) => void;
   /** Cmd/Ctrl-click bypasses the preference and opens in the system browser. */
   readonly forceBrowser: boolean;
 }
@@ -47,6 +47,7 @@ interface OpenTerminalLinkInPreviewInput<E> {
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
   const supportsPreview =
     !input.forceBrowser &&
     isWebUrl(input.url) &&
@@ -55,7 +56,7 @@ export async function openTerminalLinkInPreview<E>(
     (await resolveBrowserLinkTargetPreference()) === "app";
 
   if (!supportsPreview) {
-    input.fallbackToBrowser();
+    input.fallbackToBrowser(prepared.url);
     return;
   }
 
@@ -66,12 +67,11 @@ export async function openTerminalLinkInPreview<E>(
   };
 
   const defaults = await resolveBrowserDefaults();
-  await recoverHostedPreview(input.threadRef, input.url);
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: input.url,
+      url: prepared.url,
       // Same reason as `openUrlInPreview`: this path handles its own result
       // mapping, so the configured defaults are applied explicitly.
       viewport: browserDefaultOpenViewport(defaults),
@@ -88,7 +88,7 @@ export async function openTerminalLinkInPreview<E>(
         cause: result.cause,
       }),
     );
-    input.fallbackToBrowser();
+    input.fallbackToBrowser(prepared.url);
     return;
   }
   recordVisitForThread(input.threadRef, input.url);

@@ -39,7 +39,7 @@ working directory and `http://localhost:5173/example.html`.
 The successful tool result establishes a fixed 24-hour lease and returns its
 handoff time and expiry. LastCode owns the terminal and retains the launch
 context across turn completion and server restarts. Opening the link in its
-owning thread restores a stopped server without sending an agent message. A
+owning thread, in either the integrated or system browser, restores a stopped server without sending an agent message. A
 failed page load also tries native recovery before offering the request button.
 Repeated launch, viewing, and recovery do not extend the expiry. At expiry,
 LastCode closes only that lease's terminal. It retains the source worktree while
@@ -52,7 +52,10 @@ through `preview_host` to establish native ownership. One managed listener owns
 a local origin; use a distinct port for another preview. Native browser recovery
 uses the owning environment and thread, never an unrelated thread or public
 website. Existing browser connection limits still apply when the environment's
-preview URL is unreachable from the client.
+preview URL is unreachable from the client. Desktop, web, and mobile prepare
+owned links before opening them. Private-network environment addresses replace
+loopback destinations for remote clients; this does not create a tunnel or make
+a loopback-only listener reachable from another machine.
 
 Persistent HTML files can instead use LastCode's existing file-preview hosting
 without a temporary server. Keep the source and neighboring assets available.
