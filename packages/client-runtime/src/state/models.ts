@@ -142,6 +142,21 @@ export interface EnvironmentThreadShell {
   readonly source: OrchestrationV2ThreadShell;
 }
 
+type ThreadShellVisibility =
+  | Pick<EnvironmentThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">
+  | Pick<OrchestrationV2ThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">;
+
+export function threadShellIsCleanupRecovery(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt !== null && thread.worktreeCleanup != null;
+}
+
+/** Deleted threads stay reachable until their worktree cleanup is resolved. */
+export function threadShellIsVisible(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt === null
+    ? thread.archivedAt === null
+    : threadShellIsCleanupRecovery(thread);
+}
+
 function iso(value: DateTime.Utc): string {
   return DateTime.formatIso(value);
 }
