@@ -366,6 +366,50 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect("infers the git worktree root for nested preview launch directories", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const tempRoot = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-git-root-" });
+      const repositoryRoot = `${tempRoot}/repo`;
+      const cwd = `${repositoryRoot}/packages/app`;
+      yield* fs.makeDirectory(cwd, { recursive: true });
+      // Linked worktrees record their metadata in a `.git` file rather than a directory.
+      yield* fs.writeFileString(`${repositoryRoot}/.git`, "gitdir: /git/worktrees/preview-test");
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), tempRoot),
+      );
+      const harness = testTerminalHarness();
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const lease = yield* hosting.launch({
+            threadId: "thread-nested-preview",
+            command: "pnpm dev --port 5173",
+            cwd,
+            url: PREVIEW_URL,
+          });
+
+          assert.equal(lease.cwd, cwd);
+          assert.equal(lease.worktreePath, repositoryRoot);
+          assert.deepEqual(harness.opens[0], {
+            threadId: "thread-nested-preview",
+            terminalId: lease.terminalId,
+            cwd,
+            worktreePath: repositoryRoot,
+          });
+          assert.include(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            `"worktreePath":"${repositoryRoot}"`,
+          );
+          assert.include(yield* hosting.protectedWorkspacePaths(), repositoryRoot);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect("rejects canonical URL expansion without damaging existing lease state", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(1_000);

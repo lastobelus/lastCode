@@ -24,7 +24,7 @@ export const PreviewHostingLaunchInput = Schema.Struct({
     description: "The absolute directory where the preview command should run.",
   }),
   worktreePath: Schema.optional(Schema.NullOr(PreviewPath)).annotate({
-    description: "The source worktree to retain until this preview lease expires.",
+    description: "The source worktree root to retain until expiry; inferred from cwd when omitted.",
   }),
   env: Schema.optional(Environment).annotate({
     description: "Environment variable overrides for the preview command.",

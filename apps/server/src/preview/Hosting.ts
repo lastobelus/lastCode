@@ -553,9 +553,38 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  const containingWorktree = Effect.fn("PreviewHosting.containingWorktree")(function* (
+    cwd: string,
+  ) {
+    let directory = path.resolve(cwd);
+    while (true) {
+      if (yield* fs.exists(path.join(directory, ".git"))) return directory;
+      const parent = path.dirname(directory);
+      if (parent === directory) return null;
+      directory = parent;
+    }
+  });
+
   const launchGate = yield* Semaphore.make(1);
-  const launch: PreviewHosting["Service"]["launch"] = (input) =>
+  const launch: PreviewHosting["Service"]["launch"] = (requestedInput) =>
     Effect.gen(function* () {
+      const worktreePath =
+        requestedInput.worktreePath ??
+        (path.isAbsolute(requestedInput.cwd)
+          ? yield* containingWorktree(requestedInput.cwd).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new PreviewHostingError({
+                    operation: "validate",
+                    statePath,
+                    threadId: requestedInput.threadId,
+                    url: requestedInput.url,
+                    cause,
+                  }),
+              ),
+            )
+          : null);
+      const input = { ...requestedInput, worktreePath };
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
         const selected = yield* launchGate.withPermit(
