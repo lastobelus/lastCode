@@ -150,7 +150,7 @@ const normalizeLocalHttpUrl = (value: string): string | null => {
     if ((url.protocol !== "http:" && url.protocol !== "https:") || !isLoopbackHost(url.hostname)) {
       return null;
     }
-    return url.href;
+    return url.href.length <= PREVIEW_URL_MAX_LENGTH ? url.href : null;
   } catch {
     return null;
   }

@@ -311,6 +311,58 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect("rejects canonical URL expansion without damaging existing lease state", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-url-length-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness();
+      const oversized = `http://localhost:5174/${"漢".repeat(300)}`;
+      assert.isBelow(oversized.length, 2_048);
+      assert.isAbove(new URL(oversized).href.length, 2_048);
+      const lease = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const active = yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace",
+            url: PREVIEW_URL,
+          });
+          const rejected = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5174",
+              cwd: "/workspace",
+              url: oversized,
+            }),
+          );
+          assert.equal(rejected._tag, "Failure");
+          if (rejected._tag === "Failure") {
+            assert.equal(rejected.failure._tag, "PreviewHostingError");
+            if (rejected.failure._tag === "PreviewHostingError") {
+              assert.equal(rejected.failure.operation, "validate");
+            }
+          }
+          assert.deepEqual(yield* hosting.list("thread-1"), [active]);
+          assert.equal(harness.opens.length, 1);
+          return active;
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+      // A rejected new URL must not make a previously valid registry unreadable.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reopened = yield* PreviewHosting.PreviewHosting;
+          assert.deepEqual(yield* reopened.list("thread-1"), [lease]);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect(
     "removes deleted-thread leases only after close and keeps failed-close worktrees protected",
     () =>

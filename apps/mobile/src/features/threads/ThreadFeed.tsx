@@ -18,6 +18,7 @@ import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-mes
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import {
   type OrchestrationMessageContext,
+  type PreviewHostingLeaseSummary,
   ThreadId,
   type ChatAttachment,
   type ChatFileAttachment,
@@ -203,7 +204,7 @@ import {
 import { previewEnvironment } from "../../state/preview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { usePreparedConnection } from "../../state/session";
-import { openThreadFeedExternalUrl } from "../../lib/openThreadFeedExternalUrl";
+import { prepareThenOpenThreadFeedUrl } from "../../lib/prepareThreadFeedPreview";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
@@ -2483,6 +2484,32 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = useCallback(
     (href: string) => {
+      const previewPreparationInput = (url: string) => ({
+        threadRef: { environmentId: props.environmentId, threadId: props.threadId },
+        url,
+        environmentUrl,
+        knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+        list: async () => {
+          const result = await listHostedPreviews({
+            environmentId: props.environmentId,
+            input: { threadId: props.threadId },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+        recover: async (lease: PreviewHostingLeaseSummary) => {
+          const result = await recoverHostedPreviewLease({
+            environmentId: props.environmentId,
+            input: {
+              threadId: props.threadId,
+              leaseId: lease.leaseId,
+              url: lease.url,
+            },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+      });
       const presentation = resolveMarkdownLinkPresentation(href);
       if (presentation.kind === "file") {
         const relativePath = resolveWorkspaceRelativeFilePath(
@@ -2525,9 +2552,27 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       if (media) {
         void Haptics.selectionAsync();
         if (media.kind === "video") {
-          setExpandedVideo((current) => current ?? media.source);
+          const openVideo = (source: MediaVideoPreviewSource) =>
+            setExpandedVideo((current) => current ?? source);
+          const mediaUrl = "uri" in media.source ? media.source.uri : null;
+          if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
+            void prepareThenOpenThreadFeedUrl(previewPreparationInput(mediaUrl), (url) =>
+              openVideo({ ...media.source, uri: url }),
+            );
+          } else {
+            openVideo(media.source);
+          }
         } else {
-          setExpandedFile((current) => current ?? media.source);
+          const openImage = (source: FilePreviewSource) =>
+            setExpandedFile((current) => current ?? source);
+          const mediaUrl = "uri" in media.source ? media.source.uri : null;
+          if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
+            void prepareThenOpenThreadFeedUrl(previewPreparationInput(mediaUrl), (url) =>
+              openImage({ ...media.source, uri: url }),
+            );
+          } else {
+            openImage(media.source);
+          }
         }
         return;
       }
@@ -2563,39 +2608,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
       if (presentation.kind !== "file" && presentation.href) {
         if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
-          setExpandedFile(
-            (current) => current ?? { kind: "pdf", uri: presentation.href!, name: "Document.pdf" },
+          void prepareThenOpenThreadFeedUrl(previewPreparationInput(presentation.href), (url) =>
+            setExpandedFile(
+              (current) => current ?? { kind: "pdf", uri: url, name: "Document.pdf" },
+            ),
           );
           return;
         }
         const linkUrl = presentation.href;
-        void openThreadFeedExternalUrl({
-          threadRef: { environmentId: props.environmentId, threadId: props.threadId },
-          url: linkUrl,
-          environmentUrl,
-          knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
-          list: async () => {
-            const result = await listHostedPreviews({
-              environmentId: props.environmentId,
-              input: { threadId: props.threadId },
-            });
-            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-            return result.value;
-          },
-          recover: async (lease) => {
-            const result = await recoverHostedPreviewLease({
-              environmentId: props.environmentId,
-              input: {
-                threadId: props.threadId,
-                leaseId: lease.leaseId,
-                url: lease.url,
-              },
-            });
-            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-            return result.value;
-          },
-          openExternal: (url) => tryOpenExternalUrl(url, "markdown-link"),
-        });
+        void prepareThenOpenThreadFeedUrl(previewPreparationInput(linkUrl), (url) =>
+          tryOpenExternalUrl(url, "markdown-link"),
+        );
       }
     },
     [
