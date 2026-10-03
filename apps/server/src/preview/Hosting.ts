@@ -823,15 +823,17 @@ const make = Effect.gen(function* () {
         ),
       { concurrency: "unbounded", discard: true },
     );
+    return currentTime;
   });
 
   const expiryWorker = Effect.forever(
     Effect.gen(function* () {
-      yield* expireDueLeases();
+      const checkedAt = yield* expireDueLeases();
       const now = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
       const activeExpiry = leases
-        .filter((lease) => lease.status !== "expired" && Date.parse(lease.expiresAt) > now)
+        // Deadlines crossed while cleanup was running need another pass immediately.
+        .filter((lease) => lease.status !== "expired" && Date.parse(lease.expiresAt) > checkedAt)
         .map((lease) => Date.parse(lease.expiresAt));
       const failedCleanupPending = leases.some(
         (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= now,

@@ -245,7 +245,11 @@ function hostingLayer(
   return hosting.pipe(Layer.provideMerge(dependencies));
 }
 
-function failFirstExpiredStateWriteLayer(failedWrite: Deferred.Deferred<void>) {
+function failFirstExpiredStateWriteLayer(
+  failedWrite: Deferred.Deferred<void>,
+  releaseFailure: Deferred.Deferred<void>,
+  persistedEmptyState: Deferred.Deferred<void>,
+) {
   return Layer.effect(
     FileSystem.FileSystem,
     Effect.map(FileSystem.FileSystem, (fs) => {
@@ -257,6 +261,7 @@ function failFirstExpiredStateWriteLayer(failedWrite: Deferred.Deferred<void>) {
               if (!failedOnce && data.includes('"status":"expired"')) {
                 failedOnce = true;
                 return Deferred.succeed(failedWrite, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseFailure)),
                   Effect.andThen(
                     Effect.fail(
                       new PlatformError.PlatformError(
@@ -272,7 +277,15 @@ function failFirstExpiredStateWriteLayer(failedWrite: Deferred.Deferred<void>) {
                   ),
                 );
               }
-              return target.writeFileString(filePath, data, options);
+              return target
+                .writeFileString(filePath, data, options)
+                .pipe(
+                  Effect.tap(() =>
+                    data.includes('"leases":[]')
+                      ? Deferred.succeed(persistedEmptyState, undefined)
+                      : Effect.void,
+                  ),
+                );
             };
           }
           const value = Reflect.get(target, property, target);
@@ -964,6 +977,8 @@ describe("PreviewHosting", () => {
         ServerConfig.layerTest(process.cwd(), root),
       );
       const failedWrite = yield* Deferred.make<void>();
+      const releaseFailure = yield* Deferred.make<void>();
+      const persistedEmptyState = yield* Deferred.make<void>();
       const bothClosed = yield* Deferred.make<void>();
       const closedIds = new Set<string>();
       const harness = testTerminalHarness({
@@ -979,7 +994,7 @@ describe("PreviewHosting", () => {
         true,
         [],
         true,
-        failFirstExpiredStateWriteLayer(failedWrite),
+        failFirstExpiredStateWriteLayer(failedWrite, releaseFailure, persistedEmptyState),
       );
 
       yield* Effect.scoped(
@@ -1005,13 +1020,13 @@ describe("PreviewHosting", () => {
           );
           yield* Deferred.await(failedWrite);
 
-          // A failed due lease is retried later, without a zero-delay worker loop;
-          // the second lease's nearer fixed deadline still wakes cleanup first.
-          yield* TestClock.adjust(0);
-          yield* Effect.yieldNow;
-          assert.deepEqual(harness.closes, []);
+          // The first cleanup is held inside its failed state write while the
+          // second lease reaches its fixed deadline. Releasing it must make the
+          // worker notice that deadline without another clock advance.
           yield* TestClock.adjust(Duration.seconds(30));
+          yield* Deferred.succeed(releaseFailure, undefined);
           yield* Deferred.await(bothClosed);
+          yield* Deferred.await(persistedEmptyState);
 
           assert.deepEqual(
             new Set(harness.closes.map((close) => close.terminalId)),
