@@ -1,10 +1,15 @@
 name: CI
+run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"
 
 on:
   pull_request:
+    # Topic bases support stacked PRs; main remains the upstream mirror.
+    branches-ignore:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches:
-      - main
+      - lastcode/main
 
 permissions:
   contents: read
@@ -19,12 +24,14 @@ jobs:
   # passes only when every other job does.
   lint:
     name: Lint
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Carry validation inspects every commit in the exact PR range.
+          fetch-depth: 0
           sparse-checkout: |
             /*
             !/.repos/
@@ -45,6 +52,14 @@ jobs:
           cache: true
           run-install: true
 
+      - name: Validate carry group assignments
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/lastcode-carry-ci.ts
+
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
@@ -57,7 +72,7 @@ jobs:
 
   typecheck:
     name: Typecheck
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -83,7 +98,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -102,7 +117,9 @@ jobs:
           sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
           (
             set +e
-            sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+            # Restrict package resolution to Ubuntu sources, excluding vendor indexes.
+            apt_options=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+            sudo apt-get "${apt_options[@]}" update && sudo apt-get "${apt_options[@]}" install -y libsecret-1-dev pkg-config
             echo "$?" > "$RUNNER_TEMP/apt-status"
           ) > "$RUNNER_TEMP/apt.log" 2>&1 < /dev/null &
 
@@ -137,7 +154,7 @@ jobs:
   # per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -167,7 +184,9 @@ jobs:
           sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
           (
             set +e
-            sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+            # Restrict package resolution to Ubuntu sources, excluding vendor indexes.
+            apt_options=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+            sudo apt-get "${apt_options[@]}" update && sudo apt-get "${apt_options[@]}" install -y libsecret-1-dev pkg-config
             echo "$?" > "$RUNNER_TEMP/apt-status"
           ) > "$RUNNER_TEMP/apt.log" 2>&1 < /dev/null &
 
@@ -201,7 +220,7 @@ jobs:
   # started last and ran alone for about 40s after everything else finished.
   test_web:
     name: Test Web
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -230,7 +249,7 @@ jobs:
   # split files by recorded duration (apps/server/src/testUtils/weightedShardSequencer.ts).
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -308,7 +327,7 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -342,7 +361,7 @@ jobs:
   # the diff cannot be resolved, the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -448,7 +467,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -493,7 +512,7 @@ jobs:
         mobile_native_static_analysis,
         release_smoke,
       ]
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every job to pass
@@ -505,3 +524,42 @@ jobs:
           echo "$RESULTS" | jq -e 'all(to_entries[];
             .value.result == "success"
             or (.key == "mobile_native_static_analysis" and .value.result == "skipped"))' > /dev/null
+
+  ci_gate:
+    name: CI Gate
+    if: ${{ always() }}
+    needs:
+      - check
+      - test
+      - test_server
+      - rust
+      - mobile_native_changes
+      - mobile_native_static_analysis
+      - release_smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify required jobs
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TEST_SERVER_RESULT: ${{ needs.test_server.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          MOBILE_CHANGES_RESULT: ${{ needs.mobile_native_changes.result }}
+          MOBILE_CHANGED: ${{ needs.mobile_native_changes.outputs.changed }}
+          MOBILE_STATIC_RESULT: ${{ needs.mobile_native_static_analysis.result }}
+          RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
+        run: |
+          set -euo pipefail
+          test "$CHECK_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$TEST_SERVER_RESULT" = success
+          test "$RUST_RESULT" = success
+          test "$MOBILE_CHANGES_RESULT" = success
+          test "$RELEASE_SMOKE_RESULT" = success
+          if test "$MOBILE_CHANGED" = false; then
+            test "$MOBILE_STATIC_RESULT" = skipped
+          else
+            test "$MOBILE_STATIC_RESULT" = success
+          fi
