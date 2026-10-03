@@ -15,6 +15,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/unstable/reactivity";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import {
   applyPreviewServerSnapshot,
@@ -52,12 +53,25 @@ export type OpenPreviewMutation<E = unknown> = (input: {
   readonly input: PreviewOpenInput;
 }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
 
-export async function openUrlInPreview<E>(input: {
+interface OpenUrlInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly onOpened?: (tabId: string) => void;
-}): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+}
+
+export async function openUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
+  return openPreparedUrlInPreview(input, prepared.url);
+}
+
+/** Open an already recovered destination while retaining the authored URL. */
+export async function openPreparedUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+  destinationUrl: string,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
   );
@@ -68,7 +82,7 @@ export async function openUrlInPreview<E>(input: {
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: input.url,
+      url: destinationUrl,
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.

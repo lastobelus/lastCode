@@ -13,6 +13,7 @@ interface Props {
   description: string;
   onReload: () => void;
   recoveryRequest: PreviewRecoveryRequestState;
+  restoringHostedPreview?: boolean;
   onRequestRecovery: () => void;
 }
 
@@ -23,6 +24,7 @@ export function PreviewUnreachable({
   description,
   onReload,
   recoveryRequest,
+  restoringHostedPreview = false,
   onRequestRecovery,
 }: Props) {
   const [showDetails, setShowDetails] = useState(false);
@@ -61,21 +63,29 @@ export function PreviewUnreachable({
             type="button"
             variant="outline"
             size="sm"
-            disabled={recoveryRequest.status === "sending" || recoveryRequest.status === "sent"}
+            disabled={
+              restoringHostedPreview ||
+              recoveryRequest.status === "sending" ||
+              recoveryRequest.status === "sent"
+            }
             onClick={onRequestRecovery}
           >
-            {recoveryRequest.status === "sending"
-              ? "Sending request…"
-              : recoveryRequest.status === "sent"
-                ? "Request sent"
-                : "Ask agent to restore preview"}
+            {restoringHostedPreview
+              ? "Restoring preview…"
+              : recoveryRequest.status === "sending"
+                ? "Sending request…"
+                : recoveryRequest.status === "sent"
+                  ? "Request sent"
+                  : "Ask agent to restore preview"}
           </Button>
           <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
-            {recoveryRequest.status === "sent"
-              ? "The failed link and error were sent to this thread. Reload after the agent restores it."
-              : recoveryRequest.status === "error"
-                ? recoveryRequest.error
-                : "Send this failed link and error to the agent in this thread."}
+            {restoringHostedPreview
+              ? "LastCode is reopening this preview."
+              : recoveryRequest.status === "sent"
+                ? "The failed link and error were sent to this thread. Reload after the agent restores it."
+                : recoveryRequest.status === "error"
+                  ? recoveryRequest.error
+                  : "Send this failed link and error to the agent in this thread."}
           </p>
         </div>
 

@@ -12,11 +12,12 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useCallback } from "react";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import {
   isBrowserPreviewFile,
-  openUrlInPreview,
+  openPreparedUrlInPreview,
   type OpenPreviewMutation,
   type openFileInPreview,
 } from "~/browser/openFileInPreview";
@@ -39,12 +40,16 @@ import {
 } from "./handoffsStore";
 
 /** A browser tab that navigated away must not be hijacked when reopening a handoff. */
-function findHandoffBrowser(ref: ScopedThreadRef, entry: HandoffEntry): string | undefined {
+function findHandoffBrowser(
+  ref: ScopedThreadRef,
+  entry: HandoffEntry,
+  destinationUrl?: string,
+): string | undefined {
   const state = readThreadPreviewState(ref);
   for (const snapshot of Object.values(state.sessions)) {
     if (snapshot.navStatus._tag === "Idle") continue;
     const url = snapshot.navStatus.url;
-    if (entry.target.kind === "url" && handoffUrlsEqual(url, entry.target.url))
+    if (entry.target.kind === "url" && handoffUrlsEqual(url, destinationUrl ?? entry.target.url))
       return snapshot.tabId;
     const binding = handoffBrowserTarget(ref, snapshot.tabId);
     if (
@@ -99,19 +104,27 @@ export async function openHandoff(
     if (target.kind === "pull-request") {
       panels.openPullRequest(ref, target);
     } else if (target.kind === "url") {
-      const existing = findHandoffBrowser(ref, entry);
+      const prepared = await prepareHostedPreview(ref, target.url);
+      const existing = findHandoffBrowser(ref, entry, prepared.url);
       if (existing) {
-        if (readThreadPreviewState(ref).sessions[existing]?.navStatus._tag === "LoadFailed") {
-          await navigateHandoffBrowser(ref, existing, target.url, navigatePreview);
+        if (
+          prepared.managed ||
+          readThreadPreviewState(ref).sessions[existing]?.navStatus._tag === "LoadFailed"
+        ) {
+          await navigateHandoffBrowser(ref, existing, prepared.url, navigatePreview);
         }
+        rememberHandoffBrowser(ref, existing, target, prepared.url);
         panels.openBrowser(ref, existing);
       } else {
-        const result = await openUrlInPreview({
-          threadRef: ref,
-          url: target.url,
-          openPreview,
-          onOpened: (tabId) => rememberHandoffBrowser(ref, tabId, target, target.url),
-        });
+        const result = await openPreparedUrlInPreview(
+          {
+            threadRef: ref,
+            url: target.url,
+            openPreview,
+            onOpened: (tabId) => rememberHandoffBrowser(ref, tabId, target, prepared.url),
+          },
+          prepared.url,
+        );
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       }
     } else {

@@ -1,3 +1,4 @@
+import { HostedPreviewUrlTooLongError } from "@t3tools/client-runtime/preview-hosting";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -12,6 +13,7 @@ import {
   recordHandoff,
   readThreadHandoffs,
   rememberHandoffBrowser,
+  handoffBrowserTarget,
   useHandoffsStore,
 } from "./handoffsStore";
 import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
@@ -23,7 +25,13 @@ vi.mock("~/state/entities", () => ({
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
-  readPreparedConnection: () => ({ httpBaseUrl: "https://environment.example" }),
+  readPreparedConnection: () => ({
+    httpBaseUrl: "https://environment.example",
+    target: {
+      _tag: "PrimaryConnectionTarget",
+      httpBaseUrl: "https://environment.example",
+    },
+  }),
 }));
 vi.mock("~/components/ui/toast", () => ({
   stackedThreadToast: (input: unknown) => input,
@@ -42,6 +50,17 @@ vi.mock("~/components/preview/previewBridge", () => ({
   get previewBridge() {
     return native.bridge;
   },
+}));
+
+const hosting = vi.hoisted(() => ({
+  prepare: vi.fn(async (_ref: unknown, url: string) => ({
+    url,
+    managed: false,
+    restored: false,
+  })),
+}));
+vi.mock("~/components/preview/previewHostingRecovery", () => ({
+  prepareHostedPreview: hosting.prepare,
 }));
 
 const ref = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
@@ -68,6 +87,12 @@ const operations = () => ({
 const panel = () => selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
 beforeEach(() => {
   native.bridge = null;
+  hosting.prepare.mockReset();
+  hosting.prepare.mockImplementation(async (_ref, url) => ({
+    url,
+    managed: false,
+    restored: false,
+  }));
   resetPreviewStateForTests();
   useRightPanelStore.setState({ byThreadKey: {}, userActionRevisionByThreadKey: {} });
   useHandoffsStore.setState({ byThreadKey: {} });
@@ -214,6 +239,101 @@ describe("opening a saved handoff", () => {
     expect(panel().activeSurfaceId).toBe("browser:tab");
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(readThreadHandoffs(ref)).toHaveLength(1);
+  });
+  it.each(["web", "desktop"])(
+    "reopens a recovered remote handoff in the same %s tab",
+    async (client) => {
+      const ops = operations();
+      const authoredUrl = "http://localhost:8123/page?q=1#x";
+      const destinationUrl = "http://environment.example:8123/page?q=1#x";
+      hosting.prepare.mockResolvedValue({ url: destinationUrl, managed: true, restored: true });
+      ops.openPreview.mockImplementation(async ({ input }) =>
+        AsyncResult.success(snapshot(input.url ?? "")),
+      );
+      ops.navigatePreview.mockImplementation(async ({ input }) =>
+        AsyncResult.success(snapshot(input.url)),
+      );
+      if (client === "desktop") native.bridge = { navigate: vi.fn(async () => undefined) };
+      const entry = recordHandoff(ref, { kind: "url", url: authoredUrl });
+      await openHandoff(ref, entry, ops);
+      expect(ops.openPreview).toHaveBeenCalledTimes(1);
+      expect(handoffBrowserTarget(ref, "tab")).toEqual({
+        target: entry.target,
+        url: destinationUrl,
+      });
+      applyPreviewServerSnapshot(ref, {
+        ...snapshot(destinationUrl),
+        navStatus: {
+          _tag: "LoadFailed",
+          url: destinationUrl,
+          title: "",
+          code: -102,
+          description: "Server stopped",
+        },
+      });
+      await openHandoff(ref, entry, ops);
+      expect(hosting.prepare).toHaveBeenCalledTimes(2);
+      expect(ops.openPreview).toHaveBeenCalledTimes(1);
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      expect(panel().surfaces).toHaveLength(1);
+      if (client === "desktop") {
+        expect(native.bridge?.navigate).toHaveBeenCalledWith(
+          JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
+          destinationUrl,
+        );
+        expect(ops.navigatePreview).not.toHaveBeenCalled();
+      } else {
+        expect(ops.navigatePreview).toHaveBeenCalledWith({
+          environmentId: ref.environmentId,
+          input: { threadId: ref.threadId, tabId: "tab", url: destinationUrl },
+        });
+      }
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+      expect(readThreadHandoffs(ref)[0]?.target).toEqual(entry.target);
+    },
+  );
+  it("matches a remote destination before looking for its existing tab", async () => {
+    const ops = operations();
+    const destinationUrl = "http://environment.example:8123/page";
+    hosting.prepare.mockResolvedValue({ url: destinationUrl, managed: true, restored: true });
+    const entry = recordHandoff(ref, { kind: "url", url: "http://localhost:8123/page" });
+    // An older tab can lack provenance or have the original authored URL as its binding.
+    applyPreviewServerSnapshot(ref, snapshot(destinationUrl));
+    rememberHandoffBrowser(ref, "tab", entry.target, "http://localhost:8123/page");
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(handoffBrowserTarget(ref, "tab")?.url).toBe(destinationUrl);
+    expect(panel().activeSurfaceId).toBe("browser:tab");
+  });
+  it("does not hijack a remote handoff tab that navigated away during recovery", async () => {
+    const ops = operations();
+    const destinationUrl = "http://environment.example:8123/page";
+    let completeRecovery!: (value: { url: string; managed: boolean; restored: boolean }) => void;
+    hosting.prepare.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          completeRecovery = resolve;
+        }),
+    );
+    const entry = recordHandoff(ref, { kind: "url", url: "http://localhost:8123/page" });
+    applyPreviewServerSnapshot(ref, snapshot(destinationUrl));
+    rememberHandoffBrowser(ref, "tab", entry.target, destinationUrl);
+    const opening = openHandoff(ref, entry, ops);
+    applyPreviewServerSnapshot(ref, snapshot("https://elsewhere.example/"));
+    completeRecovery({ url: destinationUrl, managed: true, restored: true });
+    await opening;
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(ops.openPreview).toHaveBeenCalledTimes(1);
+  });
+  it("does not open or navigate a handoff when its prepared destination exceeds the limit", async () => {
+    const ops = operations();
+    const entry = recordHandoff(ref, { kind: "url", url: "http://localhost:8123/long" });
+    hosting.prepare.mockRejectedValue(new HostedPreviewUrlTooLongError());
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadHandoffs(ref)).toEqual([entry]);
   });
   it("opens unknown URLs unchanged without inferring an asset identity", async () => {
     const ops = operations();

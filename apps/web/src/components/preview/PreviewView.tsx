@@ -1,5 +1,7 @@
 "use client";
 
+import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
+
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
@@ -24,7 +26,6 @@ import {
 } from "~/browserHistoryStore";
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
 import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
-import { ensureLocalApi } from "~/localApi";
 import {
   rememberPreviewUrl,
   updatePreviewServerSnapshot,
@@ -44,6 +45,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
 import { openPreviewSession } from "./openPreviewSession";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 import { PreviewChromeRow } from "./PreviewChromeRow";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 import { PreviewMoreMenu } from "./PreviewMoreMenu";
@@ -78,6 +80,16 @@ import {
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 
+function reportHostedPreviewFailure(cause: unknown) {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Unable to restore preview",
+      description: cause instanceof Error ? cause.message : String(cause),
+    }),
+  );
+}
+
 interface Props {
   threadRef: ScopedThreadRef;
   tabId?: string | null;
@@ -95,8 +107,6 @@ function previewProfileName(
 ): string {
   return profiles.find((profile) => profile.id === profileId)?.name ?? "Removed profile";
 }
-
-const localApi = typeof window === "undefined" ? null : ensureLocalApi();
 
 /**
  * Single-tab preview surface: chrome row on top, one webview below, empty
@@ -206,12 +216,24 @@ export function PreviewView({
     // threadKey stands in for threadRef, whose identity churns on every thread update.
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
+  // Recovery must not override a newer address, tab, or environment.
+  const navigationSequence = useRef(0);
+  useEffect(() => {
+    navigationSequence.current += 1;
+    return () => {
+      navigationSequence.current += 1;
+    };
+  }, [runtimeTabId, url, environmentHttpBaseUrl]);
+
   const navigateToResolvedUrl = useCallback(
     async (resolvedUrl: string) => {
+      const sequence = ++navigationSequence.current;
       if (runtimeTabId && previewBridge) {
+        const prepared = await prepareHostedPreview(threadRef, resolvedUrl);
+        if (sequence !== navigationSequence.current) return false;
         // The bridge mirrors the resolved URL back to the server.
-        await previewBridge.navigate(runtimeTabId, resolvedUrl);
-        rememberPreviewUrl(threadRef, resolvedUrl);
+        await previewBridge.navigate(runtimeTabId, prepared.url);
+        rememberPreviewUrl(threadRef, prepared.url);
         return true;
       }
       const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
@@ -258,9 +280,104 @@ export function PreviewView({
     [navigateToResolvedUrl, threadRef],
   );
 
-  const handleRefresh = useCallback(() => {
+  const refreshNativePreview = useCallback(() => {
     if (previewBridge && runtimeTabId) void previewBridge.refresh(runtimeTabId);
   }, [runtimeTabId]);
+  const hostingEnvironmentId = threadRef.environmentId;
+  const hostingThreadId = threadRef.threadId;
+  const refreshPreparedPreview = useCallback(
+    (prepared: { url: string }) => {
+      if (previewBridge && runtimeTabId && prepared.url !== url) {
+        void previewBridge.navigate(runtimeTabId, prepared.url);
+      } else {
+        refreshNativePreview();
+      }
+    },
+    [runtimeTabId, url, refreshNativePreview],
+  );
+  const handleRefresh = useCallback(() => {
+    const sequence = ++navigationSequence.current;
+    void prepareHostedPreview(
+      { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+      url,
+    ).then(
+      (prepared) => {
+        if (sequence === navigationSequence.current) refreshPreparedPreview(prepared);
+      },
+      (cause: unknown) => {
+        if (sequence === navigationSequence.current) reportHostedPreviewFailure(cause);
+      },
+    );
+  }, [hostingEnvironmentId, hostingThreadId, url, refreshPreparedPreview]);
+
+  const hostingAttemptedByTab = useRef(
+    new Map<
+      string,
+      {
+        url: string;
+        environmentUrl: string | null;
+        recovery: ReturnType<typeof prepareHostedPreview>;
+        completed: boolean;
+      }
+    >(),
+  );
+  const [restoringHostedPreview, setRestoringHostedPreview] = useState(false);
+  const navKind = navStatus._tag;
+  useEffect(() => {
+    if (!runtimeTabId) return;
+    if (navKind !== "LoadFailed") {
+      setRestoringHostedPreview(false);
+      if (navKind === "Success") hostingAttemptedByTab.current.delete(runtimeTabId);
+      return;
+    }
+    const previous = hostingAttemptedByTab.current.get(runtimeTabId);
+    const sameDestination =
+      previous?.url === url && previous.environmentUrl === environmentHttpBaseUrl;
+    if (sameDestination && previous.completed) return;
+    // Effect replay reattaches to pending recovery; completed failures wait for a
+    // deliberate reload or a successful navigation before trying again.
+    const attempt = sameDestination
+      ? previous
+      : {
+          url,
+          environmentUrl: environmentHttpBaseUrl,
+          recovery: prepareHostedPreview(
+            { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+            url,
+          ),
+          completed: false,
+        };
+    hostingAttemptedByTab.current.set(runtimeTabId, attempt);
+    let cancelled = false;
+    const sequence = navigationSequence.current;
+    setRestoringHostedPreview(true);
+    void attempt.recovery.then(
+      (prepared) => {
+        if (cancelled) return;
+        attempt.completed = true;
+        setRestoringHostedPreview(false);
+        if (sequence === navigationSequence.current && prepared.restored)
+          refreshPreparedPreview(prepared);
+      },
+      (cause: unknown) => {
+        if (cancelled) return;
+        attempt.completed = true;
+        setRestoringHostedPreview(false);
+        if (sequence === navigationSequence.current) reportHostedPreviewFailure(cause);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    refreshPreparedPreview,
+    navKind,
+    url,
+    runtimeTabId,
+    hostingEnvironmentId,
+    hostingThreadId,
+    environmentHttpBaseUrl,
+  ]);
 
   const handleZoomIn = useCallback(() => {
     if (previewBridge && runtimeTabId) void previewBridge.zoomIn(runtimeTabId);
@@ -330,9 +447,12 @@ export function PreviewView({
   }, [runtimeTabId]);
 
   const handleOpenInBrowser = useCallback(() => {
-    if (!localApi || !url) return;
-    void localApi.shell.openExternal(url).catch(() => undefined);
-  }, [url]);
+    if (!url) return;
+    void openPreparedExternalUrl(
+      url,
+      async () => (await prepareHostedPreview(threadRef, url)).url,
+    ).catch(() => undefined);
+  }, [threadRef, url]);
 
   const handlePictureInPicture = useCallback(() => {
     if (!tabId) return;
@@ -838,6 +958,7 @@ export function PreviewView({
               description={navStatus.description}
               onReload={handleRefresh}
               recoveryRequest={recoveryRequest}
+              restoringHostedPreview={restoringHostedPreview}
               onRequestRecovery={() => {
                 void requestPreviewRecovery({
                   threadRef,

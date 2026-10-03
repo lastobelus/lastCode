@@ -279,6 +279,13 @@ import {
   PreviewAutomationStreamEvent,
 } from "./previewAutomation.ts";
 import {
+  PreviewHostingError,
+  PreviewHostingLeaseSummary,
+  PreviewHostingListInput,
+  PreviewHostingRecoverInput,
+  PreviewHostingRecoverResult,
+} from "./previewHosting.ts";
+import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
   ServerConfig,
@@ -430,6 +437,8 @@ export const WS_METHODS = {
   previewRefresh: "preview.refresh",
   previewClose: "preview.close",
   previewList: "preview.list",
+  previewHostingList: "previewHosting.list",
+  previewHostingRecover: "previewHosting.recover",
   previewReportStatus: "preview.reportStatus",
   previewClaimRecovery: "preview.claimRecovery",
   previewAutomationConnect: "previewAutomation.connect",
@@ -1483,6 +1492,18 @@ const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
   error: EnvironmentAuthorizationError,
 });
 
+const WsPreviewHostingListRpc = Rpc.make(WS_METHODS.previewHostingList, {
+  payload: PreviewHostingListInput,
+  success: Schema.Array(PreviewHostingLeaseSummary),
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
+
+const WsPreviewHostingRecoverRpc = Rpc.make(WS_METHODS.previewHostingRecover, {
+  payload: PreviewHostingRecoverInput,
+  success: PreviewHostingRecoverResult,
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
@@ -1917,6 +1938,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewRefreshRpc,
   WsPreviewCloseRpc,
   WsPreviewListRpc,
+  WsPreviewHostingListRpc,
+  WsPreviewHostingRecoverRpc,
   WsPreviewReportStatusRpc,
   WsPreviewClaimRecoveryRpc,
   WsPreviewAutomationConnectRpc,
