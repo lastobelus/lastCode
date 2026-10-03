@@ -1,3 +1,4 @@
+import { HostedPreviewUrlTooLongError } from "@t3tools/client-runtime/preview-hosting";
 import {
   BUILT_IN_BROWSER_PROFILES,
   DEFAULT_BROWSER_PROFILE_ID,
@@ -518,6 +519,55 @@ describe("PreviewView navigation", () => {
       }
     },
   );
+
+  it("settles a rejected recovery under StrictMode and leaves failure controls available", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const container = document.createElement("div");
+    const root = createRoot(container as unknown as Element);
+    let rejectRecovery!: (cause: unknown) => void;
+    mocks.recoverHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRecovery = reject;
+        }),
+    );
+    mocks.navStatus = {
+      _tag: "LoadFailed",
+      url: "http://localhost:5173/qa",
+      code: -102,
+      description: "refused",
+    };
+    const contains = (node: TestNode, name: string): boolean =>
+      node.nodeName === name || node.childNodes.some((child) => contains(child, name));
+    const render = () =>
+      root.render(
+        <StrictMode>
+          <PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />
+        </StrictMode>,
+      );
+    try {
+      await act(render);
+      expect(contains(container, "RECOVERY-PENDING")).toBe(true);
+      await act(async () => rejectRecovery(new HostedPreviewUrlTooLongError()));
+      expect(contains(container, "RECOVERY-PENDING")).toBe(false);
+      expect(contains(container, "RECOVERY-AVAILABLE")).toBe(true);
+      expect(mocks.refresh).not.toHaveBeenCalled();
+      expect(mocks.navigate).not.toHaveBeenCalled();
+      expect(toastManager.add).toHaveBeenCalledTimes(1);
+      await act(render);
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(1);
+      expect(toastManager.add).toHaveBeenCalledTimes(1);
+      mocks.recoverHostedPreview.mockRejectedValueOnce(new HostedPreviewUrlTooLongError());
+      await act(async () => mocks.reload?.());
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledTimes(2);
+      expect(toastManager.add).toHaveBeenCalledTimes(2);
+      expect(contains(container, "RECOVERY-AVAILABLE")).toBe(true);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("retries a transient native recovery failure when the user reloads", async () => {
     const document = installTestDom();

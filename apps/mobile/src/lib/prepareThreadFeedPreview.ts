@@ -20,25 +20,37 @@ export async function prepareThenOpenThreadFeedUrl<A>(
   return open(destination);
 }
 
+export type ThreadFeedMediaPreparation =
+  | { readonly status: "pending"; readonly uri: null }
+  | { readonly status: "ready"; readonly uri: string }
+  | { readonly status: "unavailable"; readonly uri: null };
+
 /** Start preparing a direct media URL and ignore results after its source leaves the feed. */
 export function startPreparingThreadFeedMediaUrl(
   url: string,
   prepare: (url: string) => Promise<string>,
-  publish: (url: string) => void,
+  publish: (result: Exclude<ThreadFeedMediaPreparation, { status: "pending" }>) => void,
 ): () => void {
   let current = true;
-  const publishIfCurrent = (value: string) => {
+  const publishIfCurrent = (value: Exclude<ThreadFeedMediaPreparation, { status: "pending" }>) => {
     if (current) publish(value);
   };
 
   if (!/^https?:\/\//i.test(url)) {
-    publishIfCurrent(url);
+    publishIfCurrent({ status: "ready", uri: url });
   } else {
     void Promise.resolve()
       .then(() => (current ? prepare(url) : url))
-      .then(publishIfCurrent, (cause: unknown) => {
-        if (!(cause instanceof HostedPreviewUrlTooLongError)) publishIfCurrent(url);
-      });
+      .then(
+        (uri) => publishIfCurrent({ status: "ready", uri }),
+        (cause: unknown) => {
+          publishIfCurrent(
+            cause instanceof HostedPreviewUrlTooLongError
+              ? { status: "unavailable", uri: null }
+              : { status: "ready", uri: url },
+          );
+        },
+      );
   }
 
   return () => {

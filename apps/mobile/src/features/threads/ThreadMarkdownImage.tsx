@@ -15,7 +15,10 @@ import { MediaActionsMenu } from "../../components/MediaActionsMenu";
 import { PresentationSource } from "../../components/NativePresentation";
 import { useMediaActions, type MediaActionsSource } from "../../lib/mediaActions";
 import { useAssetUrlState } from "../../state/assets";
-import { startPreparingThreadFeedMediaUrl } from "../../lib/prepareThreadFeedPreview";
+import {
+  startPreparingThreadFeedMediaUrl,
+  type ThreadFeedMediaPreparation,
+} from "../../lib/prepareThreadFeedPreview";
 import {
   MARKDOWN_IMAGE_MAX_WIDTH,
   type MarkdownImageDisplaySize,
@@ -37,27 +40,28 @@ export function ThreadMarkdownPreparedUri(props: {
   readonly uri: string;
   readonly sourceKey: string;
   readonly prepareUrl?: ((url: string) => Promise<string>) | undefined;
-  readonly children: (uri: string | null) => ReactNode;
+  readonly children: (result: ThreadFeedMediaPreparation) => ReactNode;
 }) {
   const [prepared, setPrepared] = useState<{
     readonly sourceKey: string;
-    readonly uri: string;
+    readonly originalUri: string;
+    readonly result: ThreadFeedMediaPreparation;
   } | null>(null);
   const requiresPreparation = props.prepareUrl !== undefined && /^https?:\/\//i.test(props.uri);
 
   useEffect(() => {
     if (!props.prepareUrl || !/^https?:\/\//i.test(props.uri)) return;
-    return startPreparingThreadFeedMediaUrl(props.uri, props.prepareUrl, (uri) =>
-      setPrepared({ sourceKey: props.sourceKey, uri }),
+    return startPreparingThreadFeedMediaUrl(props.uri, props.prepareUrl, (result) =>
+      setPrepared({ sourceKey: props.sourceKey, originalUri: props.uri, result }),
     );
   }, [props.prepareUrl, props.sourceKey, props.uri]);
 
-  const preparedUri = requiresPreparation
-    ? prepared?.sourceKey === props.sourceKey
-      ? prepared.uri
-      : null
-    : props.uri;
-  return props.children(preparedUri);
+  const result: ThreadFeedMediaPreparation = requiresPreparation
+    ? prepared?.sourceKey === props.sourceKey && prepared.originalUri === props.uri
+      ? prepared.result
+      : { status: "pending", uri: null }
+    : { status: "ready", uri: props.uri };
+  return props.children(result);
 }
 
 export function ThreadMarkdownImageView(props: {

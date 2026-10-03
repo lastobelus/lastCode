@@ -7,6 +7,7 @@ import {
   prepareThenOpenThreadFeedUrl,
   preparedThreadFeedMediaActionsSource,
   startPreparingThreadFeedMediaUrl,
+  type ThreadFeedMediaPreparation,
 } from "./prepareThreadFeedPreview";
 
 const threadRef = {
@@ -138,7 +139,7 @@ describe("startPreparingThreadFeedMediaUrl", () => {
 
     startPreparingThreadFeedMediaUrl("file:///workspace/image.png", prepare, publish);
 
-    expect(publish).toHaveBeenCalledWith("file:///workspace/image.png");
+    expect(publish).toHaveBeenCalledWith({ status: "ready", uri: "file:///workspace/image.png" });
     expect(prepare).not.toHaveBeenCalled();
   });
 
@@ -146,23 +147,83 @@ describe("startPreparingThreadFeedMediaUrl", () => {
     let finishRecovery!: (url: string) => void;
     let recoveryStarted!: () => void;
     const started = new Promise<void>((resolve) => (recoveryStarted = resolve));
-    const published: string[] = [];
+    const published: ThreadFeedMediaPreparation[] = [];
+    let finishPublishing!: () => void;
+    const publishedResult = new Promise<void>((resolve) => (finishPublishing = resolve));
     const cancel = startPreparingThreadFeedMediaUrl(
       lease.url,
       () => {
         recoveryStarted();
         return new Promise<string>((resolve) => (finishRecovery = resolve));
       },
-      (url) => published.push(url),
+      (result) => {
+        published.push(result);
+        finishPublishing();
+      },
     );
 
     await started;
     expect(published).toEqual([]);
     finishRecovery("http://192.168.1.30:5173/report/index.html?run=7#chart");
-    await vi.waitFor(() =>
-      expect(published).toEqual(["http://192.168.1.30:5173/report/index.html?run=7#chart"]),
-    );
+    await publishedResult;
+    expect(published).toEqual([
+      { status: "ready", uri: "http://192.168.1.30:5173/report/index.html?run=7#chart" },
+    ]);
     cancel();
+  });
+
+  it.each(["png", "mp4"])(
+    "settles an oversized .%s preview as unavailable without publishing its loopback URL",
+    async (extension) => {
+      const prefix = "http://localhost:5173/";
+      const suffix = `.${extension}`;
+      const url = prefix + "x".repeat(2048 - prefix.length - suffix.length) + suffix;
+      const found = { ...lease, url };
+      const recover = vi.fn(async () => found);
+      const result = await new Promise<ThreadFeedMediaPreparation>((publish) => {
+        startPreparingThreadFeedMediaUrl(
+          url,
+          (url) =>
+            prepareThenOpenThreadFeedUrl(
+              {
+                threadRef,
+                url,
+                environmentUrl: "http://192.168.100.100:3773/",
+                list: async () => [found],
+                recover,
+              },
+              (preparedUrl) => preparedUrl,
+            ),
+          publish,
+        );
+      });
+
+      expect(result).toEqual({ status: "unavailable", uri: null });
+      expect(recover).not.toHaveBeenCalled();
+    },
+  );
+
+  it("ignores an unavailable result after the media source is replaced", async () => {
+    let rejectPreparation!: (cause: unknown) => void;
+    let preparationStarted!: () => void;
+    const started = new Promise<void>((resolve) => (preparationStarted = resolve));
+    const preparation = new Promise<string>((_, reject) => (rejectPreparation = reject));
+    const publish = vi.fn();
+    const cancel = startPreparingThreadFeedMediaUrl(
+      lease.url,
+      () => {
+        preparationStarted();
+        return preparation;
+      },
+      publish,
+    );
+
+    await started;
+    cancel();
+    rejectPreparation(new HostedPreviewUrlTooLongError());
+    await expect(preparation).rejects.toBeInstanceOf(HostedPreviewUrlTooLongError);
+    await Promise.resolve();
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it("ignores a late media URL after the component source is replaced or unmounted", async () => {

@@ -80,6 +80,16 @@ import {
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 
+function reportHostedPreviewFailure(cause: unknown) {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Unable to restore preview",
+      description: cause instanceof Error ? cause.message : String(cause),
+    }),
+  );
+}
+
 interface Props {
   threadRef: ScopedThreadRef;
   tabId?: string | null;
@@ -278,7 +288,7 @@ export function PreviewView({
     void prepareHostedPreview(
       { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
       url,
-    ).then(refreshPreparedPreview);
+    ).then(refreshPreparedPreview, reportHostedPreviewFailure);
   }, [hostingEnvironmentId, hostingThreadId, url, refreshPreparedPreview]);
 
   const hostingAttemptedByTab = useRef(
@@ -321,12 +331,20 @@ export function PreviewView({
     hostingAttemptedByTab.current.set(runtimeTabId, attempt);
     let cancelled = false;
     setRestoringHostedPreview(true);
-    void attempt.recovery.then((prepared) => {
-      if (cancelled) return;
-      attempt.completed = true;
-      setRestoringHostedPreview(false);
-      if (prepared.restored) refreshPreparedPreview(prepared);
-    });
+    void attempt.recovery.then(
+      (prepared) => {
+        if (cancelled) return;
+        attempt.completed = true;
+        setRestoringHostedPreview(false);
+        if (prepared.restored) refreshPreparedPreview(prepared);
+      },
+      (cause: unknown) => {
+        if (cancelled) return;
+        attempt.completed = true;
+        setRestoringHostedPreview(false);
+        reportHostedPreviewFailure(cause);
+      },
+    );
     return () => {
       cancelled = true;
     };

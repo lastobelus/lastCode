@@ -317,10 +317,11 @@ export function FileMarkdownPreview(props: {
             sourceKey={sourceKey}
             prepareUrl={prepareMediaUrl}
           >
-            {(uri) =>
+            {({ uri, status }) =>
               media.kind === "video" ? (
                 <MediaVideoPlayer
                   uri={uri}
+                  unavailable={status === "unavailable"}
                   name={image.alt ?? "Video"}
                   thumbnailKey={sourceKey}
                   resolvePlaybackUri={() => prepareMediaUrl(originalUri)}
@@ -329,7 +330,7 @@ export function FileMarkdownPreview(props: {
                 <ThreadMarkdownImageView
                   uri={uri}
                   sourceKey={sourceKey}
-                  unavailable={false}
+                  unavailable={status === "unavailable"}
                   alt={image.alt}
                   onPressPreview={() => {
                     void prepareMediaUrl(originalUri).then((url) =>

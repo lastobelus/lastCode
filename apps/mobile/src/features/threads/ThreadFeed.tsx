@@ -730,13 +730,17 @@ function ThreadMarkdownVideo(props: {
   );
 }
 
-function ThreadMarkdownMediaPending() {
+function ThreadMarkdownVideoPlaceholder(props: { readonly unavailable: boolean }) {
   return (
     <View
       className="items-center justify-center rounded-[10px] bg-md-code-bg"
       style={{ height: 180 }}
     >
-      <ActivityIndicator />
+      {props.unavailable ? (
+        <Text className="text-xs text-foreground-muted">Video unavailable</Text>
+      ) : (
+        <ActivityIndicator />
+      )}
     </View>
   );
 }
@@ -2733,9 +2737,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
               prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
             >
-              {(uri) =>
+              {({ uri, status }) =>
                 uri === null ? (
-                  <ThreadMarkdownMediaPending />
+                  <ThreadMarkdownVideoPlaceholder unavailable={status === "unavailable"} />
                 ) : (
                   <ThreadMarkdownVideo
                     source={{
@@ -2766,16 +2770,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
             prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
           >
-            {(preparedUri) => (
+            {({ uri: preparedUri, status }) => (
               <ThreadMarkdownImageView
                 uri={preparedUri}
                 sourceKey={imageSource.uri}
-                unavailable={false}
+                unavailable={status === "unavailable"}
                 alt={image.alt}
-                actionsSource={preparedThreadFeedMediaActionsSource(
-                  media?.source.actionsSource,
-                  preparedUri ?? uri,
-                )}
+                actionsSource={
+                  status === "unavailable"
+                    ? undefined
+                    : preparedThreadFeedMediaActionsSource(
+                        media?.source.actionsSource,
+                        preparedUri ?? uri,
+                      )
+                }
                 onPressPreview={(source) => {
                   void prepareMarkdownMediaUrl(uri).then((preparedUri) =>
                     setExpandedFile(
