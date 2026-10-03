@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
   rememberPreviewUrl: vi.fn(),
   readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
   reload: null as (() => void) | null,
+  openInBrowser: null as (() => void) | null,
+  openExternal: vi.fn(async (_url: string): Promise<void> => undefined),
   submittedUrl: null as ((url: string) => void) | null,
   emptyStateUrl: null as ((url: string) => void) | null,
   togglePictureInPicture: null as (() => void) | null,
@@ -117,7 +119,7 @@ vi.mock("~/composerDraftStore", () => ({
 }));
 
 vi.mock("~/localApi", () => ({
-  ensureLocalApi: vi.fn(),
+  ensureLocalApi: vi.fn(() => ({ shell: { openExternal: mocks.openExternal } })),
 }));
 
 vi.mock("./previewRecoveryRequest", () => ({
@@ -245,6 +247,7 @@ vi.mock("./PreviewChromeRow", () => ({
   PreviewChromeRow: (props: {
     onSubmit: (url: string) => void;
     onRefresh: () => void;
+    onOpenInBrowser?: () => void;
     onPickElement?: () => void;
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
@@ -254,6 +257,7 @@ vi.mock("./PreviewChromeRow", () => ({
   }) => {
     mocks.submittedUrl = props.onSubmit;
     mocks.reload = props.onRefresh;
+    mocks.openInBrowser = props.onOpenInBrowser ?? null;
     mocks.toggleAnnotation = props.onPickElement ?? null;
     mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
     mocks.toggleNativePictureInPicture =
@@ -371,6 +375,8 @@ describe("PreviewView navigation", () => {
     mocks.readPreparedConnection.mockClear();
     mocks.submittedUrl = null;
     mocks.reload = null;
+    mocks.openInBrowser = null;
+    mocks.openExternal.mockClear();
     mocks.emptyStateUrl = null;
     mocks.togglePictureInPicture = null;
     mocks.toggleNativePictureInPicture = null;
@@ -393,6 +399,36 @@ describe("PreviewView navigation", () => {
     mocks.recordingTabIds = new Set();
     mocks.recordingRuntimeTabId = null;
     mocks.recordVisitForThread.mockClear();
+  });
+
+  it("waits for toolbar recovery before opening the prepared external destination", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    const original = "http://localhost:5173/qa";
+    const destination = "http://managed-server.ts.net:5173/qa";
+    mocks.navStatus = { _tag: "Success", url: original, title: "QA" };
+    mocks.preparedRecoveryUrl = destination;
+    let complete!: (restored: boolean) => void;
+    mocks.recoverHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      await act(() => mocks.openInBrowser?.());
+      expect(mocks.recoverHostedPreview).toHaveBeenCalledWith(TEST_THREAD_REF, original);
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+      await act(async () => complete(true));
+      expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(destination);
+    } finally {
+      await act(() => root.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 
   it("restores a failed managed preview once, then reloads without an agent message", async () => {

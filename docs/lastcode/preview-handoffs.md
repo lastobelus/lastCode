@@ -56,8 +56,10 @@ uses the owning environment and thread, never an unrelated thread or public
 website. Existing browser connection limits still apply when the environment's
 preview URL is unreachable from the client. Desktop, web, and mobile prepare
 owned links before opening them. Private-network environment addresses replace
-loopback destinations for remote clients; this does not create a tunnel or make
-a loopback-only listener reachable from another machine.
+loopback destinations for remote clients. A saved previous private address is
+rewritten only when it is known to belong to that environment; unknown LAN
+addresses are left unchanged. This does not create a tunnel or make a
+loopback-only listener reachable from another machine.
 
 Persistent HTML files can instead use LastCode's existing file-preview hosting
 without a temporary server. Keep the source and neighboring assets available.

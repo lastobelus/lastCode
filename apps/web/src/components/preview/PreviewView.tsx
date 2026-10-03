@@ -97,8 +97,6 @@ function previewProfileName(
   return profiles.find((profile) => profile.id === profileId)?.name ?? "Removed profile";
 }
 
-const localApi = typeof window === "undefined" ? null : ensureLocalApi();
-
 /**
  * Single-tab preview surface: chrome row on top, one webview below, empty
  * state when no session exists for the thread.
@@ -409,9 +407,11 @@ export function PreviewView({
   }, [runtimeTabId]);
 
   const handleOpenInBrowser = useCallback(() => {
-    if (!localApi || !url) return;
-    void localApi.shell.openExternal(url).catch(() => undefined);
-  }, [url]);
+    if (!url) return;
+    void prepareHostedPreview(threadRef, url)
+      .then((prepared) => ensureLocalApi().shell.openExternal(prepared.url))
+      .catch(() => undefined);
+  }, [threadRef, url]);
 
   const handlePictureInPicture = useCallback(() => {
     if (!tabId) return;

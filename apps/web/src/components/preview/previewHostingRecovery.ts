@@ -28,10 +28,13 @@ export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): 
 export async function prepareHostedPreview(threadRef: ScopedThreadRef, url: string) {
   const connection = readPreparedConnection(threadRef.environmentId);
   if (!connection) return { url, managed: false, restored: false };
+  const configuredEndpointUrls =
+    connection.target._tag === "PrimaryConnectionTarget" ? [connection.target.httpBaseUrl] : [];
   return prepareOwnedPreview({
     threadRef,
     url,
     environmentUrl: connection.httpBaseUrl,
+    knownEnvironmentUrls: configuredEndpointUrls,
     list: async () => {
       const result = await runAtomCommand(
         appAtomRegistry,

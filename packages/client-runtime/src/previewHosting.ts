@@ -10,6 +10,8 @@ export interface PrepareHostedPreviewInput {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly environmentUrl: string;
+  /** Previous endpoints explicitly known to belong to this same environment. */
+  readonly knownEnvironmentUrls?: ReadonlyArray<string>;
   readonly list: () => Promise<ReadonlyArray<PreviewHostingLeaseSummary>>;
   readonly recover: (
     lease: PreviewHostingLeaseSummary,
@@ -60,11 +62,11 @@ export function prepareHostedPreview(
   const targetIsLoopback = isLoopbackHost(target.hostname);
   const targetIsCurrentEnvironment =
     normalizeHostname(target.hostname) === normalizeHostname(environment.hostname);
-  const targetIsPreviousPrivateAddress =
-    !targetIsLoopback &&
-    !targetIsCurrentEnvironment &&
-    isPrivateNetworkHost(target.hostname) &&
-    isPrivateNetworkHost(environment.hostname);
+  const targetIsPreviousPrivateAddress = isKnownPreviousPrivateAddress(
+    target,
+    environment,
+    input.knownEnvironmentUrls ?? [],
+  );
   if (
     (target.protocol !== "http:" && target.protocol !== "https:") ||
     (environment.protocol !== "http:" && environment.protocol !== "https:") ||
@@ -78,6 +80,7 @@ export function prepareHostedPreview(
     input.threadRef.threadId,
     input.url,
     input.environmentUrl,
+    input.knownEnvironmentUrls ?? [],
   ]);
   const existing = inFlightPreparations.get(key);
   if (existing) return existing;
@@ -110,6 +113,31 @@ export function prepareHostedPreview(
   });
   inFlightPreparations.set(key, preparation);
   return preparation;
+}
+
+function isKnownPreviousPrivateAddress(
+  target: URL,
+  environment: URL,
+  knownEnvironmentUrls: ReadonlyArray<string>,
+): boolean {
+  return (
+    !isLoopbackHost(target.hostname) &&
+    normalizeHostname(target.hostname) !== normalizeHostname(environment.hostname) &&
+    isPrivateNetworkHost(target.hostname) &&
+    isPrivateNetworkHost(environment.hostname) &&
+    knownEnvironmentUrls.some((knownUrl) => {
+      try {
+        const known = new URL(knownUrl);
+        return (
+          (known.protocol === "http:" || known.protocol === "https:") &&
+          isPrivateNetworkHost(known.hostname) &&
+          normalizeHostname(known.hostname) === normalizeHostname(target.hostname)
+        );
+      } catch {
+        return false;
+      }
+    })
+  );
 }
 
 function selectExactPrivateHostedPreview(

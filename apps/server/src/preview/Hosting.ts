@@ -525,7 +525,8 @@ const make = Effect.gen(function* () {
       lease.id,
       Effect.gen(function* () {
         const latest = yield* findLease(lease.id);
-        if (latest === null) return;
+        // A concurrent launch may already have handed this reservation off.
+        if (latest === null || latest.status === "active") return;
         const expired = { ...latest, status: "expired" as const };
         yield* SynchronizedRef.update(leasesRef, (leases) =>
           leases.map((entry) => (entry.id === expired.id ? expired : entry)),

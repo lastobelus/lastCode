@@ -2356,6 +2356,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const environmentUrl = Option.isSome(preparedConnection)
     ? preparedConnection.value.httpBaseUrl
     : "";
+  const knownEnvironmentUrl =
+    Option.isSome(preparedConnection) &&
+    preparedConnection.value.target._tag === "PrimaryConnectionTarget"
+      ? preparedConnection.value.target.httpBaseUrl
+      : null;
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
@@ -2568,6 +2573,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           threadRef: { environmentId: props.environmentId, threadId: props.threadId },
           url: linkUrl,
           environmentUrl,
+          knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
           list: async () => {
             const result = await listHostedPreviews({
               environmentId: props.environmentId,
@@ -2594,6 +2600,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     },
     [
       environmentUrl,
+      knownEnvironmentUrl,
       listHostedPreviews,
       navigation,
       props.environmentId,

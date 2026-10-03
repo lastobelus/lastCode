@@ -62,6 +62,7 @@ describe("prepareHostedPreview", () => {
       threadRef,
       url: savedUrl,
       environmentUrl: "https://100.100.12.4:8443/",
+      knownEnvironmentUrls: ["http://192.168.1.24:8080/"],
       list: async () => [savedLease],
       recover,
     });
@@ -74,19 +75,15 @@ describe("prepareHostedPreview", () => {
     expect(recover).toHaveBeenCalledWith(savedLease);
   });
 
-  it("keeps unrelated private addresses when no exact lease for this thread matches", async () => {
+  it("does not adopt an unrelated private address even with an exact owning lease", async () => {
     const url = "http://10.8.0.42:5173/preview/index.html?theme=dark#top";
     const recover = vi.fn(async () => lease);
-    const otherThreadLease = {
-      ...lease,
-      threadId: ThreadId.make("other-preview-thread"),
-    };
 
     const result = await prepareHostedPreview({
       threadRef,
       url,
       environmentUrl: "https://100.100.12.4:8443/",
-      list: async () => [otherThreadLease],
+      list: async () => [lease],
       recover,
     });
 

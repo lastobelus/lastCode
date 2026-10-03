@@ -3,7 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
-  connection: vi.fn(() => ({ httpBaseUrl: "http://managed-server.example:3773" })),
+  connection: vi.fn(() => ({
+    httpBaseUrl: "http://managed-server.example:3773",
+    target: {
+      _tag: "PrimaryConnectionTarget",
+      httpBaseUrl: "http://managed-server.example:3773",
+    },
+  })),
   list: {},
   recover: {},
 }));
@@ -14,7 +20,11 @@ vi.mock("~/state/preview", () => ({
   previewEnvironment: { hostingList: mocks.list, hostingRecover: mocks.recover },
 }));
 
-import { recoverHostedPreview, selectHostedPreview } from "./previewHostingRecovery";
+import {
+  prepareHostedPreview,
+  recoverHostedPreview,
+  selectHostedPreview,
+} from "./previewHostingRecovery";
 
 const owner = {
   environmentId: EnvironmentId.make("environment-qa"),
@@ -46,6 +56,27 @@ describe("native preview reopening", () => {
       environmentId: owner.environmentId,
       input: { threadId: owner.threadId, leaseId: lease.leaseId, url: lease.url },
     });
+  });
+  it("uses the configured same-environment endpoint for a LAN-to-remote reopen", async () => {
+    mocks.connection.mockReturnValue({
+      httpBaseUrl: "https://100.100.12.4:8443/",
+      target: {
+        _tag: "PrimaryConnectionTarget",
+        httpBaseUrl: "http://192.168.1.24:3773/",
+      },
+    });
+    mocks.run
+      .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
+      .mockResolvedValueOnce({ _tag: "Success", value: lease });
+
+    await expect(
+      prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
+    ).resolves.toEqual({
+      url: "http://100.100.12.4:5173/qa?version=1#first",
+      managed: true,
+      restored: true,
+    });
+    expect(mocks.run).toHaveBeenCalledTimes(2);
   });
   it("does not claim arbitrary public pages or another thread's lease", async () => {
     expect(await recoverHostedPreview(owner, "https://public.example:5173/qa")).toBe(false);
