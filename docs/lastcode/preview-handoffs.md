@@ -36,6 +36,10 @@ path. Keep HTML and supporting assets in the workspace. For example, an HTML
 preview can use `python3 -m http.server 5173 --bind 127.0.0.1` with a workspace
 working directory and `http://localhost:5173/example.html`.
 
+Prefer HTTP unless HTTPS itself is under test. Readiness probes can accept a
+self-signed certificate on loopback; browsers retain their own certificate
+policy, so an HTTPS handoff must also be usable in the intended browser.
+
 The successful tool result establishes a fixed 24-hour lease and returns its
 handoff time and expiry. LastCode owns the terminal and retains the launch
 context across turn completion and server restarts. Opening the link in its

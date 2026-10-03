@@ -40,6 +40,7 @@ import * as Semaphore from "effect/Semaphore";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 
 export class PortDiscovery extends Context.Service<
   PortDiscovery,
@@ -189,7 +190,14 @@ const parseLsofOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<string, DiscoveredLocalServer>();
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
   let pid: number | null = null;
   let processName: string | null = null;
 
@@ -210,21 +218,44 @@ const parseLsofOutput = (
     if (tag === "n") {
       const portMatch = parsePortFromLsofName(value);
       if (portMatch == null) continue;
-      const url = `http://localhost:${portMatch}`;
-      const key = `localhost:${portMatch}`;
-      if (seen.has(key)) continue;
-      seen.set(key, {
-        host: "localhost",
-        port: portMatch,
-        url,
-        processName,
-        pid,
-        terminal: pid === null ? null : (terminalByProcessId.get(pid) ?? null),
-      });
+      const entry = listeners.get(portMatch) ?? {
+        processIds: new Set<number>(),
+        processNames: new Set<string>(),
+        unattributed: false,
+      };
+      if (pid === null) entry.unattributed = true;
+      else entry.processIds.add(pid);
+      if (processName !== null) entry.processNames.add(processName);
+      listeners.set(portMatch, entry);
     }
   }
 
-  return Array.from(seen.values()).toSorted((a, b) => a.port - b.port);
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
 };
 
 const parsePortFromLsofName = (name: string): number | null => {
@@ -246,7 +277,14 @@ const parseWindowsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<number, DiscoveredLocalServer>();
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
   for (const line of raw.split(/\r?\n/g)) {
     const [hostRaw, portRaw, pidRaw, processNameRaw] = line.trim().split("|", 4);
     const host = hostRaw?.trim() ?? "";
@@ -254,18 +292,44 @@ const parseWindowsListenerOutput = (
     const port = Number(portRaw);
     const pid = Number(pidRaw);
     if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
-    const normalizedPid = Number.isInteger(pid) && pid > 0 ? pid : null;
-    if (seen.has(port)) continue;
-    seen.set(port, {
-      host: "localhost",
-      port,
-      url: `http://localhost:${port}`,
-      processName: processNameRaw?.trim() || null,
-      pid: normalizedPid,
-      terminal: normalizedPid === null ? null : (terminalByProcessId.get(normalizedPid) ?? null),
-    });
+    const entry = listeners.get(port) ?? {
+      processIds: new Set<number>(),
+      processNames: new Set<string>(),
+      unattributed: false,
+    };
+    if (Number.isInteger(pid) && pid > 0) entry.processIds.add(pid);
+    else entry.unattributed = true;
+    const processName = processNameRaw?.trim();
+    if (processName) entry.processNames.add(processName);
+    listeners.set(port, entry);
   }
-  return [...seen.values()].toSorted((left, right) => left.port - right.port);
+
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
 };
 
 const parseSsListenerOutput = (
@@ -372,6 +436,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const hostPlatform = yield* HostProcessPlatform;
   const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
+  const loopbackHttpsAgent = yield* NodeHttpClient.makeAgent({ rejectUnauthorized: false });
+  const loopbackHttpsClient = (yield* NodeHttpClient.makeNodeHttp.pipe(
+    Effect.provideService(NodeHttpClient.HttpAgent, loopbackHttpsAgent),
+  )).pipe(HttpClient.withScope);
   const stateRef = yield* Ref.make<ScannerState>({
     listeners: new Map(),
     terminalProcesses: new Map(),
@@ -406,6 +474,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
 
   const probeWebUrl = Effect.fn("PortDiscovery.probeWebUrl")((url: string) =>
     httpClient.get(url).pipe(
+      Effect.catch((error) => {
+        const target = new URL(url);
+        // Readiness for local dev certificates never relaxes remote TLS or follows redirects.
+        return target.protocol === "https:" && isLoopbackHost(target.hostname)
+          ? loopbackHttpsClient.get(url)
+          : Effect.fail(error);
+      }),
       Effect.map((response) => {
         const location = response.headers.location?.trim();
         if (NAVIGATION_REDIRECT_STATUSES.has(response.status) && location) return { isWeb: true };
