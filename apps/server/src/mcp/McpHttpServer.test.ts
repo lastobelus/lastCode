@@ -5,12 +5,10 @@ import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  ActionResumeError,
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
-  UpdateDrainAdmissionError,
-  UpdateDrainRequestId,
-  UpdateDrainTargetVersion,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -138,29 +136,21 @@ const callSnapshot = (args: Record<string, unknown>) =>
       );
   });
 
-it.effect("rejects MCP action launch while update drain admission is closed", () =>
+it.effect("returns the Action service's update drain rejection over MCP", () =>
   Effect.gen(function* () {
-    let launched = false;
-    const maintenance = new UpdateDrainAdmissionError({
-      reason: "update_draining",
-      requestId: UpdateDrainRequestId.make("mcp-drain"),
-      targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+    let requestedAction: string | undefined;
+    const maintenance = new ActionResumeError({
+      reason: "internal_error",
       message: "LastCode is draining for an update.",
     });
     const layer = McpHttpServer.ActionResumeToolkitRegistrationLive.pipe(
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provideMerge(
         Layer.mock(ActionResume)({
-          runProjectActionAndResume: () =>
-            Effect.sync(() => {
-              launched = true;
-              throw new Error("action launch should not run");
-            }),
-        }),
-      ),
-      Layer.provideMerge(
-        Layer.mock(UpdateDrainAdmission)({
-          admit: () => Effect.fail(maintenance),
+          runProjectActionAndResume: (_invocation, actionId) => {
+            requestedAction = actionId;
+            return Effect.fail(maintenance);
+          },
         }),
       ),
     );
@@ -184,7 +174,8 @@ it.effect("rejects MCP action launch while update drain admission is closed", ()
     }).pipe(Effect.provide(layer));
 
     expect(result.isError).toBe(true);
-    expect(launched).toBe(false);
+    expect(requestedAction).toBe("qa");
+    expect(JSON.stringify(result.content)).toContain(maintenance.message);
   }),
 );
 

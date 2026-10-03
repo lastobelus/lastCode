@@ -90,7 +90,7 @@ export const OrchestrationV2EventSinkLayerLive = eventSinkLayer.pipe(Layer.provi
 const eventSinkProvided = OrchestrationV2EventSinkLayerLive;
 const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(Layer.provide(storesLayer));
 // Share the admission lock between orchestration and maintenance RPCs.
-export const UpdateDrainAdmissionLayerLive = UpdateDrainAdmission.layer.pipe(
+const UpdateDrainAdmissionLayerLive = UpdateDrainAdmission.layer.pipe(
   Layer.provide(
     Layer.merge(
       projectionStoreLayer,
