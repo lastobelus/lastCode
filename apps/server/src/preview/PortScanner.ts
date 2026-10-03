@@ -107,6 +107,7 @@ interface TerminalProcessOwner {
 interface WebProbeCacheEntry {
   readonly pid: number | null;
   readonly isWeb: boolean;
+  readonly isResource: boolean;
   readonly expiresAtMillis: number;
 }
 
@@ -407,14 +408,14 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     httpClient.get(url).pipe(
       Effect.map((response) => {
         const location = response.headers.location?.trim();
-        if (NAVIGATION_REDIRECT_STATUSES.has(response.status) && location) return url;
+        if (NAVIGATION_REDIRECT_STATUSES.has(response.status) && location) return { isWeb: true };
         if (response.status < 200 || response.status >= 300) return null;
         if (response.status === 204 || response.status === 205) return null;
         const contentType = response.headers["content-type"]
           ?.split(";", 1)[0]
           ?.trim()
           .toLowerCase();
-        return contentType === "text/html" || contentType === "application/xhtml+xml" ? url : null;
+        return { isWeb: contentType === "text/html" || contentType === "application/xhtml+xml" };
       }),
       Effect.scoped,
       Effect.timeoutOption(WEB_PROBE_TIMEOUT),
@@ -494,7 +495,12 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
                 ? Effect.succeed({ probe: cachedProbe, fresh: false })
                 : probeWebUrl(url).pipe(
                     Effect.map((result) => ({
-                      probe: { pid, isWeb: result !== null, expiresAtMillis: 0 },
+                      probe: {
+                        pid,
+                        isWeb: result?.isWeb ?? false,
+                        isResource: result !== null,
+                        expiresAtMillis: 0,
+                      },
                       fresh: true,
                     })),
                   ),
@@ -515,7 +521,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             const key = webProbeCacheKey(url);
             const { probe, fresh } = yield* getProbe(url, group.server.pid);
             probes.push([key, probe, fresh]);
-            if (probe.isWeb) {
+            // Explicit handoffs can target media; automatic discovery still lists documents.
+            if (probe.isWeb || (group.configuredKey !== null && probe.isResource)) {
               visibleUrl = url;
               break;
             }

@@ -11,6 +11,7 @@ import * as Net from "@t3tools/shared/Net";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -393,6 +394,60 @@ effectIt.effect("keeps a full configured URL when the discovered server root fai
     expect(servers).toHaveLength(1);
     expect(servers[0]?.url).toBe(configuredUrl);
     expect(requests).toContain(configuredUrl);
+  }).pipe(Effect.provide(layer));
+});
+
+for (const contentType of ["image/png", "application/pdf", "video/mp4"]) {
+  effectIt.effect(`publishes an owned configured ${contentType} resource as ready`, () => {
+    const configuredUrl = `http://localhost:${LSOF_TEST_PORT}/media`;
+    const layer = makeLsofScannerLayer({
+      pid: () => 1234,
+      fetch: async () => new Response("media", { headers: { "content-type": contentType } }),
+    });
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "media-thread",
+        terminalId: "media-terminal",
+        processIds: [1234],
+      });
+      const ready = yield* Deferred.make<ReadonlyArray<DiscoveredLocalServer>>();
+      yield* scanner.subscribe(
+        { configuredUrls: [configuredUrl], initialSnapshot: [] },
+        (servers) => Deferred.succeed(ready, servers).pipe(Effect.asVoid),
+      );
+      yield* scanner.retain;
+      expect(yield* Deferred.await(ready)).toMatchObject([
+        {
+          url: configuredUrl,
+          terminal: { threadId: "media-thread", terminalId: "media-terminal" },
+        },
+      ]);
+      // The same cached response does not turn a media server root into an automatically discovered document.
+      expect(yield* scanner.scan()).toEqual([]);
+      expect(yield* scanner.scan([configuredUrl])).toHaveLength(1);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+}
+
+effectIt.effect("rejects failed or empty configured resource responses", () => {
+  let status = 404;
+  let pid = 1234;
+  const layer = makeLsofScannerLayer({
+    pid: () => pid,
+    fetch: async () =>
+      new Response(status === 404 ? "missing" : null, {
+        status,
+        headers: { "content-type": "image/png" },
+      }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    for (const nextStatus of [404, 204, 205]) {
+      status = nextStatus;
+      pid++;
+      expect(yield* scanner.scan([`http://localhost:${LSOF_TEST_PORT}/media`])).toEqual([]);
+    }
   }).pipe(Effect.provide(layer));
 });
 

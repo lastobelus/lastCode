@@ -16,3 +16,13 @@ export async function prepareThenOpenThreadFeedUrl<A>(
   }
   return open(destination);
 }
+
+export function openThreadFeedMarkdownUrl<A>(
+  input: Omit<PrepareHostedPreviewInput, "url"> | null,
+  url: string,
+  open: (url: string) => A | Promise<A>,
+): Promise<A> {
+  return input === null
+    ? Promise.resolve(open(url))
+    : prepareThenOpenThreadFeedUrl({ ...input, url }, open);
+}

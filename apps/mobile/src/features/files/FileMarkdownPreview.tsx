@@ -1,7 +1,8 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, PreviewHostingLeaseSummary, ThreadId } from "@t3tools/contracts";
 import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { getBrowseDirectoryPath } from "@t3tools/client-runtime/state/projects";
 import { useCallback, useMemo, useState } from "react";
+import * as Option from "effect/Option";
 import {
   Markdown,
   type CustomRenderers,
@@ -11,6 +12,7 @@ import {
 import { RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { openThreadFeedMarkdownUrl } from "../../lib/prepareThreadFeedPreview";
 import { useFontFamily } from "../../lib/useFontFamily";
 import {
   resolveMarkdownFontSizes,
@@ -29,6 +31,10 @@ import {
   type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
 import { resolveWorkspaceFilePath } from "./filePath";
+import { previewEnvironment } from "../../state/preview";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { usePreparedConnection } from "../../state/session";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 interface MarkdownPreviewStyles {
   readonly theme: PartialMarkdownTheme;
@@ -37,7 +43,10 @@ interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
 }
 
-function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): MarkdownPreviewStyles {
+function useMarkdownPreviewStyles(
+  renderImage?: MarkdownImageRenderer,
+  onLinkPress?: (href: string) => void,
+): MarkdownPreviewStyles {
   const { appearance } = useAppearancePreferences();
   const markdownFontSizes = useMemo(
     () => resolveMarkdownFontSizes(appearance.baseFontSize),
@@ -67,7 +76,8 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
           className="font-t3-medium"
           onPress={() => {
             if (href) {
-              void tryOpenExternalUrl(href, "markdown-link");
+              if (onLinkPress) onLinkPress(href);
+              else void tryOpenExternalUrl(href, "markdown-link");
             }
           }}
           style={{
@@ -182,6 +192,7 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
     markdownFontSizes,
     mediumFontFamily,
     nativeMarkdownTypography,
+    onLinkPress,
     regularFontFamily,
     renderImage,
     strong,
@@ -200,6 +211,13 @@ export function FileMarkdownPreview(props: {
   readonly onRefresh?: () => Promise<void> | void;
 }) {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
+  const listHostedPreviews = useAtomCommand(previewEnvironment.hostingList, {
+    reportFailure: false,
+  });
+  const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
+    reportFailure: false,
+  });
+  const preparedConnection = usePreparedConnection(props.environmentId);
   const handlePullToRefresh = useCallback(async () => {
     if (!props.onRefresh) {
       return;
@@ -245,10 +263,57 @@ export function FileMarkdownPreview(props: {
     },
     [markdownDirectory, props.environmentId, props.threadId, props.captured],
   );
-  const styles = useMarkdownPreviewStyles(renderImage);
-  const onLinkPress = useCallback((href: string) => {
-    void tryOpenExternalUrl(href, "markdown-link");
-  }, []);
+  const connection = Option.getOrNull(preparedConnection);
+  const knownEnvironmentUrl =
+    connection?.target._tag === "PrimaryConnectionTarget" ? connection.target.httpBaseUrl : null;
+  const onLinkPress = useCallback(
+    (href: string) => {
+      const threadRef =
+        props.threadId === null
+          ? null
+          : { environmentId: props.environmentId, threadId: props.threadId };
+      void openThreadFeedMarkdownUrl(
+        threadRef === null || connection === null
+          ? null
+          : {
+              threadRef,
+              environmentUrl: connection.httpBaseUrl,
+              knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+              list: async () => {
+                const result = await listHostedPreviews({
+                  environmentId: props.environmentId,
+                  input: { threadId: threadRef.threadId },
+                });
+                if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+                return result.value;
+              },
+              recover: async (lease: PreviewHostingLeaseSummary) => {
+                const result = await recoverHostedPreviewLease({
+                  environmentId: props.environmentId,
+                  input: {
+                    threadId: threadRef.threadId,
+                    leaseId: lease.leaseId,
+                    url: lease.url,
+                  },
+                });
+                if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+                return result.value;
+              },
+            },
+        href,
+        (url) => tryOpenExternalUrl(url, "markdown-link"),
+      );
+    },
+    [
+      connection,
+      knownEnvironmentUrl,
+      listHostedPreviews,
+      props.environmentId,
+      props.threadId,
+      recoverHostedPreviewLease,
+    ],
+  );
+  const styles = useMarkdownPreviewStyles(renderImage, onLinkPress);
 
   return (
     <ScrollView

@@ -1,7 +1,10 @@
 import { EnvironmentId, PreviewHostingLeaseId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { prepareThenOpenThreadFeedUrl } from "./prepareThreadFeedPreview";
+import {
+  openThreadFeedMarkdownUrl,
+  prepareThenOpenThreadFeedUrl,
+} from "./prepareThreadFeedPreview";
 
 const threadRef = {
   environmentId: EnvironmentId.make("environment-mobile-link"),
@@ -63,6 +66,32 @@ describe("prepareThenOpenThreadFeedUrl", () => {
 
     expect(list).not.toHaveBeenCalled();
     expect(opened).toHaveBeenCalledWith("https://public.example/article?a=1#section");
+  });
+
+  it("waits for managed recovery before a thread markdown link opens externally", async () => {
+    let finishRecovery!: (recovered: typeof lease) => void;
+    let recoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => (recoveryStarted = resolve));
+    const opened = vi.fn(async (url: string) => url);
+    const opening = openThreadFeedMarkdownUrl(
+      {
+        threadRef,
+        environmentUrl: "https://192.168.1.30:8443/",
+        list: async () => [lease],
+        recover: () => {
+          recoveryStarted();
+          return new Promise<typeof lease>((resolve) => (finishRecovery = resolve));
+        },
+      },
+      lease.url,
+      opened,
+    );
+
+    await started;
+    expect(opened).not.toHaveBeenCalled();
+    finishRecovery(lease);
+    await expect(opening).resolves.toBe("http://192.168.1.30:5173/report/index.html?run=7#chart");
+    expect(opened).toHaveBeenCalledOnce();
   });
 
   it.each(["pdf", "png", "mp4"])(
