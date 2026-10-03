@@ -165,11 +165,14 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
       );
       assert.includeMembers(
         [...(sourcePrefixes.get("codex-thread-tools") ?? [])],
-        ["apps/server/src/provider/Layers/CodexAdapter.ts"],
+        ["apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts"],
       );
       assert.includeMembers(
         [...(sourcePrefixes.get("thread-annotations") ?? [])],
-        ["apps/server/src/orchestration/decider.ts", "apps/server/src/orchestration/projector.ts"],
+        [
+          "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
+          "apps/server/src/orchestration-v2/ProjectionStore.ts",
+        ],
       );
       assert.includeMembers(
         [...(sourcePrefixes.get("local-nightly-updates") ?? [])],
