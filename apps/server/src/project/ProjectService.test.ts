@@ -1,6 +1,14 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type Project,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2ThreadShell,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -101,7 +109,108 @@ const waitForProject = Effect.fn("ProjectServiceTest.waitForProject")(function* 
   return yield* Effect.die(`Project ${projectId} was not enriched in time.`);
 });
 
+it.effect("refuses force deletion before touching persistent threads or pending cleanup", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const projectId = ProjectId.make("project:protected-delete");
+    const threadId = ThreadId.make("thread:protected-delete");
+    const shell = {
+      schemaVersion: 2 as const,
+      snapshotSequence: 0,
+      threads: [{ id: threadId, projectId, persistent: true } as OrchestrationV2ThreadShell],
+      archivedThreads: [],
+    };
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+        ...projections,
+        getShellSnapshot: () => Effect.succeed(shell),
+      }),
+    );
+    yield* service.create({
+      commandId: CommandId.make("protected:create"),
+      projectId,
+      title: "Protected",
+      workspaceRoot: "/work/protected",
+    });
+    assert.equal(
+      (yield* Effect.result(
+        service.delete({ commandId: CommandId.make("protected:delete"), projectId, force: true }),
+      ))._tag,
+      "Failure",
+    );
+    assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+    const cleanupService = yield* ProjectService.make.pipe(
+      Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+        ...projections,
+        getWorktreeCleanupThreads: Effect.succeed([
+          { id: threadId, projectId } as OrchestrationV2AppThread,
+        ]),
+      }),
+    );
+    assert.equal(
+      (yield* Effect.result(
+        cleanupService.delete({
+          commandId: CommandId.make("cleanup:delete"),
+          projectId,
+          force: true,
+        }),
+      ))._tag,
+      "Failure",
+    );
+    const deletions = yield* sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM orchestration_events WHERE event_type = 'thread.deleted'
+    `;
+    assert.equal(deletions[0]!.count, 0);
+    assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+  }).pipe(Effect.provide(ProjectServiceDependenciesLayer)),
+);
+
 it.layer(TestLayer)("ProjectService", (it) => {
+  it.effect(
+    "reconciles Actions against their exact prior state and replays the accepted receipt",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ProjectService.ProjectService;
+        const projectId = ProjectId.make("project:actions-reconcile");
+        const action = {
+          id: "managed-action",
+          name: "Managed Action",
+          command: "echo ready",
+          icon: "play" as const,
+          runOnWorktreeCreate: false,
+          allowAgentResume: true,
+        };
+        yield* service.create({
+          commandId: CommandId.make("actions:create"),
+          projectId,
+          title: "Managed Actions",
+          workspaceRoot: "/work/managed-actions",
+        });
+        const input = {
+          commandId: CommandId.make("actions:reconcile"),
+          projectId,
+          expectedScripts: [],
+          scripts: [action],
+        };
+        const reconciled = yield* service.reconcileScripts(input);
+        assert.deepStrictEqual(reconciled.scripts, [action]);
+        assert.deepStrictEqual((yield* service.reconcileScripts(input)).scripts, [action]);
+        const conflict = yield* Effect.result(
+          service.reconcileScripts({
+            ...input,
+            commandId: CommandId.make("actions:stale"),
+            scripts: [],
+          }),
+        );
+        assert.equal(conflict._tag, "Failure");
+        assert.deepStrictEqual(Option.getOrThrow(yield* service.getById(projectId)).scripts, [
+          action,
+        ]);
+        yield* service.delete({ commandId: CommandId.make("actions:cleanup"), projectId });
+      }),
+  );
+
   it.effect("creates, updates, resolves, snapshots, and soft-deletes projects", () =>
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;

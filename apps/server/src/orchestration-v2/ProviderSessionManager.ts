@@ -13,6 +13,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -166,6 +167,11 @@ export interface ProviderSessionManagerV2Shape {
     readonly reason: ProviderSessionReleaseReason;
     readonly detail?: string;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
+  readonly teardownThread: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly threadId: ThreadId;
+    readonly detail?: string;
+  }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
   readonly detach: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly threadId: ThreadId;
@@ -203,6 +209,7 @@ interface LiveSessionEntry {
   >;
   readonly requestEventPermit: Semaphore.Semaphore;
   readonly scope: Scope.Closeable;
+  readonly scopeClosed: Deferred.Deferred<void>;
   readonly idleGeneration: number;
   readonly busyCount: number;
   readonly lastActivityAtMs: number;
@@ -365,6 +372,15 @@ export const layerWithOptions = (
       const sessionOpen = yield* makeKeyedSerialExecutor<ProviderSessionId>();
       // Orders a thread's attach against a detach unloading it on the same session.
       const threadAttachment = yield* makeKeyedSerialExecutor<string>();
+      const detachSerialization = yield* makeKeyedSerialExecutor<string>();
+      const closingSessionScopes = new Map<string, Set<Deferred.Deferred<void>>>();
+      const pendingThreadUnloads = new Map<
+        string,
+        {
+          readonly entry: LiveSessionEntry;
+          readonly providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>;
+        }
+      >();
       const threadAttachmentKey = (input: {
         readonly providerSessionId: ProviderSessionId;
         readonly threadId: ThreadId;
@@ -730,6 +746,9 @@ export const layerWithOptions = (
               return [Option.none<LiveSessionEntry>(), current] as const;
             }
             const updated = new Map(current);
+            const closing = closingSessionScopes.get(key) ?? new Set<Deferred.Deferred<void>>();
+            closing.add(existing.scopeClosed);
+            closingSessionScopes.set(key, closing);
             updated.delete(key);
             return [Option.some(existing), updated] as const;
           }),
@@ -757,6 +776,24 @@ export const layerWithOptions = (
                   // events and leaves a diagnosable trail instead of silently
                   // parking the session as "ready" forever.
                   const closeFiber = yield* Scope.close(entry.scope, Exit.void).pipe(
+                    Effect.onExit((exit) =>
+                      Deferred.done(entry.scopeClosed, exit).pipe(
+                        Effect.andThen(
+                          Effect.sync(() => {
+                            if (Exit.isSuccess(exit)) {
+                              const key = sessionKey(input.providerSessionId);
+                              const closing = closingSessionScopes.get(key);
+                              closing?.delete(entry.scopeClosed);
+                              if (closing?.size === 0) closingSessionScopes.delete(key);
+                              for (const [key, pending] of pendingThreadUnloads) {
+                                if (pending.entry.runtime === entry.runtime)
+                                  pendingThreadUnloads.delete(key);
+                              }
+                            }
+                          }),
+                        ),
+                      ),
+                    ),
                     Effect.exit,
                     Effect.forkDetach({ startImmediately: true }),
                   );
@@ -1544,6 +1581,193 @@ export const layerWithOptions = (
       });
       yield* Effect.addFinalizer(() => shutdown);
 
+      const detach: ProviderSessionManagerV2Shape["detach"] = (input) =>
+        detachSerialization
+          .withLock(
+            threadAttachmentKey(input),
+            Effect.gen(function* () {
+              const key = sessionKey(input.providerSessionId);
+              const unloadKey = threadAttachmentKey(input);
+              const currentEntry = (yield* Ref.get(sessions)).get(key);
+              let detachedProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread> = [];
+              if (currentEntry?.supportsMultipleProviderThreads === true) {
+                const projection = yield* projectionStore.getThreadRecords(input.threadId, [
+                  "providerThreads",
+                  "providerTurns",
+                ]);
+                {
+                  const providerThreads = new Map(
+                    projection.providerThreads
+                      .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                      .map((thread) => [thread.id, thread] as const),
+                  );
+                  detachedProviderThreads = [...providerThreads.values()];
+                  const activeTurns = projection.providerTurns.filter(
+                    (turn) =>
+                      turn.status === "running" && providerThreads.has(turn.providerThreadId),
+                  );
+                  yield* Effect.forEach(
+                    activeTurns,
+                    (turn) =>
+                      currentEntry.exposedRuntime
+                        .interruptTurn({
+                          providerThread: providerThreads.get(turn.providerThreadId)!,
+                          providerTurnId: turn.id,
+                        })
+                        .pipe(
+                          Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
+                          Effect.tapCause((cause) =>
+                            Effect.logWarning(
+                              "orchestration-v2.driver-session.detach-interrupt-failed",
+                              {
+                                providerSessionId: input.providerSessionId,
+                                threadId: input.threadId,
+                                providerTurnId: turn.id,
+                                cause,
+                              },
+                            ),
+                          ),
+                        ),
+                    { concurrency: 1, discard: true },
+                  );
+                }
+              }
+              const detached = yield* Ref.modify(sessions, (current) => {
+                const entry = current.get(key);
+                if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
+                  return [Option.none<LiveSessionEntry>(), current] as const;
+                }
+                const attachedThreadIds = new Set(entry.attachedThreadIds);
+                attachedThreadIds.delete(input.threadId);
+                const loadedProviderThreadKeyByThread = new Map(
+                  entry.loadedProviderThreadKeyByThread,
+                );
+                loadedProviderThreadKeyByThread.delete(input.threadId);
+                // For a plain (workspace-change) detach, the credential id stays
+                // recorded: the thread may re-attach and reuse it, and
+                // releaseEntry revokes it when the provider process finally goes
+                // away. A terminal detach (archive/delete) prunes the record so
+                // nothing vetoes the revocation below.
+                const mcpCredentialIdByThread =
+                  input.revokeMcpCredential === true
+                    ? (() => {
+                        const pruned = new Map(entry.mcpCredentialIdByThread);
+                        pruned.delete(input.threadId);
+                        return pruned;
+                      })()
+                    : entry.mcpCredentialIdByThread;
+                const updatedEntry = {
+                  ...entry,
+                  attachedThreadIds,
+                  loadedProviderThreadKeyByThread,
+                  mcpCredentialIdByThread,
+                };
+                const updated = new Map(current);
+                updated.set(key, updatedEntry);
+                return [Option.some(updatedEntry), updated] as const;
+              });
+              // Plain detaches deliberately do not revoke: a detached thread's
+              // provider process may still be alive (shared multi-thread codex
+              // session across a workspace handoff) and holds its MCP client's
+              // credential for the thread it will re-attach with. Credentials
+              // are revoked when the session entry is released (process gone)
+              // or rotated on the next attach if they stopped resolving.
+              // Terminal detaches (thread archived or deleted) revoke the
+              // thread's credentials immediately, even on a retry where the
+              // entry is already gone: there is no legitimate future re-attach,
+              // and the token must not outlive the thread.
+              if (input.revokeMcpCredential === true) {
+                yield* clearMcpSession(input.threadId);
+              }
+              if (Option.isSome(detached) && detached.value.supportsMultipleProviderThreads) {
+                pendingThreadUnloads.set(unloadKey, {
+                  entry: detached.value,
+                  providerThreads: detachedProviderThreads,
+                });
+              }
+              const detachedEntry =
+                Option.getOrUndefined(detached) ?? pendingThreadUnloads.get(unloadKey)?.entry;
+              if (detachedEntry === undefined) return;
+              detachedProviderThreads =
+                pendingThreadUnloads.get(unloadKey)?.providerThreads ?? detachedProviderThreads;
+              if (
+                detachedEntry.attachedThreadIds.size === 0 &&
+                !detachedEntry.supportsMultipleProviderThreads
+              ) {
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                });
+                return;
+              }
+              // The shared runtime stays up for other threads, so unload this
+              // thread's native state rather than leaving it (and its MCP
+              // servers) resident until the whole runtime is released.
+              const unloadThread = detachedEntry.exposedRuntime.unloadThread;
+              if (
+                detachedEntry.supportsMultipleProviderThreads &&
+                unloadThread === undefined &&
+                detachedProviderThreads.some((thread) => thread.nativeThreadRef !== null)
+              ) {
+                return yield* Effect.fail(
+                  "Provider cannot unload the thread from its shared runtime.",
+                );
+              }
+              if (detachedEntry.supportsMultipleProviderThreads && unloadThread !== undefined) {
+                // Serialized with re-attachment: a thread whose next turn
+                // attaches first stays loaded, and one that attaches during the
+                // unload waits for it, so its resume reloads the native thread.
+                yield* threadAttachment.withLock(
+                  threadAttachmentKey(input),
+                  Effect.gen(function* () {
+                    const entry = (yield* Ref.get(sessions)).get(key);
+                    if (
+                      entry?.runtime !== detachedEntry.runtime ||
+                      entry.attachedThreadIds.has(input.threadId)
+                    ) {
+                      return;
+                    }
+                    yield* Effect.forEach(
+                      detachedProviderThreads.filter((thread) => thread.nativeThreadRef !== null),
+                      (providerThread) =>
+                        unloadThread({ providerThread }).pipe(
+                          // Bounded so a wedged provider cannot hold up the
+                          // thread's next attach.
+                          Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
+                          Effect.tapCause((cause) =>
+                            Effect.logWarning(
+                              "orchestration-v2.driver-session.detach-unload-failed",
+                              {
+                                providerSessionId: input.providerSessionId,
+                                threadId: input.threadId,
+                                providerThreadId: providerThread.id,
+                                cause,
+                              },
+                            ),
+                          ),
+                        ),
+                      { concurrency: 1, discard: true },
+                    );
+                  }),
+                );
+              }
+              pendingThreadUnloads.delete(unloadKey);
+              yield* scheduleIdleRelease(input.providerSessionId);
+            }),
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.fail(
+                new ProviderSessionReleaseError({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  cause,
+                }),
+              ),
+            ),
+          );
+
       return ProviderSessionManagerV2.of({
         shutdown,
         open: (input) =>
@@ -1677,6 +1901,7 @@ export const layerWithOptions = (
                 eventSubscribers,
                 requestEventPermit: yield* Semaphore.make(1),
                 scope: sessionScope,
+                scopeClosed: yield* Deferred.make<void>(),
                 idleGeneration: 0,
                 busyCount: 0,
                 lastActivityAtMs: now,
@@ -1771,158 +1996,31 @@ export const layerWithOptions = (
             ),
           ),
         release: releaseEntry,
-        detach: (input) =>
-          Effect.gen(function* () {
-            const key = sessionKey(input.providerSessionId);
-            const currentEntry = (yield* Ref.get(sessions)).get(key);
-            let detachedProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread> = [];
-            if (currentEntry?.supportsMultipleProviderThreads === true) {
-              const projection = yield* Effect.option(
-                projectionStore.getThreadRecords(input.threadId, [
-                  "providerThreads",
-                  "providerTurns",
-                ]),
-              );
-              if (Option.isSome(projection)) {
-                const providerThreads = new Map(
-                  projection.value.providerThreads
-                    .filter((thread) => thread.providerSessionId === input.providerSessionId)
-                    .map((thread) => [thread.id, thread] as const),
-                );
-                detachedProviderThreads = [...providerThreads.values()];
-                const activeTurns = projection.value.providerTurns.filter(
-                  (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
-                );
-                yield* Effect.forEach(
-                  activeTurns,
-                  (turn) =>
-                    currentEntry.exposedRuntime
-                      .interruptTurn({
-                        providerThread: providerThreads.get(turn.providerThreadId)!,
-                        providerTurnId: turn.id,
-                      })
-                      .pipe(
-                        Effect.catchCause((cause) =>
-                          Effect.logWarning(
-                            "orchestration-v2.driver-session.detach-interrupt-failed",
-                            {
-                              providerSessionId: input.providerSessionId,
-                              threadId: input.threadId,
-                              providerTurnId: turn.id,
-                              cause,
-                            },
-                          ),
-                        ),
-                      ),
-                  { concurrency: 1, discard: true },
-                );
-              }
-            }
-            const detached = yield* Ref.modify(sessions, (current) => {
-              const entry = current.get(key);
-              if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
-                return [Option.none<LiveSessionEntry>(), current] as const;
-              }
-              const attachedThreadIds = new Set(entry.attachedThreadIds);
-              attachedThreadIds.delete(input.threadId);
-              const loadedProviderThreadKeyByThread = new Map(
-                entry.loadedProviderThreadKeyByThread,
-              );
-              loadedProviderThreadKeyByThread.delete(input.threadId);
-              // For a plain (workspace-change) detach, the credential id stays
-              // recorded: the thread may re-attach and reuse it, and
-              // releaseEntry revokes it when the provider process finally goes
-              // away. A terminal detach (archive/delete) prunes the record so
-              // nothing vetoes the revocation below.
-              const mcpCredentialIdByThread =
-                input.revokeMcpCredential === true
-                  ? (() => {
-                      const pruned = new Map(entry.mcpCredentialIdByThread);
-                      pruned.delete(input.threadId);
-                      return pruned;
-                    })()
-                  : entry.mcpCredentialIdByThread;
-              const updatedEntry = {
-                ...entry,
-                attachedThreadIds,
-                loadedProviderThreadKeyByThread,
-                mcpCredentialIdByThread,
-              };
-              const updated = new Map(current);
-              updated.set(key, updatedEntry);
-              return [Option.some(updatedEntry), updated] as const;
-            });
-            // Plain detaches deliberately do not revoke: a detached thread's
-            // provider process may still be alive (shared multi-thread codex
-            // session across a workspace handoff) and holds its MCP client's
-            // credential for the thread it will re-attach with. Credentials
-            // are revoked when the session entry is released (process gone)
-            // or rotated on the next attach if they stopped resolving.
-            // Terminal detaches (thread archived or deleted) revoke the
-            // thread's credentials immediately, even on a retry where the
-            // entry is already gone: there is no legitimate future re-attach,
-            // and the token must not outlive the thread.
-            if (input.revokeMcpCredential === true) {
-              yield* clearMcpSession(input.threadId);
-            }
-            if (Option.isNone(detached)) {
-              return;
-            }
-            if (
-              detached.value.attachedThreadIds.size === 0 &&
-              !detached.value.supportsMultipleProviderThreads
-            ) {
-              yield* releaseEntry({
-                providerSessionId: input.providerSessionId,
-                reason: "manual_shutdown",
-                ...(input.detail === undefined ? {} : { detail: input.detail }),
-              });
-              return;
-            }
-            // The shared runtime stays up for other threads, so unload this
-            // thread's native state rather than leaving it (and its MCP
-            // servers) resident until the whole runtime is released.
-            const unloadThread = detached.value.exposedRuntime.unloadThread;
-            if (detached.value.supportsMultipleProviderThreads && unloadThread !== undefined) {
-              // Serialized with re-attachment: a thread whose next turn
-              // attaches first stays loaded, and one that attaches during the
-              // unload waits for it, so its resume reloads the native thread.
-              yield* threadAttachment.withLock(
-                threadAttachmentKey(input),
-                Effect.gen(function* () {
-                  const entry = (yield* Ref.get(sessions)).get(key);
-                  if (
-                    entry?.runtime !== detached.value.runtime ||
-                    entry.attachedThreadIds.has(input.threadId)
-                  ) {
-                    return;
-                  }
-                  yield* Effect.forEach(
-                    detachedProviderThreads.filter((thread) => thread.nativeThreadRef !== null),
-                    (providerThread) =>
-                      unloadThread({ providerThread }).pipe(
-                        // Bounded so a wedged provider cannot hold up the
-                        // thread's next attach.
-                        Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
-                        Effect.catchCause((cause) =>
-                          Effect.logWarning(
-                            "orchestration-v2.driver-session.detach-unload-failed",
-                            {
-                              providerSessionId: input.providerSessionId,
-                              threadId: input.threadId,
-                              providerThreadId: providerThread.id,
-                              cause,
-                            },
-                          ),
-                        ),
-                      ),
-                    { concurrency: 1, discard: true },
-                  );
-                }),
-              );
-            }
-            yield* scheduleIdleRelease(input.providerSessionId);
-          }).pipe(
+        detach,
+        teardownThread: (input) =>
+          detach({ ...input, revokeMcpCredential: true }).pipe(
+            Effect.andThen(
+              Ref.get(sessions).pipe(
+                Effect.flatMap((current) =>
+                  current
+                    .get(sessionKey(input.providerSessionId))
+                    ?.attachedThreadIds.has(input.threadId)
+                    ? Effect.fail("Thread is still attached to the provider runtime.")
+                    : Effect.void,
+                ),
+              ),
+            ),
+            Effect.andThen(
+              Effect.suspend(() => {
+                const completions = closingSessionScopes.get(sessionKey(input.providerSessionId));
+                return completions === undefined
+                  ? Effect.void
+                  : Effect.forEach([...completions], Deferred.await, {
+                      concurrency: "unbounded",
+                      discard: true,
+                    }).pipe(Effect.timeout(RELEASE_SCOPE_CLOSE_TIMEOUT_MS));
+              }),
+            ),
             Effect.catchCause((cause) =>
               Effect.fail(
                 new ProviderSessionReleaseError({
