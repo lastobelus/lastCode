@@ -65,6 +65,8 @@ function state(ref = threadRef, requestedUrl = url) {
 }
 
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-02T22:00:00.000Z"));
   io.run.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   io.claim.mockReset().mockResolvedValue({
     _tag: "Success",
@@ -80,6 +82,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
