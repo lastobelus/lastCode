@@ -5,6 +5,9 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { createContext, type ReactNode, useContext, useMemo } from "react";
 
+import { useClientSettingsHydrated } from "../../hooks/useSettings";
+import { isHostedStaticApp } from "../../hostedPairing";
+import { useAllEnvironmentProjectSnapshotsReady } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFilesQueryState";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
@@ -56,7 +59,9 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 
 function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironment: boolean) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments: availableEnvironments, isReady: environmentsReady } = useEnvironments();
+  const settingsHydrated = useClientSettingsHydrated();
+  const projectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const search = useMemo(
     () =>
@@ -75,6 +80,8 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
     [availableEnvironments, groups, search],
   );
   const projectFiles = useMemberProjectFiles(scope);
+  const isReady =
+    environmentsReady && settingsHydrated && (isHostedStaticApp() || primaryEnvironmentId !== null);
   return useMemo(() => {
     const selected = selectScopedSettingsEnvironments(
       scope,
@@ -94,8 +101,17 @@ function useResolvedSettingsScope(rawSearch: SettingsScopeSearch, singleEnvironm
       ) ??
       targets[0] ??
       null;
-    return { scope, groups, search, ...selected, targets, target };
-  }, [availableEnvironments, groups, primaryEnvironmentId, projectFiles, scope, search]);
+    return { scope, groups, search, ...selected, targets, target, isReady, projectSnapshotsReady };
+  }, [
+    availableEnvironments,
+    groups,
+    isReady,
+    primaryEnvironmentId,
+    projectFiles,
+    projectSnapshotsReady,
+    scope,
+    search,
+  ]);
 }
 
 const SettingsScopeContext = createContext<
