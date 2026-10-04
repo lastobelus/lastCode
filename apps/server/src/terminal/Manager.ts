@@ -210,6 +210,12 @@ export class TerminalManager extends Context.Service<
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    /** Archive cleanup also removes untracked histories, except retained preview terminals. */
+    readonly closeThreadExcept: (
+      threadId: string,
+      retainedTerminalIds: ReadonlyArray<string>,
+      retainedTerminalPrefixes?: ReadonlyArray<string>,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Close a thread's terminals that wait at an idle shell prompt. A terminal
@@ -220,6 +226,7 @@ export class TerminalManager extends Context.Service<
     readonly closeIdle: (input: {
       readonly threadId: string;
       readonly terminalId?: string;
+      readonly excludedTerminalIds?: ReadonlyArray<string>;
     }) => Effect.Effect<void>;
 
     /**
@@ -1982,17 +1989,40 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const deleteAllHistoryForThread = Effect.fn("terminal.deleteAllHistoryForThread")(function* (
     threadId: string,
+    retainedTerminalIds: ReadonlyArray<string> = [],
+    retainedTerminalPrefixes: ReadonlyArray<string> = [],
   ) {
+    const retainedPaths = new Set(
+      retainedTerminalIds.flatMap((terminalId) => [
+        historyPath(threadId, terminalId),
+        ...(terminalId === DEFAULT_TERMINAL_ID ? [legacyHistoryPath(threadId)] : []),
+      ]),
+    );
     const threadPrefix = `${toSafeThreadId(threadId)}_`;
+    const retainedByPrefix = (name: string) => {
+      if (
+        retainedTerminalPrefixes.length === 0 ||
+        !name.startsWith(threadPrefix) ||
+        !name.endsWith(".log")
+      )
+        return false;
+      const decoded = Encoding.decodeBase64UrlString(name.slice(threadPrefix.length, -4));
+      return (
+        decoded._tag === "Success" &&
+        retainedTerminalPrefixes.some((prefix) => decoded.success.startsWith(prefix))
+      );
+    };
     const entries = yield* fileSystem
       .readDirectory(logsDir, { recursive: false })
       .pipe(Effect.orElseSucceed(() => [] as Array<string>));
     yield* Effect.forEach(
       entries.filter(
         (name) =>
-          name === `${toSafeThreadId(threadId)}.log` ||
-          name === `${legacySafeThreadId(threadId)}.log` ||
-          name.startsWith(threadPrefix),
+          !retainedPaths.has(path.join(logsDir, name)) &&
+          !retainedByPrefix(name) &&
+          (name === `${toSafeThreadId(threadId)}.log` ||
+            name === `${legacySafeThreadId(threadId)}.log` ||
+            name.startsWith(threadPrefix)),
       ),
       (name) =>
         fileSystem.remove(path.join(logsDir, name), { force: true }).pipe(
@@ -3216,7 +3246,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
-  const close: TerminalManager["Service"]["close"] = (input) =>
+  const close = (
+    input: TerminalCloseInput,
+    retainedTerminalIds: ReadonlyArray<string> = [],
+    retainedTerminalPrefixes: ReadonlyArray<string> = [],
+  ) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -3227,13 +3261,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
         const threadSessions = yield* sessionsForThread(input.threadId);
         yield* Effect.forEach(
-          threadSessions,
+          threadSessions.filter(
+            (session) =>
+              !retainedTerminalIds.includes(session.terminalId) &&
+              !retainedTerminalPrefixes.some((prefix) => session.terminalId.startsWith(prefix)),
+          ),
           (session) => closeSession(input.threadId, session.terminalId, false),
           { discard: true },
         );
 
         if (input.deleteHistory) {
-          yield* deleteAllHistoryForThread(input.threadId);
+          yield* deleteAllHistoryForThread(
+            input.threadId,
+            retainedTerminalIds,
+            retainedTerminalPrefixes,
+          );
         }
       }),
     );
@@ -3242,11 +3284,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
+        const excludedTerminalIds = new Set(input.excludedTerminalIds ?? []);
         const running = (yield* sessionsForThread(input.threadId)).filter(
           (session): session is TerminalSessionState & { pid: number } =>
             session.status === "running" &&
             Number.isInteger(session.pid) &&
-            (input.terminalId === undefined || session.terminalId === input.terminalId),
+            (input.terminalId === undefined || session.terminalId === input.terminalId) &&
+            !excludedTerminalIds.has(session.terminalId),
         );
         if (running.length === 0) return;
         // A command started during the process check can miss the snapshot,
@@ -3287,6 +3331,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
       Effect.andThen(readHistory(input.threadId, input.terminalId)),
+      Effect.map((persistedHistory) => persistedHistory.value()),
     );
   };
   return TerminalManager.of({
@@ -3298,6 +3343,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     history,
     restart,
     close,
+    closeThreadExcept: (threadId, retainedTerminalIds, retainedTerminalPrefixes) =>
+      close({ threadId, deleteHistory: true }, retainedTerminalIds, retainedTerminalPrefixes),
     closeIdle,
     subscribe,
     subscribeMetadata,

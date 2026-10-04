@@ -80,7 +80,27 @@ export interface ThreadCommandInput extends CommandMetadata {
   readonly threadId: ThreadId;
 }
 
-export type DeleteThreadInput = ThreadCommandInput;
+export interface DeleteThreadInput extends ThreadCommandInput {
+  readonly deleteWorktree?: boolean;
+  readonly repositoryKey?: string;
+}
+export type RetryThreadWorktreeCleanupInput = ThreadCommandInput;
+export type AbandonThreadWorktreeCleanupInput = ThreadCommandInput;
+export type ResolveThreadAnnotationInput = ThreadCommandInput;
+export type ReopenThreadAnnotationInput = ThreadCommandInput;
+export type ClearThreadAttentionInput = ThreadCommandInput;
+
+export interface SetThreadPersistenceInput extends ThreadCommandInput {
+  readonly persistent: boolean;
+}
+
+export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
+  readonly body: string;
+}
+
+export interface SetThreadAttentionInput extends ThreadCommandInput {
+  readonly attention: import("@t3tools/contracts").ThreadAttention;
+}
 export type ArchiveThreadInput = ThreadCommandInput;
 export type UnarchiveThreadInput = ThreadCommandInput;
 export type SettleThreadInput = ThreadCommandInput;
@@ -410,6 +430,11 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
 
 function simpleThreadCommand(
   type:
+    | "thread.worktree-cleanup.retry"
+    | "thread.worktree-cleanup.abandon"
+    | "thread.annotation.resolve"
+    | "thread.annotation.reopen"
+    | "thread.attention.clear"
     | "thread.delete"
     | "thread.archive"
     | "thread.unarchive"
@@ -426,7 +451,76 @@ function simpleThreadCommand(
 export const deleteThread = Effect.fn("EnvironmentCommands.deleteThread")(function* (
   input: DeleteThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.delete", input);
+  return yield* dispatch({
+    type: "thread.delete",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.deleteWorktree === undefined ? {} : { deleteWorktree: input.deleteWorktree }),
+    ...(input.repositoryKey === undefined ? {} : { repositoryKey: input.repositoryKey }),
+  });
+});
+
+export const retryThreadWorktreeCleanup = Effect.fn(
+  "EnvironmentCommands.retryThreadWorktreeCleanup",
+)(function* (input: RetryThreadWorktreeCleanupInput) {
+  return yield* simpleThreadCommand("thread.worktree-cleanup.retry", input);
+});
+
+export const abandonThreadWorktreeCleanup = Effect.fn(
+  "EnvironmentCommands.abandonThreadWorktreeCleanup",
+)(function* (input: AbandonThreadWorktreeCleanupInput) {
+  return yield* simpleThreadCommand("thread.worktree-cleanup.abandon", input);
+});
+
+export const resolveThreadAnnotation = Effect.fn("EnvironmentCommands.resolveThreadAnnotation")(
+  function* (input: ResolveThreadAnnotationInput) {
+    return yield* simpleThreadCommand("thread.annotation.resolve", input);
+  },
+);
+
+export const reopenThreadAnnotation = Effect.fn("EnvironmentCommands.reopenThreadAnnotation")(
+  function* (input: ReopenThreadAnnotationInput) {
+    return yield* simpleThreadCommand("thread.annotation.reopen", input);
+  },
+);
+
+export const clearThreadAttention = Effect.fn("EnvironmentCommands.clearThreadAttention")(
+  function* (input: ClearThreadAttentionInput) {
+    return yield* simpleThreadCommand("thread.attention.clear", input);
+  },
+);
+
+export const setThreadPersistence = Effect.fn("EnvironmentCommands.setThreadPersistence")(
+  function* (input: SetThreadPersistenceInput) {
+    return yield* dispatch({
+      type: "thread.persistence.set",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      persistent: input.persistent,
+    });
+  },
+);
+
+export const upsertThreadAnnotation = Effect.fn("EnvironmentCommands.upsertThreadAnnotation")(
+  function* (input: UpsertThreadAnnotationInput) {
+    return yield* dispatch({
+      type: "thread.annotation.upsert",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      body: input.body,
+    });
+  },
+);
+
+export const setThreadAttention = Effect.fn("EnvironmentCommands.setThreadAttention")(function* (
+  input: SetThreadAttentionInput,
+) {
+  return yield* dispatch({
+    type: "thread.attention.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    attention: input.attention,
+  });
 });
 
 export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(function* (
