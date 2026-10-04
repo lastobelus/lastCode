@@ -1,4 +1,8 @@
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadWorkingStartedAt,
+  threadShellIsCleanupRecovery,
+  threadShellIsVisible,
+} from "@t3tools/client-runtime/state/models";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -12,6 +16,7 @@ import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contract
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -464,11 +469,11 @@ type ScopedSidebarProject = SidebarProject & {
   environmentId: string;
 };
 
-type ScopedSidebarThread = ThreadSortInput & {
-  environmentId: string;
-  projectId: string;
-  archivedAt: string | null;
-};
+type ScopedSidebarThread = ThreadSortInput &
+  Pick<SidebarThreadSummary, "archivedAt" | "deletedAt" | "worktreeCleanup"> & {
+    environmentId: string;
+    projectId: string;
+  };
 
 type LogicalSidebarProject = SidebarProject & {
   projectKey: string;
@@ -562,15 +567,18 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
 }
 
 export function filterSidebarV2VisibleThreads<
-  T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage"> & {
+  T extends Pick<
+    SidebarThreadSummary,
+    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage"
+  > & {
     environmentId: string;
     projectId: string;
   },
 >(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
   return threads.filter(
     (thread) =>
-      thread.archivedAt === null &&
-      !isSidebarSubagentThread(thread) &&
+      threadShellIsVisible(thread) &&
+      (threadShellIsCleanupRecovery(thread) || !isSidebarSubagentThread(thread)) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
@@ -617,6 +625,32 @@ export function buildBulkUnpinContextMenuItem(input: {
   return { id: "unpin", label: `Unpin (${input.pinnedCount})` };
 }
 
+export function buildBulkThreadDeleteContextMenuItem(input: {
+  count: number;
+  hasPersistentThread: boolean;
+}): ContextMenuItem<"delete"> {
+  return {
+    id: "delete",
+    label: input.hasPersistentThread
+      ? `Delete (${input.count}) (disable persistence first)`
+      : `Delete (${input.count})`,
+    destructive: true,
+    disabled: input.hasPersistentThread,
+  };
+}
+
+export function collectUnprotectedBulkThreadEntries<
+  TEntry extends { readonly thread: { readonly persistent?: boolean | undefined } },
+>(input: {
+  threadKeys: readonly string[];
+  getEntry: (threadKey: string) => TEntry | undefined;
+}): readonly TEntry[] | null {
+  const entries = input.threadKeys.flatMap((threadKey) => {
+    const entry = input.getEntry(threadKey);
+    return entry ? [entry] : [];
+  });
+  return entries.some((entry) => entry.thread.persistent === true) ? null : entries;
+}
 export interface ThreadStatusPill {
   label:
     | "Working"
@@ -625,30 +659,42 @@ export interface ThreadStatusPill {
     | "Pending Approval"
     | "Awaiting Input"
     | "Waiting"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Deleting"
+    | "Deleting (Queued)"
+    | "Question"
+    | "Cleanup failed";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
+  marker?: string;
 }
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 5,
-  "Awaiting Input": 4,
+  "Pending Approval": 7,
+  "Awaiting Input": 6,
+  Question: 5,
   Working: 3,
   Connecting: 3,
   Waiting: 2.5,
   "Plan Ready": 2,
   Completed: 1,
+  Deleting: 7,
+  "Deleting (Queued)": 7,
+  "Cleanup failed": 8,
 };
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
+  | "attention"
   | "hasActionableProposedPlan"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
   | "interactionMode"
   | "latestRun"
   | "runtime"
+  | "actionResume"
+  | "worktreeCleanup"
 > & {
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
@@ -948,10 +994,14 @@ export function resolveThreadRowClassName(input: {
 export type SidebarThreadStatus =
   | "approval"
   | "input"
+  | "question"
   | "working"
   | "waiting"
   | "failed"
   | "limited"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -971,28 +1021,41 @@ export function shouldRecedeSidebarThread(input: {
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
->;
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "runtime"
+  | "actionResume"
+  | "attention"
+  | "worktreeCleanup"
+> & { pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined };
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
+  if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
+  if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
   if (thread.hasPendingApprovals) {
     return "approval";
   }
   if (thread.hasPendingUserInput) {
     return "input";
   }
+  if (thread.attention?.kind === "question") return "question";
   if (
     thread.runtime !== null &&
     ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
   ) {
     return "working";
   }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
-  }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
+  if (
+    thread.actionResume?.outcome === "running" &&
+    (thread.pendingBackgroundTasks?.length ?? 0) === 0
+  ) {
+    return actionRunningPresentation(thread.actionResume).state;
+  }
+  if (thread.runtime?.status === "idle") return "waiting";
   return "ready";
 }
 
@@ -1004,13 +1067,24 @@ export type SidebarV2TopStatusKind =
   | "input"
   | "waiting"
   | "woke"
-  | "working";
+  | "working"
+  | "question"
+  | "cleanup-deleting"
+  | "cleanup-queued"
+  | "cleanup-failed";
 
 export function resolveSidebarV2TopStatus(input: {
   readonly status: SidebarThreadStatus;
   readonly isUnread: boolean;
   readonly isWoke: boolean;
 }): SidebarV2TopStatusKind | null {
+  if (
+    input.status === "question" ||
+    input.status === "cleanup-deleting" ||
+    input.status === "cleanup-queued" ||
+    input.status === "cleanup-failed"
+  )
+    return input.status;
   if (input.status === "working") {
     return "working";
   }
@@ -1159,6 +1233,33 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
+  if (thread.worktreeCleanup?.status === "failed") {
+    return {
+      label: "Cleanup failed",
+      colorClass: "text-red-700 dark:text-red-300",
+      dotClass: "bg-red-600 dark:bg-red-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "queued") {
+    return {
+      label: "Deleting (Queued)",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
+  if (thread.worktreeCleanup?.status === "deleting") {
+    return {
+      label: "Deleting",
+      colorClass: "text-orange-700 dark:text-orange-300",
+      dotClass: "bg-orange-500 dark:bg-orange-300",
+      pulse: false,
+    };
+  }
+
   if (thread.hasPendingApprovals) {
     return {
       label: "Pending Approval",
@@ -1174,6 +1275,16 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
+    };
+  }
+
+  if (thread.attention?.kind === "question") {
+    return {
+      label: "Question",
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      pulse: false,
+      marker: "?",
     };
   }
 
@@ -1218,6 +1329,22 @@ export function resolveThreadStatusPill(input: {
       label: "Plan Ready",
       colorClass: "text-violet-600 dark:text-violet-300/90",
       dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      pulse: false,
+    };
+  }
+
+  if (thread.actionResume?.outcome === "running") {
+    const action = actionRunningPresentation(thread.actionResume);
+    return {
+      label: action.label,
+      colorClass:
+        action.state === "working"
+          ? "text-sky-600 dark:text-sky-300/80"
+          : "text-yellow-700 dark:text-yellow-300/90",
+      dotClass:
+        action.state === "working"
+          ? "bg-sky-500 dark:bg-sky-300/80"
+          : "bg-yellow-500 dark:bg-yellow-300/90",
       pulse: false,
     };
   }
@@ -1365,7 +1492,7 @@ export function sortLogicalProjectsForSidebar<
   );
   const threadsByProjectKey = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) continue;
+    if (!threadShellIsVisible(thread)) continue;
     const projectKey = groupKeyByProjectRef.get(`${thread.environmentId}\0${thread.projectId}`);
     if (!projectKey) continue;
     const existing = threadsByProjectKey.get(projectKey);
@@ -1402,8 +1529,8 @@ export function sortSidebarV2ProjectGroups<
 
 /**
  * Sorts the cross-environment project collection used by landing surfaces.
- * Project ids are only unique within an environment, and archived threads
- * must not make a project appear recently active.
+ * Project ids are only unique within an environment. Ordinary archived threads
+ * do not count as activity, but unfinished deletion cleanup remains reachable.
  */
 export function sortScopedProjectsForSidebar<
   TProject extends ScopedSidebarProject,
@@ -1417,7 +1544,7 @@ export function sortScopedProjectsForSidebar<
     `${environmentId}\u0000${projectId}`;
   const threadsByProject = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) {
+    if (!threadShellIsVisible(thread)) {
       continue;
     }
     const key = scopedKey(thread.environmentId, thread.projectId);
