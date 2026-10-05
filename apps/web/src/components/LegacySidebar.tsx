@@ -1,3 +1,4 @@
+import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { describeHandoff } from "../handoffs/handoffMenu";
 import { readThreadHandoffs } from "../handoffs/handoffsStore";
 import { useOpenHandoff } from "../handoffs/useOpenHandoff";
@@ -1246,6 +1247,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   </span>
                 ) : null}
               </span>
+              <ThreadDashboardIndicator items={thread.dashboardItems} />
             </>
           )}
         </div>
@@ -2370,6 +2372,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           };
         };
 
+        actionHandlers.set("open-dashboard", () => {
+          if (isMobile) setOpenMobile(false);
+          void router.navigate({
+            to: "/dashboard",
+            search: { environmentId: project.environmentId, projectId: project.id },
+          });
+        });
+
         actionHandlers.set("project-settings", () => {
           if (isMobile) setOpenMobile(false);
           void router.navigate({
@@ -2383,6 +2393,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             buildTargetedItem("rename", "Rename"),
             buildTargetedItem("grouping", "Group into..."),
             buildTargetedItem("copy-path", "Copy Path"),
+            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
             { id: "project-settings", label: "Project settings", icon: "settings" },
             buildTargetedItem(
               "delete",
@@ -2417,6 +2428,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
+      project.environmentId,
+      project.id,
       project.projectKey,
       router,
       setOpenMobile,
@@ -3045,6 +3058,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ...(persistenceAction ? [persistenceAction] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
+            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
             { id: "project-settings", label: "Project settings" },
             { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
             ...(handoffDescriptors.length
@@ -3104,6 +3118,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       if (clicked === "open-creator" && creatorRef && canOpenCreator) {
         await navigateToThread(creatorRef);
+        return;
+      }
+
+      if (clicked === "open-dashboard") {
+        if (isMobile) setOpenMobile(false);
+        void router.navigate({
+          to: "/dashboard",
+          search: { environmentId: thread.environmentId, projectId: thread.projectId },
+        });
         return;
       }
 

@@ -5,10 +5,10 @@ import {
   normalizeFileCommentRange,
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
+import { setMarkdownTaskChecked } from "../../markdownTaskList";
 import {
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
-  setMarkdownTaskChecked,
   shouldShowFileExplorer,
 } from "./filePreviewMode";
 

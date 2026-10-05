@@ -5,6 +5,8 @@ import {
   OrchestrationSearchThreadsResult,
   OrchestrationV2ThreadForkSourcePoint,
   OrchestrationV2ContextTransfer,
+  OrchestrationV2SubagentPromotion,
+  CommandId,
   TrimmedNonEmptyString,
   ModelSelection,
   RuntimeMode,
@@ -212,6 +214,27 @@ const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
   }),
   success: transferResult,
 }).annotate(Tool.Destructive, true);
+const SubagentPromoteTool = Tool.make("t3_subagent_promote", {
+  ...commandTool,
+  description:
+    "Request an interactive native fork of a provider-owned subagent in the calling project. A running subagent is allowed to finish first. Repeated requests reuse the existing promotion; a failed request retries it. Acceptance is not completion: use t3_subagent_promotion_status to read the destination and progress. The original subagent remains read-only, and its parent receives a handoff after the native fork succeeds.",
+  parameters: Schema.Struct({ threadId: ThreadId }),
+}).annotate(Tool.Destructive, true);
+const SubagentPromotionCancelTool = Tool.make("t3_subagent_promotion_cancel", {
+  ...commandTool,
+  description:
+    "Cancel a subagent promotion while it is waiting for the subagent to finish. Pass the requestId from t3_subagent_promotion_status. This does not stop the subagent; a native fork already in progress cannot be cancelled.",
+  parameters: Schema.Struct({ threadId: ThreadId, requestId: CommandId }),
+}).annotate(Tool.Destructive, true);
+const SubagentPromotionStatusTool = Tool.make("t3_subagent_promotion_status", {
+  ...commandTool,
+  description:
+    "Read durable subagent promotion progress in the calling project. Null means no promotion was requested. The destination is usable only when status is promoted; use t3_thread_send on that interactive thread for further work.",
+  parameters: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Struct({ promotion: Schema.NullOr(OrchestrationV2SubagentPromotion) }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 const ThreadTransfersTool = Tool.make("t3_thread_transfers", {
   ...commandTool,
   description: "Read context transfer status for a thread in the calling project.",
@@ -262,6 +285,9 @@ export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,
+  SubagentPromoteTool,
+  SubagentPromotionCancelTool,
+  SubagentPromotionStatusTool,
   ThreadMergeBackTool,
   ThreadTransfersTool,
   ThreadConfigurationTool,

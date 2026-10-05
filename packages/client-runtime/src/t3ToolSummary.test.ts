@@ -84,6 +84,10 @@ describe("summarizeT3ToolCalls", () => {
         .label,
     ).toBe("Requested 1 thread fork");
     expect(
+      summarizeT3ToolCalls("subagent-promote", [completed({ threadId: "child" }, { sequence: 4 })])
+        .label,
+    ).toBe("Requested 1 subagent promotion");
+    expect(
       summarizeT3ToolCalls("thread-merge", [
         completed({ targetThreadId: "parent" }, { sequence: 4 }),
       ]).label,

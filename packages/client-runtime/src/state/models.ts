@@ -124,6 +124,7 @@ export interface EnvironmentThreadShell {
   readonly unsettledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
+  readonly subagentPromotion?: import("@t3tools/contracts").OrchestrationV2SubagentPromotion | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
@@ -143,7 +144,12 @@ export interface EnvironmentThreadShell {
   /** Pending title regeneration marker; null when no request is in flight. */
   readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: string } | null;
   readonly deletedAt: string | null;
+  readonly persistent?: boolean;
+  readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
+  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
+  readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
+  readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
   readonly source: OrchestrationV2ThreadShell;
 }
 
@@ -284,6 +290,7 @@ export function presentThreadShell(
     unsettledAt: nullableIso(thread.unsettledAt ?? null),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
+    subagentPromotion: thread.subagentPromotion ?? null,
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
@@ -300,7 +307,12 @@ export function presentThreadShell(
             startedAt: iso(thread.titleRegeneration.startedAt),
           },
     deletedAt: nullableIso(thread.deletedAt),
+    ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
+    annotation: thread.annotation ?? null,
+    attention: thread.attention ?? null,
+    dashboardItems: thread.dashboardItems ?? [],
     actionResume: thread.actionResume ?? null,
+    worktreeCleanup: thread.worktreeCleanup ?? null,
     source: thread,
   };
 }

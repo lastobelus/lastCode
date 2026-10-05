@@ -60,6 +60,7 @@ import { makeOrchestratorV2ReplayLayerWithRegistry } from "../testkit/ProviderRe
 import {
   ProviderAdapterForkThreadError,
   ProviderAdapterOpenSessionError,
+  ProviderAdapterReadThreadSnapshotError,
   ProviderAdapterRollbackThreadError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -6912,6 +6913,216 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
     reasoningEffort: "medium",
   });
+
+  const codexSnapshotExchange = (
+    id: number,
+    method: string,
+    params: Schema.Json,
+    result: Schema.Json,
+  ): ReadonlyArray<CodexReplay.CodexAppServerReplayTranscript["entries"][number]> => [
+    { type: "expect_outbound", label: method, frame: { id, method, params } },
+    { type: "emit_inbound", label: method, frame: { id, result } },
+  ];
+
+  it.effect.each(["legacy", "paginated"] as const)(
+    "hydrates %s Codex snapshot history into the fork target without fabricating runs",
+    (historyMode) =>
+      Effect.gen(function* () {
+        const nativeThreadId = `snapshot-${historyMode}-fork`;
+        const nativeParentId = "snapshot-parent";
+        const turns = [
+          {
+            id: "history-first-turn",
+            status: "completed",
+            itemsView: "full",
+            startedAt: 1782622440,
+            completedAt: 1782622450,
+            items: [
+              {
+                type: "userMessage",
+                id: "history-user",
+                content: [
+                  { type: "text", text: "  Original request", text_elements: [] },
+                  { type: "text", text: "second line  ", text_elements: [] },
+                ],
+              },
+              { type: "agentMessage", id: "history-agent", text: "Original answer" },
+              { type: "plan", id: "history-plan", text: "Internal plan" },
+            ],
+          },
+          {
+            id: "history-second-turn",
+            status: "completed",
+            itemsView: "full",
+            items: [
+              { type: "userMessage", id: "history-empty", content: [] },
+              { type: "agentMessage", id: "history-final", text: "Final answer" },
+            ],
+          },
+        ];
+        const nativeThread = {
+          ...codexReplayThreadResult({ nativeThreadId, forkedFromId: nativeParentId }).thread,
+          projectId: null,
+          historyMode,
+          updatedAt: 1782622460,
+        };
+        let nextRequestId = 3;
+        const readEntries = () => [
+          ...codexSnapshotExchange(
+            nextRequestId++,
+            "thread/read",
+            { threadId: nativeThreadId, includeTurns: false },
+            { thread: nativeThread },
+          ),
+          ...(historyMode === "legacy"
+            ? codexSnapshotExchange(
+                nextRequestId++,
+                "thread/read",
+                { threadId: nativeThreadId, includeTurns: true },
+                { thread: { ...nativeThread, turns } },
+              )
+            : [
+                ...codexSnapshotExchange(
+                  nextRequestId++,
+                  "thread/turns/list",
+                  {
+                    threadId: nativeThreadId,
+                    cursor: null,
+                    limit: 100,
+                    sortDirection: "asc",
+                    itemsView: "full",
+                  },
+                  { data: [turns[0]!], nextCursor: "next-page" },
+                ),
+                ...codexSnapshotExchange(
+                  nextRequestId++,
+                  "thread/turns/list",
+                  {
+                    threadId: nativeThreadId,
+                    cursor: "next-page",
+                    limit: 100,
+                    sortDirection: "asc",
+                    itemsView: "full",
+                  },
+                  { data: [turns[1]!], nextCursor: null },
+                ),
+              ]),
+        ];
+        const transcript = makeCodexReplayTranscript({
+          scenario: `codex-snapshot-${historyMode}`,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            ...readEntries(),
+            ...readEntries(),
+            ...readEntries(),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const targetThreadId = ThreadId.make("snapshot-target");
+        const forkedFrom = { providerThreadId: ProviderThreadId.make("snapshot-source-provider") };
+        const providerThread = {
+          ...harness.providerThread,
+          appThreadId: targetThreadId,
+          forkedFrom,
+        };
+        const snapshot = yield* harness.runtime.readThreadSnapshot({ providerThread });
+        const repeated = yield* harness.runtime.readThreadSnapshot({ providerThread });
+        const otherTarget = yield* harness.runtime.readThreadSnapshot({
+          providerThread: {
+            ...providerThread,
+            appThreadId: ThreadId.make("other-snapshot-target"),
+          },
+        });
+
+        assert.deepEqual(
+          snapshot.messages.map(({ role, text }) => ({ role, text })),
+          [
+            { role: "user", text: "Original request\nsecond line" },
+            { role: "assistant", text: "Original answer" },
+            { role: "assistant", text: "Final answer" },
+          ],
+        );
+        assert.deepEqual(snapshot.messages, repeated.messages);
+        assert.notEqual(snapshot.messages[0]!.id, otherTarget.messages[0]!.id);
+        for (const message of snapshot.messages) {
+          assert.equal(message.threadId, targetThreadId);
+          assert.isNull(message.runId);
+          assert.isNull(message.nodeId);
+          assert.isFalse(message.streaming);
+          assert.equal(message.creationSource, "provider");
+          assert.equal(message.createdBy, message.role === "user" ? "user" : "agent");
+        }
+        assert.equal(DateTime.toEpochMillis(snapshot.messages[0]!.createdAt), 1782622440000);
+        assert.equal(DateTime.toEpochMillis(snapshot.messages[1]!.updatedAt), 1782622450000);
+        assert.equal(DateTime.toEpochMillis(snapshot.messages[2]!.updatedAt), 1782622460000);
+        assert.deepEqual(snapshot.providerTurns, []);
+        assert.equal(snapshot.providerThread.id, providerThread.id);
+        assert.equal(snapshot.providerThread.nativeThreadRef?.nativeId, nativeThreadId);
+        assert.deepEqual(snapshot.providerThread.forkedFrom, forkedFrom);
+        assert.deepEqual(snapshot.providerPayload, { ...nativeThread, turns });
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("rejects repeated cursors when reading paginated Codex snapshot history", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "snapshot-repeated-cursor";
+      const nativeThread = {
+        ...codexReplayThreadResult({ nativeThreadId, forkedFromId: null }).thread,
+        projectId: null,
+        historyMode: "paginated",
+      };
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-snapshot-repeated-cursor",
+        entries: [
+          ...codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "unused",
+            prompt: "unused",
+          }).slice(0, 5),
+          ...codexSnapshotExchange(
+            3,
+            "thread/read",
+            { threadId: nativeThreadId, includeTurns: false },
+            { thread: nativeThread },
+          ),
+          ...codexSnapshotExchange(
+            4,
+            "thread/turns/list",
+            {
+              threadId: nativeThreadId,
+              cursor: null,
+              limit: 100,
+              sortDirection: "asc",
+              itemsView: "full",
+            },
+            { data: [], nextCursor: "repeat" },
+          ),
+          ...codexSnapshotExchange(
+            5,
+            "thread/turns/list",
+            {
+              threadId: nativeThreadId,
+              cursor: "repeat",
+              limit: 100,
+              sortDirection: "asc",
+              itemsView: "full",
+            },
+            { data: [], nextCursor: "repeat" },
+          ),
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(transcript);
+      const error = yield* Effect.flip(
+        harness.runtime.readThreadSnapshot({ providerThread: harness.providerThread }),
+      );
+      assert.instanceOf(error, ProviderAdapterReadThreadSnapshotError);
+      assert.include(errorCauseChainText(error), "pagination repeated a cursor");
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
 
   const errorCauseChainText = (error: unknown): string =>
     error instanceof Error ? `${error.message} ${errorCauseChainText(error.cause)}` : String(error);

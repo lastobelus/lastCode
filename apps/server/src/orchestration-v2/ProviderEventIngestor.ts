@@ -389,7 +389,10 @@ export const layer: Layer.Layer<
     const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
       Effect.gen(function* () {
         switch (input.event.type) {
-          case "app_thread.created":
+          case "app_thread.created": {
+            // Native sessions can reannounce children after reconnecting. Creation
+            // must not replace their durable app metadata, including promotion.
+            if ((yield* projections.getThreadShell(input.event.appThread.id)) !== null) return [];
             return [
               yield* makeDomainEvent(input, {
                 type: "thread.created",
@@ -397,6 +400,7 @@ export const layer: Layer.Layer<
                 payload: input.event.appThread,
               }),
             ];
+          }
           case "provider_session.updated":
             return [
               yield* makeDomainEvent(input, {
