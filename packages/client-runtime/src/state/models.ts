@@ -141,6 +141,7 @@ export interface EnvironmentThreadShell {
   /** Pending title regeneration marker; null when no request is in flight. */
   readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: string } | null;
   readonly deletedAt: string | null;
+  readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly source: OrchestrationV2ThreadShell;
 }
 
@@ -280,6 +281,7 @@ export function presentThreadShell(
             startedAt: iso(thread.titleRegeneration.startedAt),
           },
     deletedAt: nullableIso(thread.deletedAt),
+    actionResume: thread.actionResume ?? null,
     source: thread,
   };
 }
