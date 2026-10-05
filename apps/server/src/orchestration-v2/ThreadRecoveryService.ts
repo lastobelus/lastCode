@@ -110,6 +110,14 @@ const make = Effect.gen(function* () {
         const state = yield* current(input);
         if (state === null || (expectedStatus !== undefined && state.run.status !== expectedStatus))
           return false;
+        const recovery = state.thread.recovery;
+        if (
+          status === "suspect" &&
+          recovery?.runId === input.runId &&
+          recovery.attemptId === input.attemptId &&
+          recovery.status !== "suspect"
+        )
+          return false;
         const now = yield* DateTime.now;
         const result = yield* sink.writeIfRunCurrent({
           threadId: input.threadId,

@@ -377,6 +377,34 @@ it.effect(
   },
 );
 
+it.effect(
+  "keeps exhausted recovery when a suspect publication is queued behind failed finalization",
+  () => {
+    const test = harness();
+    test.inspect(terminal);
+    test.failFinalize();
+    return Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      test.beforeFinalize(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const service = yield* test.register;
+      const recovery = yield* service.reconcile.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const suspect = yield* service.suspect(identity).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(recovery);
+      yield* Fiber.join(suspect);
+      assert.deepEqual(test.statuses, ["recovering", "failed"]);
+      yield* service.reconcile;
+      assert.equal(test.finalizations, 1);
+      assert.equal(test.thread.recovery?.status, "failed");
+    }).pipe(Effect.provide(test.layer));
+  },
+);
+
 it.effect("does not report recovery when the matching provider turn was never saved", () => {
   const test = harness();
   test.inspect(terminal);
