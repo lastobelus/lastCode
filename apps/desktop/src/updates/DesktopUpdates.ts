@@ -546,7 +546,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((inspection) => {
         const checkpointRequested =
           inspection.status === "checkpoint-requested" || inspection.checkpointRequested;
-        const result = { checked: true, checkpointRequested };
+        const result = { checked: true, checkpointRequested, error: null };
         const preserveFailure =
           state.canRetry &&
           ((state.status === "error" && state.errorContext === "download") ||
@@ -624,8 +624,14 @@ export const make = Effect.gen(function* () {
         );
       }),
       Effect.catchTag("LastCodeLocalUpdateError", (error) =>
-        setState(reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt)).pipe(
-          Effect.as({ checked: true, checkpointRequested: false }),
+        setState(
+          state.status === "available" ||
+            state.downloadedVersion !== null ||
+            (state.status === "error" && state.errorContext === "download" && state.canRetry)
+            ? { ...state, checkedAt }
+            : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
+        ).pipe(
+          Effect.as({ checked: true, checkpointRequested: false, error: error.message }),
         ),
       ),
     );
@@ -637,9 +643,9 @@ export const make = Effect.gen(function* () {
   ) {
     yield* Effect.annotateCurrentSpan({ reason });
     if (yield* Ref.get(desktopState.quitting))
-      return { checked: false, checkpointRequested: false };
+      return { checked: false, checkpointRequested: false, error: null };
     if (!(yield* Ref.get(updaterConfiguredRef)))
-      return { checked: false, checkpointRequested: false };
+      return { checked: false, checkpointRequested: false, error: null };
 
     const state = yield* Ref.get(updateStateRef);
     if (state.status === "downloading") {
@@ -647,14 +653,14 @@ export const make = Effect.gen(function* () {
         reason,
         status: state.status,
       });
-      return { checked: false, checkpointRequested: false };
+      return { checked: false, checkpointRequested: false, error: null };
     }
 
     if (state.source === "lastcode-local" && (!state.enabled || !localUpdates.supported)) {
-      return { checked: false, checkpointRequested: false };
+      return { checked: false, checkpointRequested: false, error: null };
     }
     if (actionReservation === "acquire" && !(yield* tryStartUpdateAction("check")))
-      return { checked: false, checkpointRequested: false };
+      return { checked: false, checkpointRequested: false, error: null };
 
     if (state.source === "lastcode-local") {
       const check = checkForLocalUpdate(reason);
@@ -669,7 +675,7 @@ export const make = Effect.gen(function* () {
       yield* logUpdaterInfo("checking for updates", { reason });
 
       return yield* electronUpdater.checkForUpdates.pipe(
-        Effect.as({ checked: true, checkpointRequested: false }),
+        Effect.as({ checked: true, checkpointRequested: false, error: null }),
         Effect.catchTags({
           ElectronUpdaterCheckForUpdatesError: Effect.fn(
             "desktop.updates.handleCheckForUpdatesFailure",
@@ -682,7 +688,7 @@ export const make = Effect.gen(function* () {
               errorTag: error._tag,
               channel: error.channel,
             });
-            return { checked: true, checkpointRequested: false };
+            return { checked: true, checkpointRequested: false, error: error.message };
           }),
         }),
       );
@@ -1492,6 +1498,7 @@ export const make = Effect.gen(function* () {
         return {
           checked: false,
           checkpointRequested: false,
+          error: null,
           state: yield* Ref.get(updateStateRef),
         };
       }

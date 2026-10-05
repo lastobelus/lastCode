@@ -205,6 +205,7 @@ describe("DesktopUpdates", () => {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
         const result = yield* updates.check("web-ui");
+        assert.equal(result.error, "Could not request checkpoint.");
         assert.equal(result.state.status, "error");
         assert.equal(result.state.errorContext, "check");
         assert.include(result.state.message ?? "", "Could not request checkpoint.");
@@ -213,6 +214,136 @@ describe("DesktopUpdates", () => {
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect.each(["available", "downloaded", "failed-build", "failed-install"] as const)(
+    "preserves update actions after a checkpoint request fails (%s)",
+    (priorKind) => {
+      const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+      const availableVersion = "1.2.4-nightly.20260814.1089.1";
+      const build = {
+        schemaVersion: 1 as const,
+        status: "built" as const,
+        checkpointTag,
+        outputDir: "/tmp/local-package",
+        manifestPath: "/tmp/local-package/build-manifest.json",
+        dmgPath: "/tmp/local-package/LastCode.dmg",
+        dmgSha256: "a".repeat(64),
+      };
+      let buildAttempts = 0;
+      let installAttempts = 0;
+      let handoffCommitted = false;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) =>
+          requestCheckpoint
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "inspect",
+                  message: "Could not request checkpoint.",
+                }),
+              )
+            : Effect.succeed({
+                schemaVersion: 2,
+                status: "available",
+                checkpointRequested: false,
+                checkpointTag,
+                availableVersion,
+                releaseNotes: {
+                  lastCode: { status: "known", items: ["Test fix"], omittedItems: 0 },
+                  upstream: { groups: [], omittedGroups: 0 },
+                },
+              }),
+        localBuildEffect: (_checkpointTag, onProgress) =>
+          Effect.gen(function* () {
+            buildAttempts += 1;
+            if (priorKind === "failed-build" && buildAttempts === 1) {
+              if (onProgress) {
+                yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
+              }
+              return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "build",
+                message: "Packaging failed",
+              });
+            }
+            return build;
+          }),
+        localPrepareInstall: () => {
+          installAttempts += 1;
+          return priorKind === "failed-install" && installAttempts === 1
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "install",
+                  message: "Install preflight failed",
+                }),
+              )
+            : Effect.succeed({
+                commit: Effect.sync(() => {
+                  handoffCommitted = true;
+                }),
+                cancel: Effect.void,
+              });
+        },
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.equal((yield* updates.getState).status, "available");
+          if (priorKind !== "available") {
+            const downloaded = yield* updates.download;
+            assert.isTrue(downloaded.accepted);
+            assert.equal(downloaded.completed, priorKind !== "failed-build");
+          }
+          if (priorKind === "failed-install") {
+            yield* updates.install;
+          }
+          const prior = yield* updates.getState;
+          assert.equal(prior.availableVersion, availableVersion);
+          assert.deepEqual(prior.releaseNotes[0]?.items, ["Test fix"]);
+          if (priorKind === "failed-build") {
+            assert.equal(prior.status, "error");
+            assert.equal(prior.errorContext, "download");
+            assert.equal(prior.localBuildFailure?.errorKind, "packaging");
+            assert.equal(prior.message, "Packaging failed");
+          } else if (priorKind === "failed-install") {
+            assert.equal(prior.status, "downloaded");
+            assert.equal(prior.errorContext, "install");
+            assert.equal(prior.message, "Install preflight failed");
+          } else {
+            assert.equal(prior.status, priorKind);
+          }
+          yield* TestClock.adjust(Duration.millis(1));
+          const requested = yield* updates.check("menu");
+          assert.isTrue(requested.checked);
+          assert.isFalse(requested.checkpointRequested);
+          assert.equal(requested.error, "Could not request checkpoint.");
+          assert.notEqual(requested.state.checkedAt, prior.checkedAt);
+          assert.deepEqual({ ...requested.state, checkedAt: prior.checkedAt }, prior);
+          assert.deepEqual(yield* updates.getState, requested.state);
+
+          if (priorKind === "available" || priorKind === "failed-build") {
+            const downloaded = yield* updates.download;
+            assert.isTrue(downloaded.completed);
+          }
+          assert.equal(buildAttempts, priorKind === "failed-build" ? 2 : 1);
+          yield* updates.install;
+          assert.isTrue(handoffCommitted);
+          assert.deepEqual(harness.localInstallArgs().at(-1), {
+            dmgPath: build.dmgPath,
+            dmgSha256: build.dmgSha256,
+            expectedVersion: availableVersion,
+          });
+          assert.deepEqual(harness.installEvents(), [
+            ...(priorKind === "failed-install" ? ["prepare-install"] : []),
+            "prepare-install",
+            "stop-backend",
+            "destroy-windows",
+            "quit-app",
+          ]);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 
   it("maps local sections, unavailable provenance, and overflow summaries", () => {
     assert.deepEqual(
