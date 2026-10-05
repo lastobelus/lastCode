@@ -64,15 +64,11 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   const result = yield* updates.check("menu");
   const updateState = result.state;
 
-  if (
-    updateState.source === "lastcode-local" &&
-    updateState.status !== "error" &&
-    updateState.message
-  ) {
+  if (result.checkpointRequested) {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: "Checkpoint requested",
-      message: updateState.message,
+      message: DesktopUpdates.checkpointRequestedMessage,
       buttons: ["OK"],
     });
   } else if (updateState.status === "up-to-date") {

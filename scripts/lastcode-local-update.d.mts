@@ -15,6 +15,22 @@ export interface LocalUpdateOptions {
   readonly requestCheckpoint?: boolean;
 }
 
+export type LocalUpdateInspectionResult =
+  | { readonly schemaVersion: 2; readonly status: "checkpoint-requested" }
+  | {
+      readonly schemaVersion: 1 | 2;
+      readonly status: "up-to-date" | "available";
+      readonly checkpointRequested: boolean;
+      readonly checkpointTag: string;
+      readonly availableVersion: string;
+      readonly releaseNotes?: unknown;
+      readonly build?: ExistingBuild & {
+        readonly schemaVersion: 1;
+        readonly status: "built";
+        readonly checkpointTag: string;
+      };
+    };
+
 export interface ExistingBuild {
   readonly outputDir: string;
   readonly manifestPath: string;
@@ -79,6 +95,14 @@ export function parseNightlyVersion(value: string): ParsedNightlyVersion | undef
 export function compareNightlyVersions(left: string, right: string): number;
 export function resolveLatestInstallableTag(tags: ReadonlyArray<string>): string | undefined;
 export function parseOptions(argv: ReadonlyArray<string>): LocalUpdateOptions;
+export function inspect(
+  options: LocalUpdateOptions,
+  overrides?: {
+    readonly platform?: NodeJS.Platform;
+    readonly uid?: number;
+    readonly runLaunchctl?: (args: string[]) => void;
+  },
+): LocalUpdateInspectionResult;
 export function resolveExistingBuild(options: ExistingBuildOptions): ExistingBuild | undefined;
 export function quarantineIncompleteBuild(
   outputRoot: string,

@@ -26,20 +26,17 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspect: (_version, requestCheckpoint) =>
-        Effect.succeed(
-          requestCheckpoint
-            ? { schemaVersion: 2, status: "checkpoint-requested" }
-            : {
-                schemaVersion: 2,
-                status: "available",
-                checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
-                availableVersion: "1.2.4-nightly.20260814.1090",
-                releaseNotes: {
-                  lastCode: { status: "known", items: ["An available change"], omittedItems: 0 },
-                  upstream: { groups: [], omittedGroups: 0 },
-                },
-              },
-        ),
+        Effect.succeed({
+          schemaVersion: 2,
+          checkpointRequested: requestCheckpoint ?? false,
+          status: "available",
+          checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+          availableVersion: "1.2.4-nightly.20260814.1090",
+          releaseNotes: {
+            lastCode: { status: "known", items: ["An available change"], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
     });
     return Effect.scoped(
       Effect.gen(function* () {
@@ -63,6 +60,7 @@ describe("DesktopUpdates", () => {
             ? { schemaVersion: 2, status: "checkpoint-requested" }
             : {
                 schemaVersion: 2,
+                checkpointRequested: false,
                 status: "up-to-date",
                 checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
                 availableVersion: "1.2.3-nightly.20260814.1089",
@@ -82,6 +80,64 @@ describe("DesktopUpdates", () => {
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+  it.effect(
+    "finds a fresh release on repeated manual checks and clears a stale check error",
+    () => {
+      let inspectionAttempt = 0;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) => {
+          inspectionAttempt += 1;
+          if (inspectionAttempt === 1) {
+            return Effect.fail(
+              new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "inspect",
+                message: "Checkpoint service unavailable",
+              }),
+            );
+          }
+          return Effect.succeed(
+            inspectionAttempt === 2
+              ? {
+                  schemaVersion: 2 as const,
+                  status: "up-to-date" as const,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+                  availableVersion: "1.2.3-nightly.20260814.1089",
+                }
+              : {
+                  schemaVersion: 2 as const,
+                  status: "available" as const,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  checkpointTag: "lastcode/revision/v1.2.3-nightly.20260814.1089.1",
+                  availableVersion: "1.2.3-nightly.20260814.1089.1",
+                  releaseNotes: {
+                    lastCode: { status: "known" as const, items: [], omittedItems: 0 },
+                    upstream: { groups: [], omittedGroups: 0 },
+                  },
+                },
+          );
+        },
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.equal((yield* updates.getState).errorContext, "check");
+          const recovered = yield* updates.check("menu");
+          assert.isTrue(recovered.checkpointRequested);
+          assert.equal(recovered.state.status, "idle");
+          assert.isNull(recovered.state.errorContext);
+          assert.include(recovered.state.message ?? "", "Checkpoint requested");
+          const discovered = yield* updates.check("menu");
+          assert.isTrue(discovered.checkpointRequested);
+          assert.equal(discovered.state.status, "available");
+          assert.equal(discovered.state.availableVersion, "1.2.3-nightly.20260814.1089.1");
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
   it.effect("requests checkpoints only for explicit local checks", () => {
     const requests: boolean[] = [];
     const harness = makeHarness({
@@ -91,6 +147,7 @@ describe("DesktopUpdates", () => {
           requests.push(requestCheckpoint ?? false);
           return {
             schemaVersion: 2 as const,
+            checkpointRequested: false,
             status: "up-to-date" as const,
             checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
             availableVersion: "1.2.3-nightly.20260814.1089",
@@ -137,6 +194,7 @@ describe("DesktopUpdates", () => {
             )
           : Effect.succeed({
               schemaVersion: 2,
+              checkpointRequested: false,
               status: "up-to-date",
               checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
               availableVersion: "1.2.3-nightly.20260814.1089",
@@ -160,6 +218,7 @@ describe("DesktopUpdates", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
         availableVersion: "1.2.4-nightly.20260814.1090",
@@ -215,6 +274,7 @@ describe("DesktopUpdates", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/revision/v1.2.4-nightly.20260814.1090.1",
         availableVersion: "1.2.4-nightly.20260814.1090.1",
@@ -228,6 +288,7 @@ describe("DesktopUpdates", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
         availableVersion: "1.2.4-nightly.20260814.1090",
@@ -382,6 +443,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -444,6 +506,7 @@ describe("DesktopUpdates", () => {
       localInspect: () =>
         Effect.succeed({
           schemaVersion: 2,
+          checkpointRequested: false,
           status: "available",
           checkpointTag,
           availableVersion: version,
@@ -502,20 +565,17 @@ describe("DesktopUpdates", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspect: (_version, requestCheckpoint) =>
-        Effect.succeed(
-          requestCheckpoint
-            ? { schemaVersion: 2, status: "checkpoint-requested" }
-            : {
-                schemaVersion: 2,
-                status: "available",
-                checkpointTag,
-                availableVersion: targetVersion,
-                releaseNotes: {
-                  lastCode: { status: "known", items: [], omittedItems: 0 },
-                  upstream: { groups: [], omittedGroups: 0 },
-                },
-              },
-        ),
+        Effect.succeed({
+          schemaVersion: 2,
+          checkpointRequested: requestCheckpoint ?? false,
+          status: "available",
+          checkpointTag,
+          availableVersion: targetVersion,
+          releaseNotes: {
+            lastCode: { status: "known", items: [], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
       localBuildEffect: (_checkpointTag, onProgress) =>
         Effect.gen(function* () {
           buildAttempts += 1;
@@ -574,6 +634,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -625,6 +686,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -677,6 +739,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -732,6 +795,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -802,6 +866,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "up-to-date",
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",
@@ -841,6 +906,7 @@ describe("DesktopUpdates", () => {
       let blockInspection = false;
       const inspection = {
         schemaVersion: 2 as const,
+        checkpointRequested: false,
         status: "up-to-date" as const,
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",

@@ -142,8 +142,9 @@ const configureMenu = (
   );
 
 describe("DesktopApplicationMenu", () => {
-  for (const status of ["idle", "available", "downloaded"] as const) {
-    it.effect(`confirms a checkpoint request while preserving ${status} updates`, () =>
+  it.effect.each(["idle", "available", "downloaded", "error"] as const)(
+    "confirms a checkpoint request while preserving %s updates",
+    (status) =>
       Effect.gen(function* () {
         const selectedAction = yield* Deferred.make<string>();
         const templateReady =
@@ -162,10 +163,13 @@ describe("DesktopApplicationMenu", () => {
           enabled: true,
           source: "lastcode-local" as const,
           status,
-          message: "Checkpoint requested. A later update check will pick up the result.",
+          message: status === "error" ? "Local build failed" : "Unrelated update message",
         };
-        yield* configureMenu(selectedAction, templateReady, { checked: true, state }, (options) =>
-          Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
+        yield* configureMenu(
+          selectedAction,
+          templateReady,
+          { checked: true, checkpointRequested: true, state },
+          (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
         );
         const template = yield* Deferred.await(templateReady);
         const check = template
@@ -176,10 +180,9 @@ describe("DesktopApplicationMenu", () => {
         check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
         const dialog = yield* Deferred.await(messageReady);
         assert.equal(dialog.title, "Checkpoint requested");
-        assert.equal(dialog.message, state.message);
+        assert.equal(dialog.message, DesktopUpdates.checkpointRequestedMessage);
       }),
-    );
-  }
+  );
 
   it.effect("installs the native menu and routes Settings through DesktopWindow", () =>
     Effect.gen(function* () {

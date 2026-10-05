@@ -352,6 +352,9 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
 }
 
 /** @public Service construction is part of the canonical Effect module API. */
+export const checkpointRequestedMessage =
+  "Checkpoint requested. Check again later to pick up the result.";
+
 export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
@@ -541,22 +544,46 @@ export const make = Effect.gen(function* () {
     const requestCheckpoint = reason === "web-ui" || reason === "menu";
     return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
+        const checkpointRequested =
+          inspection.status === "checkpoint-requested" || inspection.checkpointRequested;
+        const result = { checked: true, checkpointRequested };
+        const preserveFailure =
+          state.status === "error" &&
+          state.canRetry &&
+          (state.errorContext === "download" || state.errorContext === "install");
+        const applyRequest = (next: DesktopUpdateState): DesktopUpdateState =>
+          checkpointRequested && next.status !== "error"
+            ? {
+                ...next,
+                status: next.status === "up-to-date" ? "idle" : next.status,
+                message: checkpointRequestedMessage,
+              }
+            : next;
         if (inspection.status === "checkpoint-requested") {
-          return setState({
-            ...state,
-            status: state.status === "up-to-date" ? "idle" : state.status,
-            checkedAt,
-            message:
-              state.status === "error"
-                ? state.message
-                : "Checkpoint requested. A later update check will pick up the result.",
-          }).pipe(Effect.as(true));
+          const pending =
+            state.status === "error" && !preserveFailure
+              ? {
+                  ...state,
+                  status: "idle" as const,
+                  checkedAt,
+                  message: null,
+                  errorContext: null,
+                  canRetry: false,
+                }
+              : { ...state, checkedAt };
+          return setState(applyRequest(pending)).pipe(Effect.as(result));
         }
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(
-            Effect.andThen(setState(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt))),
-            Effect.as(true),
+            Effect.andThen(
+              setState(applyRequest(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt))),
+            ),
+            Effect.as(result),
           );
+        }
+        // Rediscovering the same release must not erase its build/install retry.
+        if (preserveFailure && state.availableVersion === inspection.availableVersion) {
+          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
         }
         const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const build =
@@ -578,17 +605,22 @@ export const make = Effect.gen(function* () {
           ),
           Effect.andThen(
             setState(
-              build
-                ? reduceDesktopUpdateStateOnDownloadComplete(available, inspection.availableVersion)
-                : available,
+              applyRequest(
+                build
+                  ? reduceDesktopUpdateStateOnDownloadComplete(
+                      available,
+                      inspection.availableVersion,
+                    )
+                  : available,
+              ),
             ),
           ),
-          Effect.as(true),
+          Effect.as(result),
         );
       }),
       Effect.catchTag("LastCodeLocalUpdateError", (error) =>
         setState(reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt)).pipe(
-          Effect.as(true),
+          Effect.as({ checked: true, checkpointRequested: false }),
         ),
       ),
     );
@@ -599,8 +631,10 @@ export const make = Effect.gen(function* () {
     actionReservation: "acquire" | "held" = "acquire",
   ) {
     yield* Effect.annotateCurrentSpan({ reason });
-    if (yield* Ref.get(desktopState.quitting)) return false;
-    if (!(yield* Ref.get(updaterConfiguredRef))) return false;
+    if (yield* Ref.get(desktopState.quitting))
+      return { checked: false, checkpointRequested: false };
+    if (!(yield* Ref.get(updaterConfiguredRef)))
+      return { checked: false, checkpointRequested: false };
 
     const state = yield* Ref.get(updateStateRef);
     if (state.status === "downloading") {
@@ -608,13 +642,14 @@ export const make = Effect.gen(function* () {
         reason,
         status: state.status,
       });
-      return false;
+      return { checked: false, checkpointRequested: false };
     }
 
     if (state.source === "lastcode-local" && (!state.enabled || !localUpdates.supported)) {
-      return false;
+      return { checked: false, checkpointRequested: false };
     }
-    if (actionReservation === "acquire" && !(yield* tryStartUpdateAction("check"))) return false;
+    if (actionReservation === "acquire" && !(yield* tryStartUpdateAction("check")))
+      return { checked: false, checkpointRequested: false };
 
     if (state.source === "lastcode-local") {
       const check = checkForLocalUpdate(reason);
@@ -629,7 +664,7 @@ export const make = Effect.gen(function* () {
       yield* logUpdaterInfo("checking for updates", { reason });
 
       return yield* electronUpdater.checkForUpdates.pipe(
-        Effect.as(true),
+        Effect.as({ checked: true, checkpointRequested: false }),
         Effect.catchTags({
           ElectronUpdaterCheckForUpdatesError: Effect.fn(
             "desktop.updates.handleCheckForUpdatesFailure",
@@ -642,7 +677,7 @@ export const make = Effect.gen(function* () {
               errorTag: error._tag,
               channel: error.channel,
             });
-            return true;
+            return { checked: true, checkpointRequested: false };
           }),
         }),
       );
@@ -1451,12 +1486,13 @@ export const make = Effect.gen(function* () {
       if (!(yield* Ref.get(updaterConfiguredRef))) {
         return {
           checked: false,
+          checkpointRequested: false,
           state: yield* Ref.get(updateStateRef),
         };
       }
-      const checked = yield* checkForUpdates(reason);
+      const result = yield* checkForUpdates(reason);
       return {
-        checked,
+        ...result,
         state: yield* Ref.get(updateStateRef),
       };
     }),

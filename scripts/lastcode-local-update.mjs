@@ -646,17 +646,18 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
   };
 }
 
-function inspect(options) {
+export function inspect(options, overrides = {}) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
   }
+  let checkpointRequested = false;
   // oxlint-disable-next-line t3code/no-global-process-runtime -- This dependency-free helper runs in Electron bundled Node and cannot import workspace services.
-  if (options.requestCheckpoint && process.platform === "darwin") {
-    const request = requestCheckpointServiceRunNow({
-      homeDirectory: options.home,
-      uid: process.getuid(),
-    });
-    if (request.status === "requested") return { schemaVersion: 2, status: "checkpoint-requested" };
+  if (options.requestCheckpoint && (overrides.platform ?? process.platform) === "darwin") {
+    const request = requestCheckpointServiceRunNow(
+      { homeDirectory: options.home, uid: overrides.uid ?? process.getuid() },
+      overrides.runLaunchctl ? { runLaunchctl: overrides.runLaunchctl } : {},
+    );
+    checkpointRequested = request.status === "requested";
   }
   const installableTags = splitLines(
     git(options.repoRoot, [
@@ -667,12 +668,16 @@ function inspect(options) {
     ]),
   );
   const checkpointTag = resolveLatestInstallableTag(installableTags);
-  if (!checkpointTag) throw new Error("No local LastCode installable tags were found.");
+  if (!checkpointTag) {
+    if (checkpointRequested) return { schemaVersion: 2, status: "checkpoint-requested" };
+    throw new Error("No local LastCode installable tags were found.");
+  }
   const availableVersion = versionFromInstallableTag(checkpointTag);
   if (compareNightlyVersions(availableVersion, options.currentVersion) <= 0) {
     return {
       schemaVersion: options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT ? 2 : 1,
       status: "up-to-date",
+      checkpointRequested,
       checkpointTag,
       availableVersion,
     };
@@ -681,7 +686,10 @@ function inspect(options) {
   const current = parseNightlyVersion(options.currentVersion);
   if (!current) throw new Error(`Installed version '${options.currentVersion}' is invalid.`);
   if (options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT) {
-    return inspectGrouped(options, installableTags, checkpointTag, availableVersion, current);
+    return {
+      ...inspectGrouped(options, installableTags, checkpointTag, availableVersion, current),
+      checkpointRequested,
+    };
   }
   const currentInstallable =
     current.revision === 0
@@ -696,6 +704,7 @@ function inspect(options) {
   return {
     schemaVersion: 1,
     status: "available",
+    checkpointRequested,
     checkpointTag,
     availableVersion,
     releaseNotes,

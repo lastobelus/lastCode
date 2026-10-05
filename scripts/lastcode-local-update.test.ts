@@ -11,6 +11,7 @@ import {
   boundedLocalBuildDiagnostic,
   compareNightlyVersions,
   deliverLocalBuildFailure,
+  inspect as inspectLocalUpdate,
   isReusableCheckpointCiStamp,
   localBuildFailureFingerprint,
   localBuildFailureMessage,
@@ -24,6 +25,7 @@ import {
   resolveLocalBuildEnvironment,
   resolveMiseNodeExecutable,
 } from "./lastcode-local-update.mjs";
+import { checkpointServiceRunNowPaths } from "./lib/lastcode-checkpoint-service-run-now.mjs";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
 const itMacOnly = process.platform === "darwin" ? it : it.skip;
@@ -77,6 +79,53 @@ function inspectRepository(
     .find((line) => line.startsWith("LASTCODE_LOCAL_UPDATE_RESULT="));
   assert.ok(resultLine);
   return JSON.parse(resultLine.slice("LASTCODE_LOCAL_UPDATE_RESULT=".length));
+}
+
+function checkpointInspectionFixture(serviceInstalled = true) {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-inspect-service-"));
+  const repo = NodePath.join(root, "repo");
+  NodeFS.mkdirSync(repo);
+  runGit(repo, ["init"]);
+  runGit(repo, ["config", "user.name", "LastCode Test"]);
+  runGit(repo, ["config", "user.email", "test@lastcode.invalid"]);
+  const nightly = "v0.0.34-nightly.20260816.1105";
+  const checkpointTag = `lastcode/checkpoint/${nightly}`;
+  const revisionTag = `lastcode/revision/${nightly}.1`;
+  const checkpoint = commitFile(repo, "tracked.txt", "checkpoint\n", "upstream base");
+  runGit(repo, ["tag", nightly]);
+  tagInstallable(repo, checkpointTag, checkpoint);
+  const revision = commitFile(repo, "tracked.txt", "revision\n", "local revision");
+  tagInstallable(repo, revisionTag, revision);
+
+  const { plistPath, requestPath } = checkpointServiceRunNowPaths(root);
+  if (serviceInstalled) {
+    NodeFS.mkdirSync(NodePath.dirname(plistPath), { recursive: true });
+    NodeFS.writeFileSync(plistPath, "<string>lastcode-checkpoint-schedule.mjs</string>");
+  }
+  const launchctlCalls: Array<Array<string>> = [];
+  return {
+    root,
+    repo,
+    nightly,
+    checkpointTag,
+    revisionTag,
+    requestPath,
+    launchctlCalls,
+    options: {
+      command: "inspect" as const,
+      repoRoot: repo,
+      home: root,
+      currentVersion: nightly.slice(1),
+    },
+    overrides: {
+      platform: "darwin" as const,
+      uid: 501,
+      runLaunchctl: (args: string[]) => {
+        assert.isTrue(NodeFS.existsSync(requestPath), "write the daily marker before launchctl");
+        launchctlCalls.push([...args]);
+      },
+    },
+  };
 }
 
 describe("lastcode-local-update", () => {
@@ -396,6 +445,7 @@ describe("lastcode-local-update", () => {
       assert.deepEqual(inspectRepository(repo, root, nightly.slice(1), true), {
         schemaVersion: 2,
         status: "available",
+        checkpointRequested: false,
         checkpointTag: `lastcode/revision/${nightly}.1`,
         availableVersion: `${nightly.slice(1)}.1`,
         releaseNotes: {
@@ -456,6 +506,7 @@ describe("lastcode-local-update", () => {
       assert.deepEqual(inspectRepository(repo, root, nightly1.slice(1), true), {
         schemaVersion: 2,
         status: "available",
+        checkpointRequested: false,
         checkpointTag: `lastcode/checkpoint/${nightly3}`,
         availableVersion: nightly3.slice(1),
         releaseNotes: {
@@ -568,6 +619,7 @@ describe("lastcode-local-update", () => {
       assert.deepEqual(inspectRepository(repo, root, nightly.slice(1), true), {
         schemaVersion: 2,
         status: "available",
+        checkpointRequested: false,
         checkpointTag: `lastcode/revision/${nightly}.1`,
         availableVersion: `${nightly.slice(1)}.1`,
         releaseNotes: {
@@ -671,6 +723,170 @@ describe("lastcode-local-update", () => {
     );
   });
 
+  it.each(
+    [
+      {
+        name: "passive",
+        serviceInstalled: true,
+        requestCheckpoint: false,
+        checkpointRequested: false,
+      },
+      {
+        name: "accepted request",
+        serviceInstalled: true,
+        requestCheckpoint: true,
+        checkpointRequested: true,
+      },
+      {
+        name: "absent service",
+        serviceInstalled: false,
+        requestCheckpoint: true,
+        checkpointRequested: false,
+      },
+    ].flatMap((testCase) => [
+      { ...testCase, grouped: true },
+      { ...testCase, grouped: false },
+    ]),
+  )(
+    "discovers ready releases during a $name inspection (grouped: $grouped)",
+    ({ serviceInstalled, requestCheckpoint, checkpointRequested, grouped }) => {
+      const fixture = checkpointInspectionFixture(serviceInstalled);
+      try {
+        const options = {
+          ...fixture.options,
+          requestCheckpoint,
+          ...(grouped ? { releaseNotesFormat: "grouped-v1" as const } : {}),
+        };
+        assert.deepEqual(inspectLocalUpdate(options, fixture.overrides), {
+          schemaVersion: grouped ? 2 : 1,
+          status: "available",
+          checkpointRequested,
+          checkpointTag: fixture.revisionTag,
+          availableVersion: `${fixture.nightly.slice(1)}.1`,
+          releaseNotes: grouped
+            ? {
+                lastCode: { status: "known", items: ["local revision"], omittedItems: 0 },
+                upstream: { groups: [], omittedGroups: 0 },
+              }
+            : ["local revision"],
+        });
+        assert.deepEqual(
+          inspectLocalUpdate(
+            { ...options, currentVersion: `${fixture.nightly.slice(1)}.1` },
+            fixture.overrides,
+          ),
+          {
+            schemaVersion: grouped ? 2 : 1,
+            status: "up-to-date",
+            checkpointRequested,
+            checkpointTag: fixture.revisionTag,
+            availableVersion: `${fixture.nightly.slice(1)}.1`,
+          },
+        );
+        assert.deepEqual(
+          fixture.launchctlCalls,
+          checkpointRequested
+            ? Array.from({ length: 2 }, () => [
+                "kickstart",
+                "gui/501/codes.lastobelus.lastcode-nightly-checkpoint",
+              ])
+            : [],
+        );
+        assert.equal(NodeFS.existsSync(fixture.requestPath), checkpointRequested);
+        if (checkpointRequested) {
+          const request = JSON.parse(NodeFS.readFileSync(fixture.requestPath, "utf8"));
+          assert.isFalse(Number.isNaN(Date.parse(request.requestedAt)));
+        }
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "reports an accepted request only when no installable tags exist (grouped: %s)",
+    (grouped) => {
+      const fixture = checkpointInspectionFixture();
+      try {
+        runGit(fixture.repo, ["tag", "--delete", fixture.checkpointTag, fixture.revisionTag]);
+        runGit(fixture.repo, ["tag", "lastcode/checkpoint/not-installable"]);
+        assert.deepEqual(
+          inspectLocalUpdate(
+            {
+              ...fixture.options,
+              requestCheckpoint: true,
+              ...(grouped ? { releaseNotesFormat: "grouped-v1" as const } : {}),
+            },
+            fixture.overrides,
+          ),
+          { schemaVersion: 2, status: "checkpoint-requested" },
+        );
+        assert.deepEqual(fixture.launchctlCalls, [
+          ["kickstart", "gui/501/codes.lastobelus.lastcode-nightly-checkpoint"],
+        ]);
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { name: "passive inspection", serviceInstalled: true, requestCheckpoint: false },
+    { name: "absent service", serviceInstalled: false, requestCheckpoint: true },
+  ])("reports missing installable tags for a $name", ({ serviceInstalled, requestCheckpoint }) => {
+    const fixture = checkpointInspectionFixture(serviceInstalled);
+    try {
+      runGit(fixture.repo, ["tag", "--delete", fixture.checkpointTag, fixture.revisionTag]);
+      assert.throws(
+        () => inspectLocalUpdate({ ...fixture.options, requestCheckpoint }, fixture.overrides),
+        /No local LastCode installable tags were found/,
+      );
+      assert.deepEqual(fixture.launchctlCalls, []);
+      assert.isFalse(NodeFS.existsSync(fixture.requestPath));
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces checkpoint launch failures even when a release is ready", () => {
+    const fixture = checkpointInspectionFixture();
+    try {
+      assert.throws(
+        () =>
+          inspectLocalUpdate(
+            { ...fixture.options, requestCheckpoint: true, releaseNotesFormat: "grouped-v1" },
+            {
+              ...fixture.overrides,
+              runLaunchctl: () => {
+                throw new Error("launchctl kickstart failed: service is not loaded");
+              },
+            },
+          ),
+        /launchctl kickstart failed: service is not loaded/,
+      );
+      assert.isTrue(NodeFS.existsSync(fixture.requestPath));
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps release discovery passive when launchd is unsupported", () => {
+    const fixture = checkpointInspectionFixture();
+    try {
+      assert.deepInclude(
+        inspectLocalUpdate(
+          { ...fixture.options, requestCheckpoint: true, releaseNotesFormat: "grouped-v1" },
+          { ...fixture.overrides, platform: "linux" },
+        ),
+        { schemaVersion: 2, status: "available", checkpointRequested: false },
+      );
+      assert.deepEqual(fixture.launchctlCalls, []);
+      assert.isFalse(NodeFS.existsSync(fixture.requestPath));
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("parses explicit inspect and build inputs", () => {
     assert.deepInclude(
       parseOptions(["inspect", "--repo", "/repo", "--current-version", "1.2.3-nightly.20260814.1"]),
@@ -733,10 +949,34 @@ describe("lastcode-local-update", () => {
       runGit(repo, ["tag", nightly, commit]);
       tagInstallable(repo, checkpointTag, commit);
       runGit(repo, ["tag", "--annotate", buildTag, "-m", "built"]);
+      const { plistPath, requestPath } = checkpointServiceRunNowPaths(root);
+      NodeFS.mkdirSync(NodePath.dirname(plistPath), { recursive: true });
+      NodeFS.writeFileSync(plistPath, "<string>lastcode-checkpoint-schedule.mjs</string>");
       const inspect = () =>
-        inspectRepository(repo, root, "0.0.34-nightly.20260813.1088", true, true);
+        inspectLocalUpdate(
+          {
+            command: "inspect",
+            repoRoot: repo,
+            home: root,
+            currentVersion: "0.0.34-nightly.20260813.1088",
+            releaseNotesFormat: "grouped-v1",
+            requestCheckpoint: true,
+          },
+          {
+            platform: "darwin",
+            uid: 501,
+            runLaunchctl: (args) => {
+              assert.isTrue(NodeFS.existsSync(requestPath));
+              assert.deepEqual(args, [
+                "kickstart",
+                "gui/501/codes.lastobelus.lastcode-nightly-checkpoint",
+              ]);
+            },
+          },
+        );
       const available = inspect();
       assert.propertyVal(available, "status", "available");
+      assert.propertyVal(available, "checkpointRequested", true);
       assert.notProperty(available, "build");
       const outputDir = NodePath.join(
         root,

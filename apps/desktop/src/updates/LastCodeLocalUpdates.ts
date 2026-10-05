@@ -245,12 +245,14 @@ const InspectionResult = Schema.Union([
   Schema.Struct({
     schemaVersion: Schema.Literal(2),
     status: Schema.Literal("up-to-date"),
+    checkpointRequested: Schema.Boolean,
     checkpointTag: Schema.String,
     availableVersion: Schema.String,
   }),
   Schema.Struct({
     schemaVersion: Schema.Literal(2),
     status: Schema.Literal("available"),
+    checkpointRequested: Schema.Boolean,
     checkpointTag: Schema.String,
     availableVersion: Schema.String,
     build: Schema.optional(BuildResult),
