@@ -1987,6 +1987,50 @@ it.layer(
     }),
   );
 
+  it.effect("waits for the selected thread's cleanup without waiting for another thread", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 10 });
+      yield* manager.open(openInput());
+      yield* manager.open(openInput({ threadId: "thread-2" }));
+      yield* manager.close({ threadId: "thread-1" });
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual(["SIGTERM"]);
+
+      const waiting = yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.forkScoped);
+      yield* TestClock.adjust("5 millis");
+      expect(waiting.pollUnsafe()).toBeUndefined();
+      yield* manager.close({ threadId: "thread-2" });
+      yield* TestClock.adjust("5 millis");
+      yield* Fiber.join(waiting);
+
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual(["SIGTERM"]);
+      expect(yield* manager.refreshMetadata).toEqual([
+        expect.objectContaining({ threadId: "thread-2" }),
+      ]);
+      yield* TestClock.adjust("5 millis");
+      yield* manager.waitForThreadShutdown("thread-2");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("reports failed termination after the asynchronous close has returned", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      process.killFailure = new Error("simulated signal failure");
+      yield* manager.close({ threadId: "thread-1" });
+
+      const result = yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "TerminalShutdownError");
+        assert.equal(result.failure.threadId, "thread-1");
+        assert.deepEqual(result.failure.terminalIds, [DEFAULT_TERMINAL_ID]);
+      }
+      yield* manager.waitForThreadShutdown("thread-2");
+    }),
+  );
+
   it.effect("publishes closed events when terminals are explicitly closed", () =>
     Effect.gen(function* () {
       const { manager, getEvents } = yield* createManager();

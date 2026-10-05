@@ -45,6 +45,7 @@ import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { threadEnvironment } from "../../state/threads";
 import { terminalEnvironment } from "../../state/terminal";
 import { previewEnvironment } from "../../state/preview";
+import { beginStopThreadProcessesFeedback } from "../../state/stop-thread-processes-feedback";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
@@ -743,10 +744,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
 
   const handleStopThreadProcesses = useCallback(async () => {
+    const finishFeedback = beginStopThreadProcessesFeedback(thread.title);
     const result = await stopThreadProcesses({
       environmentId: thread.environmentId,
       input: { threadId: thread.id },
     });
+    if (result._tag === "Success") {
+      finishFeedback("success");
+    } else {
+      finishFeedback("error");
+    }
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = Cause.squash(result.cause);
       Alert.alert(
@@ -754,7 +761,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         error instanceof Error ? error.message : "The previews and processes could not be stopped.",
       );
     }
-  }, [stopThreadProcesses, thread.environmentId, thread.id]);
+  }, [stopThreadProcesses, thread.environmentId, thread.id, thread.title]);
 
   const handleRetryWorktreeCleanup = useCallback(async () => {
     const result = await retryWorktreeCleanup({

@@ -142,7 +142,10 @@ export class PreviewHosting extends Context.Service<
     ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
     readonly stopThread: (
       threadId: string,
-    ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+    ) => Effect.Effect<
+      void,
+      PreviewHostingError | TerminalManager.TerminalError | TerminalManager.TerminalShutdownError
+    >;
     readonly protectedWorkspacePaths: () => Effect.Effect<
       ReadonlyArray<string>,
       PreviewHostingError
@@ -980,9 +983,11 @@ const make = Effect.gen(function* () {
             terminals.close({ threadId, terminalId: terminal.terminalId }).pipe(Effect.result),
           { concurrency: "unbounded" },
         );
+        const shutdown = yield* terminals.waitForThreadShutdown(threadId).pipe(Effect.result);
         if (previews._tag === "Failure") return yield* previews.failure;
         const failure = results.find((result) => result._tag === "Failure");
         if (failure?._tag === "Failure") return yield* failure.failure;
+        if (shutdown._tag === "Failure") return yield* shutdown.failure;
       }),
     );
 

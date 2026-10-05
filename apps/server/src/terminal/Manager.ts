@@ -150,6 +150,18 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   }
 }
 
+export class TerminalShutdownError extends Schema.TaggedError<TerminalShutdownError>()(
+  "TerminalShutdownError",
+  {
+    threadId: Schema.String,
+    terminalIds: Schema.Array(Schema.String),
+  },
+) {
+  override get message(): string {
+    return `Failed to stop terminals: ${this.terminalIds.join(", ")}.`;
+  }
+}
+
 /**
  * TerminalManager - Service tag for terminal session orchestration.
  */
@@ -210,6 +222,10 @@ export class TerminalManager extends Context.Service<
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    /** Await already requested process cleanup for this thread and report failed termination. */
+    readonly waitForThreadShutdown: (
+      threadId: string,
+    ) => Effect.Effect<void, TerminalShutdownError>;
     /** Archive cleanup also removes untracked histories, except retained preview terminals. */
     readonly closeThreadExcept: (
       threadId: string,
@@ -3315,6 +3331,29 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
+  const waitForThreadShutdown: TerminalManager["Service"]["waitForThreadShutdown"] = Effect.fn(
+    "terminal.waitForThreadShutdown",
+  )(
+    function* (threadId) {
+      const state = yield* readManagerState;
+      const fibers = [...state.terminatingProcesses.entries()].flatMap(([process, terminal]) => {
+        const fiber = state.killFibers.get(process);
+        return terminal.threadId === threadId && fiber !== undefined ? [fiber] : [];
+      });
+      yield* Effect.forEach(fibers, Fiber.await, { concurrency: "unbounded", discard: true });
+      const remaining = [...(yield* readManagerState).terminatingProcesses.values()].filter(
+        (terminal) => terminal.threadId === threadId,
+      );
+      if (remaining.length > 0) {
+        return yield* new TerminalShutdownError({
+          threadId,
+          terminalIds: [...new Set(remaining.map((terminal) => terminal.terminalId))],
+        });
+      }
+    },
+    (effect, threadId) => withThreadLock(threadId, effect),
+  );
+
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
       Effect.andThen(readHistory(input.threadId, input.terminalId)),
@@ -3330,6 +3369,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     history,
     restart,
     close,
+    waitForThreadShutdown,
     closeThreadExcept: (threadId, retainedTerminalIds, retainedTerminalPrefixes) =>
       close({ threadId, deleteHistory: true }, retainedTerminalIds, retainedTerminalPrefixes),
     closeIdle,

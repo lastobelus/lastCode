@@ -43,13 +43,28 @@ export function useStopThreadProcesses() {
   const stop = useAtomCommand(previewEnvironment.hostingStopThread, { reportFailure: false });
   return useCallback(
     async (threadRef: ScopedThreadRef) => {
+      const startedAt = performance.now();
+      const toastId = toastManager.add({
+        type: "loading",
+        title: "Stopping all previews & processes…",
+      });
       const result = await stop({
         environmentId: threadRef.environmentId,
         input: { threadId: threadRef.threadId },
       });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      if (result._tag === "Success") {
+        toastManager.update(toastId, {
+          type: "success",
+          title: "All previews & processes stopped",
+          // Zero disables auto-dismiss, so use one millisecond once the minimum has elapsed.
+          timeout: Math.max(1, 3_000 - (performance.now() - startedAt)),
+        });
+      } else if (isAtomCommandInterrupted(result)) {
+        toastManager.close(toastId);
+      } else {
         const error = squashAtomCommandFailure(result);
-        toastManager.add(
+        toastManager.update(
+          toastId,
           stackedThreadToast({
             type: "error",
             title: "Could not stop all previews and processes",

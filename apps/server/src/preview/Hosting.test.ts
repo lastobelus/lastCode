@@ -62,6 +62,9 @@ interface TerminalHarness {
     readonly terminalId?: string | undefined;
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
+  readonly onWaitForThreadShutdown?: (
+    threadId: string,
+  ) => Effect.Effect<void, TerminalManager.TerminalShutdownError>;
 }
 
 function terminalLayer(harness: TerminalHarness) {
@@ -182,6 +185,7 @@ function terminalLayer(harness: TerminalHarness) {
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
     history: () => Effect.die("Startup transcripts must remain local."),
+    waitForThreadShutdown: (threadId) => harness.onWaitForThreadShutdown?.(threadId) ?? Effect.void,
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
@@ -347,6 +351,77 @@ function failFirstExpiredStateWriteLayer(
 }
 
 describe("PreviewHosting", () => {
+  it.effect.each([false, true])(
+    "waits for thread cleanup before completing even when terminal close fails (%s)",
+    (failClose) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-drain-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const cleanupStarted = yield* Deferred.make<void>();
+        const finishCleanup = yield* Deferred.make<void>();
+        const otherTerminal = terminalFixture("thread-2", "unrelated-terminal");
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "command-terminal"), otherTerminal],
+          failClose,
+          onWaitForThreadShutdown: (threadId) =>
+            Effect.gen(function* () {
+              assert.equal(threadId, "thread-1");
+              yield* Deferred.succeed(cleanupStarted, undefined);
+              yield* Deferred.await(finishCleanup);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const stopping = yield* hosting
+              .stopThread("thread-1")
+              .pipe(Effect.result, Effect.forkScoped);
+            yield* Deferred.await(cleanupStarted);
+            assert.isUndefined(stopping.pollUnsafe());
+            assert.deepEqual(harness.closes, [
+              { threadId: "thread-1", terminalId: "command-terminal" },
+            ]);
+            assert.include(harness.summaries, otherTerminal);
+            yield* Deferred.succeed(finishCleanup, undefined);
+            assert.equal((yield* Fiber.join(stopping))._tag, failClose ? "Failure" : "Success");
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("surfaces failed process cleanup instead of reporting a successful stop", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-stop-kill-failure-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const failure = new TerminalManager.TerminalShutdownError({
+        threadId: "thread-1",
+        terminalIds: ["command-terminal"],
+      });
+      const harness = testTerminalHarness({
+        summaries: [terminalFixture("thread-1", "command-terminal")],
+        onWaitForThreadShutdown: () => Effect.fail(failure),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") assert.equal(result.failure, failure);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "stops a preview immediately while recovery is waiting for a server that never becomes ready",
     () =>
