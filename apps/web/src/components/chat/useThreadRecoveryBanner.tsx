@@ -3,7 +3,7 @@ import { presentThreadRecovery } from "@t3tools/client-runtime/state/thread-reco
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { CircleCheckIcon, TriangleAlertIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -33,7 +33,9 @@ export function useThreadRecoveryBanner({
     };
   }, []);
   const currentKey = useRef(key);
-  currentKey.current = key;
+  useLayoutEffect(() => {
+    currentKey.current = key;
+  }, [key]);
   const presentation = presentThreadRecovery(recovery);
   if (
     !thread ||

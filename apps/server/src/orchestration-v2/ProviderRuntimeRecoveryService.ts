@@ -242,6 +242,42 @@ export const make = Effect.gen(function* () {
           ),
         );
       const events: Array<OrchestrationV2DomainEvent> = [];
+      const unfinishedRecovery = projection.thread.recovery;
+      if (
+        unfinishedRecovery !== undefined &&
+        (unfinishedRecovery.status === "suspect" ||
+          unfinishedRecovery.status === "stale" ||
+          unfinishedRecovery.status === "recovering")
+      ) {
+        const incidentRun = projection.runs.find(
+          (run) =>
+            run.id === unfinishedRecovery.runId &&
+            run.activeAttemptId === unfinishedRecovery.attemptId,
+        );
+        const superseded =
+          incidentRun === undefined ||
+          projection.runs.some(
+            (run) => run.ordinal > incidentRun.ordinal && run.startedAt !== null,
+          );
+        const { recovery: _previousRecovery, ...thread } = projection.thread;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "thread.metadata-updated",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: superseded
+            ? thread
+            : {
+                ...thread,
+                recovery: {
+                  ...unfinishedRecovery,
+                  status: "failed",
+                  updatedAt: now,
+                  detail: `The server ${trigger === "startup" ? "restarted" : "shut down"} before recovery finished. The previous recovery attempt is no longer active. Open a repair thread to investigate any missing output.`,
+                },
+              },
+        });
+      }
       // Background work that outlived its settled turn. The provider transcript
       // cannot record its death, so the next provider turn is told instead.
       // Shutdown records it too: a graceful restart cancels it there first.
