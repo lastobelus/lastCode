@@ -184,6 +184,26 @@ describe("legacy sidebar subagent families", () => {
     ).toBe(true);
   });
 
+  it("counts rolled-back subagents as stopped in collapsed families", () => {
+    const parent = thread("parent");
+    const child = thread("child", "parent", {
+      latestRun: {
+        runId: RunId.make("run-rolled-back"),
+        status: "rolled_back",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00Z",
+        assistantMessageId: null,
+      },
+    });
+    const result = project([parent, child], {
+      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+    });
+    expect(legacySidebarSubagentStatusLabel(child, null)).toBe("Stopped");
+    expect(keys(result)).toEqual(["parent"]);
+    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toContain("1 stopped");
+  });
+
   it("keeps finished children and cleanup recovery rows, excluding only recovery from navigation", () => {
     const parent = thread("parent");
     const done = thread("done", "parent", {

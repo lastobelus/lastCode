@@ -25,7 +25,11 @@ export function legacySidebarSubagentStatusLabel(
 ): string {
   if (status && status.label !== "Completed") return status.label;
   if (thread.runtime?.lastError || thread.latestRun?.status === "failed") return "Failed";
-  if (thread.latestRun?.status === "interrupted" || thread.latestRun?.status === "cancelled")
+  if (
+    thread.latestRun?.status === "interrupted" ||
+    thread.latestRun?.status === "cancelled" ||
+    thread.latestRun?.status === "rolled_back"
+  )
     return "Stopped";
   if (thread.latestRun?.status === "completed") return "Done";
   return "Idle";
