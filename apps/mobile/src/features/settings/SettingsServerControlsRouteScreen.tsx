@@ -27,6 +27,7 @@ import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
@@ -447,6 +448,13 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       />
                     </View>
                   </SettingsSection>
+                  {!projectSelected ? (
+                    <LocalCiSettingsSection
+                      settings={displayTargets.map((target) => target.settings.lastcodeLocalCi)}
+                      disabled={disabledFor("lastcodeLocalCi")}
+                      onChange={(lastcodeLocalCi) => write({ lastcodeLocalCi })}
+                    />
+                  ) : null}
                 </>
               ) : null}
             </>

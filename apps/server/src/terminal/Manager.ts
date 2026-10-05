@@ -1402,6 +1402,7 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
+  localCiSettingsPath?: string;
   /**
    * Catalog cache and tool directories for managed ACP Registry installs. Their
    * install directories are appended to the terminal PATH so users can run
@@ -1478,7 +1479,8 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("TerminalManager.make")(function* () {
-  const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, providerStatusCacheDir, baseDir, settingsPath } =
+    yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
@@ -1496,6 +1498,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
   );
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
+    localCiSettingsPath: settingsPath,
     ptyAdapter,
     processTable: nativeTelemetry.processTable.pipe(
       Effect.mapError(
@@ -2340,6 +2343,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
             const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, platform);
+            if (options.localCiSettingsPath !== undefined) {
+              terminalEnv.T3CODE_LOCAL_CI_SETTINGS_PATH = options.localCiSettingsPath;
+            }
             // Append (never prepend) managed ACP agent install directories so
             // `kimi login` and friends resolve by name without shadowing any
             // system or user tool of the same name.

@@ -16,8 +16,12 @@ pnpm lastcode:ci:quick
 ```
 
 Quick CI is a local waste-prevention gate, not merge authority. It checks the
-exact branch diff for whitespace errors, repository formatting and lint, and
-workspace types. The implementing agent runs focused tests for changed behavior;
+exact branch diff for whitespace errors and checks formatting and lint on changed
+files. Typechecks cover changed workspaces and their consumers, including shared
+source and TypeScript configuration relationships. Documentation and inert asset
+changes do not start typecheckers. Workspace metadata, toolchain/configuration
+changes, or uncertain ownership retain the complete workspace gate. The
+implementing agent runs focused tests for changed behavior;
 GitHub CI retains comprehensive tests,
 Electron setup, builds, Rust, native analysis, and release smoke coverage.
 
@@ -25,7 +29,19 @@ Agents run the independent **Run Quick CI** Project Action before a push. A
 successful action records the exact head and the selected workstream base ref and
 commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
-receipt without rerunning validation.
+receipt without rerunning validation. Explicit Quick CI runs reuse the same
+receipt, including when another run finishes that validation while they queue.
+
+Local CI shares a resource budget across worktrees and independent clones on the
+same machine. Additional runs wait in their existing Action or terminal and can
+be cancelled. Settings → LastCode → Local CI controls each environment's run
+limit, package concurrency, native TypeScript compiler CPU limit, and background priority;
+mobile exposes the same controls in Maintenance. Defaults allow one CI run and
+one package check at a time, cap native TypeScript compiler CPU parallelism at two, and use
+lower CPU priority. A running check keeps its launch settings; changes apply to
+new runs. The strictest limit among active runs applies while environments with
+different settings share the machine. Cancelled runs keep their capacity until
+their owned subprocesses have stopped.
 
 LastCode setup reconciles non-setup Actions from `t3.json` through the
 event-sourced project command path. The checkpoint supervisor repeats the

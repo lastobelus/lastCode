@@ -19,6 +19,7 @@ import {
   parsePrePushUpdates,
   parseLocalCiOptions,
   prepareLocalCiRepository,
+  QUICK_CI_GATE_VERSION,
   readFullCiStamp,
   readQuickCiReceipt,
   resolveFullCiStampPath,
@@ -257,7 +258,7 @@ describe("lastcode-local-ci", () => {
     writeQuickCiReceipt(commonGitDir, receipt);
     expect(readQuickCiReceipt(commonGitDir, receipt.commit)).toEqual({
       schemaVersion: 1,
-      gateVersion: 1,
+      gateVersion: QUICK_CI_GATE_VERSION,
       ...receipt,
     });
     expect(
@@ -281,6 +282,16 @@ describe("lastcode-local-ci", () => {
     NodeFS.writeFileSync(
       resolveQuickCiReceiptPath(commonGitDir, receipt.commit),
       `${JSON.stringify({ schemaVersion: 1, gateVersion: 0, ...receipt })}\n`,
+    );
+    expect(readQuickCiReceipt(commonGitDir, receipt.commit)).toBeUndefined();
+    NodeFS.writeFileSync(
+      resolveQuickCiReceiptPath(commonGitDir, receipt.commit),
+      JSON.stringify({
+        schemaVersion: 1,
+        gateVersion: QUICK_CI_GATE_VERSION,
+        ...receipt,
+        baseCommit: null,
+      }),
     );
     expect(() => readQuickCiReceipt(commonGitDir, receipt.commit)).toThrow(
       "Invalid Quick CI receipt",

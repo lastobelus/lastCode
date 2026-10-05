@@ -35,6 +35,7 @@ import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndic
 import { searchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
+import { LocalCiSettingsSection } from "./LocalCiSettings";
 import {
   SettingResetButton,
   SettingsPageContainer,
@@ -240,6 +241,7 @@ export function LastCodeSettingsPanel() {
           }
         />
       </SettingsSection>
+      <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
         <SettingsRow
           {...searchableSetting("handoffs-menu-limit")}

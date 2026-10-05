@@ -24,6 +24,22 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("changes one CI limit without resetting the other environment limits", () => {
+    const configured = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      lastcodeLocalCi: { maxConcurrentRuns: 2, packageConcurrency: 3, backgroundPriority: false },
+    });
+    expect(
+      applyServerSettingsPatch(configured, { lastcodeLocalCi: { compilerThreads: 4 } })
+        .lastcodeLocalCi,
+    ).toEqual({
+      maxConcurrentRuns: 2,
+      packageConcurrency: 3,
+      compilerThreads: 4,
+      backgroundPriority: false,
+    });
+    expect(configured.lastcodeLocalCi.compilerThreads).toBe(2);
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },

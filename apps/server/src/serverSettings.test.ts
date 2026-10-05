@@ -35,6 +35,10 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
+const encodeModelSelectionJson = Schema.encodeEffect(Schema.fromJsonString(ModelSelection));
+const encodeProjectScriptsJson = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Array(ProjectScript)),
+);
 
 const makeServerSettingsLayer = () =>
   ServerSettingsModule.layer.pipe(
@@ -97,6 +101,28 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists CI limits through settings patches without resetting omitted limits", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateSettings({
+        lastcodeLocalCi: { maxConcurrentRuns: 2, packageConcurrency: 3, backgroundPriority: false },
+      });
+      yield* service.updateSettings({ lastcodeLocalCi: { compilerThreads: 4 } });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.lastcodeLocalCi, {
+        maxConcurrentRuns: 2,
+        packageConcurrency: 3,
+        compilerThreads: 4,
+        backgroundPriority: false,
+      });
+      assert.deepEqual((yield* service.getSettings).lastcodeLocalCi, persisted.lastcodeLocalCi);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -1864,10 +1890,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         runOnWorktreeCreate: false,
       };
       const model = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
-      const modelJson = yield* Schema.encodeEffect(Schema.fromJsonString(ModelSelection))(model);
-      const scriptsJson = yield* Schema.encodeEffect(
-        Schema.fromJsonString(Schema.Array(ProjectScript)),
-      )([script]);
+      const modelJson = yield* encodeModelSelectionJson(model);
+      const scriptsJson = yield* encodeProjectScriptsJson([script]);
       for (const [projectId, modelColumn, envMode, autoPull, scripts] of [
         // The legacy project also carries aggregate scripts, but its stored
         // null override reset them; the fold must not bring them back.
