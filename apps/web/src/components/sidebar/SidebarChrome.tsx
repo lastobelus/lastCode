@@ -104,7 +104,7 @@ export function SidebarBrandWidthProbe({
       className="pointer-events-none invisible fixed top-0 left-0 flex w-max border-r border-transparent pr-3"
       ref={observeWidth}
     >
-      <div className="ml-[var(--workspace-titlebar-content-left)] flex">
+      <div className="ml-[calc(var(--workspace-controls-left)+2*var(--workspace-titlebar-control-size)+var(--workspace-titlebar-control-gap))] flex">
         <LastCodeWordmark onBackdrop={false} />
       </div>
     </div>

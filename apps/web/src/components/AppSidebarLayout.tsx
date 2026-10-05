@@ -198,7 +198,7 @@ function SidebarControl() {
           Toggle main sidebar{shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
-      <SidebarModeToggle onBackdrop={isSidebarVisible && stageBackdropVariant !== null} />
+      {isSidebarVisible && <SidebarModeToggle onBackdrop={stageBackdropVariant !== null} />}
     </div>
   );
 }

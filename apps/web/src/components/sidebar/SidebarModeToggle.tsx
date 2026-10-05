@@ -20,10 +20,9 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
           <Button
             aria-label="Legacy sidebar"
             aria-pressed={legacySidebarEnabled}
-            data-pressed={legacySidebarEnabled ? "" : undefined}
             disabled={!hydrated}
             size="titlebar-icon"
-            variant={onBackdrop ? "media-navigation" : "ghost"}
+            variant={onBackdrop ? "media-toggle" : "ghost"}
             className="pointer-events-auto relative top-auto translate-y-0"
             onClick={() =>
               updateSettings((settings) => ({
