@@ -53,6 +53,8 @@ export const repairHistoricalThreadCreators = Effect.gen(function* () {
 
   // The launch path reused one ID for creation and its initial message. Other sender
   // attribution is not creation evidence. createThreads recorded a typed timeline item.
+  // CROSS JOIN keeps candidates outermost; INDEXED BY prevents SQLite from choosing
+  // a whole-history scan when statistics are absent or an old thread has no evidence.
   const rows = yield* sql<{
     readonly thread_id: string;
     readonly creator_thread_id: string;
@@ -62,7 +64,7 @@ export const repairHistoricalThreadCreators = Effect.gen(function* () {
     SELECT candidate.thread_id, json_extract(message.payload_json, '$.senderThreadId') AS creator_thread_id,
            candidate.payload_json
     FROM candidates AS candidate
-    INNER JOIN orchestration_events AS message
+    CROSS JOIN orchestration_events AS message INDEXED BY idx_orch_events_command_id
       ON message.stream_id = candidate.thread_id
       AND message.command_id = candidate.command_id || ':initial-message'
     WHERE candidate.command_id = candidate.thread_id
@@ -79,8 +81,8 @@ export const repairHistoricalThreadCreators = Effect.gen(function* () {
     UNION ALL
     SELECT candidate.thread_id, record.stream_id AS creator_thread_id, candidate.payload_json
     FROM candidates AS candidate
-    INNER JOIN orchestration_events AS record
-      ON json_extract(record.payload_json, '$.targetThreadId') = candidate.thread_id
+    CROSS JOIN orchestration_events AS record INDEXED BY orchestration_events_v2_thread_created_target_idx
+      ON CAST(json_extract(record.payload_json, '$.targetThreadId') AS TEXT) = candidate.thread_id
     WHERE record.application_event_version = 2
       AND record.aggregate_kind = 'thread'
       AND record.event_type = 'turn-item.updated'

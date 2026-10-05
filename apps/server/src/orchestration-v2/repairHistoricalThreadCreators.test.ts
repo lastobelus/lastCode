@@ -15,6 +15,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Tracer from "effect/Tracer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
@@ -297,5 +299,72 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         undefined,
       );
     }),
+  );
+  it.effect(
+    "uses bounded evidence index lookups even when a historical thread cannot be repaired",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const unresolved = yield* createThread("unrecoverable");
+        yield* launchMessage(
+          unresolved,
+          unresolved.id,
+          { id: MessageId.make("noise-message") },
+          "noise-seed-command",
+        );
+        const statements: string[] = [];
+        const tracer = Tracer.make({
+          span(options) {
+            const span = new Tracer.NativeSpan(options);
+            const end = span.end.bind(span);
+            span.end = (endTime, exit) => {
+              end(endTime, exit);
+              const query = span.attributes.get("db.query.text");
+              if (typeof query === "string" && query.includes("WITH candidates AS"))
+                statements.push(query);
+            };
+            return span;
+          },
+        });
+        // Exercise ordinary traffic that shares the application-version index with evidence.
+        yield* sql`
+        WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 1000)
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, actor_kind, payload_json, metadata_json, application_event_version
+        )
+        SELECT 'unrelated:' || n, 'thread', ${unresolved.id}, n + 1, 'message.updated',
+          '2026-09-01T00:00:00Z', 'unrelated-command:' || n, 'client',
+          (SELECT payload_json FROM orchestration_events WHERE command_id = 'noise-seed-command'), '{}', 2
+        FROM numbers
+      `;
+        for (const analyzed of [false, true]) {
+          if (analyzed) yield* sql`ANALYZE`;
+          assert.equal(yield* repairHistoricalThreadCreators.pipe(Effect.withTracer(tracer)), 0);
+          const statement = statements.at(-1);
+          assert.isDefined(statement);
+          const plan = yield* sql.unsafe<{ readonly detail: string }>(
+            `EXPLAIN QUERY PLAN ${statement}`,
+          );
+          const details = plan.map((row) => row.detail).join("\n");
+          assert.match(
+            details,
+            /SEARCH message USING INDEX idx_orch_events_command_id \(command_id=\?(?: AND rowid>\?)?\)/,
+          );
+          assert.match(
+            details,
+            /SEARCH record USING INDEX orchestration_events_v2_thread_created_target_idx \(<expr>=\? AND sequence>\?\)/,
+          );
+          assert.notMatch(details, /SCAN (?:message|record)/);
+          assert.notInclude(details, "idx_orchestration_events_application_sequence");
+        }
+        assert.lengthOf(statements, 2);
+        assert.equal(
+          (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(unresolved.id))
+            .thread.creatorThreadId,
+          undefined,
+        );
+        yield* sql`DELETE FROM orchestration_events WHERE event_id LIKE 'unrelated:%'`;
+      }),
   );
 });
