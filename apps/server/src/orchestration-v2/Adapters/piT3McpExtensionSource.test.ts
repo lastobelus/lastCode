@@ -9,9 +9,9 @@ type RequestHook = (
   ctx: { model: { provider: string } },
 ) => Record<string, unknown> | undefined;
 
-async function loadRequestHook(): Promise<RequestHook> {
-  const handlers = new Map<string, RequestHook>();
-  // Execute the shipped extension with MCP disabled; this path needs no Typebox.
+async function loadExtensionHandlers(hasT3Mcp = false): Promise<Map<string, unknown>> {
+  const handlers = new Map<string, unknown>();
+  // An empty MCP catalog needs no Typebox and keeps the bridge entirely local.
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
       "export default async function",
@@ -19,10 +19,24 @@ async function loadRequestHook(): Promise<RequestHook> {
     ),
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-    process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    process: {
+      env: hasT3Mcp
+        ? { T3_MCP_URL: "http://localhost:43123/mcp", T3_MCP_BEARER_TOKEN: "test-token" }
+        : {},
+    },
+    AbortSignal,
+    fetch: async () =>
+      new Response('{"id":1,"result":{"tools":[]}}', {
+        headers: { "content-type": "application/json" },
+      }),
+    pi: { on: (name: string, handler: unknown) => handlers.set(name, handler) },
   });
-  const hook = handlers.get("before_provider_request");
+  return handlers;
+}
+
+async function loadRequestHook(): Promise<RequestHook> {
+  const handlers = await loadExtensionHandlers();
+  const hook = handlers.get("before_provider_request") as RequestHook | undefined;
   assert.isDefined(hook);
   return hook!;
 }
@@ -55,5 +69,25 @@ describe("Pi upstream output-budget workaround", () => {
     assert.isUndefined(
       hook({ payload: { max_tokens: 231_969 } }, { model: { provider: "anthropic" } }),
     );
+  });
+});
+
+describe("Pi T3 MCP instructions", () => {
+  it("adds background browser guidance through the attached bridge's system prompt", async () => {
+    const handlers = await loadExtensionHandlers(true);
+    const hook = handlers.get("before_agent_start") as
+      | ((event: { readonly systemPrompt: string }) => { readonly systemPrompt: string })
+      | undefined;
+    assert.isDefined(hook);
+    const result = hook!({ systemPrompt: "Original instructions." });
+    assert.include(result.systemPrompt, "Original instructions.");
+    assert.include(result.systemPrompt, "Use `delegate_task`");
+    assert.include(result.systemPrompt, "without a separate browser-permission prompt");
+    assert.include(result.systemPrompt, "preview_open({ open: false, reuseExistingTab: false })");
+  });
+
+  it("leaves the system prompt untouched without MCP credentials", async () => {
+    const handlers = await loadExtensionHandlers();
+    assert.isFalse(handlers.has("before_agent_start"));
   });
 });
