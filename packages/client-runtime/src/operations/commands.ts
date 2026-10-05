@@ -22,7 +22,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
-  type ThreadId,
+  ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
@@ -235,6 +235,12 @@ export interface ForkThreadFromRunInput extends CommandMetadata {
   readonly targetThreadId: ThreadId;
   readonly runId: RunId;
   readonly title?: string;
+}
+
+export type RequestSubagentPromotionInput = ThreadCommandInput;
+
+export interface CancelSubagentPromotionInput extends ThreadCommandInput {
+  readonly requestId: CommandId;
 }
 
 export interface MergeThreadBackInput extends CommandMetadata {
@@ -1020,6 +1026,33 @@ export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRu
     ...(input.title === undefined ? {} : { title: input.title }),
   });
 });
+
+export const requestSubagentPromotion = Effect.fn("EnvironmentCommands.requestSubagentPromotion")(
+  function* (input: RequestSubagentPromotionInput) {
+    const commandId = yield* allocateCommandId(input);
+    return yield* dispatch({
+      type: "subagent.promote.request",
+      commandId,
+      threadId: input.threadId,
+      // The server keeps a usable canonical target; a retry offers a fresh ID
+      // so it can recover when that destination has become occupied.
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+    });
+  },
+);
+
+export const cancelSubagentPromotion = Effect.fn("EnvironmentCommands.cancelSubagentPromotion")(
+  function* (input: CancelSubagentPromotionInput) {
+    return yield* dispatch({
+      type: "subagent.promote.cancel",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      requestId: input.requestId,
+    });
+  },
+);
 
 export const mergeThreadBack = Effect.fn("EnvironmentCommands.mergeThreadBack")(function* (
   input: MergeThreadBackInput,

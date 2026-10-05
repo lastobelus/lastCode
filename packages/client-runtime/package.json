@@ -370,6 +370,10 @@
     "./device/duo-control": {
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
+    },
+    "./state/subagent-promotion": {
+      "types": "./src/state/subagentPromotion.ts",
+      "default": "./src/state/subagentPromotion.ts"
     }
   },
   "scripts": {

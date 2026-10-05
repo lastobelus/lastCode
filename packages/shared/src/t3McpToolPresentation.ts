@@ -24,6 +24,9 @@ export type T3McpToolSummaryAction =
   | "thread-configuration"
   | "thread-configure"
   | "thread-fork"
+  | "subagent-promote"
+  | "subagent-promotion-status"
+  | "subagent-promotion-cancel"
   | "thread-merge"
   | "thread-search"
   | "thread-transfers"
@@ -250,6 +253,18 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   t3_thread_configure: tool(["Set", "Setting", "Set", "thread model"], "thread-configure"),
   t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
+  t3_subagent_promote: tool(
+    ["Promote", "Requesting promotion of", "Requested promotion of", "a subagent"],
+    "subagent-promote",
+  ),
+  t3_subagent_promotion_status: tool(
+    ["Check", "Checking", "Checked", "subagent promotion"],
+    "subagent-promotion-status",
+  ),
+  t3_subagent_promotion_cancel: tool(
+    ["Cancel", "Cancelling", "Requested cancellation of", "subagent promotion"],
+    "subagent-promotion-cancel",
+  ),
   t3_thread_merge_back: tool(
     ["Merge", "Merging", "Requested a merge of", "thread context"],
     "thread-merge",

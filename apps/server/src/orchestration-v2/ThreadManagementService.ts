@@ -49,6 +49,7 @@ export function withCreationProvenance(
     case "thread.create":
     case "message.dispatch":
     case "thread.fork":
+    case "subagent.promote.request":
     case "thread.merge_back":
     case "delegated_task.request":
       return { ...command, ...provenance };

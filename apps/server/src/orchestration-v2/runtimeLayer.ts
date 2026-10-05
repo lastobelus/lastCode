@@ -59,6 +59,7 @@ import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 
 /** The shared application event log and its command receipts. */
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -313,6 +314,16 @@ const providerContinuationWorkerProvided = providerContinuationWorkerLive.pipe(
 const threadTitleRegenerationProvided = threadTitleRegenerationServiceLayer.pipe(
   Layer.provide(Layer.mergeAll(threadManagementProvided, ProjectStore.layer, TextGeneration.layer)),
 );
+const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      projectionStoreLayer,
+      providerAdapterRegistryProvided,
+      runtimePolicyProvided,
+      orchestratorProvided,
+    ),
+  ),
+);
 const effectExecutorProvided = effectExecutorLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -324,6 +335,7 @@ const effectExecutorProvided = effectExecutorLayer.pipe(
       runtimeRequestServiceProvided,
       threadTitleRegenerationProvided,
       threadManagementProvided,
+      subagentPromotionProvided,
     ),
   ),
 );

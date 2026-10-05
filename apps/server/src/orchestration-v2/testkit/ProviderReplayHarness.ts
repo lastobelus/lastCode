@@ -30,6 +30,7 @@ import * as CommandReceiptStore from "../CommandReceiptStore.ts";
 import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
+import * as SubagentPromotionService from "../SubagentPromotionService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as IdAllocator from "../IdAllocator.ts";
@@ -481,6 +482,11 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
           ),
         )
       : Layer.empty;
+  const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(storesLayer, providedRegistryLayer, runtimeLayer, orchestratorProvided),
+    ),
+  );
   const effectExecutorProvided = EffectWorker.executorLayer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -493,6 +499,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         threadTitleRegenerationTestLayer,
         serverSettingsLayer,
         threadManagementProvided,
+        subagentPromotionProvided,
       ),
     ),
   );
