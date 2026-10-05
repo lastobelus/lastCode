@@ -630,9 +630,7 @@ export const make = Effect.gen(function* () {
             (state.status === "error" && state.errorContext === "download" && state.canRetry)
             ? { ...state, checkedAt }
             : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
-        ).pipe(
-          Effect.as({ checked: true, checkpointRequested: false, error: error.message }),
-        ),
+        ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
       ),
     );
   });
