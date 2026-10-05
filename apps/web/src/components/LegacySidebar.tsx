@@ -214,7 +214,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   useSidebar,
@@ -380,6 +379,20 @@ function buildThreadJumpLabelMap(input: {
     }
   }
   return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
+}
+
+// Each descendant supplies the segment below its ancestor disclosure slot.
+// Keeping rails outside the row background preserves them through selection;
+// the next sibling starts a new segment only for ancestors it actually shares.
+function LegacySidebarFamilyGuides({ depth }: { depth: number }) {
+  return Array.from({ length: Math.min(depth, 6) }, (_, level) => (
+    <span
+      key={level}
+      aria-hidden
+      className="pointer-events-none absolute -top-1 bottom-0 border-l border-sidebar-border"
+      style={{ left: 20 + level * 12 }}
+    />
+  ));
 }
 
 interface SidebarThreadRowProps {
@@ -966,8 +979,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   return (
     <SidebarMenuSubItem
       ref={rowRef}
-      className="w-full"
-      style={family.depth ? { paddingLeft: Math.min(family.depth, 6) * 12 } : undefined}
+      className="w-full mb-1"
+      style={{ paddingLeft: 12 + Math.min(family.depth, 6) * 12 }}
       data-thread-item
       {...fileDropHandlers}
       onFocusCapture={() => setThreadRowActive(true)}
@@ -975,6 +988,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
+      <LegacySidebarFamilyGuides depth={family.depth} />
       {/* A thread row is the legacy sidebar's own control (a focusable div that hosts nested
           links and buttons), not a SidebarMenuSubButton, so it owns its look here. */}
       <TooltipTrigger
@@ -996,7 +1010,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         data-file-drag-over={isFileDragOver}
         aria-disabled={isCleanupPending || undefined}
         className={cn(
-          "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md px-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
+          "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
           isActive
             ? "bg-sidebar-row-active font-medium text-sidebar-foreground hover:bg-sidebar-row-active"
             : isSelected
@@ -1042,7 +1056,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   aria-label={`${family.expanded ? "Collapse" : "Expand"} children of ${thread.title}`}
                   aria-expanded={family.expanded}
                   aria-disabled={family.selectedDescendant || undefined}
-                  className="relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                  className={cn(
+                    "relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
+                    typedGroups &&
+                      !family.expanded &&
+                      renamingThreadKey !== threadKey &&
+                      "-translate-y-1.5",
+                  )}
                   onPointerDown={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
@@ -1064,9 +1084,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 : legacySidebarFamilySummary(family)}
             </TooltipPopup>
           </Tooltip>
-        ) : family.descendantCount > 0 ? (
-          <span className="size-4 shrink-0" aria-hidden />
-        ) : null}
+        ) : (
+          <span className="inline-flex size-4 shrink-0 items-center justify-center" aria-hidden>
+            {family.descendantCount === 0 ? (
+              <span className="size-[2px] rounded-full bg-sidebar-muted-foreground/45" />
+            ) : null}
+          </span>
+        )}
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           {cleanup === null && prStatus && pr && (
             <Tooltip>
@@ -1601,17 +1625,19 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
 
   return (
-    <SidebarMenuSub
+    <ul
       ref={attachThreadListAutoAnimateRef}
-      className="@container/legacy-sidebar mx-0.5 my-0 w-full translate-x-0 overflow-hidden sm:mx-1"
+      className="@container/legacy-sidebar relative flex min-w-0 flex-col before:pointer-events-none before:absolute before:inset-y-0 before:left-2 before:border-l before:border-sidebar-border group-data-[collapsible=icon]:hidden"
+      data-sidebar="menu-sub"
+      data-slot="sidebar-menu-sub"
       data-legacy-sidebar-scale={legacySidebarScale}
-      style={scaleStyle}
+      style={{ ...scaleStyle, marginLeft: "calc(8px * var(--legacy-sidebar-content-zoom) - 8px)" }}
     >
       {shouldShowThreadPanel && showEmptyThreadState ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
             data-thread-selection-safe
-            className="flex h-8 w-full translate-x-0 items-center px-2 text-left text-xs text-sidebar-muted-foreground/75"
+            className="flex h-8 w-full items-center pl-8 pr-2 text-left text-xs text-sidebar-muted-foreground/75"
           >
             <span>No threads yet</span>
           </div>
@@ -1625,8 +1651,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             <React.Fragment key={threadKey}>
               {familyRow.groupHeading ? (
                 <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+                  <LegacySidebarFamilyGuides depth={familyRow.depth} />
                   <div
-                    style={{ paddingLeft: Math.min(familyRow.depth, 6) * 12 + 8 }}
+                    style={{ paddingLeft: Math.min(familyRow.depth, 6) * 12 + 32 }}
                     className="py-1 text-3xs text-sidebar-muted-foreground"
                   >
                     {familyRow.groupHeading}
@@ -1676,7 +1703,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         })}
 
       {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
-        <SidebarMenuSubItem className="w-full">
+        <SidebarMenuSubItem className="ml-6">
           <SidebarMenuSubButton
             render={showMoreButtonRender}
             data-thread-selection-safe
@@ -1693,7 +1720,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         </SidebarMenuSubItem>
       )}
       {projectExpanded && hasOverflowingThreads && isThreadListExpanded && (
-        <SidebarMenuSubItem className="w-full">
+        <SidebarMenuSubItem className="ml-6">
           <SidebarMenuSubButton
             render={showLessButtonRender}
             data-thread-selection-safe
@@ -1706,7 +1733,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           </SidebarMenuSubButton>
         </SidebarMenuSubItem>
       )}
-    </SidebarMenuSub>
+    </ul>
   );
 });
 
@@ -3217,9 +3244,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <div
         className="group/project-header relative"
         data-legacy-sidebar-scale={legacySidebarScale}
-        style={scaleStyle}
+        style={{
+          ...scaleStyle,
+          marginLeft: "calc(8px * var(--legacy-sidebar-content-zoom) - 8px)",
+        }}
       >
         <SidebarMenuButton
+          size="tree"
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
           className={isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : undefined}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
@@ -3235,7 +3266,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 render={
                   <span
                     aria-label={projectStatus.label}
-                    className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
+                    className={`relative inline-flex size-4 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
                   />
                 }
               >
@@ -3252,13 +3283,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               <TooltipPopup side="top">{projectStatus.label}</TooltipPopup>
             </Tooltip>
           ) : (
-            <ChevronRightIcon
-              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
-                projectExpanded ? "rotate-90" : ""
-              }`}
-            />
+            <span className="inline-flex size-4 shrink-0 items-center justify-center">
+              <ChevronRightIcon
+                className={`size-3.5 text-muted-foreground/70 transition-transform duration-150 ${projectExpanded ? "rotate-90" : ""}`}
+              />
+            </span>
           )}
-          <span className="flex shrink-0">
+          <span className="mr-0.5 flex shrink-0">
             <ProjectFavicon project={project} />
           </span>
           <span className="flex min-w-0 flex-1 items-center gap-2">
