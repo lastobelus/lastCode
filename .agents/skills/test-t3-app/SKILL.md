@@ -17,9 +17,25 @@ testing, use [test-t3-mobile](../test-t3-mobile/SKILL.md).
 Reuse this task's healthy dev server. Otherwise run `vp run dev` from the
 repository root through `preview_host` when available, retaining its managed
 terminal and lease. Follow `docs/lastcode/preview-handoffs.md` for the hosting
-contract. Use a foreground command and an explicit free port matching the
-requested URL; do not detach the process. Otherwise retain its terminal
-session. Use the worktree's ignored `.t3` state and read the actual ports and pairing URL from the dev-runner output.
+contract. Use a foreground command; do not detach the process. Otherwise retain
+its terminal session. Use the worktree's ignored `.t3` state.
+
+Before managed launch, run `vp run dev --dry-run --home-dir "$PWD/.t3"`
+from the repository root and read `webPort` from its `[dev-runner]` output.
+Use `http://localhost:<webPort>` as the requested preview URL. Launch
+`vp run dev --home-dir "$PWD/.t3"` with the same working directory and
+environment. To choose a port range, supply `T3CODE_PORT_OFFSET` to both the
+dry run and the managed launch: the initial web port is `5733 + offset` and
+backend port is `13773 + offset`. The runner can shift occupied ports, so use
+the dry-run result, not the formula alone. `--port` selects the backend, not
+the browser-facing web listener. If a port is taken between resolution and
+launch, inspect the readiness failure and resolve a free pair again.
+
+`preview_host` does not expose startup output or a terminal handle. After a
+successful launch, obtain a fresh pairing URL with
+`node apps/server/src/bin.ts pair --base-dir "$PWD/.t3"` from the same root.
+This explicitly targets the isolated server and uses its recorded web origin.
+Keep the returned token private; do not commit it or include it in reports.
 Never run against `~/.t3/userdata` or set `VITE_HTTP_URL` or `VITE_WS_URL`.
 
 Test with meaningful project and thread data. Read
@@ -38,9 +54,9 @@ inspecting.
 
 A newly created blank tab can initially report `available: false` while its
 native browser starts. Navigate before declaring it unavailable; navigation
-waits for readiness. Navigate to the complete startup pairing URL once with
+waits for readiness. Navigate to the complete freshly minted pairing URL once with
 `preview_navigate`, then use `preview_snapshot` and T3's interaction tools.
-If the token was consumed or expired, run `node apps/server/src/bin.ts pair`
+If the token was consumed or expired, repeat the isolated pairing command above
 for a fresh one. Keep using the same tab.
 
 If managed hosting fails readiness, inspect the startup diagnostics returned by
