@@ -262,6 +262,7 @@ import {
   projectLegacySidebarFamilies,
   legacySidebarFamilySummary,
   legacySidebarCreatorGroupingEligible,
+  legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
@@ -624,8 +625,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const modelLabel = selectedModel
     ? getTriggerDisplayModelLabel(selectedModel)
     : thread.modelSelection.model;
-  const isAgentCreated =
-    thread.lineage.relationshipToParent !== "subagent" && thread.source.createdBy === "agent";
+  const isAgentCreated = legacySidebarIsAgentCreated(thread);
   const creatorRef = useMemo(
     () =>
       isAgentCreated && thread.creatorThreadId

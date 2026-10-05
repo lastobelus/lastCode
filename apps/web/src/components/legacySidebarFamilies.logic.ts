@@ -38,12 +38,12 @@ export function legacySidebarSubagentStatusLabel(
   return "Idle";
 }
 
+export function legacySidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
+  return thread.source.createdBy === "agent" && thread.lineage.relationshipToParent === null;
+}
+
 export function legacySidebarCreatorGroupingEligible(thread: SidebarThreadSummary): boolean {
-  return (
-    thread.source.createdBy === "agent" &&
-    thread.creatorThreadId !== undefined &&
-    thread.lineage.relationshipToParent === null
-  );
+  return legacySidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
 export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string {

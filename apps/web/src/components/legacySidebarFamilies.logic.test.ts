@@ -4,6 +4,7 @@ import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures
 import {
   legacySidebarFamilySummary,
   legacySidebarCreatorGroupingEligible,
+  legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   legacySidebarThreadKey,
   projectLegacySidebarFamilies,
@@ -269,6 +270,7 @@ describe("legacy sidebar creator grouping", () => {
     expect(project([historical, thread("creator")]).renderedRows.map((row) => row.depth)).toEqual([
       0, 0,
     ]);
+    expect(legacySidebarIsAgentCreated(historical)).toBe(true);
     expect(legacySidebarCreatorGroupingEligible(historical)).toBe(false);
   });
 
@@ -351,6 +353,9 @@ describe("legacy sidebar creator grouping", () => {
     const result = project([thread("creator"), thread("real-parent"), fork, subagent]);
     expect(keys(result)).toEqual(["creator", "real-parent", "helper", "fork"]);
     expect(result.renderedRows[2]?.parentKey).toBe(legacySidebarThreadKey(thread("real-parent")));
+    expect(legacySidebarIsAgentCreated(fork)).toBe(false);
+    expect(legacySidebarIsAgentCreated(subagent)).toBe(false);
+    expect(legacySidebarIsAgentCreated(thread("user-created"))).toBe(false);
     expect(legacySidebarCreatorGroupingEligible(fork)).toBe(false);
     expect(legacySidebarCreatorGroupingEligible(subagent)).toBe(false);
   });
