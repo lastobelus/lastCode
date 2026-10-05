@@ -12,6 +12,7 @@ export interface LegacySidebarFamilyRow {
   descendantsStatus: ThreadStatusPill | null;
   expanded: boolean;
   selectedDescendant: boolean;
+  projectExpanded: boolean;
   descendantStatusCounts: Map<string, number>;
 }
 
@@ -136,6 +137,7 @@ export function projectLegacySidebarFamilies(input: {
       descendantsStatus: null,
       expanded: input.collapsedByKey[key] !== true || selectedDescendant,
       selectedDescendant,
+      projectExpanded: input.projectExpanded,
       descendantStatusCounts: new Map(),
     });
     for (let index = children.length - 1; index >= 0; index--) {

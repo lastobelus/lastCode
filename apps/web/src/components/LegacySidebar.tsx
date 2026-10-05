@@ -974,7 +974,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </TooltipPopup>
           </Tooltip>
         ) : null}
-        {family.descendantCount > 0 ? (
+        {family.descendantCount > 0 && family.projectExpanded ? (
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1006,6 +1006,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 : legacySidebarFamilySummary(family)}
             </TooltipPopup>
           </Tooltip>
+        ) : family.descendantCount > 0 ? (
+          <span className="size-4 shrink-0" aria-hidden />
         ) : null}
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           {cleanup === null && prStatus && pr && (
