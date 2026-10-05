@@ -107,13 +107,19 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const service = yield* ServerSettingsModule.ServerSettingsService;
       yield* service.updateSettings({
-        lastcodeLocalCi: { maxConcurrentRuns: 2, packageConcurrency: 3, backgroundPriority: false },
+        lastcodeLocalCi: {
+          quickCiMode: "github",
+          maxConcurrentRuns: 2,
+          packageConcurrency: 3,
+          backgroundPriority: false,
+        },
       });
       yield* service.updateSettings({ lastcodeLocalCi: { compilerThreads: 4 } });
       const persisted = yield* decodeServerSettingsJson(
         yield* fs.readFileString(config.settingsPath),
       );
       assert.deepEqual(persisted.lastcodeLocalCi, {
+        quickCiMode: "github",
         maxConcurrentRuns: 2,
         packageConcurrency: 3,
         compilerThreads: 4,

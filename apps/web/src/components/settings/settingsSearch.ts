@@ -896,6 +896,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "local-ci-quick-mode",
+    title: "Quick CI mode",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["automatic always local github only checks capacity wait"],
+  },
+  {
     id: "local-ci-runs",
     title: "Concurrent CI runs",
     to: "/settings/lastcode",

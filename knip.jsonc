@@ -61,6 +61,7 @@
         "fixtures/lastcode-docs-install.mjs",
         "fixtures/lastcode-docs-local-update.mjs",
         "lastcode-packaged-server-supervisor.mjs!",
+        "lib/lastcode-ci-worker.mjs!",
         "lastcode-local-update.d.mts",
         "lastcode-lock.d.mts",
       ],

@@ -76,7 +76,7 @@ export async function readLocalCiPolicy(env = NodeProcess.env) {
     return decodePolicy(settings.lastcodeLocalCi);
   } catch {
     throw new Error(
-      "Invalid local CI settings: lastcodeLocalCi must use maxConcurrentRuns 1–4, packageConcurrency 1–8, compilerThreads 1–16, and a boolean backgroundPriority.",
+      "Invalid local CI settings: lastcodeLocalCi must use quickCiMode auto/local/github, maxConcurrentRuns 1–4, packageConcurrency 1–8, compilerThreads 1–16, and a boolean backgroundPriority.",
     );
   }
 }
@@ -233,6 +233,25 @@ function writeRecord(path: string, record: Lease | Waiter) {
  * lease alive until all of its CI subprocesses have ended, including cancellation.
  */
 export async function acquireLocalCiBudget(options: BudgetOptions): Promise<LocalCiBudgetLease> {
+  return acquireBudget(options, true);
+}
+
+/** Claims an immediately available slot without waiting or overtaking queued runs. */
+export async function tryAcquireLocalCiBudget(
+  options: BudgetOptions,
+): Promise<LocalCiBudgetLease | undefined> {
+  return acquireBudget(options, false);
+}
+
+function acquireBudget(options: BudgetOptions, waitForCapacity: true): Promise<LocalCiBudgetLease>;
+function acquireBudget(
+  options: BudgetOptions,
+  waitForCapacity: false,
+): Promise<LocalCiBudgetLease | undefined>;
+async function acquireBudget(
+  options: BudgetOptions,
+  waitForCapacity: boolean,
+): Promise<LocalCiBudgetLease | undefined> {
   const policy = decodePolicy(options.policy);
   const directory =
     options.directory ?? NodePath.join(NodeOS.homedir(), ".cache", "lastcode", "local-ci");
@@ -312,6 +331,7 @@ export async function acquireLocalCiBudget(options: BudgetOptions): Promise<Loca
               },
             };
           }
+          if (!waitForCapacity) return undefined;
           const position = waiters.findIndex((waiter) => waiter.token === token) + 1;
           waiting(
             `Waiting for local CI capacity (${active.length} active; limit ${limit}; queue position ${position}).`,
@@ -320,14 +340,14 @@ export async function acquireLocalCiBudget(options: BudgetOptions): Promise<Loca
           releaseMutex();
         }
       } else {
+        if (!waitForCapacity) return undefined;
         waiting("Waiting for another local CI run to finish its admission update.");
       }
       await NodeTimersPromises.setTimeout(RETRY_INTERVAL_MS, undefined, { signal: options.signal });
     }
-  } catch (error) {
-    // Each waiter has a unique token, so cancellation can unlink its own record
-    // without holding the admission mutex or disturbing another queued run.
+  } finally {
+    // Each waiter has a unique token, so cancellation or an unavailable try can
+    // unlink its own record without disturbing another queued run.
     NodeFS.rmSync(waiterPath, { force: true });
-    throw error;
   }
 }

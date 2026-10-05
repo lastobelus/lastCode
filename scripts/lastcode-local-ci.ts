@@ -15,7 +15,11 @@ import {
 
 import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
 import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
-import { acquireLocalCiBudget, readLocalCiPolicy } from "./lib/lastcode-ci-budget.ts";
+import {
+  acquireLocalCiBudget,
+  readLocalCiPolicy,
+  tryAcquireLocalCiBudget,
+} from "./lib/lastcode-ci-budget.ts";
 import { resolveQuickCiScope, type QuickCiScope } from "./lib/lastcode-ci-scope.ts";
 import { runCiProcess } from "./lib/lastcode-ci-process.ts";
 
@@ -96,6 +100,7 @@ export interface LocalCiOptions {
   readonly dryRun: boolean;
   readonly prePush: boolean;
   readonly checkpointTag?: string;
+  readonly requireLocal?: boolean;
 }
 
 export interface RepositoryIntegritySnapshot {
@@ -163,7 +168,6 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
       "--concurrency-limit",
       "1",
       "test",
-      "--",
       "--maxWorkers=1",
       "--maxConcurrency=1",
     ],
@@ -225,6 +229,7 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
   let dryRun = false;
   let prePush = false;
   let checkpointTag: string | undefined;
+  let requireLocal = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -238,6 +243,8 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
       dryRun = true;
     } else if (arg === "--pre-push") {
       prePush = true;
+    } else if (arg === "--require-local") {
+      requireLocal = true;
     } else if (arg === "--checkpoint") {
       checkpointTag = argv[index + 1];
       if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
@@ -250,8 +257,17 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
   if (prePush && mode !== "quick") {
     throw new Error("--pre-push is only supported with --quick.");
   }
+  if (requireLocal && mode !== "quick") {
+    throw new Error("--require-local is only supported with --quick.");
+  }
 
-  return { mode, dryRun, prePush, ...(checkpointTag ? { checkpointTag } : {}) };
+  return {
+    mode,
+    dryRun,
+    prePush,
+    ...(checkpointTag ? { checkpointTag } : {}),
+    ...(requireLocal ? { requireLocal } : {}),
+  };
 }
 
 export function resolveLocalCiSteps(
@@ -932,15 +948,61 @@ async function executeLocalCi(
   signal.throwIfAborted();
   if (await reuseReceipt()) return;
 
-  const lease = await acquireLocalCiBudget({
+  const quickCiMode =
+    options.mode === "full" || options.requireLocal ? "local" : policy.quickCiMode;
+  const deferToGitHub = async (reason: "configured" | "busy") => {
+    await assertRepositoryIntegrity(repoRoot, repositoryIntegrity, signal);
+    await assertCleanWorktreeWithCancellation(repoRoot, signal);
+    if ((await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal)) !== commitBefore) {
+      throw new Error("HEAD changed before deferring Quick CI. Try the push again.");
+    }
+    if (
+      quickBase &&
+      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+        baseCommit
+    ) {
+      throw new Error("The Quick CI base changed before deferral. Try the push again.");
+    }
+    signal.throwIfAborted();
+    const summary =
+      reason === "busy"
+        ? "Local CI capacity is busy; deferring Quick CI to required GitHub checks."
+        : "GitHub-only mode selected; local Quick CI is optional.";
+    console.log(`[lastcode:ci] Summary: ${summary}`);
+    lastCodeAction.result({
+      outcome: "attention",
+      reason: "github-ci-required",
+      summary,
+      subject: { type: "commit", id: commitBefore, revision: commitBefore },
+      facts: {
+        mode: "quick",
+        baseCommit: baseCommit!,
+        validation: "github-only",
+        skipReason: reason,
+      },
+    });
+  };
+  if (quickCiMode === "github") {
+    await deferToGitHub("configured");
+    return;
+  }
+  const budgetOptions = {
     policy,
     repoRoot,
     signal,
-    onWaiting: (summary) => {
+    onWaiting: (summary: string) => {
       console.log(`[lastcode:ci] ${summary}`);
       lastCodeAction.progress({ state: "waiting", phase: "ci-budget", summary });
     },
-  });
+  };
+  const lease =
+    quickCiMode === "auto"
+      ? await tryAcquireLocalCiBudget(budgetOptions)
+      : await acquireLocalCiBudget(budgetOptions);
+  if (lease === undefined) {
+    await deferToGitHub("busy");
+    return;
+  }
   try {
     signal.throwIfAborted();
     await assertCleanWorktreeWithCancellation(repoRoot, signal);

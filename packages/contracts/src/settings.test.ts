@@ -26,6 +26,7 @@ const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 describe("ServerSettings local CI limits", () => {
   it("uses responsive defaults and fills omitted persisted limits", () => {
     expect(decodeServerSettings({}).lastcodeLocalCi).toEqual({
+      quickCiMode: "auto",
       maxConcurrentRuns: 1,
       packageConcurrency: 1,
       compilerThreads: 2,
@@ -52,6 +53,15 @@ describe("ServerSettings local CI limits", () => {
     expect(decodeServerSettingsPatch(input)).toEqual(input);
   });
 
+  it.each(["auto", "local", "github"])(
+    "round-trips Quick CI mode %s without filling partial writes",
+    (quickCiMode) => {
+      const input = { lastcodeLocalCi: { quickCiMode } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
+
   it.each([
     ["maxConcurrentRuns", 0],
     ["maxConcurrentRuns", 5],
@@ -61,6 +71,7 @@ describe("ServerSettings local CI limits", () => {
     ["compilerThreads", 17],
     ["compilerThreads", 1.5],
     ["backgroundPriority", "true"],
+    ["quickCiMode", "unsupported"],
   ])("rejects invalid %s: %s", (key, value) => {
     const input = { lastcodeLocalCi: { [key]: value } };
     expect(() => decodeServerSettings(input)).toThrow();

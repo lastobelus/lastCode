@@ -1,5 +1,6 @@
 import {
   DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+  LastCodeQuickCiMode,
   type LastCodeLocalCiSettings,
 } from "@t3tools/contracts/settings";
 import { View } from "react-native";
@@ -7,14 +8,21 @@ import { View } from "react-native";
 import { AppText } from "../../../components/AppText";
 import { MaterialIconButton } from "../../../components/MaterialIconButton";
 import { SettingsControlRow } from "./SettingsControlRow";
+import { SettingsChoiceRow } from "./SettingsChoiceRow";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSwitchRow } from "./SettingsSwitchRow";
+
+const QUICK_CI_MODES = {
+  auto: { label: "Automatic", description: "Use free local capacity, otherwise defer to GitHub." },
+  local: { label: "Always local", description: "Wait for local capacity before running Quick CI." },
+  github: { label: "GitHub only", description: "Skip local Quick CI and use GitHub checks." },
+} satisfies Record<LastCodeQuickCiMode, { label: string; description: string }>;
 
 const LIMIT_ROWS = [
   {
     key: "maxConcurrentRuns",
     label: "Concurrent CI runs",
-    subtitle: "Additional runs across worktrees wait their turn.",
+    subtitle: "Automatic defers to GitHub when busy; explicit local runs wait.",
     max: 4,
   },
   {
@@ -42,9 +50,28 @@ export function LocalCiSettingsSection(props: {
       ? first[key]
       : null;
   };
+  const quickCiMode = uniform("quickCiMode");
   return (
     <SettingsSection title="Local CI">
-      {LIMIT_ROWS.map((row, index) => {
+      <View className="gap-1 px-4 py-3">
+        <AppText className="text-base text-foreground">
+          Quick CI mode{quickCiMode === null ? " · Mixed" : ""}
+        </AppText>
+        <AppText className="text-sm text-foreground-muted">
+          GitHub checks remain required to merge.
+        </AppText>
+      </View>
+      {LastCodeQuickCiMode.literals.map((mode) => (
+        <SettingsChoiceRow
+          key={mode}
+          {...QUICK_CI_MODES[mode]}
+          selected={quickCiMode === mode}
+          separated
+          disabled={props.disabled}
+          onPress={() => props.onChange({ quickCiMode: mode })}
+        />
+      ))}
+      {LIMIT_ROWS.map((row) => {
         const value = uniform(row.key);
         const adjust = (amount: number) => {
           const next = Math.max(
@@ -54,7 +81,7 @@ export function LocalCiSettingsSection(props: {
           if (next !== value) props.onChange({ [row.key]: next });
         };
         return (
-          <View key={row.key} className={index > 0 ? "border-t border-border-subtle" : undefined}>
+          <View key={row.key} className="border-t border-border-subtle">
             <SettingsControlRow
               icon="slider.horizontal.3"
               label={row.label}

@@ -26,12 +26,18 @@ const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFold
 describe("serverSettings helpers", () => {
   it("changes one CI limit without resetting the other environment limits", () => {
     const configured = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      lastcodeLocalCi: { maxConcurrentRuns: 2, packageConcurrency: 3, backgroundPriority: false },
+      lastcodeLocalCi: {
+        quickCiMode: "github",
+        maxConcurrentRuns: 2,
+        packageConcurrency: 3,
+        backgroundPriority: false,
+      },
     });
     expect(
       applyServerSettingsPatch(configured, { lastcodeLocalCi: { compilerThreads: 4 } })
         .lastcodeLocalCi,
     ).toEqual({
+      quickCiMode: "github",
       maxConcurrentRuns: 2,
       packageConcurrency: 3,
       compilerThreads: 4,

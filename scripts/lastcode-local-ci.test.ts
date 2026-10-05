@@ -103,6 +103,13 @@ describe("lastcode-local-ci", () => {
       dryRun: false,
       prePush: true,
     });
+    expect(parseLocalCiOptions(["--quick", "--require-local"])).toEqual({
+      mode: "quick",
+      dryRun: false,
+      prePush: false,
+      requireLocal: true,
+    });
+    expect(() => parseLocalCiOptions(["--require-local"])).toThrow("only supported with --quick");
     expect(() => parseLocalCiOptions(["--full", "--pre-push"])).toThrow(
       "only supported with --quick",
     );
@@ -144,7 +151,6 @@ describe("lastcode-local-ci", () => {
         "--concurrency-limit",
         "1",
         "test",
-        "--",
         "--maxWorkers=1",
         "--maxConcurrency=1",
       ],

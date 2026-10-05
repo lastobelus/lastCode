@@ -9,7 +9,11 @@ import * as NodeReadline from "node:readline";
 import { DEFAULT_LASTCODE_LOCAL_CI_SETTINGS } from "@t3tools/contracts/settings";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { acquireLocalCiBudget, readLocalCiPolicy } from "./lastcode-ci-budget.ts";
+import {
+  acquireLocalCiBudget,
+  readLocalCiPolicy,
+  tryAcquireLocalCiBudget,
+} from "./lastcode-ci-budget.ts";
 import { acquireLocalCiAdmissionLock } from "./lastcode-ci-admission-lock.ts";
 
 vi.mock("node:os", async (importOriginal) => {
@@ -66,7 +70,7 @@ function worker(directory: string, maxConcurrentRuns: number, repoRoot = "worksp
       if (message.type === "start") {
         try {
           lease = await acquireLocalCiBudget({
-            policy: { maxConcurrentRuns: ${maxConcurrentRuns}, packageConcurrency: 1, compilerThreads: 2, backgroundPriority: true },
+            policy: { quickCiMode: "auto", maxConcurrentRuns: ${maxConcurrentRuns}, packageConcurrency: 1, compilerThreads: 2, backgroundPriority: true },
             repoRoot: ${JSON.stringify(repoRoot)},
             directory: ${JSON.stringify(directory)},
             signal: controller.signal,
@@ -304,6 +308,96 @@ describe("local CI policy", () => {
 });
 
 describe("machine-wide local CI admission", () => {
+  it("returns immediately when the admission mutex is held", async () => {
+    const directory = temporaryDirectory();
+    const releaseMutex = await acquireLocalCiAdmissionLock(directory);
+    const onWaiting = vi.fn();
+    try {
+      expect(
+        await tryAcquireLocalCiBudget({
+          policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+          repoRoot: "workspace.example",
+          directory,
+          onWaiting,
+        }),
+      ).toBeUndefined();
+      expect(onWaiting).not.toHaveBeenCalled();
+      expect(
+        NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
+      ).toHaveLength(0);
+    } finally {
+      releaseMutex();
+    }
+  });
+
+  it("claims an available slot and releases its lease", async () => {
+    const directory = temporaryDirectory();
+    const lease = await tryAcquireLocalCiBudget({
+      policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+      repoRoot: "workspace.example",
+      directory,
+    });
+    expect(lease).toBeDefined();
+    expect(
+      NodeFS.readdirSync(directory).filter((name) => name.endsWith(".lease.json")),
+    ).toHaveLength(1);
+    expect(
+      NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
+    ).toHaveLength(0);
+    lease!.release();
+    lease!.release();
+    expect(
+      NodeFS.readdirSync(directory).filter((name) => name.endsWith(".lease.json")),
+    ).toHaveLength(0);
+  });
+
+  it("declines a try under the strictest active limit without leaving a waiter", async () => {
+    const directory = temporaryDirectory();
+    const owner = await acquireLocalCiBudget({
+      policy: { ...DEFAULT_LASTCODE_LOCAL_CI_SETTINGS, maxConcurrentRuns: 1 },
+      repoRoot: "first-worktree.example",
+      directory,
+    });
+    try {
+      expect(
+        await tryAcquireLocalCiBudget({
+          policy: { ...DEFAULT_LASTCODE_LOCAL_CI_SETTINGS, maxConcurrentRuns: 4 },
+          repoRoot: "second-worktree.example",
+          directory,
+        }),
+      ).toBeUndefined();
+      expect(
+        NodeFS.readdirSync(directory).filter((name) => name.endsWith(".lease.json")),
+      ).toHaveLength(1);
+      expect(
+        NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
+      ).toHaveLength(0);
+    } finally {
+      owner.release();
+    }
+  });
+
+  it("does not overtake a registered live waiter even when capacity is free", async () => {
+    const directory = temporaryDirectory();
+    const waiterPath = NodePath.join(directory, "queued.waiter.json");
+    const waiter = { pid: NodeProcess.pid, token: "queued", order: 1 };
+    NodeFS.writeFileSync(waiterPath, JSON.stringify(waiter));
+    expect(
+      await tryAcquireLocalCiBudget({
+        policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+        repoRoot: "workspace.example",
+        directory,
+      }),
+    ).toBeUndefined();
+    expect(JSON.parse(NodeFS.readFileSync(waiterPath, "utf8"))).toEqual(waiter);
+    expect(NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json"))).toEqual([
+      "queued.waiter.json",
+    ]);
+    expect(
+      NodeFS.readdirSync(directory).filter((name) => name.endsWith(".lease.json")),
+    ).toHaveLength(0);
+  });
+
   it("honors the strictest running limit across separate worktrees", async () => {
     const directory = temporaryDirectory();
     const first = worker(directory, 2, "first-worktree.example");

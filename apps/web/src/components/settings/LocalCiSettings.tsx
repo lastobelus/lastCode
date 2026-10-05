@@ -1,5 +1,6 @@
 import {
   DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+  LastCodeQuickCiMode,
   type LastCodeLocalCiSettings,
 } from "@t3tools/contracts/settings";
 import { GaugeIcon } from "lucide-react";
@@ -12,11 +13,18 @@ import {
   NumberFieldIncrement,
   NumberFieldInput,
 } from "../ui/number-field";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
+
+const QUICK_CI_MODES = {
+  auto: "Automatic",
+  local: "Always local",
+  github: "GitHub only",
+} satisfies Record<LastCodeQuickCiMode, string>;
 
 const LIMIT_ROWS = [
   {
@@ -24,7 +32,7 @@ const LIMIT_ROWS = [
     id: "local-ci-runs",
     title: "Concurrent CI runs",
     description:
-      "Limit CI runs across worktrees on this environment. Additional runs wait their turn.",
+      "Limit local CI runs across worktrees on this machine. Automatic defers to GitHub when busy; explicit local runs wait.",
     max: 4,
   },
   {
@@ -93,6 +101,47 @@ export function LocalCiSettingsSection() {
 
   return (
     <SettingsSection title="Local CI" icon={<GaugeIcon className="size-5" />}>
+      <SettingsRow
+        {...searchableSetting("local-ci-quick-mode")}
+        description="Automatic uses free local capacity, otherwise defers to GitHub. Always local waits for capacity. GitHub checks remain required to merge."
+        serverScoped
+        settingKeys={["lastcodeLocalCi"]}
+        mixed={mixed("quickCiMode")}
+        resetAction={
+          mixed("quickCiMode") ||
+          settings.quickCiMode !== DEFAULT_LASTCODE_LOCAL_CI_SETTINGS.quickCiMode ? (
+            <SettingResetButton
+              label="Quick CI mode"
+              onClick={() => patch({ quickCiMode: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS.quickCiMode })}
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={mixed("quickCiMode") ? null : settings.quickCiMode}
+            onValueChange={(value) => {
+              if (LastCodeQuickCiMode.literals.includes(value as LastCodeQuickCiMode)) {
+                patch({ quickCiMode: value as LastCodeQuickCiMode });
+              }
+            }}
+          >
+            <SelectTrigger size="sm" aria-label="Quick CI mode">
+              <SelectValue>
+                {(value: LastCodeQuickCiMode | null) =>
+                  value === null ? "Mixed" : QUICK_CI_MODES[value]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {LastCodeQuickCiMode.literals.map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {QUICK_CI_MODES[mode]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        }
+      />
       {LIMIT_ROWS.map((row) => (
         <SettingsRow
           key={row.key}

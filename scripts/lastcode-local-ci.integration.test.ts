@@ -16,6 +16,7 @@ it.skipIf(NodeProcess.platform === "win32")(
   () => {
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-runner-"));
     const callsPath = NodePath.join(directory, "calls.jsonl");
+    const testArgsPath = NodePath.join(directory, "test-args.jsonl");
     try {
       NodeFS.writeFileSync(
         NodePath.join(directory, "package.json"),
@@ -30,11 +31,18 @@ it.skipIf(NodeProcess.platform === "win32")(
         NodeFS.mkdirSync(packageRoot, { recursive: true });
         NodeFS.writeFileSync(
           NodePath.join(packageRoot, "package.json"),
-          JSON.stringify({ name: `@fixture/${name}`, scripts: { typecheck: "node check.cjs" } }),
+          JSON.stringify({
+            name: `@fixture/${name}`,
+            scripts: { typecheck: "node check.cjs", test: "node test.cjs" },
+          }),
         );
         NodeFS.writeFileSync(
           NodePath.join(packageRoot, "check.cjs"),
           `require('node:fs').appendFileSync(${JSON.stringify(callsPath)}, ${JSON.stringify(`${name}\n`)});`,
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(packageRoot, "test.cjs"),
+          `require('node:fs').appendFileSync(${JSON.stringify(testArgsPath)}, JSON.stringify({name:${JSON.stringify(name)},args:process.argv.slice(2)})+${JSON.stringify("\n")});`,
         );
       }
       const step = resolveLocalCiSteps("quick", {
@@ -51,6 +59,24 @@ it.skipIf(NodeProcess.platform === "win32")(
       );
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       expect(NodeFS.readFileSync(callsPath, "utf8")).toBe("selected\n");
+      const tests = resolveLocalCiSteps("full").find(({ label }) => label === "Workspace tests");
+      if (tests?.kind !== "command") throw new Error("Missing workspace tests command.");
+      const tested = NodeChildProcess.spawnSync(
+        NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
+        tests.args,
+        { cwd: directory, encoding: "utf8", timeout: 15_000 },
+      );
+      expect(tested.status, `${tested.stdout}\n${tested.stderr}`).toBe(0);
+      const argumentsByPackage = NodeFS.readFileSync(testArgsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(argumentsByPackage).toEqual(
+        expect.arrayContaining([
+          { name: "selected", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
+          { name: "unrelated", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
+        ]),
+      );
     } finally {
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
@@ -167,7 +193,7 @@ it.skipIf(NodeProcess.platform === "win32")(
           "syncBuiltinESMExports();",
         ].join("\n"),
       );
-      const command = (prePush = false) =>
+      const command = (prePush = false, requireLocal = false) =>
         NodeChildProcess.spawnSync(
           nodeExecutable,
           [
@@ -176,6 +202,7 @@ it.skipIf(NodeProcess.platform === "win32")(
             NodePath.resolve(import.meta.dirname, "lastcode-local-ci.ts"),
             "--quick",
             ...(prePush ? ["--pre-push"] : []),
+            ...(requireLocal ? ["--require-local"] : []),
           ],
           {
             cwd: repoRoot,
@@ -183,7 +210,7 @@ it.skipIf(NodeProcess.platform === "win32")(
             env: { ...process.env, T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath },
             timeout: 60_000,
             input: prePush
-              ? `refs/heads/lastcode/fixture-docs ${head} refs/heads/lastcode/fixture-docs ${"0".repeat(40)}\n`
+              ? `refs/heads/lastcode/fixture-docs ${git("rev-parse", "HEAD")} refs/heads/lastcode/fixture-docs ${"0".repeat(40)}\n`
               : undefined,
           },
         );
@@ -213,6 +240,55 @@ it.skipIf(NodeProcess.platform === "win32")(
         { args: ["check", "--no-error-on-unmatched-pattern", "./README.md"], cpu: "2" },
       ]);
 
+      write("README.md", "Documentation for the next revision.\n");
+      git("add", "README.md");
+      git("commit", "-m", "fixture next documentation");
+      const nextHead = git("rev-parse", "HEAD");
+      const nextReceipt = resolveQuickCiReceiptPath(NodePath.join(repoRoot, ".git"), nextHead);
+      const budgetDirectory = NodePath.join(isolatedHome, ".cache", "lastcode", "local-ci");
+      const occupiedLease = NodePath.join(budgetDirectory, "fixture-active.lease.json");
+      NodeFS.writeFileSync(
+        occupiedLease,
+        JSON.stringify({
+          pid: process.pid,
+          childPid: null,
+          token: "fixture-active",
+          maxConcurrentRuns: 1,
+          repoRoot,
+        }),
+      );
+      for (const prePush of [false, true]) {
+        const busy = command(prePush);
+        expect(busy.status, busy.stderr).toBe(0);
+        expect(busy.stdout).toContain('"validation":"github-only"');
+        expect(busy.stdout).toContain('"skipReason":"busy"');
+        expect(busy.stdout).not.toContain('"outcome":"success"');
+        expect(NodeFS.existsSync(nextReceipt)).toBe(false);
+        expect(NodeFS.readFileSync(callsPath, "utf8").trim().split("\n")).toHaveLength(1);
+        expect(
+          NodeFS.readdirSync(budgetDirectory).filter((name) => name.endsWith(".waiter.json")),
+        ).toEqual([]);
+      }
+      NodeFS.rmSync(occupiedLease);
+      NodeFS.writeFileSync(
+        settingsPath,
+        JSON.stringify({ lastcodeLocalCi: { quickCiMode: "github", backgroundPriority: false } }),
+      );
+      for (const prePush of [false, true]) {
+        const remote = command(prePush);
+        expect(remote.status, remote.stderr).toBe(0);
+        expect(remote.stdout).toContain('"validation":"github-only"');
+        expect(remote.stdout).toContain('"skipReason":"configured"');
+        expect(NodeFS.existsSync(nextReceipt)).toBe(false);
+      }
+      const explicitLocal = command(false, true);
+      expect(explicitLocal.status, explicitLocal.stderr).toBe(0);
+      expect(explicitLocal.stdout).toContain("Quick local CI passed");
+      expect(JSON.parse(NodeFS.readFileSync(nextReceipt, "utf8"))).toMatchObject({
+        commit: nextHead,
+      });
+      expect(NodeFS.readFileSync(callsPath, "utf8").trim().split("\n")).toHaveLength(2);
+
       const realGit = process.env.PATH?.split(NodePath.delimiter)
         .map((path) => NodePath.join(path, "git"))
         .find((path) => NodeFS.existsSync(path));
@@ -239,7 +315,7 @@ it.skipIf(NodeProcess.platform === "win32")(
       NodeFS.rmSync(directory, { recursive: true, force: true });
     }
   },
-  180_000,
+  240_000,
 );
 
 for (const { signal, milestone } of [
