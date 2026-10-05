@@ -3,6 +3,7 @@ import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
   legacySidebarFamilySummary,
+  legacySidebarCreatorDetails,
   legacySidebarCreatorGroupingEligible,
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
@@ -285,6 +286,12 @@ describe("legacy sidebar creator grouping", () => {
     ).toBe(1);
     expect(independent.creatorThreadId).toBe(child.creatorThreadId);
     expect(legacySidebarCreatorGroupingEligible(independent)).toBe(true);
+    expect(legacySidebarCreatorDetails(independent, thread("creator"))).toEqual({
+      description: "Created by creator",
+      unavailableLabel: null,
+      groupingEligible: true,
+      canOpen: true,
+    });
   });
 
   it("keeps subagents together after created threads in both layouts", () => {
@@ -329,21 +336,73 @@ describe("legacy sidebar creator grouping", () => {
     expect(result.renderedRows[0]?.descendantCount).toBe(2);
   });
 
-  it("keeps missing, cross-project, and cross-environment creators as marked reachable roots", () => {
+  it("keeps missing and cross-environment creators as marked reachable roots", () => {
     const missing = created("missing-child", "missing");
-    const otherProject = created("other-project", "creator", "grouped", {
-      projectId: ProjectId.make("another-project"),
-    });
     const remote = created("remote-child", "creator", "grouped", {
       environmentId: EnvironmentId.make("remote"),
     });
-    const result = project([thread("creator"), missing, otherProject, remote]);
-    expect(result.renderedRows.map((row) => row.depth)).toEqual([0, 0, 0, 0]);
-    expect(
-      result.renderedRows
-        .slice(1)
-        .every((row) => row.unavailableCreatorLabel?.includes("Creator unavailable")),
-    ).toBe(true);
+    const creator = thread("creator");
+    const result = project([creator, missing, remote]);
+    expect(result.renderedRows.map((row) => row.depth)).toEqual([0, 0, 0]);
+    expect(legacySidebarCreatorDetails(missing, null).unavailableLabel).toBe(
+      "Creator unavailable (missing)",
+    );
+    const remoteDetails = legacySidebarCreatorDetails(remote, creator);
+    expect(remoteDetails.description).toBe("Creator unavailable (creator)");
+    expect(remoteDetails.unavailableLabel).toBe("Creator unavailable (creator)");
+    expect(remoteDetails.canOpen).toBe(false);
+  });
+
+  it.each(["grouped", "independent"] as const)(
+    "retains available cross-project attribution without offering %s grouping changes",
+    (grouping) => {
+      const creator = thread("creator");
+      const child = created("other-project", "creator", grouping, {
+        projectId: ProjectId.make("another-project"),
+      });
+      // A creator outside this project's subscription must remain resolvable by the row.
+      const result = project([child]);
+      expect(keys(result)).toEqual(["other-project"]);
+      expect(result.renderedRows[0]?.depth).toBe(0);
+      expect(result.renderedRows[0]?.parentKey).toBeNull();
+      expect(result.renderedRows[0]?.creatorGroupingWarning).toBeNull();
+      expect(legacySidebarCreatorDetails(child, creator)).toEqual({
+        description: "Created by creator",
+        unavailableLabel: null,
+        groupingEligible: false,
+        canOpen: true,
+      });
+      // Logical project groups may include both physical projects without joining families.
+      expect(project([creator, child]).renderedRows.map((row) => row.depth)).toEqual([0, 0]);
+      expect(child.creatorThreadId).toBe(creator.id);
+      expect(child.lineage.parentThreadId).toBeNull();
+    },
+  );
+
+  it.each(["archivedAt", "deletedAt"] as const)(
+    "marks a creator with %s unavailable and does not offer to open it",
+    (field) => {
+      const child = created("conversation", "creator");
+      const creator = thread("creator", undefined, { [field]: "2026-01-01T00:00:00Z" });
+      const result = project([child]);
+      expect(result.renderedRows[0]?.depth).toBe(0);
+      expect(legacySidebarCreatorDetails(child, creator)).toEqual({
+        description: "Creator unavailable (creator)",
+        unavailableLabel: "Creator unavailable (creator)",
+        groupingEligible: true,
+        canOpen: false,
+      });
+    },
+  );
+
+  it("keeps regrouping available for missing creators and omits warnings for independent rows", () => {
+    const child = created("conversation", "missing");
+    expect(legacySidebarCreatorDetails(child, null).groupingEligible).toBe(true);
+    const independent = { ...child, creatorGrouping: "independent" as const };
+    const details = legacySidebarCreatorDetails(independent, null);
+    expect(details.description).toBe("Creator unavailable (missing)");
+    expect(details.unavailableLabel).toBeNull();
+    expect(details.canOpen).toBe(false);
   });
 
   it("does not attach forks or true subagents using creator metadata", () => {
@@ -377,7 +436,7 @@ describe("legacy sidebar creator grouping", () => {
     const invalid = project([a, b]);
     expect(
       invalid.renderedRows.every(
-        (row) => row.depth === 0 && row.unavailableCreatorLabel?.includes("invalid grouping"),
+        (row) => row.depth === 0 && row.creatorGroupingWarning?.includes("invalid grouping"),
       ),
     ).toBe(true);
     const helper = thread("helper", "parent");
@@ -385,7 +444,7 @@ describe("legacy sidebar creator grouping", () => {
     const mixed = project([helper, parent]);
     expect(keys(mixed)).toEqual(["parent", "helper"]);
     expect(mixed.renderedRows[1]?.parentKey).toBe(legacySidebarThreadKey(parent));
-    expect(mixed.renderedRows[0]?.unavailableCreatorLabel).toContain("invalid grouping");
+    expect(mixed.renderedRows[0]?.creatorGroupingWarning).toContain("invalid grouping");
   });
 
   it("reveals nested selected conversations outside preview and collapsed creator families", () => {

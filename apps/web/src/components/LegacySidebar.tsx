@@ -260,7 +260,7 @@ import type { SidebarThreadSummary } from "../types";
 import {
   projectLegacySidebarFamilies,
   legacySidebarFamilySummary,
-  legacySidebarCreatorGroupingEligible,
+  legacySidebarCreatorDetails,
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   type LegacySidebarFamilyRow,
@@ -650,13 +650,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     [isAgentCreated, thread.environmentId, thread.creatorThreadId],
   );
   const creatorShell = useThreadShell(creatorRef);
-  const creatorDescription = isAgentCreated
-    ? creatorShell
-      ? `Created by ${creatorShell.title}`
-      : thread.creatorThreadId
-        ? `Creator unavailable (${thread.creatorThreadId})`
-        : "Creator unknown"
-    : null;
+  const creatorDetails = legacySidebarCreatorDetails(thread, creatorShell);
+  const creatorDescription = creatorDetails.description;
   const lineageDescription =
     thread.lineage.relationshipToParent === "subagent"
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${props.familyRow.unavailableParentLabel ? ` · ${props.familyRow.unavailableParentLabel}` : ""}`
@@ -977,7 +972,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       : null;
   const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
   const relationshipUnavailableLabel =
-    family.unavailableParentLabel ?? family.unavailableCreatorLabel;
+    family.unavailableParentLabel ??
+    family.creatorGroupingWarning ??
+    creatorDetails.unavailableLabel;
 
   return (
     <SidebarMenuSubItem
@@ -3011,12 +3008,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         persistent: thread.persistent === true,
         supported: supportsPersistence,
       });
-      const creatorGroupingEligible = legacySidebarCreatorGroupingEligible(thread);
       const creatorRef = thread.creatorThreadId
         ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
         : null;
       const creator = creatorRef ? readThreadShell(creatorRef) : null;
-      const canOpenCreator = creator !== null && threadShellIsVisible(creator);
+      const { groupingEligible: creatorGroupingEligible, canOpen: canOpenCreator } =
+        legacySidebarCreatorDetails(thread, creator);
       const handoffs = readThreadHandoffs(threadRef);
       const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
       const clicked = await api.contextMenu.show(
@@ -3044,9 +3041,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   },
                 ]
               : []),
-            ...(creatorGroupingEligible && canOpenCreator
-              ? [{ id: "open-creator", label: "Open creator thread" }]
-              : []),
+            ...(canOpenCreator ? [{ id: "open-creator", label: "Open creator thread" }] : []),
             ...(persistenceAction ? [persistenceAction] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },

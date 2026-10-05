@@ -1,4 +1,5 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import { resolveProjectStatusIndicator, type ThreadStatusPill } from "./Sidebar.logic";
 
@@ -14,7 +15,7 @@ export interface LegacySidebarFamilyRow {
   selectedDescendant: boolean;
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
-  unavailableCreatorLabel: string | null;
+  creatorGroupingWarning: string | null;
   groupHeading: "Subagents" | "Created by this thread" | null;
   projectExpanded: boolean;
 }
@@ -44,6 +45,36 @@ export function legacySidebarIsAgentCreated(thread: SidebarThreadSummary): boole
 
 export function legacySidebarCreatorGroupingEligible(thread: SidebarThreadSummary): boolean {
   return legacySidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
+}
+
+/** Resolve attribution separately from the project-local display family. */
+export function legacySidebarCreatorDetails(
+  thread: SidebarThreadSummary,
+  creator: SidebarThreadSummary | null,
+) {
+  const knownCreator =
+    creator !== null &&
+    creator.id === thread.creatorThreadId &&
+    creator.environmentId === thread.environmentId
+      ? creator
+      : null;
+  const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
+  const isAgentCreated = legacySidebarIsAgentCreated(thread);
+  const unavailableLabel =
+    isAgentCreated && thread.creatorThreadId && !availableCreator
+      ? `Creator unavailable (${thread.creatorThreadId})`
+      : null;
+  const eligible = legacySidebarCreatorGroupingEligible(thread);
+  return {
+    description: isAgentCreated
+      ? availableCreator
+        ? `Created by ${availableCreator.title}`
+        : (unavailableLabel ?? "Creator unknown")
+      : null,
+    unavailableLabel: thread.creatorGrouping === "grouped" ? unavailableLabel : null,
+    groupingEligible: eligible && (!knownCreator || knownCreator.projectId === thread.projectId),
+    canOpen: eligible && availableCreator !== null,
+  };
 }
 
 export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string {
@@ -78,7 +109,7 @@ export function projectLegacySidebarFamilies(input: {
   const byKey = new Map(input.threads.map((thread) => [legacySidebarThreadKey(thread), thread]));
   const parentByKey = new Map<string, string>();
   const unavailableByKey = new Map<string, string>();
-  const unavailableCreatorByKey = new Map<string, string>();
+  const creatorGroupingWarningByKey = new Map<string, string>();
   const creatorEdges = new Set<string>();
   for (const [key, thread] of byKey) {
     if (thread.lineage.relationshipToParent !== "subagent") continue;
@@ -106,8 +137,6 @@ export function projectLegacySidebarFamilies(input: {
     if (creator && creator.projectId === thread.projectId) {
       parentByKey.set(key, creatorKey);
       creatorEdges.add(key);
-    } else {
-      unavailableCreatorByKey.set(key, `Creator unavailable (${creatorId})`);
     }
   }
 
@@ -126,7 +155,7 @@ export function projectLegacySidebarFamilies(input: {
         for (const cycleKey of creatorCycleKeys.length ? creatorCycleKeys : cycleKeys) {
           const parentKey = parentByKey.get(cycleKey);
           if (creatorEdges.has(cycleKey)) {
-            unavailableCreatorByKey.set(
+            creatorGroupingWarningByKey.set(
               cycleKey,
               `Creator ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid grouping`,
             );
@@ -197,7 +226,7 @@ export function projectLegacySidebarFamilies(input: {
       selectedDescendant,
       descendantStatusCounts: new Map(),
       createdThreadStatusCounts: new Map(),
-      unavailableCreatorLabel: unavailableCreatorByKey.get(key) ?? null,
+      creatorGroupingWarning: creatorGroupingWarningByKey.get(key) ?? null,
       groupHeading: null,
       projectExpanded: input.projectExpanded,
     });
