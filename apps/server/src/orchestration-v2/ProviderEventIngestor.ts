@@ -386,20 +386,20 @@ export const layer: Layer.Layer<
       },
     );
 
-    const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
-      Effect.gen(function* () {
-        switch (input.event.type) {
-          case "events.barrier":
-            return [];
+    const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) => {
+      const providerEvent = input.event;
+      if (providerEvent.type === "events.barrier") return Effect.succeed([]);
+      return Effect.gen(function* () {
+        switch (providerEvent.type) {
           case "app_thread.created": {
             // Native sessions can reannounce children after reconnecting. Creation
             // must not replace their durable app metadata, including promotion.
-            if ((yield* projections.getThreadShell(input.event.appThread.id)) !== null) return [];
+            if ((yield* projections.getThreadShell(providerEvent.appThread.id)) !== null) return [];
             return [
               yield* makeDomainEvent(input, {
                 type: "thread.created",
-                threadId: input.event.appThread.id,
-                payload: input.event.appThread,
+                threadId: providerEvent.appThread.id,
+                payload: providerEvent.appThread,
               }),
             ];
           }
@@ -407,87 +407,91 @@ export const layer: Layer.Layer<
             return [
               yield* makeDomainEvent(input, {
                 type: "provider-session.updated",
-                payload: input.event.providerSession,
+                payload: providerEvent.providerSession,
               }),
             ];
           case "provider_thread.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "provider-thread.updated",
-                threadId: input.event.providerThread.appThreadId ?? input.threadId,
-                payload: input.event.providerThread,
+                threadId: providerEvent.providerThread.appThreadId ?? input.threadId,
+                payload: providerEvent.providerThread,
               }),
             ];
           case "provider_turn.updated":
             return [
               ...(["completed", "interrupted", "failed", "cancelled"].includes(
-                input.event.providerTurn.status,
+                providerEvent.providerTurn.status,
               )
                 ? yield* dismissNativeUserInputs(
                     input,
-                    input.event.providerTurn.id,
-                    input.event.threadId,
+                    providerEvent.providerTurn.id,
+                    providerEvent.threadId,
                   )
                 : []),
               yield* makeDomainEvent(input, {
                 type: "provider-turn.updated",
-                ...(input.event.threadId === undefined ? {} : { threadId: input.event.threadId }),
-                payload: input.event.providerTurn,
-                nodeId: input.event.providerTurn.nodeId,
+                ...(providerEvent.threadId === undefined
+                  ? {}
+                  : { threadId: providerEvent.threadId }),
+                payload: providerEvent.providerTurn,
+                nodeId: providerEvent.providerTurn.nodeId,
               }),
             ];
           case "node.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "node.updated",
-                threadId: input.event.node.threadId,
-                payload: input.event.node,
-                runId: input.event.node.runId,
-                nodeId: input.event.node.id,
+                threadId: providerEvent.node.threadId,
+                payload: providerEvent.node,
+                runId: providerEvent.node.runId,
+                nodeId: providerEvent.node.id,
               }),
             ];
           case "subagent.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "subagent.updated",
-                threadId: input.event.subagent.threadId,
-                payload: input.event.subagent,
-                runId: input.event.subagent.runId,
-                nodeId: input.event.subagent.id,
+                threadId: providerEvent.subagent.threadId,
+                payload: providerEvent.subagent,
+                runId: providerEvent.subagent.runId,
+                nodeId: providerEvent.subagent.id,
               }),
             ];
           case "message.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "message.updated",
-                threadId: input.event.message.threadId,
-                payload: input.event.message,
-                runId: input.event.message.runId,
-                nodeId: input.event.message.nodeId,
+                threadId: providerEvent.message.threadId,
+                payload: providerEvent.message,
+                runId: providerEvent.message.runId,
+                nodeId: providerEvent.message.nodeId,
               }),
             ];
           case "turn_item.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
-                threadId: input.event.turnItem.threadId,
-                payload: input.event.turnItem,
-                runId: input.event.turnItem.runId,
-                nodeId: input.event.turnItem.nodeId,
+                threadId: providerEvent.turnItem.threadId,
+                payload: providerEvent.turnItem,
+                runId: providerEvent.turnItem.runId,
+                nodeId: providerEvent.turnItem.nodeId,
               }),
             ];
           case "runtime_request.updated":
             return [
               yield* makeDomainEvent(input, {
                 type: "runtime-request.updated",
-                ...(input.event.threadId === undefined ? {} : { threadId: input.event.threadId }),
-                payload: input.event.runtimeRequest,
-                nodeId: input.event.runtimeRequest.nodeId,
+                ...(providerEvent.threadId === undefined
+                  ? {}
+                  : { threadId: providerEvent.threadId }),
+                payload: providerEvent.runtimeRequest,
+                nodeId: providerEvent.runtimeRequest.nodeId,
               }),
             ];
           case "plan.updated": {
             const occurredAt = yield* DateTime.now;
-            const plan = input.event.plan;
+            const plan = providerEvent.plan;
             const previous =
               plan.kind === "todo_list"
                 ? yield* projections.getPlan(plan.threadId, plan.id)
@@ -512,8 +516,8 @@ export const layer: Layer.Layer<
             ];
           }
           case "turn.terminal":
-            const dismissed = yield* dismissNativeUserInputs(input, input.event.providerTurnId);
-            if (input.event.status !== "failed") {
+            const dismissed = yield* dismissNativeUserInputs(input, providerEvent.providerTurnId);
+            if (providerEvent.status !== "failed") {
               return dismissed;
             }
             const occurredAt = yield* DateTime.now;
@@ -523,18 +527,18 @@ export const layer: Layer.Layer<
                 type: "turn-item.updated",
                 payload: makeProviderFailureTurnItem({
                   idAllocator,
-                  driver: input.event.driver,
+                  driver: providerEvent.driver,
                   threadId: input.threadId,
                   runId: input.runId ?? null,
                   nodeId: input.nodeId ?? null,
-                  providerThreadId: input.event.providerThreadId,
-                  providerTurnId: input.event.providerTurnId,
-                  itemOrdinal: input.event.failureItemOrdinal,
-                  failure: input.event.failure,
-                  ...(input.event.retry === undefined ? {} : { retry: input.event.retry }),
-                  ...(input.event.retryStartedAt === undefined
+                  providerThreadId: providerEvent.providerThreadId,
+                  providerTurnId: providerEvent.providerTurnId,
+                  itemOrdinal: providerEvent.failureItemOrdinal,
+                  failure: providerEvent.failure,
+                  ...(providerEvent.retry === undefined ? {} : { retry: providerEvent.retry }),
+                  ...(providerEvent.retryStartedAt === undefined
                     ? {}
-                    : { retryStartedAt: input.event.retryStartedAt }),
+                    : { retryStartedAt: providerEvent.retryStartedAt }),
                   occurredAt,
                 }),
               }),
@@ -546,12 +550,12 @@ export const layer: Layer.Layer<
             new ProviderEventNormalizeError({
               providerSessionId: input.providerSessionId,
               threadId: input.threadId,
-              providerEvent: input.event,
+              providerEvent,
               cause,
             }),
         ),
       );
-
+    };
     return ProviderEventIngestorV2.of({
       normalize,
       ingestNormalized: (input) =>

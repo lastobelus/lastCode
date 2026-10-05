@@ -6,6 +6,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -1467,6 +1468,16 @@ export const layerWithOptions = (
           eventSubscribers,
           runtime.publishEventsBarrier,
           runtime.driver,
+        ).pipe(
+          Effect.tap((subscription) =>
+            Effect.gen(function* () {
+              // Register before checking residency: release either notifies this
+              // queue or has already removed this exact runtime, so close it here.
+              // A replacement with the same session id cannot revive its stream.
+              const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              if (current?.runtime !== runtime) yield* subscription.close;
+            }),
+          ),
         );
         const inspectTurn = runtime.inspectTurn;
         return {
@@ -1493,6 +1504,7 @@ export const layerWithOptions = (
                   }),
               }),
           subscribeEvents,
+          isShuttingDown: Effect.sync(() => shutdownSignal.received),
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
           ),
@@ -1748,6 +1760,7 @@ export const layerWithOptions = (
       };
 
       const shutdown = Effect.gen(function* () {
+        shutdownSignal.received = true;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,

@@ -529,6 +529,8 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Manager lifecycle hook: startup recovery owns cancellation during server shutdown. */
+  readonly isShuttingDown?: Effect.Effect<boolean>;
   /** Internal manager hook; serialized with native completion event publication. */
   readonly publishEventsBarrier?: (input: ProviderEventsBarrierInput) => Effect.Effect<void>;
   /** Exact-turn evidence only: missing adapter state never proves a turn has ended. */

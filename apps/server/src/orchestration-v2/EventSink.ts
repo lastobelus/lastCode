@@ -429,13 +429,14 @@ const baseLayer: Layer.Layer<
           if (!ownsThread) continue;
           const ownsEntity = (entity: {
             readonly runId: RunId | null;
-            readonly providerThreadId: ProviderThreadId | null;
+            readonly providerThreadId?: ProviderThreadId | null | undefined;
           }) =>
             (entity.runId === guard.runId ||
               (event.threadId !== guard.threadId &&
                 entity.runId === null &&
                 !current.runs.some((run) => run.id !== guard.runId && run.startedAt !== null))) &&
             (entity.providerThreadId === null ||
+              entity.providerThreadId === undefined ||
               current.providerThreads.some(
                 (thread) =>
                   thread.id === entity.providerThreadId &&

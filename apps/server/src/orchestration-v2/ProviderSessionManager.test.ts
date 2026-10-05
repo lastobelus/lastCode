@@ -1158,6 +1158,16 @@ it.effect("ProviderSessionManagerV2 closes event subscriptions normally on serve
       });
       const bufferedSubscription = yield* runtime.subscribeEvents!;
       const activeSubscription = yield* runtime.subscribeEvents!;
+      assert.isDefined(runtime.isShuttingDown);
+      assert.isFalse(yield* runtime.isShuttingDown!);
+      const shutdownObserved = yield* Deferred.make<boolean>();
+      const shutdownSubscription = yield* runtime.subscribeEvents!;
+      yield* shutdownSubscription.events.pipe(
+        Stream.runDrain,
+        Effect.andThen(runtime.isShuttingDown!),
+        Effect.flatMap((shuttingDown) => Deferred.succeed(shutdownObserved, shuttingDown)),
+        Effect.forkChild({ startImmediately: true }),
+      );
       const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
       assert.isDefined(adapterQueue);
       yield* Queue.offer(adapterQueue!, {
@@ -1169,6 +1179,7 @@ it.effect("ProviderSessionManagerV2 closes event subscriptions normally on serve
 
       yield* manager.shutdown;
 
+      assert.isTrue(yield* Deferred.await(shutdownObserved));
       assert.isEmpty(yield* bufferedSubscription.events.pipe(Stream.runCollect));
     });
 
@@ -2500,17 +2511,19 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
       yield* eventSink.write({
         events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
       });
-      yield* manager.open({
+      const runtime = yield* manager.open({
         threadId,
         providerSessionId,
         modelSelection,
         runtimePolicy,
       });
+      assert.isFalse(yield* runtime.isShuttingDown!);
       yield* manager.release({
         providerSessionId,
         reason: "runtime_error",
         detail: "process exited",
       });
+      assert.isFalse(yield* runtime.isShuttingDown!);
 
       const liveSession = yield* manager.get(providerSessionId);
       const runtimeState = yield* Ref.get(state);
@@ -2641,7 +2654,7 @@ it.effect.each(["active", "unknown"] as const)(
         assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
         assert.equal((yield* Ref.get(state)).closeCount, 0);
         const released = {
-          status: "released",
+          status: "released" as const,
           driver: CODEX_DRIVER,
           providerThreadId: probe.providerThread.id,
           providerTurnId: probe.providerTurnId,
@@ -2668,6 +2681,86 @@ it.effect.each(["active", "unknown"] as const)(
               Effect.andThen(Deferred.await(allowClose)),
             ),
             inspectTurn: () => Effect.succeed({ status }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each([false, true])(
+  "ends subscriptions when the inspected runtime was released before subscribing (replacement: %s)",
+  (replace) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const inspection = yield* Ref.make<ProviderAdapterV2TurnInspection>({ status: "unknown" });
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("released-subscription-thread");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        const runtime = yield* manager.open(input);
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const providerTurnId = ids.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "released-subscription-turn",
+        });
+        const event = {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThread.id,
+          providerTurnId,
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        } satisfies Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
+        yield* Ref.set(inspection, { status: "terminal", event });
+        // Recovery captures live residency, then pauses for projection work.
+        assert.deepEqual(yield* runtime.inspectTurn!({ providerThread, providerTurnId }), {
+          status: "terminal",
+          event,
+        });
+        yield* manager.release({ providerSessionId, reason: "runtime_error" });
+        const replacement = replace ? yield* manager.open(input) : undefined;
+        if (replacement !== undefined) assert.notStrictEqual(replacement, runtime);
+
+        // Release already drained its subscribers; a late reader must end
+        // without waiting for a provider event or another release notification.
+        const subscription = yield* runtime.subscribeEvents!;
+        assert.isEmpty(yield* subscription.events.pipe(Stream.runCollect));
+        yield* subscription.close;
+        assert.isEmpty(yield* runtime.events.pipe(Stream.runCollect));
+        if (replacement !== undefined) {
+          const liveSubscription = yield* replacement.subscribeEvents!;
+          const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+          yield* Queue.offer(queue, event);
+          assert.deepEqual(
+            Option.getOrUndefined(yield* liveSubscription.events.pipe(Stream.runHead)),
+            event,
+          );
+          assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+          yield* liveSubscription.close;
+        }
+      }).pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            inspectTurn: () => Ref.get(inspection),
           }),
         ),
       );

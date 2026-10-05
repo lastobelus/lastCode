@@ -3408,6 +3408,8 @@ function captureRootRunTermination(input: {
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly recovery?: Partial<ThreadRecoveryService.ThreadRecoveryService["Service"]>;
   readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
+  readonly isShuttingDown?: ProviderAdapterV2SessionRuntime["isShuttingDown"];
+  readonly providerDriver?: ProviderDriverKind;
   readonly subscribeEvents?: ProviderAdapterV2SessionRuntime["subscribeEvents"];
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
   readonly persistedBackgroundEvents?: ReadonlyArray<ProviderAdapterV2Event>;
@@ -3417,12 +3419,13 @@ function captureRootRunTermination(input: {
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
-    const providerInstanceId = ProviderInstanceId.make("codex");
+    const fixtureDriver = input.providerDriver ?? driver;
+    const providerInstanceId = ProviderInstanceId.make(String(fixtureDriver));
     const runningSubagent = makeRunOwnedSubagentFixture({
       ids,
       providerInstanceId,
       childThreadId: ids.childThreadId,
-      driver,
+      driver: fixtureDriver,
       status: "running",
     });
     const writtenItems = yield* Ref.make<ReadonlyArray<OrchestrationV2TurnItem>>([]);
@@ -3434,8 +3437,41 @@ function captureRootRunTermination(input: {
     const ingestionDone = yield* Deferred.make<void>();
     const captureTurnItem = (payload: OrchestrationV2TurnItem) =>
       Ref.update(writtenItems, (current) => [...current, payload]);
+    const providerThread = makeRecoveryProviderThreadFixture(ids, input.key, {
+      driver: fixtureDriver,
+      providerInstanceId,
+    });
+    const applyCommittedEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Ref.update(durable, (current) => [
+        ...current,
+        ...events.flatMap((event): ProviderAdapterV2Event[] => {
+          switch (event.type) {
+            case "node.updated":
+              return [{ type: "node.updated", driver: fixtureDriver, node: event.payload }];
+            case "subagent.updated":
+              return [{ type: "subagent.updated", driver: fixtureDriver, subagent: event.payload }];
+            case "turn-item.updated":
+              return [
+                { type: "turn_item.updated", driver: fixtureDriver, turnItem: event.payload },
+              ];
+            case "provider-thread.updated":
+              return [
+                {
+                  type: "provider_thread.updated",
+                  driver: fixtureDriver,
+                  providerThread: event.payload,
+                },
+              ];
+            default:
+              return [];
+          }
+        }),
+      ]);
     const captureFinalEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
       Effect.gen(function* () {
+        // The real sink applies projections before returning from its commit.
+        // Subsequent hydration must see those rows, including interruptions.
+        yield* applyCommittedEvents(events);
         yield* Ref.update(writtenEvents, (current) => [...current, ...events]);
         for (const event of events) {
           if (event.type === "turn-item.updated") {
@@ -3459,6 +3495,9 @@ function captureRootRunTermination(input: {
                   const nodes = new Map<NodeId, OrchestrationV2ExecutionNode>();
                   const subagents = new Map<NodeId, OrchestrationV2Subagent>();
                   const turnItems = new Map<TurnItemId, OrchestrationV2TurnItem>();
+                  const providerThreads = new Map<ProviderThreadId, OrchestrationV2ProviderThread>([
+                    [providerThread.id, providerThread],
+                  ]);
                   for (const event of events) {
                     if (event.type === "node.updated" && event.node.threadId === threadId)
                       nodes.set(event.node.id, event.node);
@@ -3466,22 +3505,37 @@ function captureRootRunTermination(input: {
                       subagents.set(event.subagent.id, event.subagent);
                     if (event.type === "turn_item.updated" && event.turnItem.threadId === threadId)
                       turnItems.set(event.turnItem.id, event.turnItem);
+                    if (event.type === "provider_thread.updated")
+                      providerThreads.set(event.providerThread.id, event.providerThread);
                   }
+                  const referencedProviderThreads = new Set(
+                    [...subagents.values()].map((subagent) => subagent.providerThreadId),
+                  );
                   return {
                     thread: { id: threadId } as OrchestrationV2AppThread,
                     runs: [],
+                    attempts: [],
                     nodes: [...nodes.values()],
                     subagents: [...subagents.values()],
                     turnItems: [...turnItems.values()],
-                    providerThreads: [
-                      {
-                        id: ids.providerThreadId,
-                        driver,
-                        providerInstanceId,
-                        providerSessionId: ProviderSessionId.make(`session:${input.key}`),
-                      } as OrchestrationV2ProviderThread,
-                    ],
-                  } as OrchestrationV2ThreadProjection;
+                    providerThreads: [...providerThreads.values()].filter(
+                      (thread) =>
+                        thread.appThreadId === threadId ||
+                        referencedProviderThreads.has(thread.id) ||
+                        (thread.ownerNodeId !== null && nodes.has(thread.ownerNodeId)),
+                    ),
+                    providerSessions: [],
+                    providerTurns: [],
+                    runtimeRequests: [],
+                    messages: [],
+                    plans: [],
+                    checkpointScopes: [],
+                    checkpoints: [],
+                    contextHandoffs: [],
+                    contextTransfers: [],
+                    visibleTurnItems: [],
+                    updatedAt: providerThread.updatedAt,
+                  } satisfies OrchestrationV2ThreadProjection;
                 }),
               ),
           }),
@@ -3489,6 +3543,7 @@ function captureRootRunTermination(input: {
           Layer.mock(EventSink.EventSinkV2)({
             write: (payload) =>
               Effect.gen(function* () {
+                yield* applyCommittedEvents(payload.events);
                 for (const event of payload.events) {
                   if (event.type === "turn-item.updated") {
                     yield* captureTurnItem(event.payload);
@@ -3552,6 +3607,7 @@ function captureRootRunTermination(input: {
         session: {
           events: Stream.empty,
           ...(input.inspectTurn === undefined ? {} : { inspectTurn: input.inspectTurn }),
+          ...(input.isShuttingDown === undefined ? {} : { isShuttingDown: input.isShuttingDown }),
           ...(input.hasPendingBackgroundWorkForThread === undefined
             ? {}
             : { hasPendingBackgroundWorkForThread: input.hasPendingBackgroundWorkForThread }),
@@ -3609,10 +3665,7 @@ function captureRootRunTermination(input: {
         checkpointScope: {
           id: CheckpointScopeId.make(`checkpoint-scope:${input.key}`),
         } as OrchestrationV2CheckpointScope,
-        providerThread: {
-          id: ids.providerThreadId,
-          driver,
-        } as OrchestrationV2ProviderThread,
+        providerThread,
         attempt: {
           id: ids.attemptId,
           providerTurnId: ids.rootProviderTurnId,
@@ -3671,6 +3724,7 @@ function bufferRecoveryTestSubscription(subscription: ProviderAdapterV2EventSubs
     const producer = yield* subscription.events.pipe(
       Stream.runForEach((event) => Queue.offer(queue, { event })),
       Effect.catchCause((cause) => Queue.offer(queue, { cause })),
+      Effect.andThen(Queue.end(queue)),
       Effect.forkDetach,
     );
     return {
@@ -3720,6 +3774,38 @@ function backgroundScenarioIds(key: string): BackgroundScenarioIds {
     itemId: TurnItemId.make(`turn-item:${key}`),
     childItemId: TurnItemId.make(`turn-item:${key}:child`),
     subagentNodeId: NodeId.make(`node:${key}:subagent`),
+  };
+}
+
+function makeRecoveryProviderThreadFixture(
+  ids: BackgroundScenarioIds,
+  key: string,
+  overrides: Partial<OrchestrationV2ProviderThread> = {},
+): OrchestrationV2ProviderThread {
+  const now = DateTime.makeUnsafe("2026-07-21T12:00:00.000Z");
+  const fixtureDriver = overrides.driver ?? driver;
+  return {
+    id: ids.providerThreadId,
+    driver,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerSessionId: ProviderSessionId.make(`session:${key}`),
+    appThreadId: ids.threadId,
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: fixtureDriver,
+      nativeId: `native-thread:${key}`,
+      strength: "strong",
+    },
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: 1,
+    lastRunOrdinal: 1,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [],
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
   };
 }
 
@@ -4274,330 +4360,330 @@ it.effect("does not mark a finalized root suspect when its retained background r
   }),
 );
 
-for (const runtimeReleased of [false, true]) {
-  it.effect(
-    runtimeReleased
-      ? "settles lost background outcomes atomically when recovery confirms runtime release"
-      : "settles lost background outcomes when the exact thread probe confirms its drain",
-    () =>
-      Effect.gen(function* () {
-        const key = `recover-background-drained:${runtimeReleased}`;
-        const ids = backgroundScenarioIds(key);
-        const providerInstanceId = ProviderInstanceId.make("codex");
-        const completedItemId = TurnItemId.make(`${ids.itemId}:completed-history`);
-        const dynamicItemId = TurnItemId.make(`${ids.itemId}:dynamic`);
-        const subagentItemIds = { ...ids, itemId: TurnItemId.make(`${ids.itemId}:subagent`) };
-        const receipt: OrchestrationV2DomainEvent = {
-          id: EventId.make(`${key}:receipt`),
-          type: "thread.metadata-updated",
-          threadId: ids.threadId,
-          occurredAt: yield* DateTime.now,
-          payload: { id: ids.threadId } as OrchestrationV2AppThread,
-        };
-        let registration:
-          | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
-          | undefined;
-        let subscriptions = 0;
-        let starts = 0;
-        const resumedClosed = yield* Deferred.make<void>();
-        const result = yield* captureRootRunTermination({
-          key,
-          shouldFinalizeRun: () => Effect.succeed(true),
-          // This row committed before the consumer's lifecycle tracker failed.
-          persistedBackgroundEvents: [
-            backgroundTurnItemEvent(ids, "dynamic_tool", "running", 3, dynamicItemId),
-          ],
-          subscribeEvents: Effect.sync(() => {
-            subscriptions++;
-            return {
-              events:
-                subscriptions === 1
-                  ? Stream.fromIterable([
-                      childThreadCreatedEvent(ids),
-                      backgroundTurnItemEvent(
-                        ids,
-                        "command_execution",
-                        "completed",
-                        1,
-                        completedItemId,
-                      ),
-                      backgroundTurnItemEvent(ids, "command_execution", "running", 2),
-                      {
-                        type: "subagent.updated",
-                        driver,
-                        subagent: makeRunOwnedSubagentFixture({
-                          ids,
-                          providerInstanceId,
-                          childThreadId: ids.childThreadId,
-                          driver,
-                          status: "running",
-                        }),
-                      },
-                      {
-                        type: "turn_item.updated",
-                        driver,
-                        turnItem: makeRunOwnedSubagentTurnItemFixture({
-                          ids: subagentItemIds,
-                          providerInstanceId,
-                          childThreadId: ids.childThreadId,
-                          driver,
-                          status: "running",
-                        }),
-                      },
-                      {
-                        type: "node.updated",
-                        driver,
-                        node: makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
-                      },
-                      {
-                        type: "turn_item.updated",
-                        driver,
-                        turnItem: makeLinkedChildTurnItemFixture({
-                          ids,
-                          driver,
-                          type: "command_execution",
-                        }),
-                      },
-                      backgroundTurnItemEventForRun(
-                        ids,
-                        RunId.make(`${key}:sibling`),
-                        "command_execution",
-                        "running",
-                        4,
-                      ),
-                    ] satisfies ReadonlyArray<ProviderAdapterV2Event>).pipe(
-                      Stream.concat(
-                        Stream.fail(
-                          new ProviderAdapterEventStreamError({
-                            driver,
-                            providerSessionId: ProviderSessionId.make(`session:${key}`),
-                            cause: "Consumer stopped before recording the root terminal",
-                          }),
-                        ),
-                      ),
-                    )
-                  : Stream.never,
-              close: subscriptions === 1 ? Effect.void : Deferred.succeed(resumedClosed, undefined),
-            };
-          }),
-          hasPendingBackgroundWorkForThread: () => Effect.succeed(runtimeReleased),
-          inspectTurn: () =>
-            Effect.succeed({ status: "terminal", event: rootTerminalEvent(ids, "completed") }),
-          startTurn: () =>
-            Effect.sync(() => {
-              starts++;
-            }),
-          recovery: {
-            register: (value) =>
-              Effect.sync(() => {
-                registration = value;
-              }),
-            suspect: () => Effect.void,
-            completed: () => Effect.void,
-          },
-          afterIngestion: Effect.gen(function* () {
-            assert.isDefined(registration);
-            yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [receipt], {
-              runtimeReleased,
-            });
-            if (!runtimeReleased) yield* Deferred.await(resumedClosed);
-          }),
-        });
-        assert.equal(starts, 1);
-        assert.equal(subscriptions, runtimeReleased ? 1 : 2);
-        assert.deepEqual(
-          result.written.map((item) => [item.id, item.status]).sort(),
-          [
-            [ids.itemId, "interrupted"],
-            [dynamicItemId, "interrupted"],
-            [subagentItemIds.itemId, "interrupted"],
-            [ids.childItemId, "interrupted"],
-          ].sort(),
-        );
-        assert.isFalse(result.written.some((item) => item.id === completedItemId));
-        assert.equal(result.events.filter((event) => event.id === receipt.id).length, 1);
-        assert.deepEqual(
-          result.observed.filter((value) => value.startsWith("run:")),
-          ["run:waiting"],
-        );
-        assert.equal(result.effects.length, 1);
-        assert.equal(result.effects[0]?.request.type, "checkpoint.capture");
-        assert.isTrue(
-          result.events.some(
-            (event) =>
-              event.type === "provider-thread.updated" &&
-              event.payload.id === ids.providerThreadId &&
-              event.payload.pendingBackgroundTasks?.length === 0,
-          ),
-        );
-        assert.isTrue(
-          result.events.some(
-            (event) =>
-              event.type === "node.updated" &&
-              event.payload.threadId === ids.childThreadId &&
-              event.payload.status === "interrupted",
-          ),
-        );
-      }),
-  );
-}
-
-for (const drainOutcome of [
-  "completed",
-  "completion_lost",
-  "runtime_released",
-  "recording_failed",
-] as const) {
-  const completionWasLost =
-    drainOutcome === "completion_lost" || drainOutcome === "runtime_released";
-  it.effect(
-    drainOutcome === "recording_failed"
-      ? "retains the recovered reader after recording fails and preserves its saved completion"
-      : drainOutcome === "runtime_released"
-        ? "settles recovered background rows when the reattached runtime later exits"
-        : completionWasLost
-          ? "heals a lost completion when the recovered reader observes the exact background drain"
-          : "reattaches recovery ingestion until live background work reports its real completion",
-    () =>
-      Effect.gen(function* () {
-        const key = `recover-background-live:${drainOutcome}`;
-        const ids = backgroundScenarioIds(key);
-        const pending = yield* Ref.make(true);
-        const allowCompletion = yield* Deferred.make<void>();
-        const resumed = yield* Deferred.make<void>();
-        const closed = yield* Deferred.make<void>();
-        let registration:
-          | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
-          | undefined;
-        let subscriptions = 0;
-        let runtimeReleased = false;
-        const result = yield* captureRootRunTermination({
-          key,
-          shouldFinalizeRun: () => Effect.succeed(true),
-          failRecordingEvent: (event) =>
-            drainOutcome === "recording_failed" &&
-            event.type === "turn_item.updated" &&
-            event.turnItem.status === "completed",
-          subscribeEvents: Effect.gen(function* () {
-            subscriptions++;
-            if (subscriptions === 1) {
-              return {
-                events: Stream.make(
-                  backgroundTurnItemEvent(ids, "command_execution", "running", 1),
-                ).pipe(
+it.effect.each([
+  {
+    runtimeReleased: false,
+    name: "settles lost background outcomes when the exact thread probe confirms its drain",
+  },
+  {
+    runtimeReleased: true,
+    name: "settles lost background outcomes atomically when recovery confirms runtime release",
+  },
+])("$name", ({ runtimeReleased }) =>
+  Effect.gen(function* () {
+    const key = `recover-background-drained:${runtimeReleased}`;
+    const ids = backgroundScenarioIds(key);
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const completedItemId = TurnItemId.make(`${ids.itemId}:completed-history`);
+    const dynamicItemId = TurnItemId.make(`${ids.itemId}:dynamic`);
+    const subagentItemIds = { ...ids, itemId: TurnItemId.make(`${ids.itemId}:subagent`) };
+    const receipt: OrchestrationV2DomainEvent = {
+      id: EventId.make(`${key}:receipt`),
+      type: "thread.metadata-updated",
+      threadId: ids.threadId,
+      occurredAt: yield* DateTime.now,
+      payload: { id: ids.threadId } as OrchestrationV2AppThread,
+    };
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    let subscriptions = 0;
+    let starts = 0;
+    const resumedClosed = yield* Deferred.make<void>();
+    const result = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      // This row committed before the consumer's lifecycle tracker failed.
+      persistedBackgroundEvents: [
+        backgroundTurnItemEvent(ids, "dynamic_tool", "running", 3, dynamicItemId),
+      ],
+      subscribeEvents: Effect.sync(() => {
+        subscriptions++;
+        return {
+          events:
+            subscriptions === 1
+              ? Stream.fromIterable([
+                  childThreadCreatedEvent(ids),
+                  backgroundTurnItemEvent(
+                    ids,
+                    "command_execution",
+                    "completed",
+                    1,
+                    completedItemId,
+                  ),
+                  backgroundTurnItemEvent(ids, "command_execution", "running", 2),
+                  {
+                    type: "subagent.updated",
+                    driver,
+                    subagent: makeRunOwnedSubagentFixture({
+                      ids,
+                      providerInstanceId,
+                      childThreadId: ids.childThreadId,
+                      driver,
+                      status: "running",
+                    }),
+                  },
+                  {
+                    type: "turn_item.updated",
+                    driver,
+                    turnItem: makeRunOwnedSubagentTurnItemFixture({
+                      ids: subagentItemIds,
+                      providerInstanceId,
+                      childThreadId: ids.childThreadId,
+                      driver,
+                      status: "running",
+                    }),
+                  },
+                  {
+                    type: "node.updated",
+                    driver,
+                    node: makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
+                  },
+                  {
+                    type: "turn_item.updated",
+                    driver,
+                    turnItem: makeLinkedChildTurnItemFixture({
+                      ids,
+                      driver,
+                      type: "command_execution",
+                    }),
+                  },
+                  backgroundTurnItemEventForRun(
+                    ids,
+                    RunId.make(`${key}:sibling`),
+                    "command_execution",
+                    "running",
+                    4,
+                  ),
+                ] satisfies ReadonlyArray<ProviderAdapterV2Event>).pipe(
                   Stream.concat(
                     Stream.fail(
                       new ProviderAdapterEventStreamError({
                         driver,
                         providerSessionId: ProviderSessionId.make(`session:${key}`),
-                        cause: "Original reader failed",
+                        cause: "Consumer stopped before recording the root terminal",
                       }),
                     ),
                   ),
-                ),
-                close: Effect.void,
-              };
-            }
-            yield* Deferred.succeed(resumed, undefined);
-            if (drainOutcome === "runtime_released") {
-              return {
-                events: Stream.fromEffect(
-                  Deferred.await(allowCompletion).pipe(
-                    Effect.andThen(
-                      Effect.sync(() => {
-                        runtimeReleased = true;
-                      }),
-                    ),
-                  ),
-                ).pipe(
-                  Stream.flatMap(() =>
-                    Stream.fail(
-                      new ProviderAdapterEventStreamError({
-                        driver,
-                        providerSessionId: ProviderSessionId.make(`session:${key}`),
-                        cause: "Reattached provider exited",
-                      }),
-                    ),
-                  ),
-                ),
-                close: Deferred.succeed(closed, undefined),
-              };
-            }
-            return {
-              events: Stream.fromEffect(Deferred.await(allowCompletion)).pipe(
-                Stream.flatMap(() =>
-                  completionWasLost
-                    ? Stream.empty
-                    : Stream.make(
-                        backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
-                      ),
-                ),
-                Stream.concat(
-                  Stream.fromEffect(
-                    Ref.set(pending, false).pipe(
-                      Effect.as({
-                        type: "provider_thread.updated",
-                        driver,
-                        providerThread: {
-                          id: ids.providerThreadId,
-                          driver,
-                          pendingBackgroundTasks: [],
-                        } as OrchestrationV2ProviderThread,
-                      } satisfies ProviderAdapterV2Event),
-                    ),
-                  ),
-                ),
-                Stream.concat(Stream.never),
-              ),
-              close: Deferred.succeed(closed, undefined),
-            };
-          }),
-          hasPendingBackgroundWorkForThread: () => Ref.get(pending),
-          inspectTurn: () =>
-            Effect.sync(() => ({
-              status: "terminal" as const,
-              event: rootTerminalEvent(ids, "completed"),
-              ...(runtimeReleased ? { runtimeReleased: true as const } : {}),
-            })),
-          recovery: {
-            register: (value) =>
-              Effect.sync(() => {
-                registration = value;
-              }),
-            suspect: () => Effect.void,
-            completed: () => Effect.void,
-          },
-          afterIngestion: Effect.gen(function* () {
-            yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [], {
-              runtimeReleased: false,
-            });
-            yield* Deferred.await(resumed);
-            assert.isFalse(yield* Deferred.isDone(closed));
-            yield* Deferred.succeed(allowCompletion, undefined);
-            yield* Deferred.await(closed);
-          }),
-        });
-        assert.equal(subscriptions, 2);
-        assert.deepEqual(
-          result.observed.filter((value) => value.startsWith("run:")),
-          ["run:waiting"],
-        );
-        assert.deepEqual(
-          result.written.map((item) => item.status),
-          completionWasLost ? ["interrupted"] : [],
-        );
-        assert.equal(
-          result.ingested.filter(
-            (event) => event.type === "turn_item.updated" && event.turnItem.status === "completed",
-          ).length,
-          completionWasLost ? 0 : 1,
-        );
+                )
+              : Stream.never,
+          close: subscriptions === 1 ? Effect.void : Deferred.succeed(resumedClosed, undefined),
+        };
       }),
-  );
-}
+      hasPendingBackgroundWorkForThread: () => Effect.succeed(runtimeReleased),
+      inspectTurn: () =>
+        Effect.succeed({ status: "terminal", event: rootTerminalEvent(ids, "completed") }),
+      startTurn: () =>
+        Effect.sync(() => {
+          starts++;
+        }),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        assert.isDefined(registration);
+        yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [receipt], {
+          runtimeReleased,
+        });
+        if (!runtimeReleased) yield* Deferred.await(resumedClosed);
+      }),
+    });
+    assert.equal(starts, 1);
+    assert.equal(subscriptions, runtimeReleased ? 1 : 2);
+    assert.deepEqual(
+      result.written.map((item) => [item.id, item.status]).sort(),
+      [
+        [ids.itemId, "interrupted"],
+        [dynamicItemId, "interrupted"],
+        [subagentItemIds.itemId, "interrupted"],
+        [ids.childItemId, "interrupted"],
+      ].sort(),
+    );
+    assert.isFalse(result.written.some((item) => item.id === completedItemId));
+    assert.equal(result.events.filter((event) => event.id === receipt.id).length, 1);
+    assert.deepEqual(
+      result.observed.filter((value) => value.startsWith("run:")),
+      ["run:waiting"],
+    );
+    assert.equal(result.effects.length, 1);
+    assert.equal(result.effects[0]?.request.type, "checkpoint.capture");
+    assert.isTrue(
+      result.events.some(
+        (event) =>
+          event.type === "provider-thread.updated" &&
+          event.payload.id === ids.providerThreadId &&
+          event.payload.pendingBackgroundTasks?.length === 0,
+      ),
+    );
+    assert.isTrue(
+      result.events.some(
+        (event) =>
+          event.type === "node.updated" &&
+          event.payload.threadId === ids.childThreadId &&
+          event.payload.status === "interrupted",
+      ),
+    );
+  }),
+);
 
-for (const timing of ["node_first", "queued_before_reader", "after_pending_marker"] as const) {
-  it.effect(`preserves queued command and tool completions during recovery (${timing})`, () =>
+it.effect.each([
+  {
+    drainOutcome: "completed",
+    name: "reattaches recovery ingestion until live background work reports its real completion",
+  },
+  {
+    drainOutcome: "completion_lost",
+    name: "heals a lost completion when the recovered reader observes the exact background drain",
+  },
+  {
+    drainOutcome: "runtime_released",
+    name: "settles recovered background rows when the reattached runtime later exits",
+  },
+  {
+    drainOutcome: "recording_failed",
+    name: "retains the recovered reader after recording fails and preserves its saved completion",
+  },
+] as const)("$name", ({ drainOutcome }) =>
+  Effect.gen(function* () {
+    const completionWasLost =
+      drainOutcome === "completion_lost" || drainOutcome === "runtime_released";
+    const key = `recover-background-live:${drainOutcome}`;
+    const ids = backgroundScenarioIds(key);
+    const pending = yield* Ref.make(true);
+    const allowCompletion = yield* Deferred.make<void>();
+    const resumed = yield* Deferred.make<void>();
+    const closed = yield* Deferred.make<void>();
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    let subscriptions = 0;
+    let runtimeReleased = false;
+    const result = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      failRecordingEvent: (event) =>
+        drainOutcome === "recording_failed" &&
+        event.type === "turn_item.updated" &&
+        event.turnItem.status === "completed",
+      subscribeEvents: Effect.gen(function* () {
+        subscriptions++;
+        if (subscriptions === 1) {
+          return {
+            events: Stream.make(
+              backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+            ).pipe(
+              Stream.concat(
+                Stream.fail(
+                  new ProviderAdapterEventStreamError({
+                    driver,
+                    providerSessionId: ProviderSessionId.make(`session:${key}`),
+                    cause: "Original reader failed",
+                  }),
+                ),
+              ),
+            ),
+            close: Effect.void,
+          };
+        }
+        yield* Deferred.succeed(resumed, undefined);
+        if (drainOutcome === "runtime_released") {
+          return {
+            events: Stream.fromEffect(
+              Deferred.await(allowCompletion).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    runtimeReleased = true;
+                  }),
+                ),
+              ),
+            ).pipe(
+              Stream.flatMap(() =>
+                Stream.fail(
+                  new ProviderAdapterEventStreamError({
+                    driver,
+                    providerSessionId: ProviderSessionId.make(`session:${key}`),
+                    cause: "Reattached provider exited",
+                  }),
+                ),
+              ),
+            ),
+            close: Deferred.succeed(closed, undefined),
+          };
+        }
+        return {
+          events: Stream.fromEffect(Deferred.await(allowCompletion)).pipe(
+            Stream.flatMap(() =>
+              completionWasLost
+                ? Stream.empty
+                : Stream.make(backgroundTurnItemEvent(ids, "command_execution", "completed", 2)),
+            ),
+            Stream.concat(
+              Stream.fromEffect(
+                Ref.set(pending, false).pipe(
+                  Effect.as({
+                    type: "provider_thread.updated",
+                    driver,
+                    providerThread: makeRecoveryProviderThreadFixture(ids, key),
+                  } satisfies ProviderAdapterV2Event),
+                ),
+              ),
+            ),
+            Stream.concat(Stream.never),
+          ),
+          close: Deferred.succeed(closed, undefined),
+        };
+      }),
+      hasPendingBackgroundWorkForThread: () => Ref.get(pending),
+      inspectTurn: () =>
+        Effect.sync(() => ({
+          status: "terminal" as const,
+          event: rootTerminalEvent(ids, "completed"),
+          ...(runtimeReleased ? { runtimeReleased: true as const } : {}),
+        })),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [], {
+          runtimeReleased: false,
+        });
+        yield* Deferred.await(resumed);
+        assert.isFalse(yield* Deferred.isDone(closed));
+        yield* Deferred.succeed(allowCompletion, undefined);
+        yield* Deferred.await(closed);
+      }),
+    });
+    assert.equal(subscriptions, 2);
+    assert.deepEqual(
+      result.observed.filter((value) => value.startsWith("run:")),
+      ["run:waiting"],
+    );
+    assert.deepEqual(
+      result.written.map((item) => item.status),
+      completionWasLost ? ["interrupted"] : [],
+    );
+    assert.equal(
+      result.ingested.filter(
+        (event) => event.type === "turn_item.updated" && event.turnItem.status === "completed",
+      ).length,
+      completionWasLost ? 0 : 1,
+    );
+  }),
+);
+
+it.effect.each(["node_first", "queued_before_reader", "after_pending_marker"] as const)(
+  "preserves queued command and tool completions during recovery (%s)",
+  (timing) =>
     Effect.gen(function* () {
       const key = `recover-native-order:${timing}`;
       const ids = backgroundScenarioIds(key);
@@ -4744,8 +4830,182 @@ for (const timing of ["node_first", "queued_before_reader", "after_pending_marke
         0,
       );
     }),
-  );
-}
+);
+
+it.effect.each(
+  (["codex", "claudeAgent"] as const).flatMap((provider) => [
+    { provider, lifecycle: "confirmed_release" as const },
+    { provider, lifecycle: "stale_subscription" as const },
+    { provider, lifecycle: "server_shutdown" as const },
+  ]),
+)("preserves native child ownership across $lifecycle ($provider)", ({ provider, lifecycle }) =>
+  Effect.gen(function* () {
+    const key = `native-child:${provider}:${lifecycle}`;
+    const ids = backgroundScenarioIds(key);
+    const fixtureDriver = ProviderDriverKind.make(provider);
+    const providerInstanceId = ProviderInstanceId.make(provider);
+    const parentProvider = makeRecoveryProviderThreadFixture(ids, key, {
+      driver: fixtureDriver,
+      providerInstanceId,
+    });
+    const childProvider = {
+      ...parentProvider,
+      id: ProviderThreadId.make(`${ids.providerThreadId}:child`),
+      appThreadId: ids.childThreadId,
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      nativeThreadRef: {
+        driver: fixtureDriver,
+        nativeId: `native-child:${key}`,
+        strength: "strong" as const,
+      },
+      forkedFrom: { providerThreadId: parentProvider.id, providerTurnId: ids.rootProviderTurnId },
+    } satisfies OrchestrationV2ProviderThread;
+    const nativeParent = {
+      ...makeRunOwnedSubagentFixture({
+        ids,
+        providerInstanceId,
+        childThreadId: ids.childThreadId,
+        driver: fixtureDriver,
+        status: "running",
+      }),
+      providerThreadId: provider === "codex" ? childProvider.id : parentProvider.id,
+    };
+    const subagentIds = { ...ids, itemId: TurnItemId.make(`${ids.itemId}:subagent`) };
+    const parentItem = {
+      ...makeRunOwnedSubagentTurnItemFixture({
+        ids: subagentIds,
+        providerInstanceId,
+        childThreadId: ids.childThreadId,
+        driver: fixtureDriver,
+        status: "running",
+      }),
+      providerThreadId: nativeParent.providerThreadId,
+    };
+    // Both adapters create a local root with no cross-thread parent node.
+    // Codex binds it to a child provider; Claude shares the parent's query.
+    const childNode = {
+      ...makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
+      providerThreadId: provider === "codex" ? childProvider.id : null,
+    };
+    const childItem = {
+      ...makeLinkedChildTurnItemFixture({ ids, driver: fixtureDriver, type: "command_execution" }),
+      providerThreadId: childNode.providerThreadId,
+    };
+    const terminal = { ...rootTerminalEvent(ids, "completed"), driver: fixtureDriver };
+    const initial: ProviderAdapterV2Event[] = (
+      [
+        childThreadCreatedEvent(ids),
+        ...(provider === "codex"
+          ? [
+              {
+                type: "provider_thread.updated",
+                driver: fixtureDriver,
+                providerThread: childProvider,
+              } as const,
+            ]
+          : []),
+        backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+        { type: "subagent.updated", driver: fixtureDriver, subagent: nativeParent },
+        {
+          type: "node.updated",
+          driver: fixtureDriver,
+          node: makeRunOwnedSubagentNodeFixture({ ids, status: "running" }),
+        },
+        { type: "turn_item.updated", driver: fixtureDriver, turnItem: parentItem },
+        { type: "node.updated", driver: fixtureDriver, node: childNode },
+        { type: "turn_item.updated", driver: fixtureDriver, turnItem: childItem },
+      ] satisfies ReadonlyArray<ProviderAdapterV2Event>
+    ).map((event) => ({ ...event, driver: fixtureDriver }));
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    let subscriptions = 0;
+    let released = lifecycle === "server_shutdown";
+    const replacementClosed = yield* Deferred.make<void>();
+    const result = yield* captureRootRunTermination({
+      key,
+      providerDriver: fixtureDriver,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      subscribeEvents: Effect.sync(() => {
+        subscriptions++;
+        if (subscriptions > 1) {
+          released = true;
+          return { events: Stream.empty, close: Deferred.succeed(replacementClosed, undefined) };
+        }
+        return {
+          events:
+            lifecycle === "server_shutdown"
+              ? Stream.fromIterable([...initial, terminal])
+              : Stream.fromIterable(initial).pipe(
+                  Stream.concat(
+                    Stream.fail(
+                      new ProviderAdapterEventStreamError({
+                        driver: fixtureDriver,
+                        providerSessionId: parentProvider.providerSessionId!,
+                        cause: "Original reader stopped",
+                      }),
+                    ),
+                  ),
+                ),
+          close: Effect.void,
+        };
+      }),
+      isShuttingDown: Effect.succeed(lifecycle === "server_shutdown"),
+      inspectTurn: () =>
+        Effect.sync(() => ({
+          status: "terminal" as const,
+          event: terminal,
+          ...(released ? { runtimeReleased: true as const } : {}),
+        })),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        if (lifecycle === "server_shutdown") return;
+        if (lifecycle === "confirmed_release") released = true;
+        const inspection = yield* registration!.inspect;
+        assert.equal(inspection.status, "terminal");
+        if (inspection.status !== "terminal") return;
+        assert.equal(inspection.runtimeReleased === true, lifecycle === "confirmed_release");
+        yield* registration!.finalize(inspection.event, [], {
+          runtimeReleased: lifecycle === "confirmed_release",
+        });
+        if (lifecycle === "stale_subscription") yield* Deferred.await(replacementClosed);
+      }),
+    });
+    assert.equal(subscriptions, lifecycle === "stale_subscription" ? 2 : 1);
+    assert.deepEqual(
+      result.written.map((item) => [item.id, item.status]).sort(),
+      lifecycle === "server_shutdown"
+        ? []
+        : [
+            [ids.itemId, "interrupted"],
+            [subagentIds.itemId, "interrupted"],
+            [ids.childItemId, "interrupted"],
+          ].sort(),
+    );
+    assert.equal(
+      result.events.some(
+        (event) =>
+          event.type === "node.updated" &&
+          event.payload.id === childNode.id &&
+          event.payload.status === "interrupted" &&
+          event.payload.parentNodeId === null,
+      ),
+      lifecycle !== "server_shutdown",
+    );
+    assert.deepEqual(
+      result.observed.filter((value) => value.startsWith("run:")),
+      ["run:waiting"],
+    );
+  }),
+);
 
 it.effect("keeps durable-only background rows open after an unknown captured probe", () =>
   Effect.gen(function* () {
@@ -4763,7 +5023,7 @@ it.effect("keeps durable-only background rows open after an unknown captured pro
       key,
       shouldFinalizeRun: () => Effect.succeed(true),
       persistedBackgroundEvents: [backgroundTurnItemEvent(ids, "command_execution", "running", 1)],
-      subscribeEvents: Effect.gen(function* () {
+      subscribeEvents: Effect.sync(() => {
         subscriptions++;
         if (subscriptions === 1)
           return {

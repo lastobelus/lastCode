@@ -2310,7 +2310,7 @@ it.effect(
         ),
         Layer.provide(
           Layer.mock(ThreadRecovery.ThreadRecoveryService)({
-            withRepairableIncident: (_input, effect) =>
+            withRepairableIncident: (identity, effect) =>
               effect((id) =>
                 Effect.gen(function* () {
                   repairThreadId = id;
@@ -2323,7 +2323,15 @@ it.effect(
                     status: "accepted",
                     error: null,
                   });
-                }),
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ThreadRecovery.ThreadRecoveryError({
+                        threadId: identity.threadId,
+                        cause,
+                      }),
+                  ),
+                ),
               ),
           }),
         ),

@@ -1097,16 +1097,12 @@ export const layer: Layer.Layer<
                 const hasIndependentRun = child.runs.some(
                   (run) => run.id !== input.run.id && run.startedAt !== null,
                 );
-                const linkedRootIds = new Set(
-                  child.nodes
-                    .filter(
-                      (node) => node.parentNodeId !== null && parentNodeIds.has(node.parentNodeId),
-                    )
-                    .map((node) => node.rootNodeId),
-                );
                 const ownedNodeIds = new Set<NodeId>();
-                const ownedProviderThread = (providerThreadId: ProviderThreadId | null) =>
+                const ownedProviderThread = (
+                  providerThreadId: ProviderThreadId | null | undefined,
+                ) =>
                   providerThreadId === null ||
+                  providerThreadId === undefined ||
                   child.providerThreads.some(
                     (thread) =>
                       thread.id === providerThreadId &&
@@ -1117,9 +1113,10 @@ export const layer: Layer.Layer<
                     node.threadId === childThreadId &&
                     ownedProviderThread(node.providerThreadId) &&
                     (node.runId === input.run.id ||
-                      (!hasIndependentRun &&
-                        node.runId === null &&
-                        linkedRootIds.has(node.rootNodeId)))
+                      // Native child roots have no local parent node. Their
+                      // durable native subagent link and session establish
+                      // ownership; a separately started child run revokes it.
+                      (!hasIndependentRun && node.runId === null))
                   ) {
                     ownedNodeIds.add(node.id);
                     if (isOpenExecutionNodeStatus(node.status))
@@ -1834,6 +1831,11 @@ export const layer: Layer.Layer<
               Effect.ensuring(
                 Effect.gen(function* () {
                   if (!(yield* Ref.get(rootRunFinalized))) return;
+                  // Startup recovery owns intentional server shutdown: it
+                  // cancels the saved work and records the next-turn note.
+                  // A stale subscription ending normally after unexpected
+                  // release still needs the guarded settlement below.
+                  if (yield* input.session.isShuttingDown ?? Effect.succeed(false)) return;
                   const terminal = yield* Ref.get(terminalEvent);
                   if (terminal === null) return;
                   const inspection = yield* (
