@@ -81,6 +81,43 @@ describe("v2 thread shell lists", () => {
     registry.dispose();
   });
 
+  it("updates creator placement from the shell stream while retaining environment and ordinary ownership", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const creator = ThreadId.make("creator:origin");
+    const ordinary = {
+      ...v2ThreadShell,
+      createdBy: "agent" as const,
+      creatorThreadId: creator,
+      creatorGrouping: "grouped" as const,
+    };
+    const snapshot = { ...v2ShellSnapshot, threads: [ordinary] };
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    try {
+      const before = registry.get(threads.navigationThreadShellsAtom)[0];
+      expect(before?.creatorThreadId).toBe(creator);
+      expect(before?.creatorGrouping).toBe("grouped");
+      registry.set(
+        snapshotAtom(environmentId),
+        applyShellStreamEvent(snapshot, {
+          kind: "thread.updated",
+          location: "active",
+          sequence: 1,
+          thread: { ...ordinary, creatorGrouping: "independent" },
+        }),
+      );
+      const after = registry.get(threads.navigationThreadShellsAtom)[0];
+      expect(after?.creatorThreadId).toBe(creator);
+      expect(after?.creatorGrouping).toBe("independent");
+      expect(after?.environmentId).toBe(environmentId);
+      expect(after?.lineage).toEqual(ordinary.lineage);
+      expect(after?.source.createdBy).toBe("agent");
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it("preserves ordered reference arrays when a middle thread changes", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const snapshot = {
