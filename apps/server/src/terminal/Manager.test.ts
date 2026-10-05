@@ -512,6 +512,218 @@ it.layer(
     }),
   );
 
+  it.effect("does not recreate a detached terminal from metadata during normal kill grace", () =>
+    Effect.gen(function* () {
+      const termSent = yield* Deferred.make<void>();
+      const removed = yield* Deferred.make<void>();
+      let environmentResolutions = 0;
+      const { manager, ptyAdapter, logsDir } = yield* createManager(5, {
+        processKillGraceMs: 10,
+        resolveProviderInstanceEnvironment: () =>
+          Effect.sync(() => {
+            environmentResolutions += 1;
+            return {};
+          }),
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      process.onKill = (signal) => {
+        if (signal === "SIGTERM") Deferred.doneUnsafe(termSent, Effect.void);
+      };
+      const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
+        event.type === "remove"
+          ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
+
+      yield* manager.close({ threadId: "thread-1", deleteHistory: true });
+      yield* Deferred.await(termSent);
+      const retainedMetadata = yield* manager.metadata;
+      const historyPath = yield* historyLogPath(logsDir);
+      expect(yield* pathExists(historyPath)).toBe(false);
+      const rejectedEvents: TerminalAttachStreamEvent[] = [];
+      const error = yield* manager
+        .attachStream(
+          {
+            ...openInput({ cwd: "/missing-terminal-directory" }),
+            providerInstanceId: ProviderInstanceId.make("test-provider"),
+            restartIfNotRunning: true,
+          },
+          (event) =>
+            Effect.sync(() => {
+              rejectedEvents.push(event);
+            }),
+        )
+        .pipe(Effect.flip);
+
+      expect(error._tag).toBe("TerminalNotRunningError");
+      expect(environmentResolutions).toBe(0);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+      expect(yield* manager.metadata).toEqual(retainedMetadata);
+      expect(yield* pathExists(historyPath)).toBe(false);
+
+      yield* TestClock.adjust("10 millis");
+      yield* Deferred.await(removed);
+      yield* manager.waitForThreadShutdown("thread-1");
+      const snapshots: TerminalAttachStreamEvent[] = [];
+      const unsubscribe = yield* manager.attachStream(openInput(), (event) =>
+        Effect.sync(() => {
+          snapshots.push(event);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      expect(snapshots).toEqual([
+        expect.objectContaining({
+          type: "snapshot",
+          snapshot: expect.objectContaining({
+            status: "running",
+            pid: ptyAdapter.processes[1]?.pid,
+          }),
+        }),
+      ]);
+      expect(rejectedEvents).toEqual([]);
+      ptyAdapter.processes[1]!.exitOnKill = "SIGTERM";
+      yield* manager.shutdownThread("thread-1");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "keeps failed retained terminals visible without respawning on repeated attachment",
+    () =>
+      Effect.gen(function* () {
+        const removed = yield* Deferred.make<void>();
+        const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 });
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.killFailure = new Error("signal failure");
+        const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
+          event.type === "remove" && event.threadId === "thread-1"
+            ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
+        yield* manager.close({ threadId: "thread-1" });
+        expect((yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result))._tag).toBe(
+          "Failure",
+        );
+        const retainedMetadata = yield* manager.metadata;
+        const rejectedEvents: TerminalAttachStreamEvent[] = [];
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const error = yield* manager
+            .attachStream(openInput(), (event) =>
+              Effect.sync(() => {
+                rejectedEvents.push(event);
+              }),
+            )
+            .pipe(Effect.flip);
+          expect(error._tag).toBe("TerminalNotRunningError");
+          expect(yield* manager.metadata).toEqual(retainedMetadata);
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+        expect(retainedMetadata).toEqual([
+          expect.objectContaining({
+            threadId: "thread-1",
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: true,
+          }),
+        ]);
+
+        const unsubscribeOtherThread = yield* manager.attachStream(
+          openInput({ threadId: "thread-2" }),
+          () => Effect.void,
+        );
+        const unsubscribeOtherId = yield* manager.attachStream(
+          openInput({ terminalId: "other-terminal" }),
+          () => Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeOtherThread));
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeOtherId));
+        expect(ptyAdapter.spawnInputs).toHaveLength(3);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+
+        process.emitExit({ exitCode: 0, signal: null });
+        yield* Deferred.await(removed);
+        yield* manager.waitForThreadShutdown("thread-1");
+        const unsubscribe = yield* manager.attachStream(openInput(), () => Effect.void);
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+        expect(ptyAdapter.spawnInputs).toHaveLength(4);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+        expect(rejectedEvents).toEqual([]);
+        yield* manager.shutdownThread("thread-1");
+        yield* manager.shutdownThread("thread-2");
+      }),
+  );
+
+  it.effect(
+    "blocks processless session attachment but attaches to an explicit live replacement",
+    () =>
+      Effect.gen(function* () {
+        const replacementVisible = yield* Deferred.make<void>();
+        const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 });
+        yield* manager.open(openInput());
+        const original = ptyAdapter.processes[0]!;
+        original.killFailure = new Error("signal failure");
+        ptyAdapter.spawnFailures.push(new Error("replacement spawn failed"));
+        const failedRestart = yield* manager.restart(restartInput());
+        expect(failedRestart.status).toBe("error");
+        expect((yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result))._tag).toBe(
+          "Failure",
+        );
+        const retainedMetadata = yield* manager.metadata;
+        const rejectedEvents: TerminalAttachStreamEvent[] = [];
+        const error = yield* manager
+          .attachStream({ ...openInput(), restartIfNotRunning: true }, (event) =>
+            Effect.sync(() => {
+              rejectedEvents.push(event);
+            }),
+          )
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("TerminalNotRunningError");
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+        expect(ptyAdapter.processes).toHaveLength(1);
+        expect(yield* manager.metadata).toEqual(retainedMetadata);
+        expect(original.killSignals).toEqual(["SIGTERM"]);
+
+        const replacement = yield* manager.restart(restartInput());
+        const attachedEvents: TerminalAttachStreamEvent[] = [];
+        const unsubscribe = yield* manager.attachStream(
+          { ...openInput(), restartIfNotRunning: true },
+          (event) =>
+            Effect.sync(() => {
+              attachedEvents.push(event);
+            }),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        expect(ptyAdapter.spawnInputs).toHaveLength(3);
+        expect(attachedEvents).toEqual([
+          expect.objectContaining({ type: "snapshot", snapshot: replacement }),
+        ]);
+        expect(original.killSignals).toEqual(["SIGTERM"]);
+        const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
+          event.type === "upsert" && event.terminal.pid === replacement.pid
+            ? Deferred.succeed(replacementVisible, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
+
+        original.emitExit({ exitCode: 0, signal: null });
+        yield* Deferred.await(replacementVisible);
+        expect(yield* manager.metadata).toEqual([
+          expect.objectContaining({ status: "running", pid: replacement.pid }),
+        ]);
+        expect(rejectedEvents).toEqual([]);
+        yield* manager.shutdownThread("thread-1");
+      }),
+  );
+
   it.effect("keeps attach streams live when a terminal id is closed and reopened", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

@@ -2914,6 +2914,25 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const terminalId = input.terminalId;
         const existing = yield* getSession(input.threadId, terminalId);
 
+        if (Option.isNone(existing) || existing.value.process === null) {
+          const terminating = (yield* readManagerState).terminatingProcesses.values();
+          // Retained metadata keeps Stop available; mounting its viewport must
+          // not turn a closed session back into a new process before exit.
+          if (
+            [...terminating].some(
+              ({ terminal, exited }) =>
+                terminal.threadId === input.threadId &&
+                terminal.terminalId === terminalId &&
+                !Deferred.isDoneUnsafe(exited),
+            )
+          ) {
+            return yield* new TerminalNotRunningError({
+              threadId: input.threadId,
+              terminalId,
+            });
+          }
+        }
+
         if (Option.isNone(existing)) {
           if (!input.cwd || !startIfNeeded) {
             return yield* new TerminalSessionLookupError({
