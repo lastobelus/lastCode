@@ -974,19 +974,8 @@ const make = Effect.gen(function* () {
     launchGate.withPermit(
       Effect.gen(function* () {
         const previews = yield* removeThreadLocked(threadId).pipe(Effect.result);
-        const sessions = (yield* terminals.metadata).filter(
-          (terminal) => terminal.threadId === threadId,
-        );
-        const results = yield* Effect.forEach(
-          sessions,
-          (terminal) =>
-            terminals.close({ threadId, terminalId: terminal.terminalId }).pipe(Effect.result),
-          { concurrency: "unbounded" },
-        );
-        const shutdown = yield* terminals.waitForThreadShutdown(threadId).pipe(Effect.result);
+        const shutdown = yield* terminals.shutdownThread(threadId).pipe(Effect.result);
         if (previews._tag === "Failure") return yield* previews.failure;
-        const failure = results.find((result) => result._tag === "Failure");
-        if (failure?._tag === "Failure") return yield* failure.failure;
         if (shutdown._tag === "Failure") return yield* shutdown.failure;
       }),
     );

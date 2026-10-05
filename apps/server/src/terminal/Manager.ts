@@ -59,6 +59,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
@@ -222,6 +223,10 @@ export class TerminalManager extends Context.Service<
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+    /** Close and await this thread's terminals without allowing concurrent opens or restarts. */
+    readonly shutdownThread: (
+      threadId: string,
+    ) => Effect.Effect<void, TerminalError | TerminalShutdownError>;
     /** Await already requested process cleanup for this thread and report failed termination. */
     readonly waitForThreadShutdown: (
       threadId: string,
@@ -1642,6 +1647,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
   const threadLocks = yield* KeyedLock.make<string>();
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
+  const terminalMetadataListeners = new Set<
+    (event: TerminalMetadataStreamEvent) => Effect.Effect<void>
+  >();
+  const metadataDeliveryLock = yield* Semaphore.make(1);
   const workerScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
 
@@ -1649,6 +1658,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     Effect.gen(function* () {
       for (const listener of terminalEventListeners) {
         yield* listener(event).pipe(Effect.ignoreCause({ log: true }));
+      }
+      if (shouldPublishTerminalMetadataEvent(event)) {
+        yield* publishMetadataUpdate(event);
       }
     });
 
@@ -1763,6 +1775,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     threadId: string,
     terminalId: string,
   ) {
+    const existing = (yield* readManagerState).killFibers.get(process);
+    if (existing !== undefined && existing.pollUnsafe() === undefined) return;
+
     const fiber = yield* runKillEscalation(process, threadId, terminalId).pipe(
       Effect.tap((completed) =>
         completed
@@ -1773,7 +1788,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               const terminatingProcesses = new Map(state.terminatingProcesses);
               terminatingProcesses.delete(process);
               return [undefined, { ...state, terminatingProcesses }] as const;
-            })
+            }).pipe(Effect.andThen(publishMetadataUpdate({ threadId, terminalId })))
           : Effect.void,
       ),
       Effect.asVoid,
@@ -2900,20 +2915,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const readAllTerminalMetadata = () =>
     readManagerState.pipe(
-      Effect.map((state) =>
-        [...state.sessions.values()]
-          .map(summary)
-          .sort(
-            (left, right) =>
-              right.updatedAt.localeCompare(left.updatedAt) ||
-              left.threadId.localeCompare(right.threadId) ||
-              left.terminalId.localeCompare(right.terminalId),
-          ),
-      ),
-    );
-
-  const readDrainTerminalMetadata = () =>
-    readManagerState.pipe(
       Effect.map((state) => {
         const terminals = new Map(
           [...state.sessions.values()].map((session) => [
@@ -2937,8 +2938,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     readonly threadId: string;
     readonly terminalId: string;
   }) =>
-    getSession(input.threadId, input.terminalId).pipe(
-      Effect.map((session) => (Option.isSome(session) ? summary(session.value) : null)),
+    readManagerState.pipe(
+      Effect.map((state) => {
+        const terminating = [...state.terminatingProcesses.values()].findLast(
+          (terminal) =>
+            terminal.threadId === input.threadId && terminal.terminalId === input.terminalId,
+        );
+        if (terminating !== undefined) return terminating;
+        const session = state.sessions.get(toSessionKey(input.threadId, input.terminalId));
+        return session === undefined ? null : summary(session);
+      }),
     );
 
   const subscribe: TerminalManager["Service"]["subscribe"] = (listener) =>
@@ -3010,87 +3019,35 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const metadataEventFromTerminalEvent = (
-    event: TerminalEvent,
-  ): Effect.Effect<TerminalMetadataStreamEvent | null> => {
-    if (!shouldPublishTerminalMetadataEvent(event)) {
-      return Effect.succeed(null);
-    }
-
-    if (event.type === "closed") {
-      return Effect.succeed({
-        type: "remove" as const,
-        threadId: event.threadId,
-        terminalId: event.terminalId,
-      });
-    }
-
-    return readTerminalMetadata({
-      threadId: event.threadId,
-      terminalId: event.terminalId,
-    }).pipe(
-      Effect.map((terminal) =>
-        terminal
-          ? {
-              type: "upsert" as const,
-              terminal,
-            }
-          : null,
-      ),
-    );
-  };
-
-  const offerMetadataEvent = (
-    listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
-    event: TerminalEvent,
-  ) =>
-    metadataEventFromTerminalEvent(event).pipe(
-      Effect.flatMap((metadataEvent) => (metadataEvent ? listener(metadataEvent) : Effect.void)),
-    );
-
-  const subscribeMetadata: TerminalManager["Service"]["subscribeMetadata"] = (listener) => {
-    let unsubscribe: (() => void) | null = null;
-
-    return Effect.gen(function* () {
-      const bufferedEvents: TerminalEvent[] = [];
-      let deliverLive = false;
-
-      unsubscribe = yield* subscribe((event) => {
-        if (!deliverLive) {
-          bufferedEvents.push(event);
-          return Effect.void;
+  const publishMetadataUpdate = (input: {
+    readonly threadId: string;
+    readonly terminalId: string;
+  }): Effect.Effect<void> =>
+    metadataDeliveryLock.withPermit(
+      Effect.gen(function* () {
+        // Read after acquiring the delivery lock: a completed kill must not be
+        // followed by an older close update that restores its retained summary.
+        const terminal = yield* readTerminalMetadata(input);
+        const event: TerminalMetadataStreamEvent = terminal
+          ? { type: "upsert", terminal }
+          : { type: "remove", threadId: input.threadId, terminalId: input.terminalId };
+        for (const listener of terminalMetadataListeners) {
+          yield* listener(event).pipe(Effect.ignoreCause({ log: true }));
         }
-
-        return offerMetadataEvent(listener, event);
-      });
-
-      const terminals = yield* readAllTerminalMetadata();
-      yield* listener({
-        type: "snapshot",
-        terminals,
-      });
-
-      for (const event of bufferedEvents) {
-        yield* offerMetadataEvent(listener, event);
-      }
-
-      deliverLive = true;
-      return () => {
-        unsubscribe?.();
-        unsubscribe = null;
-      };
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.flatMap(
-          Effect.sync(() => {
-            unsubscribe?.();
-            unsubscribe = null;
-          }),
-          () => Effect.failCause(cause),
-        ),
-      ),
+      }),
     );
-  };
+
+  const subscribeMetadata: TerminalManager["Service"]["subscribeMetadata"] = (listener) =>
+    metadataDeliveryLock.withPermit(
+      Effect.gen(function* () {
+        const terminals = yield* readAllTerminalMetadata();
+        yield* listener({ type: "snapshot", terminals });
+        terminalMetadataListeners.add(listener);
+        return () => {
+          terminalMetadataListeners.delete(listener);
+        };
+      }),
+    );
 
   const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
     const terminalId = input.terminalId;
@@ -3249,6 +3206,53 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
+  const closeUnlocked = (
+    input: TerminalCloseInput,
+    retainedTerminalIds: ReadonlyArray<string> = [],
+    retainedTerminalPrefixes: ReadonlyArray<string> = [],
+  ): Effect.Effect<void, TerminalError> =>
+    Effect.gen(function* () {
+      // Failed handles outlive their sessions. A later close retries them,
+      // while startKillEscalation leaves any current cleanup fiber alone.
+      const terminating = [...(yield* readManagerState).terminatingProcesses.entries()].filter(
+        ([, terminal]) =>
+          terminal.threadId === input.threadId &&
+          (input.terminalId === undefined || terminal.terminalId === input.terminalId) &&
+          !retainedTerminalIds.includes(terminal.terminalId) &&
+          !retainedTerminalPrefixes.some((prefix) => terminal.terminalId.startsWith(prefix)),
+      );
+      yield* Effect.forEach(
+        terminating,
+        ([process, terminal]) =>
+          startKillEscalation(process, terminal.threadId, terminal.terminalId),
+        { discard: true },
+      );
+
+      if (input.terminalId) {
+        yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
+        return;
+      }
+
+      const threadSessions = yield* sessionsForThread(input.threadId);
+      yield* Effect.forEach(
+        threadSessions.filter(
+          (session) =>
+            !retainedTerminalIds.includes(session.terminalId) &&
+            !retainedTerminalPrefixes.some((prefix) => session.terminalId.startsWith(prefix)),
+        ),
+        (session) => closeSession(input.threadId, session.terminalId, false),
+        { discard: true },
+      );
+
+      if (input.deleteHistory) {
+        yield* deleteAllHistoryForThread(
+          input.threadId,
+          retainedTerminalIds,
+          retainedTerminalPrefixes,
+        );
+      }
+    });
+
   const close = (
     input: TerminalCloseInput,
     retainedTerminalIds: ReadonlyArray<string> = [],
@@ -3256,31 +3260,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   ) =>
     withThreadLock(
       input.threadId,
-      Effect.gen(function* () {
-        if (input.terminalId) {
-          yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
-          return;
-        }
-
-        const threadSessions = yield* sessionsForThread(input.threadId);
-        yield* Effect.forEach(
-          threadSessions.filter(
-            (session) =>
-              !retainedTerminalIds.includes(session.terminalId) &&
-              !retainedTerminalPrefixes.some((prefix) => session.terminalId.startsWith(prefix)),
-          ),
-          (session) => closeSession(input.threadId, session.terminalId, false),
-          { discard: true },
-        );
-
-        if (input.deleteHistory) {
-          yield* deleteAllHistoryForThread(
-            input.threadId,
-            retainedTerminalIds,
-            retainedTerminalPrefixes,
-          );
-        }
-      }),
+      closeUnlocked(input, retainedTerminalIds, retainedTerminalPrefixes),
     );
 
   const closeIdle: TerminalManager["Service"]["closeIdle"] = (input) =>
@@ -3331,28 +3311,39 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
 
-  const waitForThreadShutdown: TerminalManager["Service"]["waitForThreadShutdown"] = Effect.fn(
-    "terminal.waitForThreadShutdown",
-  )(
-    function* (threadId) {
-      const state = yield* readManagerState;
-      const fibers = [...state.terminatingProcesses.entries()].flatMap(([process, terminal]) => {
-        const fiber = state.killFibers.get(process);
-        return terminal.threadId === threadId && fiber !== undefined ? [fiber] : [];
+  const waitForThreadShutdownUnlocked = Effect.fn("terminal.waitForThreadShutdown")(function* (
+    threadId: string,
+  ): Effect.fn.Return<void, TerminalShutdownError> {
+    const state = yield* readManagerState;
+    const fibers = [...state.terminatingProcesses.entries()].flatMap(([process, terminal]) => {
+      const fiber = state.killFibers.get(process);
+      return terminal.threadId === threadId && fiber !== undefined ? [fiber] : [];
+    });
+    yield* Effect.forEach(fibers, Fiber.await, { concurrency: "unbounded", discard: true });
+    const remaining = [...(yield* readManagerState).terminatingProcesses.values()].filter(
+      (terminal) => terminal.threadId === threadId,
+    );
+    if (remaining.length > 0) {
+      return yield* new TerminalShutdownError({
+        threadId,
+        terminalIds: [...new Set(remaining.map((terminal) => terminal.terminalId))],
       });
-      yield* Effect.forEach(fibers, Fiber.await, { concurrency: "unbounded", discard: true });
-      const remaining = [...(yield* readManagerState).terminatingProcesses.values()].filter(
-        (terminal) => terminal.threadId === threadId,
-      );
-      if (remaining.length > 0) {
-        return yield* new TerminalShutdownError({
-          threadId,
-          terminalIds: [...new Set(remaining.map((terminal) => terminal.terminalId))],
-        });
-      }
-    },
-    (effect, threadId) => withThreadLock(threadId, effect),
-  );
+    }
+  });
+
+  const waitForThreadShutdown: TerminalManager["Service"]["waitForThreadShutdown"] = (threadId) =>
+    withThreadLock(threadId, waitForThreadShutdownUnlocked(threadId));
+
+  const shutdownThread: TerminalManager["Service"]["shutdownThread"] = (threadId) =>
+    withThreadLock(
+      threadId,
+      Effect.gen(function* () {
+        const closeResult = yield* closeUnlocked({ threadId }).pipe(Effect.result);
+        const shutdown = yield* waitForThreadShutdownUnlocked(threadId).pipe(Effect.result);
+        if (closeResult._tag === "Failure") return yield* closeResult.failure;
+        if (shutdown._tag === "Failure") return yield* shutdown.failure;
+      }),
+    );
 
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
@@ -3369,6 +3360,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     history,
     restart,
     close,
+    shutdownThread,
     waitForThreadShutdown,
     closeThreadExcept: (threadId, retainedTerminalIds, retainedTerminalPrefixes) =>
       close({ threadId, deleteHistory: true }, retainedTerminalIds, retainedTerminalPrefixes),
@@ -3376,7 +3368,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     subscribe,
     subscribeMetadata,
     metadata: readAllTerminalMetadata(),
-    refreshMetadata: pollSubprocessActivity().pipe(Effect.andThen(readDrainTerminalMetadata())),
+    refreshMetadata: pollSubprocessActivity().pipe(Effect.andThen(readAllTerminalMetadata())),
   });
 });
 

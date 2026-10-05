@@ -27,6 +27,8 @@ import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import type * as PtyAdapter from "../terminal/PtyAdapter.ts";
+import * as ProcessRunner from "../processRunner.ts";
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
 const encodePersistedHostingState = Schema.encodeSync(
@@ -68,7 +70,7 @@ interface TerminalHarness {
 }
 
 function terminalLayer(harness: TerminalHarness) {
-  return Layer.mock(TerminalManager.TerminalManager)({
+  const service = {
     open: (input) => {
       harness.opens.push(input);
       return (harness.onOpen?.(input) ?? Effect.void).pipe(
@@ -189,6 +191,25 @@ function terminalLayer(harness: TerminalHarness) {
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
+  } satisfies Partial<TerminalManager.TerminalManager["Service"]>;
+  return Layer.mock(TerminalManager.TerminalManager)({
+    ...service,
+    shutdownThread: (threadId) =>
+      Effect.gen(function* () {
+        const sessions = (yield* service.metadata).filter(
+          (terminal) => terminal.threadId === threadId,
+        );
+        const results = yield* Effect.forEach(
+          sessions,
+          (terminal) =>
+            service.close({ threadId, terminalId: terminal.terminalId }).pipe(Effect.result),
+          { concurrency: "unbounded" },
+        );
+        const shutdown = yield* service.waitForThreadShutdown(threadId).pipe(Effect.result);
+        const failure = results.find((result) => result._tag === "Failure");
+        if (failure?._tag === "Failure") return yield* failure.failure;
+        if (shutdown._tag === "Failure") return yield* shutdown.failure;
+      }),
   });
 }
 
@@ -418,6 +439,98 @@ describe("PreviewHosting", () => {
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") assert.equal(result.failure, failure);
         }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a second Stop retries a failed terminal without touching another thread", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-retry-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const processes: Array<
+        PtyAdapter.PtyProcess & {
+          killSignals: Array<string | undefined>;
+          killFailure: Error | undefined;
+        }
+      > = [];
+      const terminalsLayer = Layer.effect(
+        TerminalManager.TerminalManager,
+        TerminalManager.makeWithOptions({
+          logsDir: config.terminalLogsDir,
+          processKillGraceMs: 0,
+          processTable: Effect.succeed([]),
+          ptyAdapter: {
+            spawn: () =>
+              Effect.sync(() => {
+                const ptyProcess = {
+                  pid: 9000 + processes.length,
+                  killSignals: [] as Array<string | undefined>,
+                  killFailure: undefined as Error | undefined,
+                  write: () => {},
+                  resize: () => {},
+                  kill: (signal?: string) => {
+                    ptyProcess.killSignals.push(signal);
+                    if (ptyProcess.killFailure !== undefined) throw ptyProcess.killFailure;
+                  },
+                  onData: () => () => {},
+                  onExit: () => () => {},
+                };
+                processes.push(ptyProcess);
+                return ptyProcess;
+              }),
+          },
+        }),
+      ).pipe(Layer.provide(ProcessRunner.layer));
+      const dependencies = Layer.mergeAll(
+        ServerConfig.layer(config),
+        terminalsLayer,
+        discoveryLayer(true, [], testTerminalHarness()),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const terminals = yield* TerminalManager.TerminalManager;
+          yield* terminals.open({
+            threadId: "thread-1",
+            terminalId: "command-terminal",
+            cwd: root,
+          });
+          yield* terminals.open({
+            threadId: "thread-2",
+            terminalId: "unrelated-terminal",
+            cwd: root,
+          });
+          const first = processes[0]!;
+          const other = processes[1]!;
+          first.killFailure = new Error("transient signal failure");
+
+          const failure = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+          assert.equal(failure._tag, "Failure");
+          if (failure._tag === "Failure") {
+            assert.equal(failure.failure._tag, "TerminalShutdownError");
+          }
+          assert.deepEqual(first.killSignals, ["SIGTERM"]);
+          assert.deepEqual(other.killSignals, []);
+          assert.sameMembers(
+            (yield* terminals.metadata).map((terminal) => terminal.threadId),
+            ["thread-1", "thread-2"],
+          );
+
+          first.killFailure = undefined;
+          yield* hosting.stopThread("thread-1");
+          assert.deepEqual(first.killSignals, ["SIGTERM", "SIGTERM", "SIGKILL"]);
+          assert.deepEqual(other.killSignals, []);
+          assert.deepEqual(
+            (yield* terminals.metadata).map((terminal) => terminal.threadId),
+            ["thread-2"],
+          );
+          yield* terminals.close({ threadId: "thread-2" });
+          yield* terminals.waitForThreadShutdown("thread-2");
+        }).pipe(Effect.provide(PreviewHosting.layer.pipe(Layer.provideMerge(dependencies)))),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );

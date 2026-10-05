@@ -247,6 +247,7 @@ interface CreateManagerOptions {
   >[0]["resolveProviderInstanceEnvironment"];
   managedBinaryCacheDir?: string;
   managedBinaryToolsDir?: string;
+  unregisterTerminal?: Parameters<typeof TerminalManager.makeWithOptions>[0]["unregisterTerminal"];
 }
 
 interface ManagerFixture {
@@ -304,6 +305,9 @@ const createManager = (
               managedBinaryCacheDir: options.managedBinaryCacheDir,
               managedBinaryToolsDir: options.managedBinaryToolsDir,
             }),
+        ...(options.unregisterTerminal === undefined
+          ? {}
+          : { unregisterTerminal: options.unregisterTerminal }),
       });
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
       const unsubscribe = yield* manager.subscribe((event) =>
@@ -1940,7 +1944,7 @@ it.layer(
 
   it.effect("keeps a closing terminal in blocker metadata until kill escalation finishes", () =>
     Effect.gen(function* () {
-      const { manager } = yield* createManager(5, { processKillGraceMs: 10 });
+      const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 10 });
       yield* manager.open(openInput());
 
       const closeFiber = yield* manager.close({ threadId: "thread-1" }).pipe(Effect.forkScoped);
@@ -1954,6 +1958,9 @@ it.layer(
           hasRunningSubprocess: true,
         }),
       ]);
+      expect(yield* manager.metadata).toEqual(yield* manager.refreshMetadata);
+      yield* manager.close({ threadId: "thread-1" });
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual(["SIGTERM"]);
 
       yield* TestClock.adjust("10 millis");
       yield* Fiber.join(closeFiber);
@@ -1968,6 +1975,12 @@ it.layer(
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
       yield* manager.open(openInput());
+      const original = (yield* manager.metadata)[0];
+      const metadataEvents = yield* Ref.make<ReadonlyArray<TerminalMetadataStreamEvent>>([]);
+      const unsubscribe = yield* manager.subscribeMetadata((event) =>
+        Ref.update(metadataEvents, (events) => [...events, event]),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       const process = ptyAdapter.processes[0];
       expect(process).toBeDefined();
       if (!process) return;
@@ -1976,6 +1989,31 @@ it.layer(
       yield* manager.close({ threadId: "thread-1" });
 
       expect(process.killSignals).toEqual(["SIGTERM"]);
+      const metadata = yield* manager.metadata;
+      expect(metadata).toEqual([
+        expect.objectContaining({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          status: "running",
+          hasRunningSubprocess: true,
+          pid: process.pid,
+          cwd: original?.cwd,
+          worktreePath: original?.worktreePath,
+          label: original?.label,
+        }),
+      ]);
+      expect((yield* Ref.get(metadataEvents)).at(-1)).toEqual({
+        type: "upsert",
+        terminal: metadata[0],
+      });
+      const snapshots: TerminalMetadataStreamEvent[] = [];
+      const unsubscribeSnapshot = yield* manager.subscribeMetadata((event) =>
+        Effect.sync(() => {
+          snapshots.push(event);
+        }),
+      );
+      unsubscribeSnapshot();
+      expect(snapshots).toEqual([{ type: "snapshot", terminals: metadata }]);
       expect(yield* manager.refreshMetadata).toEqual([
         expect.objectContaining({
           threadId: "thread-1",
@@ -1984,6 +2022,117 @@ it.layer(
           hasRunningSubprocess: true,
         }),
       ]);
+    }),
+  );
+
+  it.effect("retries only failed handles for the selected thread without duplicating cleanup", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 });
+      yield* manager.open(openInput());
+      yield* manager.open(openInput({ threadId: "thread-2" }));
+      const first = ptyAdapter.processes[0]!;
+      const second = ptyAdapter.processes[1]!;
+      first.killFailure = new Error("simulated signal failure");
+      second.killFailure = new Error("another thread's signal failure");
+      yield* manager.close({ threadId: "thread-1" });
+      yield* manager.close({ threadId: "thread-2" });
+      expect((yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result))._tag).toBe(
+        "Failure",
+      );
+      expect((yield* manager.waitForThreadShutdown("thread-2").pipe(Effect.result))._tag).toBe(
+        "Failure",
+      );
+
+      first.killFailure = undefined;
+      yield* manager.close({ threadId: "thread-1" });
+      yield* manager.close({ threadId: "thread-1" });
+      yield* manager.waitForThreadShutdown("thread-1");
+
+      expect(first.killSignals).toEqual(["SIGTERM", "SIGTERM", "SIGKILL"]);
+      expect(second.killSignals).toEqual(["SIGTERM"]);
+      expect(yield* manager.metadata).toEqual([
+        expect.objectContaining({ threadId: "thread-2", hasRunningSubprocess: true }),
+      ]);
+    }),
+  );
+
+  it.effect("delivers successful cleanup after an in-flight retained metadata update", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* createManager(5, { processKillGraceMs: 10 });
+      yield* manager.open(openInput());
+      const upsertStarted = yield* Deferred.make<void>();
+      const releaseUpsert = yield* Deferred.make<void>();
+      const removed = yield* Deferred.make<void>();
+      const events: TerminalMetadataStreamEvent[] = [];
+      const unsubscribe = yield* manager.subscribeMetadata((event) =>
+        Effect.gen(function* () {
+          if (event.type === "upsert") {
+            yield* Deferred.succeed(upsertStarted, undefined);
+            yield* Deferred.await(releaseUpsert);
+          }
+          events.push(event);
+          if (event.type === "remove") yield* Deferred.succeed(removed, undefined);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const closing = yield* manager.close({ threadId: "thread-1" }).pipe(Effect.forkScoped);
+      yield* Deferred.await(upsertStarted);
+      yield* TestClock.adjust("10 millis");
+      expect(yield* manager.metadata).toEqual([]);
+      yield* Deferred.succeed(releaseUpsert, undefined);
+      yield* Fiber.join(closing);
+      yield* manager.waitForThreadShutdown("thread-1");
+      yield* Deferred.await(removed);
+
+      expect(events.map((event) => event.type)).toEqual(["snapshot", "upsert", "remove"]);
+      expect(events.at(-1)).toEqual({
+        type: "remove",
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+      });
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps opens and restarts outside the selected thread's shutdown interval", () =>
+    Effect.gen(function* () {
+      const cleanupStarted = yield* Deferred.make<void>();
+      const finishCleanup = yield* Deferred.make<void>();
+      let blockCleanup = true;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processKillGraceMs: 0,
+        unregisterTerminal: (terminal) =>
+          terminal.threadId === "thread-1" && blockCleanup
+            ? Deferred.succeed(cleanupStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishCleanup)),
+              )
+            : Effect.void,
+      });
+      yield* manager.open(openInput());
+      const stopping = yield* manager.shutdownThread("thread-1").pipe(Effect.forkScoped);
+      yield* Deferred.await(cleanupStarted);
+      const opening = yield* manager
+        .open(openInput({ terminalId: "new-terminal" }))
+        .pipe(Effect.forkScoped);
+      const restarting = yield* manager.restart(restartInput()).pipe(Effect.forkScoped);
+
+      yield* manager.open(openInput({ threadId: "thread-2" }));
+      expect(stopping.pollUnsafe()).toBeUndefined();
+      expect(opening.pollUnsafe()).toBeUndefined();
+      expect(restarting.pollUnsafe()).toBeUndefined();
+      expect(ptyAdapter.processes).toHaveLength(2);
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual([]);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+
+      blockCleanup = false;
+      yield* Deferred.succeed(finishCleanup, undefined);
+      yield* Fiber.join(stopping);
+      yield* Fiber.join(opening);
+      yield* Fiber.join(restarting);
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+      expect(ptyAdapter.processes).toHaveLength(4);
+      yield* manager.shutdownThread("thread-1");
+      yield* manager.shutdownThread("thread-2");
     }),
   );
 
