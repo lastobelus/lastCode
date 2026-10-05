@@ -192,23 +192,12 @@ const discoveryPortKey = (value: string): string => {
   return `${isLoopbackHost(url.hostname) ? "loopback" : url.hostname.toLowerCase()}:${port}`;
 };
 
-/** Select complete trailing lines before redaction work; never retain a known secret suffix. */
-const startupTextWindow = (text: string, sensitiveValues: ReadonlyArray<string>): string | null => {
+/** Select complete trailing lines before redaction work. */
+const startupTextWindow = (text: string): string | null => {
   if (text.length <= STARTUP_RAW_MAX_CHARS) return text;
   const tail = text.slice(-STARTUP_RAW_MAX_CHARS);
   const newline = tail.indexOf("\n");
   if (newline === -1) return null;
-  const start = text.length - tail.length + newline + 1;
-  for (const value of sensitiveValues) {
-    if (!value.includes("\n")) continue;
-    // Launch fields are bounded by their contracts. An unusually large inherited
-    // multiline credential cannot be checked safely within the diagnostic budget.
-    if (value.length > STARTUP_RAW_MAX_CHARS) return null;
-    const preceding = Math.min(start, value.length - 1);
-    const boundary = text.slice(start - preceding, start + value.length - 1);
-    const match = boundary.lastIndexOf(value, preceding - 1);
-    if (match !== -1 && match + value.length > preceding) return null;
-  }
   return tail.slice(newline + 1);
 };
 
@@ -229,7 +218,7 @@ const sanitizeStartupText = (
       ),
     ),
   ];
-  const window = startupTextWindow(text, [lease.command, ...values]);
+  const window = startupTextWindow(text);
   if (window === null) return "[Startup output omitted: oversized line or partial credential.]";
   const plain = NodeUtil.stripVTControlCharacters(window);
   // Coverage stays fixed in size even when many literal occurrences overlap.
@@ -474,12 +463,21 @@ const make = Effect.gen(function* () {
       .pipe(Effect.orElseSucceed(() => null));
     const history = diagnostics?.history ?? null;
     const redactionValues = diagnostics?.redactionValues ?? null;
+    // PTYs can rewrite line endings and terminal controls. Literal matching cannot
+    // establish coverage for those values; omit before slicing or stripping output.
+    const unsafeRendering = [
+      lease.command,
+      ...Object.values(lease.env ?? {}),
+      ...(redactionValues ?? []),
+    ].some((value) => value.length > STARTUP_RAW_MAX_CHARS || /\p{Cc}/u.test(value));
     const output =
       history === null
         ? null
         : redactionValues === null
           ? "[Startup output omitted: launch credential coverage unavailable.]"
-          : sanitizeStartupText(history, lease, redactionValues);
+          : unsafeRendering
+            ? "[Startup output omitted: command or credentials cannot be safely matched after terminal rendering.]"
+            : sanitizeStartupText(history, lease, redactionValues);
     const tail = output?.split(/\r?\n/).slice(-12).join("\n").slice(-STARTUP_OUTPUT_MAX_CHARS);
     const terminal =
       summary === null

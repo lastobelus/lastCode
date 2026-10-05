@@ -2053,22 +2053,101 @@ describe("PreviewHosting", () => {
   );
 
   it.effect.each([
-    { name: "whitespace", key: "SECRET", value: "first second" },
+    { name: "whitespace", key: "SECRET", value: "first second", omitted: false },
     {
       name: "multiline",
       key: "PRIVATE_KEY",
       value: "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
+      omitted: true,
     },
-  ])("masks a complete $name value overlapping a generic assignment", ({ key, value }) =>
+  ])(
+    "protects a complete $name value overlapping a generic assignment",
+    ({ key, value, omitted }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-overlap-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          startupHistory: `${key}=${value}\nError: Cannot find module 'vite'`,
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                };
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command: "pnpm dev",
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+                env: { [key]: value },
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.include(
+                result.failure.message,
+                omitted
+                  ? "cannot be safely matched after terminal rendering"
+                  : "[redacted]\nError: Cannot find module 'vite'",
+              );
+              for (const fragment of value.split(/\s+/)) {
+                assert.notInclude(result.failure.message, fragment);
+              }
+            }
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    {
+      name: "CRLF-rendered PEM",
+      value: "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
+      history: "-----BEGIN PRIVATE KEY-----\r\nprivate-key-body\r\n-----END PRIVATE KEY-----",
+      fragment: "private-key-body",
+    },
+    {
+      name: "ANSI-stripped credential",
+      value: "\u001b[31mprivate-rendered-value\u001b[0m",
+      history: "private-rendered-value",
+      fragment: "private-rendered-value",
+    },
+    {
+      name: "rendered credential crossing the truncation boundary",
+      value: "credential-prefix\nprivate-rendered-value",
+      history: `credential-prefix\r\nprivate-rendered-value\r\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
+      fragment: "private-rendered-value",
+    },
+    {
+      name: "oversized captured credential",
+      value: "private-rendered-value".repeat(1_000),
+      history: "private-rendered-value",
+      fragment: "private-rendered-value",
+    },
+  ])("omits transcript diagnostics for $name", ({ value, history, fragment }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-overlap-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-rendered-" });
       const config = yield* Effect.provide(
         ServerConfig.ServerConfig,
         ServerConfig.layerTest(process.cwd(), root),
       );
       const harness = testTerminalHarness({
-        startupHistory: `${key}=${value}\nError: Cannot find module 'vite'`,
+        startupHistory: `${"old noise\n".repeat(5_000)}${history}`,
+        startupRedactionValues: [value],
         onRefreshMetadata: () =>
           Effect.sync(() => {
             const summary = harness.summaries[0];
@@ -2089,16 +2168,21 @@ describe("PreviewHosting", () => {
               command: "pnpm dev",
               cwd: "/workspace",
               url: PREVIEW_URL,
-              env: { [key]: value },
             }),
           );
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") {
-            assert.include(result.failure.message, "[redacted]\nError: Cannot find module 'vite'");
-            for (const fragment of value.split(/\s+/)) {
-              assert.notInclude(result.failure.message, fragment);
-            }
+            assert.include(result.failure.message, `at ${PREVIEW_URL}.\n`);
+            assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
+            assert.include(
+              result.failure.message,
+              "[Startup output omitted: command or credentials cannot be safely matched after terminal rendering.]",
+            );
+            assert.notInclude(result.failure.message, fragment);
+            assert.notInclude(result.failure.message, "Cannot find module 'vite'");
+            assert.isAtMost(result.failure.message.length, 1_024);
           }
+          assert.equal(harness.historyDeletes.length, 1);
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
