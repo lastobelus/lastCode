@@ -83,6 +83,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -2997,6 +2998,7 @@ export function makeClaudeAdapterV2(
           now,
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        const eventPublication = yield* Semaphore.make(1);
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
@@ -3669,7 +3671,7 @@ export function makeClaudeAdapterV2(
             providerThread: remembered,
             status,
           });
-        });
+        }, eventPublication.withPermits(1));
 
         // A subagent's projection ids derive from its task id, so they are
         // the same whether this process created the subagent or not.
@@ -6591,7 +6593,7 @@ export function makeClaudeAdapterV2(
           // settles the prompt's turn.
           yield* releaseHeldRootFrames(context);
           yield* handleRoutedSdkMessage(input);
-        });
+        }, eventPublication.withPermits(1));
 
         const canUseToolEffect = Effect.fn("ClaudeAdapterV2.canUseTool")(function* (
           toolName: Parameters<CanUseTool>[0],
@@ -6637,7 +6639,7 @@ export function makeClaudeAdapterV2(
             // the held output goes with it to the pending prompt turn, as it
             // did before this turn was held. ExitPlanMode is answered at once
             // below, so its frames stay held.
-            yield* releaseHeldRootFrames(context);
+            yield* releaseHeldRootFrames(context).pipe(eventPublication.withPermits(1));
             if (toolName !== "Agent") {
               yield* ensureToolCallStarted({
                 context,
@@ -7111,7 +7113,7 @@ export function makeClaudeAdapterV2(
                   heldContext !== null &&
                   heldContext.heldRootFrames.length > 0
                 ) {
-                  yield* releaseHeldRootFrames(heldContext);
+                  yield* releaseHeldRootFrames(heldContext).pipe(eventPublication.withPermits(1));
                 }
                 const ownsLiveQuery = yield* Ref.modify(queryContext, (current) =>
                   current?.query === querySession ? [true, null] : [false, current],
@@ -7119,7 +7121,7 @@ export function makeClaudeAdapterV2(
                 if (ownsLiveQuery) {
                   yield* finalizeActiveTurnAfterQueryExit(
                     exit._tag === "Failure" ? exit.cause : undefined,
-                  );
+                  ).pipe(eventPublication.withPermits(1));
                 }
               }),
             ),
@@ -7251,7 +7253,9 @@ export function makeClaudeAdapterV2(
               // session, or a duplicate request): settle immediately instead
               // of leaving a run waiting on a prompt that was never sent.
               const completedAt = yield* DateTime.now;
-              yield* finalizeActiveTurn({ context, status: "completed", completedAt });
+              yield* finalizeActiveTurn({ context, status: "completed", completedAt }).pipe(
+                eventPublication.withPermits(1),
+              );
               return;
             }
             // Replay any result message last: a result finalizes the turn, and
@@ -7288,7 +7292,9 @@ export function makeClaudeAdapterV2(
             );
             if (hasOpaqueTaskNotification && !hasNativeWakeFrame) {
               const completedAt = yield* DateTime.now;
-              yield* finalizeActiveTurn({ context, status: "completed", completedAt });
+              yield* finalizeActiveTurn({ context, status: "completed", completedAt }).pipe(
+                eventPublication.withPermits(1),
+              );
             }
           },
           (effect, turnInput) =>
@@ -7377,7 +7383,7 @@ export function makeClaudeAdapterV2(
               context: currentTurn,
               status: "interrupted",
               completedAt,
-            });
+            }).pipe(eventPublication.withPermits(1));
             yield* Deferred.succeed(existing.closed, undefined);
           },
           (effect, turnInput) =>
@@ -7492,6 +7498,17 @@ export function makeClaudeAdapterV2(
           getModelContextWindow: (selection) =>
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          publishEventsBarrier: (barrier) =>
+            eventPublication.withPermits(1)(
+              Effect.gen(function* () {
+                const observation = yield* barrier.observe;
+                yield* emitProviderEvent({
+                  type: "events.barrier",
+                  driver: CLAUDE_PROVIDER,
+                  after: barrier.after(observation),
+                });
+              }),
+            ),
           inspectTurn: ({ providerThread, providerTurnId }) =>
             Effect.gen(function* () {
               const event = terminalEvidence.get(providerThread.id);

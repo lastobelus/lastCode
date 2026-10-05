@@ -45,6 +45,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import type {
   ProviderAdapterV2Event,
   ProviderAdapterV2EventSubscription,
+  ProviderBackgroundWorkObservation,
   ProviderAdapterV2RuntimePolicy,
   ProviderAdapterV2SessionRuntime,
   ProviderAdapterV2TurnMessage,
@@ -373,6 +374,8 @@ export function routeProviderEvent(
   });
 
   switch (event.type) {
+    case "events.barrier":
+      return [true, state];
     case "provider_session.updated":
       // The session manager persists process-wide status once for every
       // attached app thread before broadcasting the adapter event.
@@ -1011,6 +1014,12 @@ export const layer: Layer.Layer<
             ReadonlyMap<TurnItemId, OrchestrationV2TurnItem>
           >(new Map());
           const recoveredBackgroundDrain = yield* Ref.make(false);
+          const activeSubscription =
+            yield* Ref.make<ProviderAdapterV2EventSubscription>(eventSubscription);
+          const drainRequested = yield* Ref.make(false);
+          const drainObserved = yield* Ref.make<ProviderBackgroundWorkObservation | "unobserved">(
+            "unobserved",
+          );
           const makeBackgroundSettlement = Effect.gen(function* () {
             {
               // Reload saved rows: recording can commit an item before its
@@ -1187,19 +1196,19 @@ export const layer: Layer.Layer<
                 new Set([...current].filter((id) => inheritedBackgroundTurnItemsById.has(id))),
             );
           });
-          const hasConfirmedBackgroundDrain = Effect.gen(function* () {
+          const inspectBackgroundWork = Effect.gen(function* () {
             const probe = input.session.hasPendingBackgroundWorkForThread;
-            if (probe === undefined) return false;
+            if (probe === undefined) return "unknown" as const;
             // A failed probe is unknown. Only an authoritative thread-scoped
             // negative can settle rows while the shared runtime is still live.
             return yield* probe(yield* Ref.get(latestProviderThread)).pipe(
-              Effect.map((pending) => !pending),
-              Effect.catchCause(() => Effect.succeed(false)),
+              Effect.map((pending) => (pending ? ("pending" as const) : ("drained" as const))),
+              Effect.catchCause(() => Effect.succeed("unknown" as const)),
             );
           });
-          const settleRecoveredBackground = (runtimeReleased = false) =>
+          const settleRecoveredBackground = (runtimeReleased = false, drainConfirmed = false) =>
             Effect.gen(function* () {
-              if (!runtimeReleased && !(yield* hasConfirmedBackgroundDrain)) return;
+              if (!runtimeReleased && !drainConfirmed) return;
               const events = yield* makeBackgroundSettlement;
               const providerThread = yield* Ref.get(latestProviderThread);
               if (
@@ -1460,7 +1469,28 @@ export const layer: Layer.Layer<
               return true;
             }
             if (yield* Ref.get(recoveredBackgroundDrain)) {
-              const settlement = yield* Effect.exit(settleRecoveredBackground());
+              const observation = yield* Ref.get(drainObserved);
+              // Empty lifecycle refs cannot establish an outcome: a row can
+              // commit before its tracker fails. Unknown keeps this reader.
+              if (observation === "pending" || observation === "unknown") return false;
+              if (observation === "unobserved") {
+                const subscription = yield* Ref.get(activeSubscription);
+                if (subscription.requestDrain !== undefined && !(yield* Ref.get(drainRequested))) {
+                  yield* Ref.set(drainRequested, true);
+                  yield* subscription.requestDrain({
+                    observe: inspectBackgroundWork,
+                    after: (captured) =>
+                      Ref.set(drainObserved, captured).pipe(
+                        Effect.andThen(Ref.set(drainRequested, false)),
+                      ),
+                  });
+                }
+                return false;
+              }
+              // The native publication permit and manager fanout put this
+              // marker after completion emission. Its consumer callback runs
+              // only after all earlier database ingestion in this subscription.
+              const settlement = yield* Effect.exit(settleRecoveredBackground(false, true));
               if (Exit.isFailure(settlement)) {
                 yield* Effect.logWarning(
                   "Recovered background recording is unavailable; retaining its reader",
@@ -1471,6 +1501,7 @@ export const layer: Layer.Layer<
                 );
                 return false;
               }
+              return true;
             }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
             if (childProviderTurns.size > 0) {
@@ -1572,19 +1603,18 @@ export const layer: Layer.Layer<
                   yield* finalizeRootRun(
                     terminal,
                     [...receipt, ...terminalEvents],
-                    runtimeReleased || (yield* hasConfirmedBackgroundDrain),
+                    runtimeReleased,
                   ).pipe(Effect.onError(() => resumedSubscription?.close ?? Effect.void));
                   if (resumedSubscription !== undefined) {
-                    if (
-                      yield* shouldStopProviderEventIngestion.pipe(
-                        Effect.onError(() => resumedSubscription.close),
-                      )
-                    ) {
-                      yield* resumedSubscription.close;
-                    } else {
-                      yield* Ref.set(consumerStopped, false);
-                      yield* consumeProviderEvents(resumedSubscription).pipe(Effect.forkDetach);
-                    }
+                    yield* Ref.set(activeSubscription, resumedSubscription);
+                    yield* Ref.set(drainObserved, "unobserved");
+                    yield* Ref.set(drainRequested, false);
+                    yield* Ref.set(consumerStopped, false);
+                    yield* consumeProviderEvents(resumedSubscription).pipe(Effect.forkDetach);
+                    // Recovery holds the source command lock. Queue the drain
+                    // separately, without waiting for its ingestion under that
+                    // same lock, and always start the buffered reader first.
+                    yield* shouldStopProviderEventIngestion.pipe(Effect.forkDetach);
                   }
                 }).pipe(
                   Effect.mapError(
@@ -1606,6 +1636,11 @@ export const layer: Layer.Layer<
               ),
               Stream.tap((event) =>
                 Effect.gen(function* () {
+                  if (event.type === "events.barrier") {
+                    yield* event.after;
+                    return;
+                  }
+                  yield* Ref.set(drainObserved, "unobserved");
                   let storedEventCount = 0;
                   const deliveredEvent = filterAssistantEvent(
                     event,
@@ -1688,16 +1723,16 @@ export const layer: Layer.Layer<
                   yield* trackChildLifecycle(event, deliveredEvent !== null);
                 }).pipe(
                   Effect.catchCause((cause) =>
-                    Ref.get(recoveredBackgroundDrain).pipe(
-                      Effect.flatMap((recovered) =>
-                        recovered && !Cause.hasInterruptsOnly(cause)
+                    Ref.get(rootRunFinalized).pipe(
+                      Effect.flatMap((finalized) =>
+                        finalized && !Cause.hasInterruptsOnly(cause)
                           ? Effect.logWarning(
-                              "Recovered background event could not be recorded; retaining its reader",
+                              "Post-terminal background event could not be recorded; retaining its reader",
                               {
                                 runId: input.run.id,
                                 cause,
                               },
-                            )
+                            ).pipe(Effect.andThen(Ref.set(recoveredBackgroundDrain, true)))
                           : Effect.failCause(cause),
                       ),
                     ),
@@ -1798,7 +1833,7 @@ export const layer: Layer.Layer<
               ),
               Effect.ensuring(
                 Effect.gen(function* () {
-                  if (!(yield* Ref.get(recoveredBackgroundDrain))) return;
+                  if (!(yield* Ref.get(rootRunFinalized))) return;
                   const terminal = yield* Ref.get(terminalEvent);
                   if (terminal === null) return;
                   const inspection = yield* (

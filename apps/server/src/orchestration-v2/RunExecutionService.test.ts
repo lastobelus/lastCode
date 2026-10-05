@@ -33,9 +33,12 @@ import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -49,6 +52,7 @@ import {
   ProviderAdapterTurnStartError,
   type ProviderAdapterV2Error,
   type ProviderAdapterV2Event,
+  type ProviderAdapterV2EventSubscription,
   type ProviderAdapterV2SessionRuntime,
 } from "./ProviderAdapter.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -3408,6 +3412,7 @@ function captureRootRunTermination(input: {
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
   readonly persistedBackgroundEvents?: ReadonlyArray<ProviderAdapterV2Event>;
   readonly failRecordingEvent?: (event: ProviderAdapterV2Event) => boolean;
+  readonly onIngested?: (event: ProviderAdapterV2Event) => Effect.Effect<void>;
   readonly afterIngestion?: Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>;
 }) {
   return Effect.gen(function* () {
@@ -3515,6 +3520,7 @@ function captureRootRunTermination(input: {
             ingestNormalized: (payload) =>
               Ref.update(ingested, (current) => [...current, payload.event]).pipe(
                 Effect.andThen(Ref.update(durable, (current) => [...current, payload.event])),
+                Effect.andThen(input.onIngested?.(payload.event) ?? Effect.void),
                 Effect.andThen(
                   Effect.suspend(() =>
                     input.failRecordingEvent?.(payload.event)
@@ -3551,6 +3557,7 @@ function captureRootRunTermination(input: {
             : { hasPendingBackgroundWorkForThread: input.hasPendingBackgroundWorkForThread }),
           subscribeEvents:
             input.subscribeEvents?.pipe(
+              Effect.flatMap(bufferRecoveryTestSubscription),
               Effect.map((subscription) => ({
                 ...subscription,
                 close: subscription.close.pipe(
@@ -3649,6 +3656,42 @@ function captureRootRunTermination(input: {
       ingested: yield* Ref.get(ingested),
       observed: yield* Ref.get(observed),
     };
+  });
+}
+
+// The fixture's adapter stream feeds a manager-style queue. The replacement
+// reader must consume all earlier events before acknowledging its marker.
+function bufferRecoveryTestSubscription(subscription: ProviderAdapterV2EventSubscription) {
+  if (subscription.requestDrain !== undefined) return Effect.succeed(subscription);
+  return Effect.gen(function* () {
+    type Signal =
+      | { readonly event: ProviderAdapterV2Event }
+      | { readonly cause: Cause.Cause<ProviderAdapterV2Error> };
+    const queue = yield* Queue.unbounded<Signal, Cause.Done>();
+    const producer = yield* subscription.events.pipe(
+      Stream.runForEach((event) => Queue.offer(queue, { event })),
+      Effect.catchCause((cause) => Queue.offer(queue, { cause })),
+      Effect.forkDetach,
+    );
+    return {
+      events: Stream.fromQueue(queue).pipe(
+        Stream.mapEffect((signal) =>
+          "event" in signal ? Effect.succeed(signal.event) : Effect.failCause(signal.cause),
+        ),
+      ),
+      close: Fiber.interrupt(producer).pipe(
+        Effect.andThen(Queue.end(queue)),
+        Effect.andThen(subscription.close),
+        Effect.asVoid,
+      ),
+      requestDrain: (barrier) =>
+        Effect.gen(function* () {
+          const observation = yield* barrier.observe;
+          yield* Queue.offer(queue, {
+            event: { type: "events.barrier", driver, after: barrier.after(observation) },
+          });
+        }),
+    } satisfies ProviderAdapterV2EventSubscription;
   });
 }
 
@@ -4256,6 +4299,7 @@ for (const runtimeReleased of [false, true]) {
           | undefined;
         let subscriptions = 0;
         let starts = 0;
+        const resumedClosed = yield* Deferred.make<void>();
         const result = yield* captureRootRunTermination({
           key,
           shouldFinalizeRun: () => Effect.succeed(true),
@@ -4333,7 +4377,7 @@ for (const runtimeReleased of [false, true]) {
                       ),
                     )
                   : Stream.never,
-              close: Effect.void,
+              close: subscriptions === 1 ? Effect.void : Deferred.succeed(resumedClosed, undefined),
             };
           }),
           hasPendingBackgroundWorkForThread: () => Effect.succeed(runtimeReleased),
@@ -4356,6 +4400,7 @@ for (const runtimeReleased of [false, true]) {
             yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [receipt], {
               runtimeReleased,
             });
+            if (!runtimeReleased) yield* Deferred.await(resumedClosed);
           }),
         });
         assert.equal(starts, 1);
@@ -4401,7 +4446,6 @@ for (const drainOutcome of [
   "completed",
   "completion_lost",
   "runtime_released",
-  "probe_unknown",
   "recording_failed",
 ] as const) {
   const completionWasLost =
@@ -4411,11 +4455,9 @@ for (const drainOutcome of [
       ? "retains the recovered reader after recording fails and preserves its saved completion"
       : drainOutcome === "runtime_released"
         ? "settles recovered background rows when the reattached runtime later exits"
-        : drainOutcome === "probe_unknown"
-          ? "preserves live recovered work when its exact background probe fails"
-          : completionWasLost
-            ? "heals a lost completion when the recovered reader observes the exact background drain"
-            : "reattaches recovery ingestion until live background work reports its real completion",
+        : completionWasLost
+          ? "heals a lost completion when the recovered reader observes the exact background drain"
+          : "reattaches recovery ingestion until live background work reports its real completion",
     () =>
       Effect.gen(function* () {
         const key = `recover-background-live:${drainOutcome}`;
@@ -4510,10 +4552,7 @@ for (const drainOutcome of [
               close: Deferred.succeed(closed, undefined),
             };
           }),
-          hasPendingBackgroundWorkForThread: () =>
-            drainOutcome === "probe_unknown"
-              ? Effect.die("Exact background probe is unavailable")
-              : Ref.get(pending),
+          hasPendingBackgroundWorkForThread: () => Ref.get(pending),
           inspectTurn: () =>
             Effect.sync(() => ({
               status: "terminal" as const,
@@ -4556,3 +4595,319 @@ for (const drainOutcome of [
       }),
   );
 }
+
+for (const timing of ["node_first", "queued_before_reader", "after_pending_marker"] as const) {
+  it.effect(`preserves queued command and tool completions during recovery (${timing})`, () =>
+    Effect.gen(function* () {
+      const key = `recover-native-order:${timing}`;
+      const ids = backgroundScenarioIds(key);
+      const toolId = TurnItemId.make(`${ids.itemId}:tool`);
+      const pending = yield* Ref.make(true);
+      const publication = yield* Semaphore.make(1);
+      const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+      const markerQueued = yield* Deferred.make<void>();
+      const allowMarker = yield* Deferred.make<void>();
+      const closed = yield* Deferred.make<void>();
+      let firstMarker = true;
+      let subscriptions = 0;
+      let registration:
+        | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+        | undefined;
+      const complete = publication.withPermits(1)(
+        Effect.gen(function* () {
+          // Codex clears its native tracker before its node/item publications.
+          yield* Ref.set(pending, false);
+          yield* Queue.offer(queue, {
+            type: "node.updated",
+            driver,
+            node: {
+              id: NodeId.make(`${key}:command`),
+              threadId: ids.threadId,
+              runId: ids.runId,
+              providerThreadId: ids.providerThreadId,
+              status: "completed",
+            } as OrchestrationV2ExecutionNode,
+          });
+          for (const [type, id] of [
+            ["command_execution", ids.itemId],
+            ["dynamic_tool", toolId],
+          ] as const) {
+            const event = backgroundTurnItemEvent(ids, type, "completed", 2, id);
+            assert.equal(event.type, "turn_item.updated");
+            if (
+              event.type !== "turn_item.updated" ||
+              (event.turnItem.type !== "command_execution" &&
+                event.turnItem.type !== "dynamic_tool")
+            )
+              return;
+            yield* Queue.offer(queue, {
+              ...event,
+              turnItem: {
+                ...event.turnItem,
+                output: `${type} real output`,
+                ...(event.turnItem.type === "command_execution" ? { exitCode: 0 } : {}),
+              },
+            });
+          }
+        }),
+      );
+      const result = yield* captureRootRunTermination({
+        key,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        subscribeEvents: Effect.gen(function* () {
+          subscriptions++;
+          if (subscriptions === 1)
+            return {
+              events: Stream.make(
+                backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+                backgroundTurnItemEvent(ids, "dynamic_tool", "running", 1, toolId),
+              ).pipe(
+                Stream.concat(
+                  Stream.fail(
+                    new ProviderAdapterEventStreamError({
+                      driver,
+                      providerSessionId: ProviderSessionId.make(`session:${key}`),
+                      cause: "Reader stopped",
+                    }),
+                  ),
+                ),
+              ),
+              close: Effect.void,
+            };
+          if (timing === "queued_before_reader") yield* complete;
+          return {
+            events: Stream.fromQueue(queue),
+            close: Queue.end(queue).pipe(
+              Effect.andThen(Deferred.succeed(closed, undefined)),
+              Effect.asVoid,
+            ),
+            requestDrain: (barrier) =>
+              publication.withPermits(1)(
+                Effect.gen(function* () {
+                  const captured = yield* barrier.observe;
+                  const hold = firstMarker && timing === "after_pending_marker";
+                  firstMarker = false;
+                  yield* Queue.offer(queue, {
+                    type: "events.barrier",
+                    driver,
+                    after: (hold ? Deferred.await(allowMarker) : Effect.void).pipe(
+                      Effect.andThen(barrier.after(captured)),
+                    ),
+                  });
+                  yield* Deferred.succeed(markerQueued, undefined);
+                }),
+              ),
+          } satisfies ProviderAdapterV2EventSubscription;
+        }),
+        hasPendingBackgroundWorkForThread: () => Ref.get(pending),
+        inspectTurn: () =>
+          Effect.succeed({ status: "terminal", event: rootTerminalEvent(ids, "completed") }),
+        recovery: {
+          register: (value) =>
+            Effect.sync(() => {
+              registration = value;
+            }),
+          suspect: () => Effect.void,
+          completed: () => Effect.void,
+        },
+        afterIngestion: Effect.gen(function* () {
+          yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [], {
+            runtimeReleased: false,
+          });
+          if (timing !== "queued_before_reader") {
+            yield* Deferred.await(markerQueued);
+            assert.isFalse(yield* Deferred.isDone(closed));
+            yield* complete;
+            yield* Deferred.succeed(allowMarker, undefined);
+          }
+          yield* Deferred.await(closed);
+        }),
+      });
+      assert.isEmpty(result.written);
+      const completions = result.ingested.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.status === "completed"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.deepEqual(
+        completions.map((item) => item.id),
+        [ids.itemId, toolId],
+      );
+      assert.deepEqual(
+        completions.map((item) =>
+          item.type === "command_execution" || item.type === "dynamic_tool" ? item.output : null,
+        ),
+        ["command_execution real output", "dynamic_tool real output"],
+      );
+      assert.equal(
+        completions[0]?.type === "command_execution" ? completions[0].exitCode : null,
+        0,
+      );
+    }),
+  );
+}
+
+it.effect("keeps durable-only background rows open after an unknown captured probe", () =>
+  Effect.gen(function* () {
+    const key = "recover-durable-only-unknown";
+    const ids = backgroundScenarioIds(key);
+    const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+    const unknownObserved = yield* Deferred.make<void>();
+    const closed = yield* Deferred.make<void>();
+    let released = false;
+    let subscriptions = 0;
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    const result = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      persistedBackgroundEvents: [backgroundTurnItemEvent(ids, "command_execution", "running", 1)],
+      subscribeEvents: Effect.gen(function* () {
+        subscriptions++;
+        if (subscriptions === 1)
+          return {
+            events: Stream.fail(
+              new ProviderAdapterEventStreamError({
+                driver,
+                providerSessionId: ProviderSessionId.make(`session:${key}`),
+                cause: "Tracker never ran",
+              }),
+            ),
+            close: Effect.void,
+          };
+        return {
+          events: Stream.fromQueue(queue),
+          close: Deferred.succeed(closed, undefined),
+          requestDrain: (barrier) =>
+            Effect.gen(function* () {
+              const captured = yield* barrier.observe;
+              assert.equal(captured, "unknown");
+              yield* Queue.offer(queue, {
+                type: "events.barrier",
+                driver,
+                after: barrier
+                  .after(captured)
+                  .pipe(Effect.andThen(Deferred.succeed(unknownObserved, undefined))),
+              });
+            }),
+        } satisfies ProviderAdapterV2EventSubscription;
+      }),
+      hasPendingBackgroundWorkForThread: () => Effect.die("Probe unavailable"),
+      inspectTurn: () =>
+        Effect.sync(() => ({
+          status: "terminal" as const,
+          event: rootTerminalEvent(ids, "completed"),
+          ...(released ? { runtimeReleased: true as const } : {}),
+        })),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        yield* registration!.finalize(rootTerminalEvent(ids, "completed"), [], {
+          runtimeReleased: false,
+        });
+        yield* Deferred.await(unknownObserved);
+        assert.isFalse(yield* Deferred.isDone(closed));
+        released = true;
+        yield* Queue.end(queue);
+        yield* Deferred.await(closed);
+      }),
+    });
+    assert.deepEqual(
+      result.written.map((item) => item.status),
+      ["interrupted"],
+    );
+    assert.equal(subscriptions, 2);
+  }),
+);
+
+it.effect(
+  "settles native background rows after an ordinary completed reader loses its runtime",
+  () =>
+    Effect.gen(function* () {
+      const key = "ordinary-terminal-background-release";
+      const ids = backgroundScenarioIds(key);
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const toolId = TurnItemId.make(`${ids.itemId}:tool`);
+      const subagentIds = { ...ids, itemId: TurnItemId.make(`${ids.itemId}:subagent`) };
+      const result = yield* captureRootRunTermination({
+        key,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: () =>
+          Stream.fromIterable([
+            childThreadCreatedEvent(ids),
+            backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+            backgroundTurnItemEvent(ids, "dynamic_tool", "running", 2, toolId),
+            {
+              type: "subagent.updated",
+              driver,
+              subagent: makeRunOwnedSubagentFixture({
+                ids,
+                providerInstanceId,
+                childThreadId: ids.childThreadId,
+                driver,
+                status: "running",
+              }),
+            },
+            {
+              type: "turn_item.updated",
+              driver,
+              turnItem: makeRunOwnedSubagentTurnItemFixture({
+                ids: subagentIds,
+                providerInstanceId,
+                childThreadId: ids.childThreadId,
+                driver,
+                status: "running",
+              }),
+            },
+            {
+              type: "node.updated",
+              driver,
+              node: makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
+            },
+            {
+              type: "turn_item.updated",
+              driver,
+              turnItem: makeLinkedChildTurnItemFixture({ ids, driver, type: "command_execution" }),
+            },
+            rootTerminalEvent(ids, "completed"),
+          ] satisfies ReadonlyArray<ProviderAdapterV2Event>).pipe(
+            Stream.concat(
+              Stream.fail(
+                new ProviderAdapterEventStreamError({
+                  driver,
+                  providerSessionId: ProviderSessionId.make(`session:${key}`),
+                  cause: "Runtime released after root completion",
+                }),
+              ),
+            ),
+          ),
+        inspectTurn: () =>
+          Effect.succeed({
+            status: "terminal",
+            event: rootTerminalEvent(ids, "completed"),
+            runtimeReleased: true,
+          }),
+      });
+      assert.deepEqual(
+        result.written.map((item) => [item.id, item.status]).sort(),
+        [
+          [ids.itemId, "interrupted"],
+          [toolId, "interrupted"],
+          [subagentIds.itemId, "interrupted"],
+          [ids.childItemId, "interrupted"],
+        ].sort(),
+      );
+      assert.deepEqual(
+        result.observed.filter((value) => value.startsWith("run:")),
+        ["run:waiting"],
+      );
+      assert.equal(result.effects.length, 1);
+    }),
+);

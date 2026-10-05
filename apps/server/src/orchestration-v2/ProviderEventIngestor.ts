@@ -389,6 +389,8 @@ export const layer: Layer.Layer<
     const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
       Effect.gen(function* () {
         switch (input.event.type) {
+          case "events.barrier":
+            return [];
           case "app_thread.created": {
             // Native sessions can reannounce children after reconnecting. Creation
             // must not replace their durable app metadata, including promotion.

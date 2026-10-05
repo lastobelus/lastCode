@@ -1397,6 +1397,8 @@ export const layerWithOptions = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        publishEventsBarrier: ProviderAdapterV2SessionRuntime["publishEventsBarrier"],
+        driver: ProviderDriverKind,
       ): Effect.Effect<ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
@@ -1428,7 +1430,30 @@ export const layerWithOptions = (
             ),
             Stream.ensuring(close),
           );
-          return { events, close } satisfies ProviderAdapterV2EventSubscription;
+          return {
+            events,
+            close,
+            ...(publishEventsBarrier === undefined
+              ? {}
+              : {
+                  requestDrain: (input) =>
+                    publishEventsBarrier({
+                      observe: input.observe,
+                      after: (observation) =>
+                        Effect.gen(function* () {
+                          if (!(yield* Ref.get(subscribers)).has(subscriberId)) return;
+                          yield* Queue.offer(queue, {
+                            type: "event",
+                            event: {
+                              type: "events.barrier",
+                              driver,
+                              after: input.after(observation),
+                            },
+                          });
+                        }),
+                    }),
+                }),
+          } satisfies ProviderAdapterV2EventSubscription;
         });
 
       const decorateRuntime = (
@@ -1438,7 +1463,11 @@ export const layerWithOptions = (
         >,
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(
+          eventSubscribers,
+          runtime.publishEventsBarrier,
+          runtime.driver,
+        );
         const inspectTurn = runtime.inspectTurn;
         return {
           ...runtime,
@@ -1621,6 +1650,7 @@ export const layerWithOptions = (
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
+            if (event.type === "events.barrier") return event.after;
             if (
               event.type === "provider_session.updated" &&
               event.providerSession.status === "stopped"

@@ -5388,6 +5388,17 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          publishEventsBarrier: (barrier) =>
+            turnTerminalizationPermit.withPermits(1)(
+              Effect.gen(function* () {
+                const observation = yield* barrier.observe;
+                yield* emitProviderEvent({
+                  type: "events.barrier",
+                  driver: CODEX_PROVIDER,
+                  after: barrier.after(observation),
+                });
+              }),
+            ),
           inspectTurn: ({ providerThread, providerTurnId }) =>
             Effect.gen(function* () {
               const event = terminalEvidence.get(providerThread.id);

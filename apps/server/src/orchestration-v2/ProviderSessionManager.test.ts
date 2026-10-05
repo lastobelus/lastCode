@@ -532,6 +532,15 @@ function makeProviderAdapter(
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
+          publishEventsBarrier: (barrier) =>
+            Effect.gen(function* () {
+              const captured = yield* barrier.observe;
+              yield* Queue.offer(events, {
+                type: "events.barrier",
+                driver: CODEX_DRIVER,
+                after: barrier.after(captured),
+              });
+            }),
           ...(options.inspectTurn === undefined ? {} : { inspectTurn: options.inspectTurn }),
           events: options.failEventStream
             ? Stream.fail(
@@ -1164,6 +1173,102 @@ it.effect("ProviderSessionManagerV2 closes event subscriptions normally on serve
     });
 
     yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
+it.effect("orders native markers through fanout and the requesting subscriber's ingestion", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("drain-marker-thread");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const requested = yield* runtime.subscribeEvents!;
+      const sibling = yield* runtime.subscribeEvents!;
+      const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+      const pending = yield* Ref.make(true);
+      const entered = yield* Deferred.make<void>();
+      const persisted = yield* Deferred.make<void>();
+      const observed = yield* Deferred.make<void>();
+      const sequence: string[] = [];
+      const event = {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: idAllocator.derive.providerThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: "drain-native-thread",
+        }),
+        providerTurnId: idAllocator.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "drain-native-turn",
+        }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      } as const;
+      yield* Queue.offer(queue, event);
+      yield* requested.requestDrain!({
+        observe: Ref.get(pending).pipe(
+          Effect.map((value) => (value ? ("pending" as const) : ("drained" as const))),
+        ),
+        after: (captured) =>
+          Effect.sync(() => {
+            sequence.push(`marker:${captured}`);
+          }),
+      });
+      yield* Ref.set(pending, false);
+      yield* Queue.offer(queue, { ...event, runOrdinal: 2 });
+      yield* requested.requestDrain!({
+        observe: Effect.succeed("drained"),
+        after: (captured) =>
+          Effect.sync(() => {
+            sequence.push(`marker:${captured}`);
+          }).pipe(Effect.andThen(Deferred.succeed(observed, undefined))),
+      });
+      const reader = yield* requested.events.pipe(
+        Stream.runForEach((value) =>
+          value.type === "events.barrier"
+            ? value.after
+            : Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(persisted)),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    sequence.push(
+                      `stored:${value.type === "turn.terminal" ? value.runOrdinal : value.type}`,
+                    );
+                  }),
+                ),
+              ),
+        ),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      assert.isFalse(yield* Deferred.isDone(observed));
+      yield* Deferred.succeed(persisted, undefined);
+      yield* Deferred.await(observed);
+      assert.deepEqual(sequence, ["stored:1", "marker:pending", "stored:2", "marker:drained"]);
+      const siblings = yield* sibling.events.pipe(Stream.take(2), Stream.runCollect);
+      assert.isTrue(siblings.every((value) => value.type === "turn.terminal"));
+      yield* requested.close;
+      yield* sibling.close;
+      yield* Fiber.join(reader);
+    }).pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
   }),
 );
 

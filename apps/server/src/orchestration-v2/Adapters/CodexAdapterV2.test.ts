@@ -64,6 +64,7 @@ import {
   ProviderAdapterRollbackThreadError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
+  type ProviderAdapterV2SessionRuntime,
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
@@ -1669,6 +1670,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onEvent: (event: ProviderAdapterV2Event) => Effect.Effect<unknown> = () => Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: (threadId: string) => Effect.Effect<unknown>,
+    beforeEmitInbound?: (
+      entry: Extract<
+        CodexReplay.CodexAppServerReplayTranscript["entries"][number],
+        { readonly type: "emit_inbound" }
+      >,
+    ) => Effect.Effect<void>,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1677,7 +1684,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const continuationRequests: Array<ProviderContinuationRequest> = [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+          (beforeEmitInbound === undefined
+            ? Layer.build(CodexReplay.layerReplay(transcript))
+            : CodexReplay.makeReplayDriver(transcript, { beforeEmitInbound }).pipe(
+                Effect.flatMap((driver) => Layer.build(CodexReplay.layerReplayWithDriver(driver))),
+              )
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapterOpenSessionError({
@@ -3949,6 +3961,95 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
       ),
+  );
+
+  it.effect("orders a drained marker after native node-first command completion emission", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const allowCompletion = yield* Deferred.make<void>();
+        const firstMarker = yield* Deferred.make<void>();
+        const drained = yield* Deferred.make<void>();
+        let runtime: ProviderAdapterV2SessionRuntime | undefined;
+        let thread: OrchestrationV2ProviderThread | undefined;
+        const entries = backgroundExecTranscript.entries.map((entry) =>
+          entry.type === "emit_inbound" && entry.label === "item/completed/command-late"
+            ? { ...entry, afterMs: 0 }
+            : entry,
+        );
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({ scenario: "native-completion-drain-marker", entries }),
+          (event) =>
+            Effect.gen(function* () {
+              if (event.type === "events.barrier") {
+                yield* event.after;
+              } else if (
+                event.type === "node.updated" &&
+                event.node.nativeItemRef?.nativeId === BG_COMMAND_ITEM &&
+                event.node.status === "completed"
+              ) {
+                assert.isFalse(yield* runtime!.hasPendingBackgroundWorkForThread!(thread!));
+                yield* runtime!.publishEventsBarrier!({
+                  observe: runtime!.hasPendingBackgroundWorkForThread!(thread!).pipe(
+                    Effect.map((pending) =>
+                      pending ? ("pending" as const) : ("drained" as const),
+                    ),
+                  ),
+                  after: (captured) =>
+                    Effect.gen(function* () {
+                      assert.equal(captured, "drained");
+                      const completions = harness.events.filter(
+                        (value) =>
+                          value.type === "turn_item.updated" &&
+                          value.turnItem.type === "command_execution" &&
+                          value.turnItem.status === "completed",
+                      );
+                      assert.lengthOf(completions, 1);
+                      const completion = completions[0];
+                      assert.isTrue(
+                        completion?.type === "turn_item.updated" &&
+                          completion.turnItem.type === "command_execution" &&
+                          completion.turnItem.output === "CODEX_BG_WAKE_DONE\n" &&
+                          completion.turnItem.exitCode === 0,
+                      );
+                      yield* Deferred.succeed(drained, undefined);
+                    }),
+                });
+              }
+            }),
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "item/completed/command-late"
+              ? Deferred.await(allowCompletion)
+              : Effect.void,
+        );
+        runtime = harness.runtime;
+        thread = harness.providerThread;
+        yield* runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: thread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("native-completion-drain-attempt"),
+            text: BG_PROMPT,
+          }),
+        );
+        yield* harness.firstTerminal;
+        yield* runtime.publishEventsBarrier!({
+          observe: runtime.hasPendingBackgroundWorkForThread!(thread).pipe(
+            Effect.map((pending) => (pending ? ("pending" as const) : ("drained" as const))),
+          ),
+          after: (captured) =>
+            Effect.gen(function* () {
+              assert.equal(captured, "pending");
+              yield* Deferred.succeed(firstMarker, undefined);
+            }),
+        });
+        yield* Deferred.await(firstMarker);
+        yield* Deferred.succeed(allowCompletion, undefined);
+        yield* Deferred.await(drained);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
   );
 
   // "thread_unloaded": the thread was settled, so T3 unsubscribed and Codex
