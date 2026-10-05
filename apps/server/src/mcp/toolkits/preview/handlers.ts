@@ -217,11 +217,9 @@ const handlers = {
                     ? "invalid_request"
                     : "unavailable";
               const message =
-                error.operation === "validate"
+                error.operation === "validate" || error.operation === "ready"
                   ? error.message
-                  : error.operation === "ready"
-                    ? "The local preview did not become reachable. Check its command and URL."
-                    : "Preview hosting is unavailable on this server.";
+                  : "Preview hosting is unavailable on this server.";
               return new ContractPreviewHostingError({ reason, message });
             }
             return new ContractPreviewHostingError({

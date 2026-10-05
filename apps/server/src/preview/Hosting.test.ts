@@ -60,6 +60,8 @@ interface TerminalHarness {
     readonly terminalId?: string | undefined;
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
+  readonly startupHistory?: string;
+  readonly onHistory?: () => Effect.Effect<void, TerminalManager.TerminalHistoryError>;
 }
 
 function terminalLayer(harness: TerminalHarness) {
@@ -179,6 +181,8 @@ function terminalLayer(harness: TerminalHarness) {
       return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
+    history: () =>
+      (harness.onHistory?.() ?? Effect.void).pipe(Effect.as(harness.startupHistory ?? "")),
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
@@ -1663,11 +1667,152 @@ describe("PreviewHosting", () => {
           yield* Deferred.await(wrote);
           yield* Effect.yieldNow;
           yield* TestClock.adjust(Duration.seconds(31));
-          assert.equal((yield* Fiber.join(pending))._tag, "Failure");
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "HTTP responded, but ownership did not match");
+            assert.include(result.failure.message, "No startup output captured.");
+          }
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.closes.length, 1);
         }).pipe(Effect.provide(hostingLayer(config, harness, true, [], false))),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "captures a bounded startup failure before deleting history and redacts credentials",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(10_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-diagnostics-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const wrote = yield* Deferred.make<void>();
+        let captured = false;
+        const command = "SECRET_VALUE=inline-command-secret pnpm dev --port 5173";
+        const harness = testTerminalHarness({
+          startupHistory: `${command}\nfirst-line-only\n${"early startup noise\n".repeat(200)}\n\u001b[31mError: Cannot find module 'vite'\u001b[0m\nconfig=override-credential\nAPI_TOKEN=ambient-credential\nhttps://operator:password@localhost:5173/?token=query-credential#fragment-secret`,
+          onHistory: () =>
+            Effect.sync(() => {
+              captured = true;
+              assert.deepEqual(harness.historyDeletes, []);
+            }),
+          onCloseAttempt: () =>
+            Effect.sync(() => {
+              assert.isTrue(captured);
+            }),
+          onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pending = yield* Effect.forkScoped(
+              Effect.result(
+                hosting.launch({
+                  threadId: "thread-1",
+                  command,
+                  cwd: "/workspace",
+                  env: { CUSTOM_CONFIG: "override-credential" },
+                  url: `${PREVIEW_URL}?token=query-credential#fragment-secret`,
+                }),
+              ),
+            );
+            yield* Deferred.await(wrote);
+            yield* Effect.yieldNow;
+            yield* TestClock.adjust(Duration.seconds(31));
+            const result = yield* Fiber.join(pending);
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.equal(result.failure._tag, "PreviewHostingError");
+              assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+              assert.include(result.failure.message, "running subprocess: yes");
+              assert.include(result.failure.message, "Cannot find module 'vite'");
+              assert.include(result.failure.message, "truncated");
+              assert.isAtMost(result.failure.message.length, 1_024);
+              for (const secret of [
+                "inline-command-secret",
+                "override-credential",
+                "ambient-credential",
+                "operator",
+                "password",
+                "query-credential",
+                "fragment-secret",
+                "\u001b",
+                "first-line-only",
+              ]) {
+                assert.notInclude(result.failure.message, secret);
+              }
+            }
+            assert.equal(harness.historyDeletes.length, 1);
+            assert.deepEqual(yield* hosting.list("thread-1"), []);
+          }).pipe(Effect.provide(hostingLayer(config, harness, false))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "reports process exit and missing startup history without blocking failed-launch cleanup",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-missing-output-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          onHistory: () =>
+            Effect.fail(
+              new TerminalManager.TerminalHistoryError({
+                operation: "read",
+                threadId: "thread-1",
+                terminalId: "preview-test",
+                cause: new Error("history unavailable"),
+              }),
+            ),
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                  exitCode: 1,
+                };
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command: "pnpm dev",
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.include(result.failure.message, "preview command is no longer running");
+              assert.include(
+                result.failure.message,
+                "Terminal: exited; running subprocess: no; exit code: 1",
+              );
+              assert.include(result.failure.message, "Startup output unavailable.");
+              assert.notInclude(result.failure.message, "history unavailable");
+            }
+            assert.equal(harness.historyDeletes.length, 1);
+            assert.deepEqual(yield* hosting.list("thread-1"), []);
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

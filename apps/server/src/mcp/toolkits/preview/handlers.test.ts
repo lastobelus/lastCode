@@ -1,17 +1,74 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import {
   createPendingAttachmentId,
   parseThreadSegmentFromAttachmentId,
 } from "../../../attachmentStore.ts";
 import * as ServerConfig from "../../../config.ts";
-import { claimPreviewRecording, normalizePreviewOpenInput } from "./handlers.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  claimPreviewRecording,
+  normalizePreviewOpenInput,
+  PreviewStandardToolkitHandlersLive,
+} from "./handlers.ts";
+import { PreviewStandardToolkit } from "./tools.ts";
+
+it.effect("preview_host returns captured startup diagnostics to its owning agent", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("preview-startup-thread");
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("preview-startup-environment"),
+        threadId,
+        providerSessionId: "preview-startup-session",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        capabilities: new Set(["preview"] as const),
+        issuedAt: 0,
+      }),
+      Layer.mock(PreviewHosting.PreviewHosting)({
+        launch: (input) => {
+          expect(input.threadId).toBe(threadId);
+          return Effect.fail(
+            new PreviewHosting.PreviewHostingError({
+              operation: "ready",
+              statePath: "/isolated/preview-hosting.json",
+              threadId,
+              url: "http://localhost:5173/",
+              detail:
+                "Terminal: exited; exit code: 1.\nRecent startup output:\nError: Cannot find module 'vite'",
+            }),
+          );
+        },
+      }),
+    );
+    const toolkit = yield* PreviewStandardToolkit.pipe(
+      Effect.provide(PreviewStandardToolkitHandlersLive.pipe(Layer.provide(dependencies))),
+    );
+    const results = yield* toolkit
+      .handle("preview_host", {
+        command: "pnpm dev",
+        cwd: "/workspace",
+        url: "http://localhost:5173/",
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies), Effect.result);
+    expect(results._tag).toBe("Failure");
+    if (results._tag !== "Failure") return;
+    expect(results.failure).toMatchObject({
+      _tag: "PreviewHostingError",
+      reason: "unavailable",
+      message: expect.stringContaining("Cannot find module 'vite'"),
+    });
+    expect(results.failure).not.toHaveProperty("statePath");
+  }),
+);
 
 describe("normalizePreviewOpenInput", () => {
   it("leaves an unstated visibility for the client preference to decide", () => {

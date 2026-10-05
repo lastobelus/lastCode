@@ -9,6 +9,7 @@ import {
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "node:crypto";
+import * as NodeUtil from "node:util";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -35,6 +36,8 @@ const READY_TIMEOUT_MS = 30_000;
 const EXPIRED_TERMINAL_RETRY_MS = 60_000;
 const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
+const STARTUP_OUTPUT_MAX_CHARS = 512;
+const STARTUP_MESSAGE_MAX_CHARS = 1_024;
 
 const LeaseStatus = Schema.Literals(["starting", "active", "expired"]);
 const EnvironmentOverrides = Schema.Record(
@@ -91,7 +94,10 @@ export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>
       case "validate":
         return this.detail ?? "Invalid preview launch details.";
       case "ready":
-        return `Preview did not become reachable before the recovery deadline: ${this.url ?? "unknown URL"}.`;
+        return `Preview did not become ready at ${this.url ?? "unknown URL"}.\n${this.detail ?? "No startup diagnostics available."}`.slice(
+          0,
+          STARTUP_MESSAGE_MAX_CHARS,
+        );
       case "read":
         return `Failed to read preview leases at ${this.statePath}.`;
       case "decode":
@@ -182,6 +188,50 @@ const discoveryPortKey = (value: string): string => {
   const url = new URL(discoveryUrl(value));
   const port = url.port || (url.protocol === "https:" ? "443" : "80");
   return `${isLoopbackHost(url.hostname) ? "loopback" : url.hostname.toLowerCase()}:${port}`;
+};
+
+/** Startup transcripts can echo commands and credentials; redact before taking a tail. */
+const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string => {
+  let sanitized = NodeUtil.stripVTControlCharacters(text).replaceAll(
+    lease.command,
+    "[launch command]",
+  );
+  const environmentValues = [
+    ...Object.values(lease.env ?? {}),
+    ...Object.entries(process.env)
+      .filter(([name]) => /token|key|password|secret|credential|auth/i.test(name))
+      .map(([, value]) => value),
+  ];
+  for (const value of new Set(
+    environmentValues
+      .flatMap((value) => (value === undefined || value.length === 0 ? [] : [value]))
+      .toSorted((left, right) => right.length - left.length),
+  )) {
+    sanitized = sanitized.replaceAll(value, "[redacted]");
+  }
+  return sanitized
+    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (value) => {
+      try {
+        const url = new URL(value);
+        url.username = "";
+        url.password = "";
+        url.search = "";
+        url.hash = "";
+        return url.href;
+      } catch {
+        return "[redacted URL]";
+      }
+    })
+    .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]")
+    .replace(
+      /(\b[\w-]*(?:token|key|password|secret|credential|auth)[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/g,
+      "[redacted]",
+    )
+    .trim();
 };
 
 const make = Effect.gen(function* () {
@@ -350,22 +400,58 @@ const make = Effect.gen(function* () {
 
   const startupError = yield* SynchronizedRef.get(startupErrorRef);
 
-  const makeReadinessError = (lease: PreviewHostingLease) =>
-    new PreviewHostingError({
+  const terminalSummary = (lease: PreviewHostingLease) =>
+    terminals.refreshMetadata.pipe(
+      Effect.andThen(terminals.metadata),
+      Effect.map(
+        (summaries) =>
+          summaries.find(
+            (summary) =>
+              summary.threadId === lease.threadId && summary.terminalId === lease.terminalId,
+          ) ?? null,
+      ),
+    );
+
+  const failReadiness = Effect.fn("PreviewHosting.failReadiness")(function* (
+    lease: PreviewHostingLease,
+    readiness: string,
+  ) {
+    const summary = yield* terminalSummary(lease);
+    const history = yield* terminals
+      .history({
+        threadId: lease.threadId,
+        terminalId: lease.terminalId,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
+    const output = history === null ? null : sanitizeStartupText(history, lease);
+    const tail = output?.split(/\r?\n/).slice(-12).join("\n").slice(-STARTUP_OUTPUT_MAX_CHARS);
+    const terminal =
+      summary === null
+        ? "Terminal metadata unavailable."
+        : `Terminal: ${summary.status}; running subprocess: ${summary.hasRunningSubprocess ? "yes" : "no"}${summary.exitCode === null ? "" : `; exit code: ${summary.exitCode}`}${summary.exitSignal === null ? "" : `; signal: ${summary.exitSignal}`}.`;
+    return yield* new PreviewHostingError({
       operation: "ready",
       statePath,
       threadId: lease.threadId,
-      url: lease.url,
+      url: sanitizeStartupText(lease.url, lease).slice(0, 120),
+      detail: `${readiness}\n${terminal}\n${tail ? `Recent startup output${tail.length < (output?.length ?? 0) ? " (truncated)" : ""}:\n${tail}` : history === null ? "Startup output unavailable." : "No startup output captured."}`,
     });
+  });
 
   const waitForReady = Effect.fn("PreviewHosting.waitForReady")(function* (
     lease: PreviewHostingLease,
   ) {
+    let observation = "No HTTP response was attributed to the owned preview terminal.";
+    let timeoutMs = 0;
     const result = yield* Effect.scoped(
       Effect.gen(function* () {
         const ready = yield* Deferred.make<DiscoveredLocalServer>();
         const listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => {
           const expectedUrl = discoveryUrl(lease.url);
+          const responding = servers.find((server) => discoveryUrl(server.url) === expectedUrl);
+          if (responding !== undefined) {
+            observation = "HTTP responded, but ownership did not match the preview terminal.";
+          }
           const match = servers.find((server) => {
             if (discoveryUrl(server.url) !== expectedUrl) return false;
             if (server.terminal === null) return false;
@@ -380,26 +466,16 @@ const make = Effect.gen(function* () {
         yield* discovery.retain;
         const currentTime = yield* nowMillis;
         const remainingLeaseMs = Math.max(0, Date.parse(lease.expiresAt) - currentTime);
-        const timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
+        timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
         if (timeoutMs === 0) return Option.none<DiscoveredLocalServer>();
         return yield* Deferred.await(ready).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
       }),
     );
-    if (Option.isNone(result)) return yield* makeReadinessError(lease);
+    if (Option.isNone(result)) {
+      return yield* failReadiness(lease, `${observation} Readiness deadline: ${timeoutMs} ms.`);
+    }
     return result.value;
   });
-
-  const terminalSummary = (lease: PreviewHostingLease) =>
-    terminals.refreshMetadata.pipe(
-      Effect.andThen(terminals.metadata),
-      Effect.map(
-        (summaries) =>
-          summaries.find(
-            (summary) =>
-              summary.threadId === lease.threadId && summary.terminalId === lease.terminalId,
-          ) ?? null,
-      ),
-    );
 
   const verifyLaunchOwnership = Effect.fn("PreviewHosting.verifyLaunchOwnership")(function* (
     lease: PreviewHostingLease,
@@ -504,7 +580,10 @@ const make = Effect.gen(function* () {
         }
         const readyTerminal = yield* terminalSummary(lease);
         if (readyTerminal?.status !== "running" || !readyTerminal.hasRunningSubprocess) {
-          return yield* makeReadinessError(lease);
+          return yield* failReadiness(
+            lease,
+            "HTTP responded, but the preview command is no longer running.",
+          );
         }
         const handedOffAt = startsHandoff ? completedAt : Date.parse(afterReady.handedOffAt);
         const active = {
@@ -741,12 +820,10 @@ const make = Effect.gen(function* () {
         const ensureReady = ensureLeaseReady(selected.lease.id);
         const started = yield* ensureReady;
         if (started === null) {
-          return yield* new PreviewHostingError({
-            operation: "ready",
-            statePath,
-            threadId: input.threadId,
-            url: selected.lease.url,
-          });
+          return yield* failReadiness(
+            selected.lease,
+            "The preview lease expired before readiness completed.",
+          );
         }
         return started;
       });
