@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { WorkspaceBrowserPreview } from "./WorkspaceBrowserPreview";
 
-const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
-vi.mock("~/assets/assetUrls", () => ({ useAssetUrlRefresh: () => refresh }));
+const { refresh, useAssetUrlRefresh } = vi.hoisted(() => ({
+  refresh: vi.fn<() => Promise<string | null>>(),
+  useAssetUrlRefresh: vi.fn<() => () => Promise<string | null>>(),
+}));
+vi.mock("~/assets/assetUrls", () => ({ useAssetUrlRefresh }));
 
 const environmentId = EnvironmentId.make("test-environment");
 const props = {
@@ -22,6 +25,7 @@ describe("workspace document reading session", () => {
   let renderer: ReactTestRenderer;
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    useAssetUrlRefresh.mockReset().mockReturnValue(refresh);
     refresh
       .mockReset()
       .mockResolvedValue("https://environment.test/report.html?signature=original");
@@ -46,6 +50,41 @@ describe("workspace document reading session", () => {
     });
     expect(renderer.root.findByType("iframe")).toBe(frame);
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the loaded document across reconnects and uses the latest authorization on reload", async () => {
+    await open();
+    const frame = renderer.root.findByType("iframe");
+    const offline = vi.fn(async () => null);
+    useAssetUrlRefresh.mockReturnValue(offline);
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} />));
+    expect(renderer.root.findByType("iframe")).toBe(frame);
+    expect(offline).not.toHaveBeenCalled();
+
+    const recovered = vi.fn(async () => "https://environment.test/report.html?signature=recovered");
+    useAssetUrlRefresh.mockReturnValue(recovered);
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} />));
+    expect(renderer.root.findByType("iframe")).toBe(frame);
+    expect(recovered).not.toHaveBeenCalled();
+
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} revision={1} />));
+    expect(recovered).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findByType("iframe")).not.toBe(frame);
+    expect(renderer.root.findByType("iframe").props.src).toContain("signature=recovered");
+  });
+
+  it("recovers an initially offline document when authorization becomes available", async () => {
+    refresh.mockResolvedValue(null);
+    await open();
+    expect(renderer.root.findAllByType("iframe")).toHaveLength(0);
+    expect(renderer.root.findByProps({ role: "alert" })).toBeDefined();
+
+    const recovered = vi.fn(async () => "https://environment.test/report.html?signature=recovered");
+    useAssetUrlRefresh.mockReturnValue(recovered);
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} />));
+    expect(recovered).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findByType("iframe").props.src).toContain("signature=recovered");
+    expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
   });
 
   it("reauthorizes and replaces the document only on explicit reload", async () => {

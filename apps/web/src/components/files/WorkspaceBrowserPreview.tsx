@@ -1,6 +1,6 @@
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAssetUrlRefresh } from "~/assets/assetUrls";
 
@@ -29,7 +29,13 @@ export function WorkspaceBrowserPreview(props: {
   const refresh = useAssetUrlRefresh(props.environmentId, resource);
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hasLoadedDocument = useRef(false);
+  const requestedRevision = useRef<number | null>(null);
   useEffect(() => {
+    // Reconnecting replaces the authorization callback. It can recover an
+    // initial offline load, but must not replace a document already being read.
+    if (hasLoadedDocument.current && requestedRevision.current === props.revision) return;
+    requestedRevision.current = props.revision;
     let cancelled = false;
     // Reauthorize explicit reloads, including after a long reading session. Do not
     // subscribe the frame to workspace mutations or automatic token renewals:
@@ -40,6 +46,7 @@ export function WorkspaceBrowserPreview(props: {
         if (!target) throw new Error("Reconnect to the environment and reload the preview.");
         const next = new URL(target);
         next.searchParams.set("preview-revision", String(props.revision));
+        hasLoadedDocument.current = true;
         setUrl(next.toString());
         setError(null);
       })
