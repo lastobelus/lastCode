@@ -35,6 +35,7 @@ import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementSer
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 
@@ -115,6 +116,7 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
   const terminals = yield* TerminalManager.TerminalManager;
+  const previewHosting = yield* PreviewHosting.PreviewHosting;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
@@ -147,6 +149,23 @@ export const make = Effect.gen(function* () {
           inside(worktreePath, cwd)
         );
       });
+
+  const previewsProtectingWorktrees = Effect.fn("StorageCleanup.previewsProtectingWorktrees")(
+    function* () {
+      // If lease state cannot be trusted, preserve worktrees rather than risk
+      // deleting the source of a preview that may still be running.
+      return yield* previewHosting.protectedWorkspacePaths().pipe(Effect.orElseSucceed(() => null));
+    },
+  );
+  const previewUsesWorktree = (
+    worktreePath: string,
+    protectedPaths: ReadonlyArray<string> | null,
+  ) =>
+    protectedPaths === null ||
+    protectedPaths.some((candidate) => {
+      const resolved = path.resolve(candidate);
+      return resolved === worktreePath || inside(worktreePath, resolved);
+    });
 
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
     const active = yield* projections.getShellSnapshot();
@@ -197,6 +216,8 @@ export const make = Effect.gen(function* () {
         resolveWorktreeCleanup(serverSettings, thread.projectId).worktreeOnDelete,
     );
     const snapshot = yield* readThreads();
+    const previewLeases = yield* previewsProtectingWorktrees();
+    if (previewLeases === null) return;
     const root = yield* fs.realPath(config.worktreesDir);
     const refreshedDefaultRefs = new Map<string, Set<string>>();
     const groups = Map.groupBy(
@@ -218,7 +239,8 @@ export const make = Effect.gen(function* () {
       if (
         project === undefined ||
         (!deleted && !storageCleanupThreadIdle(thread, now)) ||
-        hasTerminal(worktreePath)
+        hasTerminal(worktreePath) ||
+        previewUsesWorktree(worktreePath, previewLeases)
       )
         continue;
       yield* Effect.gen(function* () {
@@ -292,6 +314,8 @@ export const make = Effect.gen(function* () {
         // thread sharing this path cancels the removal.
         const latestSnapshot = yield* readThreads();
         if (yield* containsProjectRoot(worktreePath, [project, ...latestSnapshot.projects])) return;
+        const latestPreviewLeases = yield* previewsProtectingWorktrees();
+        if (previewUsesWorktree(worktreePath, latestPreviewLeases)) return;
         const latest = latestSnapshot.threads.filter(
           (entry) =>
             entry.worktreePath !== null && path.resolve(entry.worktreePath) === worktreePath,

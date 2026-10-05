@@ -52,7 +52,14 @@ import { layer as threadLifecycleServiceLayer } from "./ThreadLifecycleService.t
 import { layer as threadForkServiceLayer } from "./ThreadForkService.ts";
 import { layer as turnItemPositionStoreLayer } from "./TurnItemPositionStore.ts";
 import { layer as scheduledTaskServiceLayer } from "../scheduledTasks/ScheduledTaskService.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import * as ThreadWait from "../threadTools/ThreadWait.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
+import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 
 /** The shared application event log and its command receipts. */
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -92,6 +99,9 @@ const UpdateDrainAdmissionLayerLive = UpdateDrainAdmission.layer.pipe(
       UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryLive)),
     ),
   ),
+);
+const threadWaitProvided = ThreadWait.layer.pipe(
+  Layer.provide(Layer.merge(projectionStoreLayer, eventSinkProvided)),
 );
 const legacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(eventSinkProvided),
@@ -273,7 +283,7 @@ const worktreeCleanupWorkerProvided = Layer.effectDiscard(
   Effect.flatMap(WorktreeCleanupService.WorktreeCleanupService, (service) => service.start()),
 ).pipe(Layer.provideMerge(worktreeCleanupProvided));
 export const ProjectSetupScriptRunnerLayerLive = projectSetupScriptRunnerLayer.pipe(
-  Layer.provide(ProjectServiceLayerLive),
+  Layer.provide(Layer.merge(ProjectServiceLayerLive, UpdateDrainAdmissionLayerLive)),
 );
 const managedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(ProjectServiceLayerLive),
@@ -304,6 +314,16 @@ const providerContinuationWorkerProvided = providerContinuationWorkerLive.pipe(
 const threadTitleRegenerationProvided = threadTitleRegenerationServiceLayer.pipe(
   Layer.provide(Layer.mergeAll(threadManagementProvided, ProjectStore.layer, TextGeneration.layer)),
 );
+const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      projectionStoreLayer,
+      providerAdapterRegistryProvided,
+      runtimePolicyProvided,
+      orchestratorProvided,
+    ),
+  ),
+);
 const effectExecutorProvided = effectExecutorLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -315,6 +335,7 @@ const effectExecutorProvided = effectExecutorLayer.pipe(
       runtimeRequestServiceProvided,
       threadTitleRegenerationProvided,
       threadManagementProvided,
+      subagentPromotionProvided,
     ),
   ),
 );
@@ -346,6 +367,8 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
 );
 
 export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
+  threadWaitProvided,
+  actionResumeProvided,
   worktreeCleanupWorkerProvided,
   OrchestrationV2LayerLive.pipe(Layer.provide(ProjectServiceLayerLive)),
   ProjectServiceLayerLive,
@@ -359,6 +382,7 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   providerContinuationWorkerProvided,
   agentSessionImporterProvided,
 ).pipe(
+  Layer.provideMerge(UpdateDrainAdmissionLayerLive),
   Layer.provide(Scheduler.layer),
   Layer.provideMerge(OrchestrationEventInfrastructureLayerLive),
 );

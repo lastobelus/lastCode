@@ -1,3 +1,4 @@
+import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
 import { setThreadChangeRequestSnapshot } from "./ThreadStatusIndicators";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
@@ -75,6 +76,7 @@ import {
   TerminalIcon,
   Undo2Icon,
   XIcon,
+  LayoutDashboardIcon,
 } from "lucide-react";
 import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
 import {
@@ -259,6 +261,11 @@ import {
   type ProviderInstanceEntry,
 } from "../providerInstances";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import {
+  usePreviewProcessControlsSupported,
+  useStopThreadProcesses,
+  useThreadPreviewLeases,
+} from "../state/previewHosting";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button, InlineButton } from "./ui/button";
 import {
@@ -1003,7 +1010,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   onCancelRename: () => void;
   isRenaming: boolean;
   renamingTitle: string;
-  onContextMenu: (threadRef: ScopedThreadRef, position: { x: number; y: number }) => void;
+  onContextMenu: (
+    threadRef: ScopedThreadRef,
+    position: { x: number; y: number },
+    hasStoppableProcesses: boolean,
+  ) => void;
   onSettle: (threadRef: ScopedThreadRef) => void;
   onActionSweepStart: (
     threadRef: ScopedThreadRef,
@@ -1068,6 +1079,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
+  const previews = useThreadPreviewLeases(threadRef);
+  const supportsProcessControls = usePreviewProcessControlsSupported(thread.environmentId);
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   // Unsent composer text on this thread. The open thread shows its own
   // composer, so the marker only decorates rows you have navigated away from.
   const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isActive;
@@ -1301,9 +1316,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     (event: ReactMouseEvent) => {
       event.preventDefault();
       if (cleanup !== null) return;
-      onContextMenu(threadRef, { x: event.clientX, y: event.clientY });
+      onContextMenu(threadRef, { x: event.clientX, y: event.clientY }, hasStoppableProcesses);
     },
-    [cleanup, onContextMenu, threadRef],
+    [cleanup, hasStoppableProcesses, onContextMenu, threadRef],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
@@ -1727,6 +1742,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {draftIndicator}
             {title}
             {pinIndicator}
+            <ThreadDashboardIndicator items={thread.dashboardItems} />
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
@@ -1903,6 +1919,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {pinIndicator}
+              <ThreadDashboardIndicator items={thread.dashboardItems} />
               {/* The visible state owns this slot's width: status at rest,
                   actions on hover/keyboard focus or while the popover is open. Keeping
                   the hidden state out of flow lets the project label reclaim
@@ -2333,6 +2350,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
               <span className={cn("min-w-0 flex-1 truncate", thread.persistent && "italic")}>
                 {thread.title}
               </span>
+              <ThreadDashboardIndicator items={thread.dashboardItems} />
               <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
                 {threadTimeLabel(thread)}
               </span>
@@ -2409,6 +2427,7 @@ export default function Sidebar() {
     reportFailure: false,
   });
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
+  const stopThreadProcesses = useStopThreadProcesses();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -2720,6 +2739,16 @@ export default function Sidebar() {
     },
     [isMobile, router, setOpenMobile],
   );
+  const openProjectDashboard = useCallback(
+    (projectGroup: SidebarProjectSnapshot) => {
+      if (isMobile) setOpenMobile(false);
+      void router.navigate({
+        to: "/dashboard",
+        search: { environmentId: projectGroup.environmentId, projectId: projectGroup.id },
+      });
+    },
+    [isMobile, router, setOpenMobile],
+  );
   // Anchor for the scope popup: the header search field, not its icon trigger.
   const headerSearchRef = useRef<HTMLDivElement | null>(null);
   // Safari can send a click after Ctrl+click opens settings. Ignore that one
@@ -2738,6 +2767,40 @@ export default function Sidebar() {
       openProjectSettings(projectGroup);
     },
     [openProjectSettings],
+  );
+
+  const handleProjectContextMenu = useCallback(
+    (
+      event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLInputElement>,
+      projectGroup: SidebarProjectSnapshot,
+    ) => {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressNextScopeChangeRef.current = true;
+      dispatchProjectScopeMenu({ type: "project-settings-opened" });
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position =
+        "clientX" in event
+          ? { x: event.clientX, y: event.clientY }
+          : { x: rect.left, y: rect.bottom };
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const result = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
+              { id: "project-settings", label: "Project settings", icon: "settings" },
+            ],
+            position,
+          ),
+        );
+        if (result._tag === "Failure") return;
+        if (result.value === "open-dashboard") openProjectDashboard(projectGroup);
+        if (result.value === "project-settings") openProjectSettings(projectGroup);
+      })();
+    },
+    [openProjectDashboard, openProjectSettings],
   );
 
   // Keep a dropped row at its destination while its server applies the
@@ -4517,7 +4580,11 @@ export default function Sidebar() {
   );
 
   const handleThreadContextMenu = useCallback(
-    (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+    (
+      threadRef: ScopedThreadRef,
+      position: { x: number; y: number },
+      hasStoppableProcesses: boolean,
+    ) => {
       void (async () => {
         const api = readLocalApi();
         if (!api) return;
@@ -4567,37 +4634,41 @@ export default function Sidebar() {
         const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
-            buildThreadActionMenuItems({
-              branch: thread.branch ?? null,
-              projectFilter: threadProjectGroup
-                ? {
-                    label: threadProjectGroup.displayName,
-                    isActive: projectScopeKey === threadProjectGroup.projectKey,
-                  }
-                : null,
-              isPinned,
-              isPersistent: thread.persistent === true,
-              isSettled,
-              autoSettleEnabled: thread.autoSettleDisabledAt == null,
-              isSnoozed,
-              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-              isRegeneratingTitle,
-              isRunning: !threadRuntimeCanArchive(thread.runtime),
-              hasRunningAction: thread.actionResume?.outcome === "running",
-              supports: {
-                settlement: supportsSettlement,
-                autoSettleOptOut: supportsAutoSettleOptOut,
-                snooze: supportsSnooze,
-                pinning: supportsPinning,
-                persistence:
-                  serverConfigs.get(thread.environmentId)?.environment.capabilities
-                    .threadPersistence === true,
-                titleRegeneration: supportsTitleRegeneration,
-              },
-              snoozePresets,
-              handoffs: handoffDescriptors,
-              handoffsOverflow: handoffs.length > handoffDescriptors.length,
-            }),
+            [
+              { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
+              ...buildThreadActionMenuItems({
+                branch: thread.branch ?? null,
+                projectFilter: threadProjectGroup
+                  ? {
+                      label: threadProjectGroup.displayName,
+                      isActive: projectScopeKey === threadProjectGroup.projectKey,
+                    }
+                  : null,
+                isPinned,
+                isPersistent: thread.persistent === true,
+                isSettled,
+                autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                isSnoozed,
+                canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                isRegeneratingTitle,
+                isRunning: !threadRuntimeCanArchive(thread.runtime),
+                hasRunningAction: thread.actionResume?.outcome === "running",
+                hasStoppableProcesses,
+                supports: {
+                  settlement: supportsSettlement,
+                  autoSettleOptOut: supportsAutoSettleOptOut,
+                  snooze: supportsSnooze,
+                  pinning: supportsPinning,
+                  persistence:
+                    serverConfigs.get(thread.environmentId)?.environment.capabilities
+                      .threadPersistence === true,
+                  titleRegeneration: supportsTitleRegeneration,
+                },
+                snoozePresets,
+                handoffs: handoffDescriptors,
+                handoffsOverflow: handoffs.length > handoffDescriptors.length,
+              }),
+            ],
             position,
           ),
         );
@@ -4629,6 +4700,13 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "open-dashboard":
+            if (isMobile) setOpenMobile(false);
+            await router.navigate({
+              to: "/dashboard",
+              search: { environmentId: thread.environmentId, projectId: thread.projectId },
+            });
+            return;
           case "filter-by-project":
             // This item is the only scope control here, so picking the
             // already-scoped project again is the way back to all projects.
@@ -4747,6 +4825,9 @@ export default function Sidebar() {
             });
             return;
           }
+          case "stop-thread-processes":
+            await stopThreadProcesses(threadRef);
+            return;
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
@@ -4834,6 +4915,7 @@ export default function Sidebar() {
     [
       archiveThread,
       closeTerminal,
+      stopThreadProcesses,
       attemptPin,
       attemptSettle,
       attemptSnooze,
@@ -4848,6 +4930,9 @@ export default function Sidebar() {
       deleteThread,
       handleMultiSelectContextMenu,
       handoffsMenuLimit,
+      isMobile,
+      router,
+      setOpenMobile,
       markThreadUnread,
       openProjectSettings,
       projectScopeKey,
@@ -5067,7 +5152,7 @@ export default function Sidebar() {
                         // stay on this input, not on the highlighted option.
                         const scopeKey = highlightedProjectScopeKeyRef.current;
                         const project = scopeKey ? projectGroupByScopeKey.get(scopeKey) : null;
-                        if (project) handleProjectSettings(event, project);
+                        if (project) handleProjectContextMenu(event, project);
                       }}
                       onChange={(event) =>
                         dispatchProjectScopeMenu({
@@ -5086,7 +5171,7 @@ export default function Sidebar() {
                             hideIndicator
                             value={item}
                             onContextMenu={(event) => {
-                              if (project) handleProjectSettings(event, project);
+                              if (project) handleProjectContextMenu(event, project);
                             }}
                           >
                             {project ? (
@@ -5101,6 +5186,25 @@ export default function Sidebar() {
                                 primaryEnvironmentId={primaryEnvironmentId}
                                 machineByEnvironmentId={environmentMachineById}
                               />
+                            ) : null}
+                            {project ? (
+                              <Button
+                                size="icon-xs"
+                                variant="ghost-muted"
+                                tabIndex={-1}
+                                aria-hidden="true"
+                                title={`Open dashboard for ${project.displayName}`}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  suppressNextScopeChangeRef.current = true;
+                                  dispatchProjectScopeMenu({ type: "project-settings-opened" });
+                                  openProjectDashboard(project);
+                                }}
+                              >
+                                <LayoutDashboardIcon className="size-3.5" />
+                              </Button>
                             ) : null}
                             {project ? (
                               <Button

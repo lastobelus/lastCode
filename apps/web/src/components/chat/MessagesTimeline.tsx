@@ -1,3 +1,10 @@
+import { useAtomValue } from "@effect/atom-react";
+import type { ThreadAnnotation } from "@t3tools/contracts";
+import {
+  ThreadAnnotationBody,
+  ThreadAnnotationActions,
+  useThreadAnnotationBodyPending,
+} from "../thread-annotation/ThreadAnnotation";
 import {
   parseActionResumeFollowUp,
   actionResultPresentation,
@@ -37,7 +44,6 @@ import {
   type ToolActivityIcon,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
@@ -420,6 +426,11 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: () => void;
+  onAnnotationBodyChange?: (body: string) => Promise<boolean>;
+  onAnnotationResolve?: () => void;
+  onAnnotationReopen?: () => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistoryLoading?: boolean;
   onCiteAssistantText?: (
@@ -510,6 +521,11 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  annotation = null,
+  onAnnotationEdit = () => {},
+  onAnnotationBodyChange,
+  onAnnotationResolve = () => {},
+  onAnnotationReopen = () => {},
   citationRequest = null,
   citationHistoryLoading = false,
   onCiteAssistantText,
@@ -732,7 +748,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     },
     [suspendEndScrollMaintenanceForDisclosure],
   );
-
   const onToggleActionFollowUp = useCallback(
     (rowId: string) => {
       suspendEndScrollMaintenanceForDisclosure(rowId);
@@ -1411,11 +1426,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListFooterComponent={timelineListFooter}
           />
           <TimelineMinimap
+            annotation={annotation}
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             currentIndex={minimapCurrentIndex}
             stripMap={minimapStripMap}
+            threadRef={parseScopedThreadKey(routeThreadKey)}
+            markdownCwd={markdownCwd}
+            onAnnotationEdit={onAnnotationEdit}
+            onAnnotationBodyChange={onAnnotationBodyChange}
+            onAnnotationResolve={onAnnotationResolve}
+            onAnnotationReopen={onAnnotationReopen}
             onSelect={(item) => {
               onManualNavigation();
               void listRef.current?.scrollToIndex({
@@ -1489,22 +1511,126 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
+function TimelineAnnotationPopover({
+  annotation,
+  ariaLabel,
+  earlier,
+  markdownCwd,
+  open,
+  threadRef,
+  triggerClassName,
+  onActivate,
+  onAnnotationBodyChange,
+  onAnnotationEdit,
+  onAnnotationResolve,
+  onAnnotationReopen,
+  onOpenChange,
+}: {
+  annotation: ThreadAnnotation;
+  ariaLabel: string;
+  earlier: boolean;
+  markdownCwd: string | undefined;
+  open: boolean;
+  threadRef: ScopedThreadRef;
+  triggerClassName: string;
+  onActivate?: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationEdit: () => void;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger
+        closeDelay={120}
+        delay={0}
+        openOnHover
+        render={
+          <button
+            aria-label={ariaLabel}
+            className={triggerClassName}
+            data-thread-annotation-marker={earlier ? undefined : ""}
+            type="button"
+          />
+        }
+        onClick={(event) => {
+          event.stopPropagation();
+          onActivate?.();
+        }}
+        onFocus={onActivate}
+      />
+      <PopoverPopup
+        align="center"
+        width="md"
+        data-minimap-preview
+        elevated
+        finalFocus={false}
+        initialFocus={false}
+        side="right"
+        tooltipStyle
+        padding="none"
+      >
+        <div className="w-80 max-w-80 bg-warning/10 p-3 text-left text-warning-foreground">
+          {earlier ? (
+            <div className="mb-2 text-2xs font-medium">Attached to an earlier message</div>
+          ) : null}
+          <ThreadAnnotationBody
+            annotation={annotation}
+            className="max-h-52 overflow-y-auto"
+            compact
+            cwd={markdownCwd}
+            onBodyChange={onAnnotationBodyChange}
+            threadRef={threadRef}
+          />
+          <div className="mt-2">
+            <ThreadAnnotationActions
+              annotation={annotation}
+              onEdit={onAnnotationEdit}
+              onReopen={onAnnotationReopen}
+              onResolve={onAnnotationResolve}
+              pending={annotationBodyPending}
+            />
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 function TimelineMinimap({
+  annotation,
   hasPersistentGutter,
   hitStripWidth,
   currentIndex,
   items,
+  markdownCwd,
   stripMap,
+  threadRef,
+  onAnnotationEdit,
+  onAnnotationBodyChange,
+  onAnnotationResolve,
+  onAnnotationReopen,
   onSelect,
 }: {
+  annotation: ThreadAnnotation | null;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   currentIndex: number | null;
   items: ReadonlyArray<TimelineMinimapItem>;
+  markdownCwd: string | undefined;
   stripMap: Map<string, HTMLSpanElement>;
+  threadRef: ScopedThreadRef | null;
+  onAnnotationEdit: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [annotationPopoverOpen, setAnnotationPopoverOpen] = useState(false);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -1516,6 +1642,10 @@ function TimelineMinimap({
     [items, resolvedActiveIndex],
   );
   const navigationInteractive = resolveTimelineMinimapNavigationInteractive(hitStripWidth);
+  const annotationItemIndex = annotation
+    ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
+    : -1;
+  const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -1565,7 +1695,7 @@ function TimelineMinimap({
     [items.length],
   );
 
-  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS) {
+  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS && annotation === null) {
     return null;
   }
 
@@ -1573,6 +1703,8 @@ function TimelineMinimap({
     <div
       className={cn(
         "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        annotation !== null &&
+          "[@media(pointer:coarse)]:block [@media(pointer:coarse)]:opacity-100",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
@@ -1586,11 +1718,16 @@ function TimelineMinimap({
             "absolute top-1/2 left-3 -translate-y-1/2",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            hitStripWidth > 0 || annotation !== null
+              ? "pointer-events-auto"
+              : "pointer-events-none",
           )}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
-            width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
+            width: resolveTimelineMinimapInteractiveWidth(
+              Math.max(hitStripWidth, annotation === null ? 0 : 14),
+              activeItem !== null,
+            ),
           }}
         >
           <TimelineMinimapNavigationButton
@@ -1689,7 +1826,7 @@ function TimelineMinimap({
                 </span>
               );
             })}
-            {activeItem ? (
+            {activeItem && !annotationPopoverOpen ? (
               <span
                 className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
                 data-minimap-preview
@@ -1719,6 +1856,30 @@ function TimelineMinimap({
               </span>
             ) : null}
           </button>
+          {annotationItemIndex >= 0 && annotation && threadRef ? (
+            <span
+              className="pointer-events-none absolute left-0 h-0.5 w-2 -translate-y-1/2"
+              style={{
+                top: `${resolveTimelineMinimapTopPercent(annotationItemIndex, items.length)}%`,
+              }}
+            >
+              <TimelineAnnotationPopover
+                annotation={annotation}
+                ariaLabel="Thread annotation"
+                earlier={false}
+                markdownCwd={markdownCwd}
+                open={annotationPopoverOpen}
+                threadRef={threadRef}
+                triggerClassName="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
+                onActivate={() => setActiveIndex(annotationItemIndex)}
+                onAnnotationBodyChange={onAnnotationBodyChange}
+                onAnnotationEdit={onAnnotationEdit}
+                onAnnotationReopen={onAnnotationReopen}
+                onAnnotationResolve={onAnnotationResolve}
+                onOpenChange={setAnnotationPopoverOpen}
+              />
+            </span>
+          ) : null}
           <TimelineMinimapNavigationButton
             direction="next"
             disabled={nextItem === null}
@@ -1728,6 +1889,31 @@ function TimelineMinimap({
             }}
           />
         </div>
+        {annotationIsEarlier && annotation && threadRef ? (
+          <div
+            className="pointer-events-auto absolute left-3"
+            data-thread-annotation-overflow
+            style={{
+              top: "50%",
+              transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
+            }}
+          >
+            <TimelineAnnotationPopover
+              annotation={annotation}
+              ariaLabel="Annotation attached to an earlier message"
+              earlier
+              markdownCwd={markdownCwd}
+              open={annotationPopoverOpen}
+              threadRef={threadRef}
+              triggerClassName="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationReopen={onAnnotationReopen}
+              onAnnotationResolve={onAnnotationResolve}
+              onOpenChange={setAnnotationPopoverOpen}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1863,6 +2049,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}

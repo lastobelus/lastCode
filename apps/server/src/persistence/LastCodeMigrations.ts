@@ -13,6 +13,7 @@ import Migration0055 from "./Migrations/055_ProjectionThreadMessageSource.ts";
 import Migration0056 from "./Migrations/056_ProjectionThreadsPersistent.ts";
 import Migration0057 from "./Migrations/057_ProjectionThreadAttention.ts";
 import ActionRunMigration from "../actionResume/ActionRunMigration.ts";
+import ThreadCreatorEvidenceIndexMigration from "./Migrations/057_ThreadCreatorEvidenceIndex.ts";
 
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
@@ -26,6 +27,7 @@ export const lastcodeMigrationEntries = [
   [9, "ProjectionThreadsPersistent", Migration0056],
   [10, "ProjectionThreadAttention", Migration0057],
   [11, "ActionResumeRuns", ActionRunMigration],
+  [12, "ThreadCreatorEvidenceIndex", ThreadCreatorEvidenceIndexMigration],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(

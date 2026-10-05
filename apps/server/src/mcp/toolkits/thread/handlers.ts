@@ -151,6 +151,27 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
         .pipe(Effect.mapError(unavailable));
       return { sequence: result.sequence, targetThreadId: input.targetThreadId };
     }),
+  t3_subagent_promote: (input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.request",
+      commandId,
+      threadId,
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "agent",
+      creationSource: "mcp",
+    })),
+  t3_subagent_promotion_cancel: (input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.cancel",
+      commandId,
+      threadId,
+      requestId: input.requestId,
+    })),
+  t3_subagent_promotion_status: (input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return { promotion: projection.thread.subagentPromotion ?? null };
+    }),
   t3_thread_transfers: (input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["contextTransfers"]);

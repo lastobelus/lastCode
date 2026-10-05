@@ -936,6 +936,7 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__t3_pending_request_read",
   "mcp__t3-code__t3_thread_configuration",
   "mcp__t3-code__t3_thread_transfers",
+  "mcp__t3-code__t3_subagent_promotion_status",
   "mcp__t3-code__t3_worktree_status",
   "mcp__t3-code__t3_worktree_list",
   "mcp__t3-code__t3_project_list",

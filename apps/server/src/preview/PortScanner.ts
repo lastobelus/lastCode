@@ -5,13 +5,14 @@
  * stable line-prefixed field format; this is the only `lsof` flag set we rely
  * on).
  *
- * Windows / lsof missing: checks a curated list of common dev ports through
- * the shared Net service.
+ * Linux tries `ss` with process attribution when `lsof` is unavailable.
+ * Windows tries PowerShell, then `netstat -ano`, retaining process attribution.
+ * When process tools are missing, checks common dev ports through the Net service.
  *
  * Listening ports are published only after a bounded HTTP(S) probe finds a
  * successful HTML document or a redirect to one.
- * Positive and negative results are cached briefly by candidate URL and listener identity,
- * limiting repeated requests without leaving stale classifications around.
+ * Positive results and automatic discovery failures are cached briefly by candidate URL
+ * and listener identity. Explicit configured URLs retry failures on the next scan.
  *
  * Polling is reference-counted via scoped `retain`. A single layer-scoped fiber
  * polls forever, but each tick is a no-op when the retain count is zero.
@@ -39,6 +40,7 @@ import * as Semaphore from "effect/Semaphore";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 
 export class PortDiscovery extends Context.Service<
   PortDiscovery,
@@ -72,6 +74,7 @@ export const COMMON_DEV_PORTS: ReadonlyArray<number> = Object.freeze([
 
 const POLL_INTERVAL = Duration.seconds(3);
 const LSOF_TIMEOUT_MS = 5_000;
+const SS_TIMEOUT_MS = 5_000;
 const WINDOWS_LISTENER_TIMEOUT_MS = 5_000;
 const WEB_PROBE_TIMEOUT = Duration.seconds(1);
 const WEB_PROBE_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(15));
@@ -105,6 +108,7 @@ interface TerminalProcessOwner {
 interface WebProbeCacheEntry {
   readonly pid: number | null;
   readonly isWeb: boolean;
+  readonly isResource: boolean;
   readonly expiresAtMillis: number;
 }
 
@@ -186,7 +190,14 @@ const parseLsofOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<string, DiscoveredLocalServer>();
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
   let pid: number | null = null;
   let processName: string | null = null;
 
@@ -207,21 +218,44 @@ const parseLsofOutput = (
     if (tag === "n") {
       const portMatch = parsePortFromLsofName(value);
       if (portMatch == null) continue;
-      const url = `http://localhost:${portMatch}`;
-      const key = `localhost:${portMatch}`;
-      if (seen.has(key)) continue;
-      seen.set(key, {
-        host: "localhost",
-        port: portMatch,
-        url,
-        processName,
-        pid,
-        terminal: pid === null ? null : (terminalByProcessId.get(pid) ?? null),
-      });
+      const entry = listeners.get(portMatch) ?? {
+        processIds: new Set<number>(),
+        processNames: new Set<string>(),
+        unattributed: false,
+      };
+      if (pid === null) entry.unattributed = true;
+      else entry.processIds.add(pid);
+      if (processName !== null) entry.processNames.add(processName);
+      listeners.set(portMatch, entry);
     }
   }
 
-  return Array.from(seen.values()).toSorted((a, b) => a.port - b.port);
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
 };
 
 const parsePortFromLsofName = (name: string): number | null => {
@@ -243,7 +277,14 @@ const parseWindowsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
-  const seen = new Map<number, DiscoveredLocalServer>();
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
   for (const line of raw.split(/\r?\n/g)) {
     const [hostRaw, portRaw, pidRaw, processNameRaw] = line.trim().split("|", 4);
     const host = hostRaw?.trim() ?? "";
@@ -251,18 +292,139 @@ const parseWindowsListenerOutput = (
     const port = Number(portRaw);
     const pid = Number(pidRaw);
     if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
-    const normalizedPid = Number.isInteger(pid) && pid > 0 ? pid : null;
-    if (seen.has(port)) continue;
-    seen.set(port, {
-      host: "localhost",
-      port,
-      url: `http://localhost:${port}`,
-      processName: processNameRaw?.trim() || null,
-      pid: normalizedPid,
-      terminal: normalizedPid === null ? null : (terminalByProcessId.get(normalizedPid) ?? null),
-    });
+    const entry = listeners.get(port) ?? {
+      processIds: new Set<number>(),
+      processNames: new Set<string>(),
+      unattributed: false,
+    };
+    if (Number.isInteger(pid) && pid > 0) entry.processIds.add(pid);
+    else entry.unattributed = true;
+    const processName = processNameRaw?.trim();
+    if (processName) entry.processNames.add(processName);
+    listeners.set(port, entry);
   }
-  return [...seen.values()].toSorted((left, right) => left.port - right.port);
+
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
+};
+
+const parseWindowsNetstatOutput = (
+  raw: string,
+  terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner>,
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const listeners: string[] = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const [protocol, localAddress, , state, pid] = line.trim().split(/\s+/u);
+    if (protocol !== "TCP" || state !== "LISTENING" || !localAddress) continue;
+    const lastColon = localAddress.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const host = localAddress.slice(0, lastColon).replace(/^\[(.*)\]$/u, "$1");
+    const port = localAddress.slice(lastColon + 1);
+    listeners.push(`${host}|${port}|${pid ?? ""}|`);
+  }
+  // Aggregate all IPv4/IPv6 listeners before assigning ownership to a port.
+  return parseWindowsListenerOutput(listeners.join("\n"), terminalByProcessId);
+};
+
+const isCompleteWindowsListenerProbe = (result: ProcessRunner.ProcessRunOutput): boolean =>
+  result.code === 0 && !result.timedOut && !result.stdoutTruncated && !result.stdoutInvalidUtf8;
+
+const parseSsListenerOutput = (
+  raw: string,
+  terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const listeners = new Map<
+    number,
+    {
+      readonly processIds: Set<number>;
+      readonly processNames: Set<string>;
+      unattributed: boolean;
+    }
+  >();
+
+  for (const line of raw.split(/\r?\n/u)) {
+    const fields = line.trim().split(/\s+/u);
+    if (fields[0] !== "LISTEN") continue;
+    const localAddress = fields[3];
+    if (!localAddress) continue;
+    const lastColon = localAddress.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const host = localAddress.slice(0, lastColon);
+    const port = Number(localAddress.slice(lastColon + 1));
+    if (
+      !LSOF_LOCAL_HOST_TOKENS.has(host) ||
+      !Number.isInteger(port) ||
+      port <= 0 ||
+      port >= 65536
+    ) {
+      continue;
+    }
+
+    const entry = listeners.get(port) ?? {
+      processIds: new Set<number>(),
+      processNames: new Set<string>(),
+      unattributed: false,
+    };
+    const processIds = [...line.matchAll(/pid=(\d+)/gu)]
+      .map((match) => Number(match[1]))
+      .filter((processId) => Number.isInteger(processId) && processId > 0);
+    const processNames = [...line.matchAll(/\(\("([^"]+)"/gu)].map((match) => match[1]!);
+    if (processIds.length === 0) entry.unattributed = true;
+    for (const processId of processIds) entry.processIds.add(processId);
+    for (const processName of processNames) entry.processNames.add(processName);
+    listeners.set(port, entry);
+  }
+
+  return [...listeners]
+    .map(([port, listener]): DiscoveredLocalServer => {
+      const processIds = [...listener.processIds];
+      const owners = processIds.map((processId) => terminalByProcessId.get(processId));
+      const firstOwner = owners[0];
+      const terminal =
+        !listener.unattributed &&
+        firstOwner !== undefined &&
+        owners.every(
+          (owner) =>
+            owner !== undefined &&
+            owner.threadId === firstOwner.threadId &&
+            owner.terminalId === firstOwner.terminalId,
+        )
+          ? firstOwner
+          : null;
+      return {
+        host: "localhost",
+        port,
+        url: `http://localhost:${port}`,
+        processName: listener.processNames.values().next().value ?? null,
+        pid: processIds.length === 1 ? (processIds[0] ?? null) : null,
+        terminal,
+      };
+    })
+    .toSorted((left, right) => left.port - right.port);
 };
 
 const serversEqual = (
@@ -295,6 +457,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const hostPlatform = yield* HostProcessPlatform;
   const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
+  const loopbackHttpsAgent = yield* NodeHttpClient.makeAgent({ rejectUnauthorized: false });
+  const loopbackHttpsClient = (yield* NodeHttpClient.makeNodeHttp.pipe(
+    Effect.provideService(NodeHttpClient.HttpAgent, loopbackHttpsAgent),
+  )).pipe(HttpClient.withScope);
   const stateRef = yield* Ref.make<ScannerState>({
     listeners: new Map(),
     terminalProcesses: new Map(),
@@ -329,16 +495,23 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
 
   const probeWebUrl = Effect.fn("PortDiscovery.probeWebUrl")((url: string) =>
     httpClient.get(url).pipe(
+      Effect.catch((error) => {
+        const target = new URL(url);
+        // Readiness for local dev certificates never relaxes remote TLS or follows redirects.
+        return target.protocol === "https:" && isLoopbackHost(target.hostname)
+          ? loopbackHttpsClient.get(url)
+          : Effect.fail(error);
+      }),
       Effect.map((response) => {
         const location = response.headers.location?.trim();
-        if (NAVIGATION_REDIRECT_STATUSES.has(response.status) && location) return url;
+        if (NAVIGATION_REDIRECT_STATUSES.has(response.status) && location) return { isWeb: true };
         if (response.status < 200 || response.status >= 300) return null;
         if (response.status === 204 || response.status === 205) return null;
         const contentType = response.headers["content-type"]
           ?.split(";", 1)[0]
           ?.trim()
           .toLowerCase();
-        return contentType === "text/html" || contentType === "application/xhtml+xml" ? url : null;
+        return { isWeb: contentType === "text/html" || contentType === "application/xhtml+xml" };
       }),
       Effect.scoped,
       Effect.timeoutOption(WEB_PROBE_TIMEOUT),
@@ -397,6 +570,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     const nowMillis = yield* Clock.currentTimeMillis;
     const cached = yield* Ref.get(webProbeCacheRef);
     const groups = makeWebProbeGroups(servers, configuredUrls);
+    const configuredProbeKeys = new Set(
+      groups.flatMap((group) => (group.configuredKey === null ? [] : [group.configuredKey])),
+    );
     const batchProbes = new Map<
       string,
       Effect.Effect<{ readonly probe: WebProbeCacheEntry; readonly fresh: boolean }>
@@ -412,13 +588,21 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             if (existing) return [existing] as const;
             const cachedProbe = cached.get(key);
             const cachedIsCurrent =
-              cachedProbe?.pid === pid && cachedProbe.expiresAtMillis > nowMillis;
+              cachedProbe?.pid === pid &&
+              cachedProbe.expiresAtMillis > nowMillis &&
+              // Explicit previews must retry transient startup failures on the next scan.
+              (cachedProbe.isResource || !configuredProbeKeys.has(key));
             const memoized = yield* Effect.cached(
               cachedIsCurrent
                 ? Effect.succeed({ probe: cachedProbe, fresh: false })
                 : probeWebUrl(url).pipe(
                     Effect.map((result) => ({
-                      probe: { pid, isWeb: result !== null, expiresAtMillis: 0 },
+                      probe: {
+                        pid,
+                        isWeb: result?.isWeb ?? false,
+                        isResource: result !== null,
+                        expiresAtMillis: 0,
+                      },
                       fresh: true,
                     })),
                   ),
@@ -439,7 +623,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             const key = webProbeCacheKey(url);
             const { probe, fresh } = yield* getProbe(url, group.server.pid);
             probes.push([key, probe, fresh]);
-            if (probe.isWeb) {
+            // Explicit handoffs can target media; automatic discovery still lists documents.
+            if (probe.isWeb || (group.configuredKey !== null && probe.isResource)) {
               visibleUrl = url;
               break;
             }
@@ -471,8 +656,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   });
 
   const recoverProcessProbeFailure =
-    (probe: "lsof" | "windows-listeners") => (error: ProcessRunner.ProcessRunError) =>
-      Effect.logDebug("preview port process probe failed; falling back to common-port probes", {
+    (probe: "lsof" | "ss-listeners" | "windows-listeners" | "windows-netstat") =>
+    (error: ProcessRunner.ProcessRunError) =>
+      Effect.logDebug("preview port process probe failed; trying the next available probe", {
         cause: error,
         probe,
         platform: hostPlatform,
@@ -501,7 +687,11 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           outputMode: "truncate",
         })
         .pipe(
-          Effect.map((result) => parseWindowsListenerOutput(result.stdout, terminalByProcessId)),
+          Effect.map((result) =>
+            isCompleteWindowsListenerProbe(result)
+              ? parseWindowsListenerOutput(result.stdout, terminalByProcessId)
+              : null,
+          ),
           Effect.catchTags({
             ProcessSpawnError: recoverWindowsProbeFailure,
             ProcessStdinError: recoverWindowsProbeFailure,
@@ -511,6 +701,31 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           }),
         );
       if (listeners !== null) return yield* probeWebServers(listeners, configuredUrls);
+      const recoverNetstatProbeFailure = recoverProcessProbeFailure("windows-netstat");
+      const netstatListeners = yield* processRunner
+        .run({
+          command: "netstat.exe",
+          args: ["-ano"],
+          timeout: Duration.millis(WINDOWS_LISTENER_TIMEOUT_MS),
+          maxOutputBytes: 1024 * 1024,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.map((result) =>
+            isCompleteWindowsListenerProbe(result)
+              ? parseWindowsNetstatOutput(result.stdout, terminalByProcessId)
+              : null,
+          ),
+          Effect.catchTags({
+            ProcessSpawnError: recoverNetstatProbeFailure,
+            ProcessStdinError: recoverNetstatProbeFailure,
+            ProcessOutputLimitError: recoverNetstatProbeFailure,
+            ProcessReadError: recoverNetstatProbeFailure,
+            ProcessTimeoutError: recoverNetstatProbeFailure,
+          }),
+        );
+      if (netstatListeners !== null)
+        return yield* probeWebServers(netstatListeners, configuredUrls);
       return yield* probeWebServers(yield* probeCommonPorts(), configuredUrls);
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");
@@ -533,6 +748,28 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         }),
       );
     if (lsofResult !== null) return yield* probeWebServers(lsofResult, configuredUrls);
+    if (hostPlatform === "linux") {
+      const recoverSsProbeFailure = recoverProcessProbeFailure("ss-listeners");
+      const ssResult = yield* processRunner
+        .run({
+          command: "ss",
+          args: ["-H", "-ltnp"],
+          timeout: Duration.millis(SS_TIMEOUT_MS),
+          maxOutputBytes: 1024 * 1024,
+          outputMode: "truncate",
+        })
+        .pipe(
+          Effect.map((result) => parseSsListenerOutput(result.stdout, terminalByProcessId)),
+          Effect.catchTags({
+            ProcessSpawnError: recoverSsProbeFailure,
+            ProcessStdinError: recoverSsProbeFailure,
+            ProcessOutputLimitError: recoverSsProbeFailure,
+            ProcessReadError: recoverSsProbeFailure,
+            ProcessTimeoutError: recoverSsProbeFailure,
+          }),
+        );
+      if (ssResult !== null) return yield* probeWebServers(ssResult, configuredUrls);
+    }
     return yield* probeWebServers(yield* probeCommonPorts(), configuredUrls);
   });
 
