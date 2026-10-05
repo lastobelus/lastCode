@@ -159,17 +159,16 @@ export function projectLegacySidebarFamilies(input: {
     }
   }
   const typedGroups = input.groupingStyle !== "minimal";
-  if (typedGroups) {
-    for (const [key, children] of childrenByKey) {
-      childrenByKey.set(key, [
-        ...children.filter(
-          (childKey) => byKey.get(childKey)!.lineage.relationshipToParent === "subagent",
-        ),
-        ...children.filter(
-          (childKey) => byKey.get(childKey)!.lineage.relationshipToParent !== "subagent",
-        ),
-      ]);
-    }
+  // Keep delegated work together after ordinary conversations in both layouts.
+  for (const [key, children] of childrenByKey) {
+    childrenByKey.set(key, [
+      ...children.filter(
+        (childKey) => byKey.get(childKey)!.lineage.relationshipToParent !== "subagent",
+      ),
+      ...children.filter(
+        (childKey) => byKey.get(childKey)!.lineage.relationshipToParent === "subagent",
+      ),
+    ]);
   }
   const selectedPath = new Set<string>();
   let selectedRoot: string | null = null;

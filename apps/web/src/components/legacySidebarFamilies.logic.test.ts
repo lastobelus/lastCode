@@ -287,21 +287,32 @@ describe("legacy sidebar creator grouping", () => {
     expect(legacySidebarCreatorGroupingEligible(independent)).toBe(true);
   });
 
-  it("shows distinct typed subgroups by default, and a mixed list in minimal style", () => {
+  it("keeps subagents together after created threads in both layouts", () => {
     const threads = [
       thread("creator"),
-      created("ordinary", "creator"),
-      thread("helper", "creator"),
+      thread("helper-first", "creator"),
+      created("ordinary-first", "creator"),
+      thread("helper-second", "creator"),
+      created("ordinary-second", "creator"),
+    ];
+    const expected = [
+      "creator",
+      "ordinary-first",
+      "ordinary-second",
+      "helper-first",
+      "helper-second",
     ];
     const typed = project(threads);
-    expect(keys(typed)).toEqual(["creator", "helper", "ordinary"]);
+    expect(keys(typed)).toEqual(expected);
     expect(typed.renderedRows.map((row) => row.groupHeading)).toEqual([
       null,
-      "Subagents",
       "Created by this thread",
+      null,
+      "Subagents",
+      null,
     ]);
     const minimal = project(threads, { groupingStyle: "minimal" });
-    expect(keys(minimal)).toEqual(["creator", "ordinary", "helper"]);
+    expect(keys(minimal)).toEqual(expected);
     expect(minimal.renderedRows.every((row) => row.groupHeading === null)).toBe(true);
     expect(minimal.orderedThreadKeys).toEqual(minimal.renderedRows.map((row) => row.key));
   });

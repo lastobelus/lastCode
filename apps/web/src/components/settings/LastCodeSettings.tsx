@@ -410,13 +410,13 @@ export function LastCodeSettingsPanel() {
               <SelectTrigger size="sm" className="w-44" aria-label="Thread grouping style">
                 <SelectValue>
                   {clientSettings.legacySidebarThreadGroupingStyle === "minimal"
-                    ? "A · Minimal"
-                    : "B · Typed groups"}
+                    ? "Minimal"
+                    : "Typed groups"}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup>
-                <SelectItem value="minimal">A · Minimal</SelectItem>
-                <SelectItem value="typed-groups">B · Typed groups</SelectItem>
+                <SelectItem value="minimal">Minimal</SelectItem>
+                <SelectItem value="typed-groups">Typed groups</SelectItem>
               </SelectPopup>
             </Select>
           }
