@@ -50,6 +50,7 @@ interface TerminalHarness {
     readonly data: string;
   }>;
   readonly closes: Array<{ readonly threadId: string; readonly terminalId: string }>;
+  readonly clears: Array<{ readonly threadId: string; readonly terminalId: string }>;
   readonly historyDeletes: Array<{ readonly threadId: string; readonly terminalId: string }>;
   readonly summaries: TerminalSummary[];
   readonly liveSummaries?: TerminalSummary[];
@@ -65,7 +66,8 @@ interface TerminalHarness {
     readonly terminalId?: string | undefined;
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
-  readonly startupHistory?: string;
+  readonly onClear?: () => Effect.Effect<void, TerminalManager.TerminalError>;
+  startupHistory?: string;
   readonly startupRedactionValues?: ReadonlyArray<string> | null;
   readonly onHistory?: () => Effect.Effect<void, TerminalManager.TerminalHistoryError>;
 }
@@ -187,6 +189,10 @@ function terminalLayer(harness: TerminalHarness) {
       return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
+    clear: (input) => {
+      harness.clears.push(input);
+      return harness.onClear?.() ?? Effect.void;
+    },
     history: () =>
       (harness.onHistory?.() ?? Effect.void).pipe(Effect.as(harness.startupHistory ?? "")),
     startupDiagnostics: () =>
@@ -244,6 +250,7 @@ function testTerminalHarness(overrides: Partial<TerminalHarness> = {}): Terminal
     opens: [],
     writes: [],
     closes: [],
+    clears: [],
     historyDeletes: [],
     summaries: [],
     ...overrides,
@@ -387,6 +394,7 @@ describe("PreviewHosting", () => {
           assert.equal(repeated.expiresAt, lease.expiresAt);
           assert.equal(harness.opens.length, 1);
           assert.equal(harness.writes.length, 1);
+          assert.equal(harness.clears.length, 1);
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
@@ -1309,6 +1317,106 @@ describe("PreviewHosting", () => {
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect(
+    "does not report an earlier attempt's output when a reused lease retry fails quietly",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-quiet-retry-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          onClear: () =>
+            Effect.sync(() => {
+              harness.startupHistory = "";
+            }),
+          onWrite: () =>
+            Effect.sync(() => {
+              if (harness.writes.length === 1) {
+                harness.startupHistory = "Error from the previous startup attempt";
+              } else {
+                const summary = harness.summaries[0];
+                if (summary) harness.summaries[0] = { ...summary, hasRunningSubprocess: false };
+              }
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const input = {
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+            };
+            const lease = yield* hosting.launch(input);
+            const repeated = yield* hosting.launch(input);
+            assert.equal(repeated.id, lease.id);
+            assert.equal(harness.clears.length, 1);
+            assert.equal(harness.writes.length, 1);
+            assert.equal(harness.startupHistory, "Error from the previous startup attempt");
+            const summary = harness.summaries[0];
+            assert.isDefined(summary);
+            if (summary) harness.summaries[0] = { ...summary, hasRunningSubprocess: false };
+
+            const retry = yield* Effect.result(hosting.launch(input));
+            assert.equal(retry._tag, "Failure");
+            if (retry._tag === "Failure") {
+              assert.include(retry.failure.message, "preview command is no longer running");
+              assert.include(retry.failure.message, "No startup output captured.");
+              assert.notInclude(retry.failure.message, "previous startup attempt");
+            }
+            assert.equal(harness.opens.length, 2);
+            assert.equal(harness.clears.length, 2);
+            assert.equal(harness.writes.length, 2);
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not write a launch command when clearing its startup history fails", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-failed-clear-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness({
+        onClear: () =>
+          Effect.fail(
+            new TerminalManager.TerminalWriteError({
+              threadId: "thread-1",
+              terminalId: harness.opens[0]?.terminalId ?? "preview-test",
+              terminalPid: 100,
+              cause: new Error("synthetic terminal clear failure"),
+            }),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          assert.equal(harness.opens.length, 1);
+          assert.equal(harness.clears.length, 1);
+          assert.deepEqual(harness.writes, []);
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.equal(harness.closes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("does not persist an active lease when writing the launch command fails", () =>

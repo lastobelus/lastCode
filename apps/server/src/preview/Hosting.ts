@@ -575,6 +575,7 @@ const make = Effect.gen(function* () {
       const summary = yield* terminalSummary(lease);
       if (summary?.status === "running" && summary.hasRunningSubprocess) return;
       yield* terminals.open(openInput(lease));
+      yield* terminals.clear({ threadId: lease.threadId, terminalId: lease.terminalId });
       yield* terminals.write({
         threadId: lease.threadId,
         terminalId: lease.terminalId,
