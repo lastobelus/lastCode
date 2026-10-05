@@ -50,8 +50,11 @@ in the dashboard's project picker when it exists on several machines.
 The dashboard shows active and waiting threads alongside questions, reviews, QA,
 and progress reported by your agents. Threads with reported items have a small
 dashboard indicator in the sidebar. Each item links to its source thread and shows
-when it was raised or updated. Expand an item for context, then open its source
-thread to act.
+when it was raised or updated. Expand an item for context. Choose **Message** to
+send a text follow-up without leaving the dashboard; messages queue after any
+current turn. Drafts remain if delivery fails, and **Retry send** confirms the same
+message. Use **Open thread** for approvals, structured questions, full reviews,
+and QA. Sending a message does not resolve a reported dashboard item.
 
 **Quick** and **Focused** describe effort; **Computer** describes a requirement.
 These filters can overlap. **On my phone** hides requests marked as requiring a
