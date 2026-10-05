@@ -700,7 +700,7 @@ export function prepareLocalCiRepository(cwd = process.cwd()): PreparedLocalCiRe
 export async function assertRepositoryIntegrity(
   repoRoot: string,
   before: RepositoryIntegritySnapshot,
-  signal = new AbortController().signal,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<void> {
   const coreBare = await runGitWithCancellation(
     repoRoot,
@@ -771,7 +771,7 @@ export async function writeVerifiedFullCiStamp(
   repoRoot: string,
   integrity: RepositoryIntegritySnapshot,
   stamp: Omit<FullCiStamp, "schemaVersion">,
-  signal = new AbortController().signal,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<string> {
   await assertRepositoryIntegrity(repoRoot, integrity, signal);
   signal.throwIfAborted();
@@ -782,7 +782,7 @@ export async function writeVerifiedQuickCiReceipt(
   repoRoot: string,
   integrity: RepositoryIntegritySnapshot,
   receipt: Omit<QuickCiReceipt, "schemaVersion" | "gateVersion">,
-  signal = new AbortController().signal,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<string> {
   await assertRepositoryIntegrity(repoRoot, integrity, signal);
   signal.throwIfAborted();
