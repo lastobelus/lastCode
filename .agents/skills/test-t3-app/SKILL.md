@@ -22,9 +22,15 @@ its terminal session. Use the worktree's ignored `.t3` state.
 
 Before managed launch, run `vp run dev --dry-run --home-dir "$PWD/.t3"`
 from the repository root and read `webPort` from its `[dev-runner]` output.
-Use `http://localhost:<webPort>` as the requested preview URL. Launch
-`vp run dev --home-dir "$PWD/.t3"` with the same working directory and
-environment. To choose a port range, supply `T3CODE_PORT_OFFSET` to both the
+Use `http://localhost:<webPort>` as the requested preview URL. Launch with the
+same working directory and environment, preserving startup output privately:
+
+```sh
+mkdir -p "$PWD/.t3" && qa_startup_log=$(mktemp "$PWD/.t3/qa-startup.XXXXXX") && vp run dev --home-dir "$PWD/.t3" > "$qa_startup_log" 2>&1
+```
+
+`mktemp` creates a unique owner-only file; the dev command stays in the foreground.
+To choose a port range, supply `T3CODE_PORT_OFFSET` to both the
 dry run and the managed launch: the initial web port is `5733 + offset` and
 backend port is `13773 + offset`. The runner can shift occupied ports, so use
 the dry-run result, not the formula alone. `--port` selects the backend, not
@@ -32,10 +38,21 @@ the browser-facing web listener. If a port is taken between resolution and
 launch, inspect the readiness failure and resolve a free pair again.
 
 `preview_host` does not expose startup output or a terminal handle. After a
-successful launch, obtain a fresh pairing URL with
+successful launch, read the new `.t3/qa-startup.*` file created by this attempt
+to obtain its complete startup pairing URL. That credential has administrative
+scope, including the access needed to test Connections settings. Retain the
+exact file path for this attempt; do not pick an older launch's log. Treat the
+file as secret-bearing: never commit it, upload it, or quote its contents in
+reports. Remove the file after extracting the URL.
+
+If the startup token expires or has already been consumed, ordinary QA can use
 `node apps/server/src/bin.ts pair --base-dir "$PWD/.t3"` from the same root.
-This explicitly targets the isolated server and uses its recorded web origin.
-Keep the returned token private; do not commit it or include it in reports.
+That command grants only standard client scopes; it cannot replace an admin
+credential for Connections management. For administrative QA, reuse an already
+authenticated admin tab or the configured reusable dev credential described in
+`docs/operations/development.md#reusable-dev-credential`; otherwise relaunch only
+this task's isolated server with private startup capture to obtain a new admin
+URL. Never restart the user's running LastCode instance for this purpose.
 Never run against `~/.t3/userdata` or set `VITE_HTTP_URL` or `VITE_WS_URL`.
 
 Test with meaningful project and thread data. Read
@@ -54,10 +71,10 @@ inspecting.
 
 A newly created blank tab can initially report `available: false` while its
 native browser starts. Navigate before declaring it unavailable; navigation
-waits for readiness. Navigate to the complete freshly minted pairing URL once with
+waits for readiness. Navigate to the complete pairing URL once with
 `preview_navigate`, then use `preview_snapshot` and T3's interaction tools.
-If the token was consumed or expired, repeat the isolated pairing command above
-for a fresh one. Keep using the same tab.
+If the token was consumed or expired, follow the scope-aware recovery above.
+Keep using the same tab.
 
 If managed hosting fails readiness, inspect the startup diagnostics returned by
 `preview_host`, the launch command, actual listening port, and ownership before
