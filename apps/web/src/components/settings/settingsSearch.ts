@@ -874,6 +874,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "scale-legacy-sidebar",
+    title: "Scale legacy sidebar",
+    to: "/settings/lastcode",
+  },
+  {
     id: "local-ci-quick-mode",
     title: "Quick CI mode",
     to: "/settings/lastcode",
@@ -907,6 +912,32 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local ci quick full cpu priority responsive nice"],
+  },
+  {
+    id: "thread-grouping-style",
+    title: "Thread grouping style",
+    to: "/settings/lastcode",
+    searchTerms: ["legacy sidebar subagents agent-created minimal typed groups relationships"],
+  },
+  {
+    id: "compact-status-indicators",
+    title: "Compact status indicators",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "show-worktree-indicators",
+    title: "Show worktree indicators (legacy sidebar)",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "rounded-project-icons",
+    title: "Rounded project icons",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "environment-icons",
+    title: "Environment icons",
+    to: "/settings/lastcode",
   },
   {
     id: "archive",

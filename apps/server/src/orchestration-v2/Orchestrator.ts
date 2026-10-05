@@ -2134,11 +2134,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.driver": command.modelSelection.instanceId,
     });
 
+    const existing = yield* projectionStore.getThread(command.threadId).pipe(
+      Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)),
+      Effect.mapError(
+        (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+      ),
+    );
+    if (
+      existing !== null &&
+      (existing.creatorThreadId !== undefined || command.creatorThreadId !== undefined)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "An existing conversation's creator history cannot be replaced by another creation request.",
+      });
+    }
+    if (command.creatorThreadId !== undefined) {
+      const creatorThreadId = command.creatorThreadId;
+      if (command.createdBy !== "agent" || command.creatorThreadId === command.threadId) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "A creator must be a different conversation that created this thread through an agent.",
+        });
+      }
+      yield* projectionStore
+        .getThread(command.creatorThreadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: creatorThreadId, cause }),
+          ),
+        );
+    }
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...(command.creatorThreadId === undefined
+        ? {}
+        : { creatorThreadId: command.creatorThreadId, creatorGrouping: "grouped" }),
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
@@ -2355,6 +2393,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (
+      command.type === "thread.metadata.update" &&
+      command.creatorGrouping !== undefined &&
+      (thread.creatorThreadId === undefined ||
+        thread.createdBy !== "agent" ||
+        thread.lineage.parentThreadId !== null ||
+        thread.lineage.relationshipToParent !== null ||
+        thread.forkedFrom !== null)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "Creator grouping is available only for ordinary agent-created conversations with a known creator.",
       });
     }
     if (
@@ -2873,6 +2927,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
+            ...(command.creatorGrouping === undefined
+              ? {}
+              : { creatorGrouping: command.creatorGrouping }),
             updatedAt: now,
           };
         }
