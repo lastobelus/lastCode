@@ -122,7 +122,6 @@ const make = Effect.gen(function* () {
               : { type: "root" },
             createdBy: "user",
             creationSource: "server",
-            creatorThreadId: source.id,
             initialMessage: {
               messageId: MessageId.make(`recovery-repair-message:${key}`),
               attachments: [],
