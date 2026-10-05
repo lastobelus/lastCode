@@ -192,6 +192,21 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
 const isPreviewHostingError = Schema.is(PreviewHosting.PreviewHostingError);
 
 const handlers = {
+  preview_stop_thread: () =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      return yield* hosting.stopThread(scope.threadId).pipe(
+        Effect.as({}),
+        Effect.mapError(
+          () =>
+            new ContractPreviewHostingError({
+              reason: "unavailable",
+              message: "Some previews or processes could not be stopped. Please try again.",
+            }),
+        ),
+      );
+    }),
   preview_host: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("preview");

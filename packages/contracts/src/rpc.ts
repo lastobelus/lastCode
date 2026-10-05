@@ -281,10 +281,12 @@ import {
 } from "./previewAutomation.ts";
 import {
   PreviewHostingError,
+  PreviewHostingLeaseMetadata,
   PreviewHostingLeaseSummary,
   PreviewHostingListInput,
   PreviewHostingRecoverInput,
   PreviewHostingRecoverResult,
+  PreviewHostingStopThreadInput,
 } from "./previewHosting.ts";
 import {
   ServerConfigStreamEvent,
@@ -440,6 +442,7 @@ export const WS_METHODS = {
   previewList: "preview.list",
   previewHostingList: "previewHosting.list",
   previewHostingRecover: "previewHosting.recover",
+  previewHostingStopThread: "previewHosting.stopThread",
   previewReportStatus: "preview.reportStatus",
   previewClaimRecovery: "preview.claimRecovery",
   previewAutomationConnect: "previewAutomation.connect",
@@ -556,6 +559,7 @@ export const WS_METHODS = {
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
+  subscribePreviewHosting: "subscribePreviewHosting",
   subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
   subscribeDeviceState: "subscribeDeviceState",
   subscribeServerConfig: "subscribeServerConfig",
@@ -1505,6 +1509,18 @@ const WsPreviewHostingRecoverRpc = Rpc.make(WS_METHODS.previewHostingRecover, {
   error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
 });
 
+const WsPreviewHostingStopThreadRpc = Rpc.make(WS_METHODS.previewHostingStopThread, {
+  payload: PreviewHostingStopThreadInput,
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
+
+const WsSubscribePreviewHostingRpc = Rpc.make(WS_METHODS.subscribePreviewHosting, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(PreviewHostingLeaseMetadata),
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
@@ -1957,6 +1973,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewListRpc,
   WsPreviewHostingListRpc,
   WsPreviewHostingRecoverRpc,
+  WsPreviewHostingStopThreadRpc,
+  WsSubscribePreviewHostingRpc,
   WsPreviewReportStatusRpc,
   WsPreviewClaimRecoveryRpc,
   WsPreviewAutomationConnectRpc,

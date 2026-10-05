@@ -61,11 +61,17 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
-  it("keeps hosted preview recovery read-only for listing and terminal-authorized for launch", () => {
+  it("keeps hosted preview observation read-only and process control terminal-authorized", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingList)).toBe(
       AuthOrchestrationReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
+      AuthTerminalOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.subscribePreviewHosting)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingStopThread)).toBe(
       AuthTerminalOperateScope,
     );
   });

@@ -1,3 +1,4 @@
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
   PREVIEW_URL_MAX_LENGTH,
@@ -5,6 +6,7 @@ import {
   ThreadId,
   PreviewHostingLeaseId,
   type PreviewHostingLeaseSummary as ContractPreviewHostingLeaseSummary,
+  type PreviewHostingLeaseMetadata,
   type TerminalOpenInput,
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
@@ -129,6 +131,9 @@ export class PreviewHosting extends Context.Service<
     readonly list: (
       threadId?: string,
     ) => Effect.Effect<ReadonlyArray<PreviewHostingLease>, PreviewHostingError>;
+    readonly subscribe: (
+      listener: (leases: ReadonlyArray<PreviewHostingLeaseMetadata>) => Effect.Effect<void>,
+    ) => Effect.Effect<() => void, PreviewHostingError>;
     readonly ownsTerminal: (
       threadId: string,
       terminalId: string,
@@ -136,6 +141,12 @@ export class PreviewHosting extends Context.Service<
     readonly removeThread: (
       threadId: string,
     ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+    readonly stopThread: (
+      threadId: string,
+    ) => Effect.Effect<
+      void,
+      PreviewHostingError | TerminalManager.TerminalError | TerminalManager.TerminalShutdownError
+    >;
     readonly protectedWorkspacePaths: () => Effect.Effect<
       ReadonlyArray<string>,
       PreviewHostingError
@@ -267,6 +278,44 @@ const make = Effect.gen(function* () {
     ),
   );
   const leasesRef = yield* SynchronizedRef.make<ReadonlyArray<PreviewHostingLease>>(initialLeases);
+  const listeners = new Set<
+    (leases: ReadonlyArray<PreviewHostingLeaseMetadata>) => Effect.Effect<void>
+  >();
+
+  const activeLeases = (
+    leases: ReadonlyArray<PreviewHostingLease>,
+    currentTime: number,
+    threadId?: string,
+  ) =>
+    leases
+      .filter(
+        (lease) =>
+          lease.status !== "expired" &&
+          Date.parse(lease.expiresAt) > currentTime &&
+          (threadId === undefined || lease.threadId === threadId),
+      )
+      .toSorted((left, right) => left.expiresAt.localeCompare(right.expiresAt));
+
+  const leaseSummaries = (leases: ReadonlyArray<PreviewHostingLease>) =>
+    Effect.map(DateTime.now, (now) =>
+      activeLeases(leases, DateTime.toEpochMillis(now)).map((lease) => ({
+        ...toPreviewHostingLeaseSummary(lease),
+        terminalId: lease.terminalId,
+      })),
+    );
+
+  const publishLeases = Effect.fnUntraced(function* (leases: ReadonlyArray<PreviewHostingLease>) {
+    if (listeners.size === 0) return;
+    const summaries = yield* leaseSummaries(leases);
+    yield* Effect.forEach([...listeners], (listener) => listener(summaries), {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to deliver preview lease update", { cause }),
+      ),
+    );
+  });
 
   const persistState = (leases: ReadonlyArray<PreviewHostingLease>) =>
     writeFileStringAtomically({
@@ -299,6 +348,7 @@ const make = Effect.gen(function* () {
         const [result, next] = f(current);
         yield* persistState(next);
         yield* SynchronizedRef.set(leasesRef, next);
+        yield* publishLeases(next);
         if (wakeWorker) yield* Queue.offer(wakeups, undefined);
         return result;
       }),
@@ -391,7 +441,15 @@ const make = Effect.gen(function* () {
     let timeoutMs = 0;
     const result = yield* Effect.scoped(
       Effect.gen(function* () {
-        const ready = yield* Deferred.make<DiscoveredLocalServer>();
+        const ready = yield* Deferred.make<DiscoveredLocalServer | null>();
+        yield* Effect.acquireRelease(
+          subscribe((leases) =>
+            leases.some((entry) => entry.leaseId === lease.id)
+              ? Effect.void
+              : Deferred.succeed(ready, null).pipe(Effect.asVoid),
+          ),
+          (unsubscribe) => Effect.sync(unsubscribe),
+        );
         const listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => {
           const expectedUrl = discoveryUrl(lease.url);
           const responding = servers.find((server) => discoveryUrl(server.url) === expectedUrl);
@@ -413,7 +471,7 @@ const make = Effect.gen(function* () {
         const currentTime = yield* nowMillis;
         const remainingLeaseMs = Math.max(0, Date.parse(lease.expiresAt) - currentTime);
         timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
-        if (timeoutMs === 0) return Option.none<DiscoveredLocalServer>();
+        if (timeoutMs === 0) return Option.none<DiscoveredLocalServer | null>();
         return yield* Deferred.await(ready).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
       }),
     );
@@ -460,13 +518,16 @@ const make = Effect.gen(function* () {
   const launchCommandIfNeeded = (lease: PreviewHostingLease) =>
     Effect.gen(function* () {
       const summary = yield* terminalSummary(lease);
-      if (summary?.status === "running" && summary.hasRunningSubprocess) return;
+      const latest = yield* findLease(lease.id);
+      if (latest === null || latest.status === "expired") return false;
+      if (summary?.status === "running" && summary.hasRunningSubprocess) return true;
       yield* terminals.open(openInput(lease));
       yield* terminals.write({
         threadId: lease.threadId,
         terminalId: lease.terminalId,
         data: lease.command.endsWith("\n") ? lease.command : `${lease.command}\n`,
       });
+      return true;
     });
 
   const closeOwnedTerminal = (lease: PreviewHostingLease) =>
@@ -512,8 +573,16 @@ const make = Effect.gen(function* () {
 
         const startsHandoff = lease.status === "starting";
         yield* verifyLaunchOwnership(lease);
-        yield* launchCommandIfNeeded(lease);
-        yield* waitForReady(lease);
+        if (!(yield* launchCommandIfNeeded(lease))) {
+          const latest = yield* findLease(lease.id);
+          if (latest !== null) yield* expireLocked(latest);
+          return null;
+        }
+        if ((yield* waitForReady(lease)) === null) {
+          const latest = yield* findLease(lease.id);
+          if (latest !== null) yield* expireLocked(latest);
+          return null;
+        }
         const afterReady = yield* findLease(lease.id);
         const completedAt = yield* nowMillis;
         if (
@@ -544,8 +613,16 @@ const make = Effect.gen(function* () {
             : {}),
           status: "active" as const,
         };
-        yield* setLease(active);
-        return active;
+        const committed = yield* changeLeases((leases) => {
+          const latest = leases.find((entry) => entry.id === lease.id);
+          if (latest === undefined || latest.status === "expired") return [null, leases];
+          return [active, leases.map((entry) => (entry.id === lease.id ? active : entry))];
+        });
+        if (committed === null) {
+          const latest = yield* findLease(lease.id);
+          if (latest !== null) yield* expireLocked(latest);
+        }
+        return committed;
       }),
     );
 
@@ -557,17 +634,23 @@ const make = Effect.gen(function* () {
         // A concurrent launch may already have handed this reservation off.
         if (latest === null || latest.status === "active") return;
         const expired = { ...latest, status: "expired" as const };
-        yield* SynchronizedRef.update(leasesRef, (leases) =>
-          leases.map((entry) => (entry.id === expired.id ? expired : entry)),
-        );
-        yield* setLease(expired, false).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("failed to persist failed preview lease cleanup state", {
-              threadId: lease.threadId,
-              terminalId: lease.terminalId,
-              error: error.message,
-            }),
-          ),
+        yield* persistLock.withPermit(
+          Effect.gen(function* () {
+            const next = (yield* SynchronizedRef.get(leasesRef)).map((entry) =>
+              entry.id === expired.id ? expired : entry,
+            );
+            yield* persistState(next).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("failed to persist failed preview lease cleanup state", {
+                  threadId: lease.threadId,
+                  terminalId: lease.terminalId,
+                  error: error.message,
+                }),
+              ),
+            );
+            yield* SynchronizedRef.set(leasesRef, next);
+            yield* publishLeases(next);
+          }),
         );
         yield* expireLocked(expired).pipe(
           Effect.catch((error) =>
@@ -604,6 +687,9 @@ const make = Effect.gen(function* () {
     }
   });
 
+  // Only same-thread reservations wait for terminal cleanup. Readiness stays
+  // outside this lock so cleanup can cancel launches and recoveries immediately.
+  const threadLocks = yield* KeyedLock.make<string>();
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = (requestedInput) =>
     Effect.gen(function* () {
@@ -634,7 +720,7 @@ const make = Effect.gen(function* () {
       );
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
-        const selected = yield* launchGate.withPermit(
+        const reservation = launchGate.withPermit(
           withWorkspaceLease(
             path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
@@ -759,6 +845,7 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
+        const selected = yield* threadLocks.withLock(input.threadId, reservation);
 
         // The durable reservation is visible to cleanup before the workspace lock
         // is released. TerminalManager.open takes the same lock itself, so readiness
@@ -812,15 +899,23 @@ const make = Effect.gen(function* () {
       if (startupError !== null) return yield* startupError;
       const currentTime = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
-      return leases
-        .filter(
-          (lease) =>
-            lease.status !== "expired" &&
-            Date.parse(lease.expiresAt) > currentTime &&
-            (threadId === undefined || lease.threadId === threadId),
-        )
-        .toSorted((left, right) => left.expiresAt.localeCompare(right.expiresAt));
+      return activeLeases(leases, currentTime, threadId);
     });
+
+  const subscribe: PreviewHosting["Service"]["subscribe"] = (listener) =>
+    persistLock.withPermit(
+      Effect.gen(function* () {
+        if (startupError !== null) return yield* startupError;
+        const summaries = yield* leaseSummaries(yield* SynchronizedRef.get(leasesRef));
+        // Registration and the initial snapshot share the mutation lock so no
+        // lease update can fall between them.
+        yield* listener(summaries);
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      }),
+    );
 
   const ownsTerminal: PreviewHosting["Service"]["ownsTerminal"] = (threadId, terminalId) =>
     Effect.gen(function* () {
@@ -836,32 +931,58 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const removeThreadLocked = Effect.fnUntraced(function* (threadId: string) {
+    if (startupError !== null) return yield* startupError;
+    const { owned, cancellation } = yield* persistLock.withPermit(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const current = yield* SynchronizedRef.get(leasesRef);
+          const owned = current.filter((lease) => lease.threadId === threadId);
+          const next = current.map((lease) =>
+            lease.threadId === threadId ? { ...lease, status: "expired" as const } : lease,
+          );
+          const cancellation = yield* (owned.length === 0 ? Effect.void : persistState(next)).pipe(
+            Effect.result,
+          );
+          // Even a failed disk write must prevent an in-flight recovery from
+          // restarting a preview while best-effort terminal cleanup runs.
+          yield* SynchronizedRef.set(leasesRef, next);
+          yield* publishLeases(next);
+          yield* Queue.offer(wakeups, undefined);
+          return { owned, cancellation };
+        }),
+      ),
+    );
+    const results = yield* Effect.forEach(
+      owned,
+      (lease) =>
+        withLeaseLock(
+          lease.id,
+          Effect.gen(function* () {
+            const latest = yield* findLease(lease.id);
+            if (latest === null || latest.threadId !== threadId) return;
+            yield* closeOwnedTerminal(latest);
+            yield* removeLease(latest.id);
+          }),
+        ).pipe(Effect.result),
+      { concurrency: "unbounded" },
+    );
+    if (cancellation._tag === "Failure") return yield* cancellation.failure;
+    const failure = results.find((result) => result._tag === "Failure");
+    if (failure?._tag === "Failure") return yield* failure.failure;
+  });
+
   const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
-    launchGate.withPermit(
+    threadLocks.withLock(threadId, removeThreadLocked(threadId));
+
+  const stopThread: PreviewHosting["Service"]["stopThread"] = (threadId) =>
+    threadLocks.withLock(
+      threadId,
       Effect.gen(function* () {
-        if (startupError !== null) return yield* startupError;
-        const owned = (yield* SynchronizedRef.get(leasesRef)).filter(
-          (lease) => lease.threadId === threadId,
-        );
-        const results = yield* Effect.forEach(
-          owned,
-          (lease) =>
-            withLeaseLock(
-              lease.id,
-              Effect.gen(function* () {
-                const latest = yield* findLease(lease.id);
-                if (latest === null || latest.threadId !== threadId) return;
-                const expired =
-                  latest.status === "expired" ? latest : { ...latest, status: "expired" as const };
-                if (expired !== latest) yield* setLease(expired);
-                yield* closeOwnedTerminal(expired);
-                yield* removeLease(expired.id);
-              }),
-            ).pipe(Effect.result),
-          { concurrency: "unbounded" },
-        );
-        const failure = results.find((result) => result._tag === "Failure");
-        if (failure?._tag === "Failure") return yield* failure.failure;
+        const previews = yield* removeThreadLocked(threadId).pipe(Effect.result);
+        const shutdown = yield* terminals.shutdownThread(threadId).pipe(Effect.result);
+        if (previews._tag === "Failure") return yield* previews.failure;
+        if (shutdown._tag === "Failure") return yield* shutdown.failure;
       }),
     );
 
@@ -937,8 +1058,10 @@ const make = Effect.gen(function* () {
     launch,
     recover,
     list,
+    subscribe,
     ownsTerminal,
     removeThread,
+    stopThread,
     protectedWorkspacePaths,
   });
 });

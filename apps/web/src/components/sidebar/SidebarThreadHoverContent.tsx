@@ -1,5 +1,6 @@
 import { ArrowRightLeftIcon, CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 
@@ -14,6 +15,9 @@ import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { ThreadPullRequestsMiniList } from "../ThreadStatusIndicators";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import { useKnownTerminalSessions } from "../../state/terminalSessions";
+import { useThreadPreviewLeases } from "../../state/previewHosting";
+import { threadTerminalProcessLabels } from "./threadTerminalPresentation";
 
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
@@ -48,6 +52,17 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
   const supportsMultiplePullRequests = useSupportsMultiplePullRequests(props.thread.environmentId);
   const driverKind = props.providerEntry?.driverKind ?? null;
   const projectDisplayName = props.projectDisplayName ?? props.projectTitle;
+  const sessions = useKnownTerminalSessions({
+    environmentId: props.thread.environmentId,
+    threadId: props.thread.id,
+  });
+  const previews = useThreadPreviewLeases(
+    scopeThreadRef(props.thread.environmentId, props.thread.id),
+  );
+  const terminalLabels = threadTerminalProcessLabels(
+    sessions.flatMap((session) => (session.state.summary ? [session.state.summary] : [])),
+    previews,
+  );
   const previousProviderNames = props.thread.providerInstanceHistory
     .filter((instanceId) => instanceId !== props.modelInstanceId)
     .map(
@@ -138,14 +153,21 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
             </div>
           </div>
         ) : null}
-        {props.terminalStatus ? (
-          <div className="flex min-w-0 items-center gap-2">
+        {props.terminalStatus || terminalLabels.length > 0 ? (
+          <div className="flex min-w-0 items-start gap-2">
             <TerminalIcon
               aria-hidden
-              className={cn("size-3 shrink-0", props.terminalStatus.colorClass)}
+              className={cn("mt-0.5 size-3 shrink-0", props.terminalStatus?.colorClass)}
             />
-            <div className="min-w-0 truncate text-foreground/75">
-              {terminalProcessLabel(props.terminalProcessCount)}
+            <div className="grid min-w-0 gap-1 text-foreground/75">
+              {props.terminalStatus ? (
+                <div>{terminalProcessLabel(props.terminalProcessCount)}</div>
+              ) : null}
+              {terminalLabels.map((terminal) => (
+                <div key={terminal.terminalId} className="wrap-anywhere">
+                  {terminal.label}
+                </div>
+              ))}
             </div>
           </div>
         ) : null}

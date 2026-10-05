@@ -11,6 +11,7 @@ import { RowPressable } from "../../components/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
+import { environmentServerConfigsAtom } from "../../state/server";
 import type { ThreadMoveDestination } from "./threadOrder";
 import type {
   EnvironmentProject,
@@ -20,10 +21,14 @@ import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
+import { useAtomValue } from "@effect/atom-react";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
-import { Alert, Pressable, useWindowDimensions, View } from "react-native";
+import { Alert, Platform, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
 import type { ThreadListProvider } from "../../state/thread-list-environments";
@@ -39,6 +44,8 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { threadEnvironment } from "../../state/threads";
 import { terminalEnvironment } from "../../state/terminal";
+import { previewEnvironment } from "../../state/preview";
+import { beginStopThreadProcessesFeedback } from "../../state/stop-thread-processes-feedback";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
@@ -60,6 +67,7 @@ import { PersistentThreadIcon } from "./PersistentThreadIcon";
 import {
   buildThreadPersistenceMenuItems,
   persistenceIntentForMenuEvent,
+  withThreadMenuDividers,
 } from "./thread-persistence-menu";
 import { resolveWorktreeCleanupStatus, shouldShowActionWaitingIndicator } from "./thread-status";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
@@ -595,6 +603,38 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     reportFailure: false,
   });
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
+  const stopThreadProcesses = useAtomCommand(previewEnvironment.hostingStopThread, {
+    reportFailure: false,
+  });
+  const hasRunningSubprocess = useAtomValue(
+    terminalEnvironment.metadata({ environmentId: thread.environmentId, input: null }),
+    useCallback(
+      (result) =>
+        Option.exists(AsyncResult.value(result), (terminals) =>
+          terminals.some(
+            (terminal) => terminal.threadId === thread.id && terminal.hasRunningSubprocess,
+          ),
+        ),
+      [thread.id],
+    ),
+  );
+  const hasPreviewLease = useAtomValue(
+    previewEnvironment.hostingLeases({ environmentId: thread.environmentId, input: {} }),
+    useCallback(
+      (result) =>
+        Option.exists(AsyncResult.value(result), (leases) =>
+          leases.some((lease) => lease.threadId === thread.id),
+        ),
+      [thread.id],
+    ),
+  );
+  const supportsProcessControls = useAtomValue(
+    environmentServerConfigsAtom,
+    (configs) =>
+      configs.get(thread.environmentId)?.environment.capabilities.previewHostingProcessControl ===
+      true,
+  );
+  const hasManagedProcesses = supportsProcessControls && (hasRunningSubprocess || hasPreviewLease);
 
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
@@ -702,6 +742,26 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       );
     }
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
+
+  const handleStopThreadProcesses = useCallback(async () => {
+    const finishFeedback = beginStopThreadProcessesFeedback(thread.title);
+    const result = await stopThreadProcesses({
+      environmentId: thread.environmentId,
+      input: { threadId: thread.id },
+    });
+    if (result._tag === "Success") {
+      finishFeedback("success");
+    } else if (isAtomCommandInterrupted(result)) {
+      finishFeedback("interrupted");
+    } else {
+      finishFeedback("error");
+      const error = Cause.squash(result.cause);
+      Alert.alert(
+        "Could not stop all previews and processes",
+        error instanceof Error ? error.message : "The previews and processes could not be stopped.",
+      );
+    }
+  }, [stopThreadProcesses, thread.environmentId, thread.id, thread.title]);
 
   const handleRetryWorktreeCleanup = useCallback(async () => {
     const result = await retryWorktreeCleanup({
@@ -874,11 +934,21 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const withPersistence = useCallback(
     (actions: ReadonlyArray<MenuAction>) =>
       buildThreadPersistenceMenuItems({
-        actions,
+        actions: hasManagedProcesses
+          ? [
+              {
+                id: "stop-thread-processes",
+                title: "Stop all previews & processes",
+                image: "stop.fill",
+                attributes: { destructive: true },
+              },
+              ...actions,
+            ]
+          : actions,
         persistent: thread.persistent === true,
         supported: props.persistenceSupported,
       }),
-    [props.persistenceSupported, thread.persistent],
+    [hasManagedProcesses, props.persistenceSupported, thread.persistent],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () =>
@@ -975,6 +1045,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         copyTextWithHaptic(thread.id, { target: "thread-id" });
       }
       if (nativeEvent.event === "cancel-action") void handleCancelAction();
+      if (nativeEvent.event === "stop-thread-processes") void handleStopThreadProcesses();
       if (nativeEvent.event === "retry-worktree-cleanup") void handleRetryWorktreeCleanup();
       if (nativeEvent.event === "keep-worktree") handleKeepWorktree();
       const persistenceIntent = persistenceIntentForMenuEvent(nativeEvent.event);
@@ -1000,6 +1071,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       thread,
       handleArchive,
       handleCancelAction,
+      handleStopThreadProcesses,
       handleKeepWorktree,
       handlePersistence,
       handleRetryWorktreeCleanup,
@@ -1471,27 +1543,30 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 ? FAILED_CLEANUP_MENU_ACTIONS
                 : cleanupPending
                   ? []
-                  : [
-                      ...(thread.branch
-                        ? [
-                            {
-                              id: "new-thread-on-branch",
-                              title: getThreadListV2NewBranchMenuTitle(thread.branch),
-                              image: "square.and.pencil",
-                            },
-                          ]
-                        : []),
-                      { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
-                      ...(snoozedRow
-                        ? snoozedMenuActions
-                        : !props.settlementSupported
-                          ? legacyMenuActions
-                          : canUnsettle
-                            ? slimMenuActions
-                            : swipeActions.secondary === "snooze"
-                              ? snoozableCardMenuActions
-                              : cardMenuActions),
-                    ]
+                  : withThreadMenuDividers(
+                      [
+                        ...(thread.branch
+                          ? [
+                              {
+                                id: "new-thread-on-branch",
+                                title: getThreadListV2NewBranchMenuTitle(thread.branch),
+                                image: "square.and.pencil",
+                              },
+                            ]
+                          : []),
+                        { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
+                        ...(snoozedRow
+                          ? snoozedMenuActions
+                          : !props.settlementSupported
+                            ? legacyMenuActions
+                            : canUnsettle
+                              ? slimMenuActions
+                              : swipeActions.secondary === "snooze"
+                                ? snoozableCardMenuActions
+                                : cardMenuActions),
+                      ],
+                      Platform.OS === "ios" || Platform.OS === "android",
+                    )
             }
             onPressAction={handleMenuAction}
             shouldOpenOnLongPress={cleanupFailed || !cleanupPending}

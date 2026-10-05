@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  buildStopThreadProcessesMenuItem,
+  withThreadActionMenuDividers,
   type ThreadActionMenuState,
 } from "./threadActionMenu.logic";
 
@@ -18,6 +20,7 @@ const baseState: ThreadActionMenuState = {
   isRegeneratingTitle: false,
   isRunning: false,
   hasRunningAction: false,
+  hasStoppableProcesses: false,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
@@ -52,6 +55,54 @@ function allIds(state: ThreadActionMenuState): string[] {
 }
 
 describe("buildThreadActionMenuItems", () => {
+  it("offers stopping only when the thread owns a preview or running subprocess", () => {
+    expect(buildStopThreadProcessesMenuItem(false)).toBeNull();
+    expect(ids(baseState)).not.toContain("stop-thread-processes");
+    const items = buildThreadActionMenuItems({ ...baseState, hasStoppableProcesses: true });
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]).toEqual({
+      id: "stop-thread-processes",
+      label: "Stop all previews & processes",
+      destructive: true,
+    });
+    expect(items[persistenceIndex + 2]?.separatorBefore).toBe(true);
+  });
+
+  it("separates branch creation and persistence without separating persistence from stop", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, branch: "feature/preview" });
+    expect(items[1]?.separatorBefore).toBe(true);
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]?.separatorBefore).toBe(true);
+    const withoutPersistence = buildThreadActionMenuItems({
+      ...baseState,
+      hasStoppableProcesses: true,
+      supports: { ...baseState.supports, persistence: false },
+    });
+    const stopIndex = withoutPersistence.findIndex((item) => item.id === "stop-thread-processes");
+    expect(withoutPersistence[stopIndex + 1]?.separatorBefore).toBe(true);
+  });
+
+  it("groups legacy thread commands with dividers after creation, annotation, and stop", () => {
+    const commands = [
+      "new-thread-on-branch",
+      "rename",
+      "annotate",
+      "mark-unread",
+      "mark-persistent",
+      "stop-thread-processes",
+      "copy-path",
+    ];
+    const items = withThreadActionMenuDividers(commands.map((id) => ({ id, label: id })));
+    expect(items.filter((item) => item.separatorBefore).map((item) => item.id)).toEqual([
+      "rename",
+      "mark-unread",
+      "copy-path",
+    ]);
+    const withoutStop = withThreadActionMenuDividers(
+      commands.filter((id) => id !== "stop-thread-processes").map((id) => ({ id, label: id })),
+    );
+    expect(withoutStop.find((item) => item.id === "copy-path")?.separatorBefore).toBe(true);
+  });
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({

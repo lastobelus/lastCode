@@ -152,6 +152,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPinning: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.persistence.set and enforces archive/delete protection. */
   threadPersistence: Schema.optionalKey(Schema.Boolean),
+  /** Server streams hosted preview lifetimes and can stop a thread's previews and terminals. */
+  previewHostingProcessControl: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).
       Same version-skew contract as threadSettlement. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),

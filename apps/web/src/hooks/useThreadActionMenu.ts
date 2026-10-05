@@ -19,6 +19,12 @@ import {
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { threadEnvironment } from "../state/threads";
 import { terminalEnvironment } from "../state/terminal";
+import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import {
+  usePreviewProcessControlsSupported,
+  useStopThreadProcesses,
+  useThreadPreviewLeases,
+} from "../state/previewHosting";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsAutoSettleOptOut,
@@ -105,6 +111,17 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
+  const stopThreadProcesses = useStopThreadProcesses();
+  const previews = useThreadPreviewLeases(threadRef);
+  const runningTerminalIds = useThreadRunningTerminalIds({
+    environmentId: threadRef?.environmentId ?? null,
+    threadId: threadRef?.threadId ?? null,
+  });
+  const supportsProcessControls = usePreviewProcessControlsSupported(
+    threadRef?.environmentId ?? null,
+  );
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -166,6 +183,7 @@ export function useThreadActionMenu(input: {
           isRegeneratingTitle,
           isRunning: !threadRuntimeCanArchive(thread.runtime),
           hasRunningAction: thread.actionResume?.outcome === "running",
+          hasStoppableProcesses,
           supports,
           snoozePresets,
           handoffs: handoffDescriptors,
@@ -295,6 +313,9 @@ export function useThreadActionMenu(input: {
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
+          case "stop-thread-processes":
+            await stopThreadProcesses(threadRef);
+            return;
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -373,6 +394,8 @@ export function useThreadActionMenu(input: {
     [
       archiveThread,
       closeTerminal,
+      stopThreadProcesses,
+      hasStoppableProcesses,
       confirmThreadArchive,
       confirmThreadDelete,
       confirmAndUnpinThread,

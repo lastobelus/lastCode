@@ -80,6 +80,18 @@ const PreviewHostTool = Tool.make("preview_host", {
   .annotate(Tool.OpenWorld, true)
   .annotate(Tool.Destructive, true);
 
+const PreviewStopThreadTool = Tool.make("preview_stop_thread", {
+  description:
+    "Permanently cancel every managed preview lease and stop all app-managed terminal processes in this agent's own thread. Stopped previews cannot restart when their old links are opened. Ordinary terminal history is preserved, and other threads and agent providers are untouched.",
+  success: PreviewActionResult,
+  failure: Schema.Union([PreviewHostingError, PreviewAutomationUnavailableError]),
+  dependencies: [McpInvocationContext.McpInvocationContext, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Stop thread previews and processes")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
@@ -260,6 +272,7 @@ const PreviewRecordingStopTool = safeBrowserTool(
 
 export const PreviewToolkit = Toolkit.make(
   PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
@@ -278,6 +291,7 @@ export const PreviewToolkit = Toolkit.make(
 
 export const PreviewStandardToolkit = Toolkit.make(
   PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,

@@ -19,6 +19,7 @@ import {
   PreviewHostingLeaseId,
   ThreadId,
   type DiscoveredLocalServer,
+  type PreviewHostingLeaseMetadata,
   type TerminalOpenInput,
   type TerminalSummary,
 } from "@t3tools/contracts";
@@ -26,6 +27,8 @@ import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import type * as PtyAdapter from "../terminal/PtyAdapter.ts";
+import * as ProcessRunner from "../processRunner.ts";
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
 const encodePersistedHostingState = Schema.encodeSync(
@@ -36,6 +39,7 @@ const encodePersistedHostingState = Schema.encodeSync(
     }),
   ),
 );
+const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 interface TerminalHarness {
   readonly opens: TerminalOpenInput[];
@@ -60,10 +64,13 @@ interface TerminalHarness {
     readonly terminalId?: string | undefined;
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
+  readonly onWaitForThreadShutdown?: (
+    threadId: string,
+  ) => Effect.Effect<void, TerminalManager.TerminalShutdownError>;
 }
 
 function terminalLayer(harness: TerminalHarness) {
-  return Layer.mock(TerminalManager.TerminalManager)({
+  const service = {
     open: (input) => {
       harness.opens.push(input);
       return (harness.onOpen?.(input) ?? Effect.void).pipe(
@@ -180,9 +187,29 @@ function terminalLayer(harness: TerminalHarness) {
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
     history: () => Effect.die("Startup transcripts must remain local."),
+    waitForThreadShutdown: (threadId) => harness.onWaitForThreadShutdown?.(threadId) ?? Effect.void,
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
+  } satisfies Partial<TerminalManager.TerminalManager["Service"]>;
+  return Layer.mock(TerminalManager.TerminalManager)({
+    ...service,
+    shutdownThread: (threadId) =>
+      Effect.gen(function* () {
+        const sessions = (yield* service.metadata).filter(
+          (terminal) => terminal.threadId === threadId,
+        );
+        const results = yield* Effect.forEach(
+          sessions,
+          (terminal) =>
+            service.close({ threadId, terminalId: terminal.terminalId }).pipe(Effect.result),
+          { concurrency: "unbounded" },
+        );
+        const shutdown = yield* service.waitForThreadShutdown(threadId).pipe(Effect.result);
+        const failure = results.find((result) => result._tag === "Failure");
+        if (failure?._tag === "Failure") return yield* failure.failure;
+        if (shutdown._tag === "Failure") return yield* shutdown.failure;
+      }),
   });
 }
 
@@ -229,6 +256,45 @@ function testTerminalHarness(overrides: Partial<TerminalHarness> = {}): Terminal
     closes: [],
     historyDeletes: [],
     summaries: [],
+    ...overrides,
+  };
+}
+
+function terminalFixture(
+  threadId: string,
+  terminalId: string,
+  status: TerminalSummary["status"] = "running",
+  hasRunningSubprocess = true,
+): TerminalSummary {
+  return {
+    threadId,
+    terminalId,
+    cwd: "/workspace",
+    worktreePath: "/workspace",
+    status,
+    pid: status === "running" ? 100 : null,
+    exitCode: null,
+    exitSignal: null,
+    hasRunningSubprocess,
+    label: terminalId,
+    updatedAt: "1970-01-01T00:00:00.000Z",
+  };
+}
+
+function leaseFixture(
+  overrides: Partial<PreviewHosting.PreviewHostingLease> = {},
+): PreviewHosting.PreviewHostingLease {
+  return {
+    id: "preview-lease",
+    threadId: "thread-1",
+    terminalId: "preview-terminal",
+    command: "pnpm dev --port 5173",
+    cwd: "/workspace",
+    worktreePath: "/workspace",
+    url: PREVIEW_URL,
+    handedOffAt: "1970-01-01T00:00:00.000Z",
+    expiresAt: "1970-01-02T00:00:00.000Z",
+    status: "active",
     ...overrides,
   };
 }
@@ -306,6 +372,777 @@ function failFirstExpiredStateWriteLayer(
 }
 
 describe("PreviewHosting", () => {
+  it.effect.each([false, true])(
+    "lets other threads launch while shutdown blocks new launches in the stopping thread (%s)",
+    (failClose) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-stop-isolation-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const shutdownStarted = yield* Deferred.make<void>();
+        const finishShutdown = yield* Deferred.make<void>();
+        let shutdownFinished = false;
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "command-terminal")],
+          failClose,
+          onWaitForThreadShutdown: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(shutdownStarted, undefined);
+              yield* Deferred.await(finishShutdown);
+              shutdownFinished = true;
+            }),
+          onOpen: (input) =>
+            Effect.sync(() => {
+              if (input.threadId === "thread-1") assert.isTrue(shutdownFinished);
+            }),
+        });
+        // Keep path normalization synchronous so the immediately-started launch
+        // reaches reservation ordering before the unrelated launch begins.
+        const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+          ...fs,
+          realPath: (filePath) => Effect.succeed(filePath),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const stopping = yield* hosting
+              .stopThread("thread-1")
+              .pipe(Effect.result, Effect.forkScoped);
+            yield* Deferred.await(shutdownStarted);
+            const sameThread = yield* hosting
+              .launch({
+                threadId: "thread-1",
+                command: "pnpm dev --port 5173",
+                cwd: "/workspace/one",
+                worktreePath: "/workspace/one",
+                url: PREVIEW_URL,
+              })
+              .pipe(Effect.forkScoped({ startImmediately: true }));
+            const other = yield* hosting.launch({
+              threadId: "thread-2",
+              command: "pnpm dev --port 5174",
+              cwd: "/workspace/two",
+              worktreePath: "/workspace/two",
+              url: "http://localhost:5174/",
+            });
+
+            assert.equal(other.status, "active");
+            assert.isFalse(shutdownFinished);
+            assert.isUndefined(stopping.pollUnsafe());
+            assert.deepEqual(yield* hosting.list("thread-1"), []);
+            assert.deepEqual(
+              harness.opens.map((terminal) => terminal.threadId),
+              ["thread-2"],
+            );
+            yield* Deferred.succeed(finishShutdown, undefined);
+            assert.equal((yield* Fiber.join(stopping))._tag, failClose ? "Failure" : "Success");
+            const restarted = yield* Fiber.join(sameThread);
+            assert.equal(restarted.status, "active");
+            assert.deepEqual(yield* hosting.list("thread-1"), [restarted]);
+            assert.deepEqual(yield* hosting.list("thread-2"), [other]);
+            assert.deepEqual(
+              harness.opens.map((terminal) => terminal.threadId),
+              ["thread-2", "thread-1"],
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness, true, [], true, fileSystemLayer))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([false, true])(
+    "waits for thread cleanup before completing even when terminal close fails (%s)",
+    (failClose) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-drain-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const cleanupStarted = yield* Deferred.make<void>();
+        const finishCleanup = yield* Deferred.make<void>();
+        const otherTerminal = terminalFixture("thread-2", "unrelated-terminal");
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "command-terminal"), otherTerminal],
+          failClose,
+          onWaitForThreadShutdown: (threadId) =>
+            Effect.gen(function* () {
+              assert.equal(threadId, "thread-1");
+              yield* Deferred.succeed(cleanupStarted, undefined);
+              yield* Deferred.await(finishCleanup);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const stopping = yield* hosting
+              .stopThread("thread-1")
+              .pipe(Effect.result, Effect.forkScoped);
+            yield* Deferred.await(cleanupStarted);
+            assert.isUndefined(stopping.pollUnsafe());
+            assert.deepEqual(harness.closes, [
+              { threadId: "thread-1", terminalId: "command-terminal" },
+            ]);
+            assert.include(harness.summaries, otherTerminal);
+            yield* Deferred.succeed(finishCleanup, undefined);
+            assert.equal((yield* Fiber.join(stopping))._tag, failClose ? "Failure" : "Success");
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("surfaces failed process cleanup instead of reporting a successful stop", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-stop-kill-failure-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const failure = new TerminalManager.TerminalShutdownError({
+        threadId: "thread-1",
+        terminalIds: ["command-terminal"],
+      });
+      const harness = testTerminalHarness({
+        summaries: [terminalFixture("thread-1", "command-terminal")],
+        onWaitForThreadShutdown: () => Effect.fail(failure),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") assert.equal(result.failure, failure);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a second Stop retries a failed terminal without touching another thread", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-retry-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const processes: Array<
+        PtyAdapter.PtyProcess & {
+          killSignals: Array<string | undefined>;
+          killFailure: Error | undefined;
+        }
+      > = [];
+      const terminalsLayer = Layer.effect(
+        TerminalManager.TerminalManager,
+        TerminalManager.makeWithOptions({
+          logsDir: config.terminalLogsDir,
+          processKillGraceMs: 0,
+          processTable: Effect.succeed([]),
+          ptyAdapter: {
+            spawn: () =>
+              Effect.sync(() => {
+                const exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
+                let exitEvent: PtyAdapter.PtyExitEvent | undefined;
+                const ptyProcess = {
+                  pid: 9000 + processes.length,
+                  killSignals: [] as Array<string | undefined>,
+                  killFailure: undefined as Error | undefined,
+                  write: () => {},
+                  resize: () => {},
+                  kill: (signal?: string) => {
+                    ptyProcess.killSignals.push(signal);
+                    if (ptyProcess.killFailure !== undefined) throw ptyProcess.killFailure;
+                    if (signal === "SIGKILL" && exitEvent === undefined) {
+                      exitEvent = { exitCode: 0, signal: 9 };
+                      for (const listener of exitListeners) listener(exitEvent);
+                      exitListeners.clear();
+                    }
+                  },
+                  onData: () => () => {},
+                  onExit: (callback: (event: PtyAdapter.PtyExitEvent) => void) => {
+                    if (exitEvent !== undefined) {
+                      callback(exitEvent);
+                      return () => {};
+                    }
+                    exitListeners.add(callback);
+                    return () => {
+                      exitListeners.delete(callback);
+                    };
+                  },
+                };
+                processes.push(ptyProcess);
+                return ptyProcess;
+              }),
+          },
+        }),
+      ).pipe(Layer.provide(ProcessRunner.layer));
+      const dependencies = Layer.mergeAll(
+        ServerConfig.layer(config),
+        terminalsLayer,
+        discoveryLayer(true, [], testTerminalHarness()),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const terminals = yield* TerminalManager.TerminalManager;
+          yield* terminals.open({
+            threadId: "thread-1",
+            terminalId: "command-terminal",
+            cwd: root,
+          });
+          yield* terminals.open({
+            threadId: "thread-2",
+            terminalId: "unrelated-terminal",
+            cwd: root,
+          });
+          const first = processes[0]!;
+          const other = processes[1]!;
+          first.killFailure = new Error("transient signal failure");
+
+          const failure = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+          assert.equal(failure._tag, "Failure");
+          if (failure._tag === "Failure") {
+            assert.equal(failure.failure._tag, "TerminalShutdownError");
+          }
+          assert.deepEqual(first.killSignals, ["SIGTERM"]);
+          assert.deepEqual(other.killSignals, []);
+          assert.sameMembers(
+            (yield* terminals.metadata).map((terminal) => terminal.threadId),
+            ["thread-1", "thread-2"],
+          );
+
+          first.killFailure = undefined;
+          yield* hosting.stopThread("thread-1");
+          assert.deepEqual(first.killSignals, ["SIGTERM", "SIGTERM", "SIGKILL"]);
+          assert.deepEqual(other.killSignals, []);
+          assert.deepEqual(
+            (yield* terminals.metadata).map((terminal) => terminal.threadId),
+            ["thread-2"],
+          );
+          yield* terminals.close({ threadId: "thread-2" });
+          yield* terminals.waitForThreadShutdown("thread-2");
+        }).pipe(Effect.provide(PreviewHosting.layer.pipe(Layer.provideMerge(dependencies)))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["launch", "recover"] as const)(
+    "stops a preview immediately while %s is waiting for a server that never becomes ready",
+    (operation) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-stop-readiness-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const preview = leaseFixture();
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [preview] }),
+        );
+        const wrote = yield* Deferred.make<void>();
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "ordinary-terminal")],
+          onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pending = yield* (
+              operation === "recover"
+                ? hosting.recover({
+                    threadId: "thread-1",
+                    leaseId: PreviewHostingLeaseId.make(preview.id),
+                    url: preview.url,
+                  })
+                : hosting.launch({
+                    threadId: preview.threadId,
+                    command: preview.command,
+                    cwd: preview.cwd,
+                    worktreePath: preview.worktreePath,
+                    url: preview.url,
+                  })
+            ).pipe(Effect.result, Effect.forkScoped);
+            yield* Deferred.await(wrote);
+            yield* hosting.stopThread("thread-1");
+            const cancelled = yield* Fiber.join(pending);
+            if (operation === "recover") {
+              assert.equal(cancelled._tag, "Success");
+              if (cancelled._tag === "Success") assert.isNull(cancelled.success);
+            } else {
+              assert.equal(cancelled._tag, "Failure");
+              if (cancelled._tag === "Failure") {
+                assert.equal(cancelled.failure._tag, "PreviewHostingError");
+              }
+            }
+            assert.deepEqual(harness.summaries, []);
+            assert.deepEqual(yield* hosting.list(), []);
+            assert.include(
+              harness.closes.map((terminal) => terminal.terminalId),
+              "ordinary-terminal",
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness, false))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "subscribes to initial and changing environment-wide lease summaries without launch secrets",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-subscribe-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const first = leaseFixture({
+          command: "SECRET=fixture-secret pnpm dev",
+          env: { SECRET: "fixture-secret" },
+        });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [first] }),
+        );
+        const harness = testTerminalHarness();
+        const snapshots: Array<ReadonlyArray<PreviewHostingLeaseMetadata>> = [];
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const unsubscribe = yield* hosting.subscribe((leases) =>
+              Effect.sync(() => {
+                snapshots.push(leases);
+              }),
+            );
+            assert.deepEqual(snapshots, [
+              [
+                {
+                  leaseId: first.id,
+                  threadId: ThreadId.make(first.threadId),
+                  terminalId: first.terminalId,
+                  url: first.url,
+                  handedOffAt: first.handedOffAt,
+                  expiresAt: first.expiresAt,
+                  status: "active",
+                },
+              ],
+            ]);
+            const second = yield* hosting.launch({
+              threadId: "thread-2",
+              command: "pnpm dev --port 5174",
+              cwd: "/workspace/two",
+              env: { SECRET: "another-fixture-secret" },
+              url: "http://localhost:5174/",
+            });
+            assert.isTrue(
+              snapshots.some((leases) =>
+                leases.some((lease) => lease.leaseId === second.id && lease.status === "starting"),
+              ),
+            );
+            assert.isTrue(
+              snapshots
+                .at(-1)
+                ?.some((lease) => lease.leaseId === second.id && lease.status === "active"),
+            );
+            assert.sameMembers(snapshots.at(-1)?.map((lease) => lease.threadId) ?? [], [
+              "thread-1",
+              "thread-2",
+            ]);
+            const serializedSnapshots = yield* encodeUnknownJson(snapshots);
+            assert.notInclude(serializedSnapshots, "fixture-secret");
+            assert.notInclude(serializedSnapshots, '"command"');
+            assert.notInclude(serializedSnapshots, '"env"');
+            assert.notInclude(serializedSnapshots, '"cwd"');
+            yield* hosting.stopThread("thread-1");
+            assert.deepEqual(
+              snapshots.at(-1)?.map((lease) => lease.leaseId),
+              [second.id],
+            );
+            unsubscribe();
+            const count = snapshots.length;
+            yield* hosting.stopThread("thread-2");
+            assert.equal(snapshots.length, count);
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "cannot miss a lease mutation while its initial subscription snapshot is being delivered",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-subscribe-race-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const initialStarted = yield* Deferred.make<void>();
+        const releaseInitial = yield* Deferred.make<void>();
+        const mutationStarted = yield* Deferred.make<void>();
+        const harness = testTerminalHarness();
+        const snapshots: Array<ReadonlyArray<PreviewHostingLeaseMetadata>> = [];
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pendingSubscription = yield* Effect.forkScoped(
+              hosting.subscribe((leases) =>
+                Effect.gen(function* () {
+                  snapshots.push(leases);
+                  if (snapshots.length === 1) {
+                    yield* Deferred.succeed(initialStarted, undefined);
+                    yield* Deferred.await(releaseInitial);
+                  }
+                }),
+              ),
+            );
+            yield* Deferred.await(initialStarted);
+            const pendingLaunch = yield* Effect.forkScoped(
+              Deferred.succeed(mutationStarted, undefined).pipe(
+                Effect.andThen(
+                  hosting.launch({
+                    threadId: "thread-1",
+                    command: "pnpm dev --port 5173",
+                    cwd: "/workspace",
+                    url: PREVIEW_URL,
+                  }),
+                ),
+              ),
+            );
+            yield* Deferred.await(mutationStarted);
+            yield* Deferred.succeed(releaseInitial, undefined);
+            const unsubscribe = yield* Fiber.join(pendingSubscription);
+            const lease = yield* Fiber.join(pendingLaunch);
+            assert.deepEqual(snapshots[0], []);
+            assert.equal(snapshots.at(-1)?.[0]?.leaseId, lease.id);
+            assert.equal(snapshots.at(-1)?.[0]?.status, "active");
+            unsubscribe();
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([1, 3])(
+    "keeps an in-flight recovery cancelled even if terminal close fails (metadata phase: %s)",
+    (pauseAt) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-stop-recover-race-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const preview = leaseFixture();
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [preview] }),
+        );
+        const refreshStarted = yield* Deferred.make<void>();
+        const releaseRefresh = yield* Deferred.make<void>();
+        const cancelled = yield* Deferred.make<void>();
+        let refreshCount = 0;
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "ordinary-terminal")],
+          failClose: (input) => pauseAt === 3 && input.terminalId === preview.terminalId,
+          onRefreshMetadata: () =>
+            Effect.suspend(() => {
+              refreshCount++;
+              return refreshCount === pauseAt
+                ? Deferred.succeed(refreshStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseRefresh)),
+                  )
+                : Effect.void;
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const unsubscribe = yield* hosting.subscribe((leases) =>
+              leases.length === 0
+                ? Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+            );
+            const pendingRecovery = yield* Effect.forkScoped(
+              hosting.recover({
+                threadId: "thread-1",
+                leaseId: PreviewHostingLeaseId.make(preview.id),
+                url: preview.url,
+              }),
+            );
+            yield* Deferred.await(refreshStarted);
+            const pendingStop = yield* Effect.forkScoped(
+              hosting.stopThread("thread-1").pipe(Effect.result),
+            );
+            yield* Deferred.await(cancelled);
+            yield* Deferred.succeed(releaseRefresh, undefined);
+            assert.isNull(yield* Fiber.join(pendingRecovery));
+            assert.equal(
+              (yield* Fiber.join(pendingStop))._tag,
+              pauseAt === 3 ? "Failure" : "Success",
+            );
+            assert.equal(harness.opens.length, pauseAt === 3 ? 1 : 0);
+            assert.equal(harness.writes.length, pauseAt === 3 ? 1 : 0);
+            assert.include(
+              harness.closes.map((terminal) => terminal.terminalId),
+              "ordinary-terminal",
+            );
+            assert.deepEqual(yield* hosting.list(), []);
+            unsubscribe();
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "cancels running and stopped previews and closes every terminal in only the owning thread",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-thread-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const running = leaseFixture();
+        const stopped = leaseFixture({
+          id: "stopped-preview",
+          terminalId: "stopped-preview-terminal",
+          url: "http://localhost:5174/",
+        });
+        const other = leaseFixture({
+          id: "other-preview",
+          threadId: "thread-2",
+          terminalId: "other-preview-terminal",
+          url: "http://localhost:5175/",
+        });
+        const otherTerminal = terminalFixture("thread-2", other.terminalId);
+        const harness = testTerminalHarness({
+          summaries: [
+            terminalFixture("thread-1", running.terminalId),
+            terminalFixture("thread-1", stopped.terminalId, "exited", false),
+            terminalFixture("thread-1", "command-terminal"),
+            terminalFixture("thread-1", "idle-shell", "running", false),
+            terminalFixture("thread-1", "stopped-shell", "exited", false),
+            otherTerminal,
+          ],
+        });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [running, stopped, other] }),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            assert.equal((yield* hosting.list("thread-1")).length, 2);
+            yield* hosting.stopThread("thread-1");
+            assert.deepEqual(yield* hosting.list("thread-1"), []);
+            assert.deepEqual(yield* hosting.list("thread-2"), [other]);
+            for (const lease of [running, stopped]) {
+              assert.isNull(
+                yield* hosting.recover({
+                  threadId: "thread-1",
+                  leaseId: PreviewHostingLeaseId.make(lease.id),
+                  url: lease.url,
+                }),
+              );
+            }
+            assert.deepEqual(harness.summaries, [otherTerminal]);
+            assert.sameMembers(
+              harness.closes.map((terminal) => terminal.terminalId),
+              [
+                running.terminalId,
+                stopped.terminalId,
+                "command-terminal",
+                "idle-shell",
+                "stopped-shell",
+              ],
+            );
+            assert.isTrue(harness.closes.every((terminal) => terminal.threadId === "thread-1"));
+            assert.sameMembers(
+              harness.historyDeletes.map((terminal) => terminal.terminalId),
+              [running.terminalId, stopped.terminalId],
+            );
+            assert.deepEqual(harness.opens, []);
+            assert.equal(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              `${encodePersistedHostingState({ version: 1, leases: [other] })}\n`,
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const restarted = yield* PreviewHosting.PreviewHosting;
+            assert.isNull(
+              yield* restarted.recover({
+                threadId: "thread-1",
+                leaseId: PreviewHostingLeaseId.make(running.id),
+                url: running.url,
+              }),
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("attempts every ordinary terminal even when preview and terminal cleanup fail", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-failure-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const preview = leaseFixture();
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [preview] }),
+      );
+      let shouldFail = true;
+      const harness = testTerminalHarness({
+        summaries: [
+          terminalFixture("thread-1", preview.terminalId),
+          terminalFixture("thread-1", "failing-command"),
+          terminalFixture("thread-1", "other-command"),
+          terminalFixture("thread-2", "unrelated-command"),
+        ],
+        failClose: (input) =>
+          shouldFail &&
+          (input.terminalId === preview.terminalId || input.terminalId === "failing-command"),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          assert.include(
+            harness.closes.map((terminal) => terminal.terminalId),
+            "failing-command",
+          );
+          assert.include(
+            harness.closes.map((terminal) => terminal.terminalId),
+            "other-command",
+          );
+          assert.notInclude(
+            harness.closes.map((terminal) => terminal.terminalId),
+            "unrelated-command",
+          );
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.include(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            '"status":"expired"',
+          );
+          assert.isNull(
+            yield* hosting.recover({
+              threadId: "thread-1",
+              leaseId: PreviewHostingLeaseId.make(preview.id),
+              url: preview.url,
+            }),
+          );
+          shouldFail = false;
+          yield* hosting.stopThread("thread-1");
+          assert.deepEqual(harness.summaries, [terminalFixture("thread-2", "unrelated-command")]);
+          assert.deepEqual(yield* hosting.list(), []);
+          assert.notInclude(
+            harness.historyDeletes.map((terminal) => terminal.terminalId),
+            "failing-command",
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "keeps cancelled previews unrecoverable and stops ordinary terminals after a persistence failure",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-stop-persist-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const preview = leaseFixture();
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [preview] }),
+        );
+        const failedWrite = yield* Deferred.make<void>();
+        const releaseFailure = yield* Deferred.make<void>();
+        const persistedEmptyState = yield* Deferred.make<void>();
+        yield* Deferred.succeed(releaseFailure, undefined);
+        const harness = testTerminalHarness({
+          summaries: [
+            terminalFixture("thread-1", preview.terminalId),
+            terminalFixture("thread-1", "command-terminal"),
+          ],
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* hosting.stopThread("thread-1").pipe(Effect.result);
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") assert.equal(result.failure._tag, "PreviewHostingError");
+            assert.isTrue(yield* Deferred.isDone(failedWrite));
+            assert.isTrue(yield* Deferred.isDone(persistedEmptyState));
+            assert.sameMembers(
+              harness.closes.map((terminal) => terminal.terminalId),
+              [preview.terminalId, "command-terminal"],
+            );
+            assert.deepEqual(harness.summaries, []);
+            assert.isNull(
+              yield* hosting.recover({
+                threadId: "thread-1",
+                leaseId: PreviewHostingLeaseId.make(preview.id),
+                url: preview.url,
+              }),
+            );
+            assert.equal(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              `${encodePersistedHostingState({ version: 1, leases: [] })}\n`,
+            );
+          }).pipe(
+            Effect.provide(
+              hostingLayer(
+                config,
+                harness,
+                true,
+                [],
+                true,
+                failFirstExpiredStateWriteLayer(failedWrite, releaseFailure, persistedEmptyState),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("launches a named terminal and fixes its 24-hour expiry at handoff", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(1_000);
@@ -675,6 +1512,79 @@ describe("PreviewHosting", () => {
           }).pipe(Effect.provide(hostingLayer(config, harness))),
         );
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("reserves discovery ports atomically across concurrent thread launches", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-concurrent-reservation-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const reservationStarted = yield* Deferred.make<void>();
+      const finishReservation = yield* Deferred.make<void>();
+      let blockedFirstReservation = false;
+      const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        realPath: (filePath) => Effect.succeed(filePath),
+        writeFileString: (filePath, data, options) =>
+          Effect.suspend(() => {
+            const write = fs.writeFileString(filePath, data, options);
+            if (blockedFirstReservation || !data.includes('"status":"starting"')) return write;
+            blockedFirstReservation = true;
+            return Deferred.succeed(reservationStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(finishReservation)),
+              Effect.andThen(write),
+            );
+          }),
+      });
+      const harness = testTerminalHarness();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const first = yield* hosting
+            .launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace/one",
+              worktreePath: "/workspace/one",
+              url: PREVIEW_URL,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(reservationStarted);
+          // This launch reaches the reservation gate while the first lease's
+          // durable write is blocked, before that lease appears in memory.
+          const second = yield* hosting
+            .launch({
+              threadId: "thread-2",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace/two",
+              worktreePath: "/workspace/two",
+              url: "http://127.0.0.1:5173/another-page",
+            })
+            .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+          yield* Deferred.succeed(finishReservation, undefined);
+
+          const lease = yield* Fiber.join(first);
+          const conflict = yield* Fiber.join(second);
+          assert.equal(lease.status, "active");
+          assert.equal(conflict._tag, "Failure");
+          if (conflict._tag === "Failure") {
+            assert.equal(conflict.failure._tag, "PreviewHostingError");
+            if (conflict.failure._tag === "PreviewHostingError") {
+              assert.equal(conflict.failure.operation, "validate");
+              assert.match(conflict.failure.detail ?? "", /discovery port 5173/);
+            }
+          }
+          assert.deepEqual(yield* hosting.list(), [lease]);
+          assert.equal(harness.opens.length, 1);
+          assert.equal(harness.writes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness, true, [], true, fileSystemLayer))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("reserves a discovery port across threads regardless of path or loopback alias", () =>

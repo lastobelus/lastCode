@@ -45,6 +45,12 @@ export const PreviewHostingLeaseSummary = Schema.Struct({
 });
 export type PreviewHostingLeaseSummary = typeof PreviewHostingLeaseSummary.Type;
 
+export const PreviewHostingLeaseMetadata = Schema.Struct({
+  ...PreviewHostingLeaseSummary.fields,
+  terminalId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type PreviewHostingLeaseMetadata = typeof PreviewHostingLeaseMetadata.Type;
+
 export const PreviewHostingRecoverInput = Schema.Struct({
   threadId: ThreadId,
   leaseId: PreviewHostingLeaseId,
@@ -56,6 +62,11 @@ export const PreviewHostingListInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type PreviewHostingListInput = typeof PreviewHostingListInput.Type;
+
+export const PreviewHostingStopThreadInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type PreviewHostingStopThreadInput = typeof PreviewHostingStopThreadInput.Type;
 
 export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>()(
   "PreviewHostingError",

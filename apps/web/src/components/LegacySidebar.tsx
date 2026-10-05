@@ -32,7 +32,11 @@ import {
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { SidebarDraftBlock } from "./Sidebar";
-import { buildDraftActionMenuItems } from "./threadActionMenu.logic";
+import {
+  buildDraftActionMenuItems,
+  buildStopThreadProcessesMenuItem,
+  withThreadActionMenuDividers,
+} from "./threadActionMenu.logic";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
@@ -126,6 +130,11 @@ import {
 } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import {
+  usePreviewProcessControlsSupported,
+  useStopThreadProcesses,
+  useThreadPreviewLeases,
+} from "../state/previewHosting";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
 import { openDiscoveredPort } from "./preview/openDiscoveredPort";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -433,6 +442,7 @@ interface SidebarThreadRowProps {
   handleThreadContextMenu: (
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
+    hasStoppableProcesses: boolean,
   ) => Promise<void>;
   clearSelection: () => void;
   commitRename: (
@@ -517,6 +527,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
+  const previews = useThreadPreviewLeases(threadRef);
+  const supportsProcessControls = usePreviewProcessControlsSupported(thread.environmentId);
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const isMobile = useIsMobile();
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
@@ -825,10 +839,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       }
       void (async () => {
         const result = await settlePromise(() =>
-          handleThreadContextMenu(threadRef, {
-            x: event.clientX,
-            y: event.clientY,
-          }),
+          handleThreadContextMenu(
+            threadRef,
+            {
+              x: event.clientX,
+              y: event.clientY,
+            },
+            hasStoppableProcesses,
+          ),
         );
         if (result._tag === "Failure") {
           const error = squashAtomCommandFailure(result);
@@ -847,6 +865,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       clearSelection,
       handleMultiSelectContextMenu,
       handleThreadContextMenu,
+      hasStoppableProcesses,
       isSelected,
       threadRef,
     ],
@@ -1551,6 +1570,7 @@ interface SidebarProjectThreadListProps {
   handleThreadContextMenu: (
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
+    hasStoppableProcesses: boolean,
   ) => Promise<void>;
   clearSelection: () => void;
   commitRename: (
@@ -1841,6 +1861,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const resolveThreadAnnotation = useAtomCommand(threadEnvironment.resolveAnnotation, {
     reportFailure: false,
   });
+  const stopThreadProcesses = useStopThreadProcesses();
   const updateSettings = useUpdateClientSettings();
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
@@ -3002,7 +3023,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   ]);
 
   const handleThreadContextMenu = useCallback(
-    async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+    async (
+      threadRef: ScopedThreadRef,
+      position: { x: number; y: number },
+      hasStoppableProcesses: boolean,
+    ) => {
       const api = readLocalApi();
       if (!api) return;
       const threadKey = scopedThreadKey(threadRef);
@@ -3021,6 +3046,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         persistent: thread.persistent === true,
         supported: supportsPersistence,
       });
+      const stopProcessesAction = buildStopThreadProcessesMenuItem(hasStoppableProcesses);
+      const canAnnotate = supportsThreadAnnotations && thread.latestUserMessageAt !== null;
       const creatorRef = thread.creatorThreadId
         ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
         : null;
@@ -3031,14 +3058,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
-          [
+          withThreadActionMenuDividers([
             ...(thread.branch
               ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
               : []),
             { id: "rename", label: "Rename thread" },
-            ...(supportsThreadAnnotations && thread.latestUserMessageAt !== null
-              ? [{ id: "annotate", label: "Annotate thread…" }]
-              : []),
+            ...(canAnnotate ? [{ id: "annotate", label: "Annotate thread…" }] : []),
             { id: "mark-unread", label: "Mark unread" },
             ...(creatorGroupingEligible
               ? [
@@ -3056,6 +3081,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               : []),
             ...(canOpenCreator ? [{ id: "open-creator", label: "Open creator thread" }] : []),
             ...(persistenceAction ? [persistenceAction] : []),
+            ...(stopProcessesAction ? [stopProcessesAction] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
             { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
@@ -3074,7 +3100,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               destructive: true,
               icon: "trash",
             },
-          ],
+          ]),
           thread.persistent === true,
         ),
         position,
@@ -3177,6 +3203,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         markThreadUnread(threadRef);
         return;
       }
+      if (clicked === "stop-thread-processes") {
+        await stopThreadProcesses(threadRef);
+        return;
+      }
       if (clicked === "mark-persistent" || clicked === "disable-persistence") {
         const result = await setThreadPersistence(threadRef, clicked === "mark-persistent");
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -3261,6 +3291,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       setOpenMobile,
       setThreadPersistence,
       startThreadRename,
+      stopThreadProcesses,
       updateThreadMetadata,
       navigateToThread,
     ],

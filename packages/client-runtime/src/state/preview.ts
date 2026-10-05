@@ -7,7 +7,9 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
+  createEnvironmentSubscriptionAtomFamily,
 } from "./runtime.ts";
+import { subscribe } from "../rpc/client.ts";
 
 export const previewAutomationHostFocusConcurrencyKey = (value: {
   readonly environmentId: string;
@@ -30,6 +32,23 @@ export function createPreviewEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    hostingLeases: createEnvironmentSubscriptionAtomFamily(runtime, {
+      label: "environment-data:preview:hosting-leases",
+      subscribe: (input: {}) =>
+        subscribe(WS_METHODS.subscribePreviewHosting, input, {
+          capability: {
+            supports: (config) =>
+              config.environment.capabilities.previewHostingProcessControl === true,
+            unsupportedValue: [],
+          },
+        }),
+    }),
+    hostingStopThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-stop-thread",
+      tag: WS_METHODS.previewHostingStopThread,
+      scheduler: hostingScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
     hostingList: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:hosting-list",
       tag: WS_METHODS.previewHostingList,
