@@ -95,8 +95,7 @@ import { scopedThreadKey } from "../../lib/scopedEntities";
 import { threadEnvironment } from "../../state/threads";
 import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { ThreadId } from "@t3tools/contracts";
-import { uuidv4 } from "../../lib/uuid";
+import type { ThreadId } from "@t3tools/contracts";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import type {
@@ -1311,9 +1310,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                                 environmentId: props.environmentId,
                                 input: {
                                   threadId: props.selectedThread.id,
-                                  targetThreadId:
-                                    props.selectedThread.subagentPromotion?.targetThreadId ??
-                                    ThreadId.make(uuidv4()),
                                   creationSource: "mobile",
                                 },
                               });

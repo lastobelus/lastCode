@@ -22,7 +22,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
-  type ThreadId,
+  ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
@@ -237,9 +237,7 @@ export interface ForkThreadFromRunInput extends CommandMetadata {
   readonly title?: string;
 }
 
-export interface RequestSubagentPromotionInput extends ThreadCommandInput {
-  readonly targetThreadId: ThreadId;
-}
+export type RequestSubagentPromotionInput = ThreadCommandInput;
 
 export interface CancelSubagentPromotionInput extends ThreadCommandInput {
   readonly requestId: CommandId;
@@ -1031,11 +1029,14 @@ export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRu
 
 export const requestSubagentPromotion = Effect.fn("EnvironmentCommands.requestSubagentPromotion")(
   function* (input: RequestSubagentPromotionInput) {
+    const commandId = yield* allocateCommandId(input);
     return yield* dispatch({
       type: "subagent.promote.request",
-      commandId: yield* allocateCommandId(input),
+      commandId,
       threadId: input.threadId,
-      targetThreadId: input.targetThreadId,
+      // The server keeps a usable canonical target; a retry offers a fresh ID
+      // so it can recover when that destination has become occupied.
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
       createdBy: "user",
       creationSource: input.creationSource ?? "web",
     });

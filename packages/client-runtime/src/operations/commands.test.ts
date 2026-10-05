@@ -635,11 +635,10 @@ describe("V2 environment commands", () => {
         supervisor,
       );
       const requestId = CommandId.make("subagent-promotion");
-      const targetThreadId = ThreadId.make("interactive-subagent");
+      const targetThreadId = ThreadId.make(`${requestId}:interactive`);
       yield* requestSubagentPromotion({
         commandId: requestId,
         threadId: v2ThreadId,
-        targetThreadId,
         creationSource: "mobile",
       }).pipe(provide);
       yield* cancelSubagentPromotion({
@@ -664,6 +663,59 @@ describe("V2 environment commands", () => {
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect.each(["web", "mobile"] as const)(
+    "offers fresh promotion destinations for %s retries, preserving transport idempotency",
+    (creationSource) =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const occupiedTargetId = ThreadId.make("occupied-interactive-thread");
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          projection: {
+            ...v2Projection,
+            thread: {
+              ...v2Projection.thread,
+              subagentPromotion: {
+                requestId: CommandId.make("previous-promotion"),
+                targetThreadId: occupiedTargetId,
+                status: "failed",
+                createdBy: "user",
+                creationSource,
+                requestedAt: v2Now,
+                updatedAt: v2Now,
+                error: "The destination thread already exists",
+              },
+            },
+          },
+        });
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          supervisor,
+        );
+        const retry = {
+          commandId: CommandId.make("retry-promotion"),
+          threadId: v2ThreadId,
+          creationSource,
+        };
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion({
+          ...retry,
+          commandId: CommandId.make("next-retry-promotion"),
+        }).pipe(provide);
+        const destinations = commands
+          .filter((command) => command.type === "subagent.promote.request")
+          .map((command) => command.targetThreadId);
+        expect(destinations).toEqual([
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("next-retry-promotion:interactive"),
+        ]);
+        expect(destinations).not.toContain(occupiedTargetId);
+      }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
   it.effect(

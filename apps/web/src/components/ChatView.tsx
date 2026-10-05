@@ -11506,9 +11506,6 @@ export default function ChatView(props: ChatViewProps) {
                                         environmentId,
                                         input: {
                                           threadId: activeThread.id,
-                                          targetThreadId:
-                                            activeThread.subagentPromotion?.targetThreadId ??
-                                            newThreadId(),
                                           creationSource: "web",
                                         },
                                       });
