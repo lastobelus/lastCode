@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Host-side CI orchestration runs subprocesses directly.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off globalTimers:off -- Host-side CI owns subprocesses and cancellation timers.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
