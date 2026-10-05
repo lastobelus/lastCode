@@ -735,6 +735,68 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect.each(["available", "no-tags"] as const)(
+    "preserves install diagnostics and retry after a checkpoint request (%s)",
+    (inspectionKind) => {
+      const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+      const availableVersion = "1.2.4-nightly.20260814.1089.1";
+      const build = {
+        schemaVersion: 1 as const,
+        status: "built" as const,
+        checkpointTag,
+        outputDir: "/tmp/local-package",
+        manifestPath: "/tmp/local-package/build-manifest.json",
+        dmgPath: "/tmp/local-package/LastCode.dmg",
+        dmgSha256: "a".repeat(64),
+      };
+      let attempts = 0;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) =>
+          Effect.succeed(
+            requestCheckpoint && inspectionKind === "no-tags"
+              ? { schemaVersion: 2, status: "checkpoint-requested" }
+              : {
+                  schemaVersion: 2,
+                  status: "available",
+                  checkpointTag,
+                  availableVersion,
+                  build,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  releaseNotes: {
+                    lastCode: { status: "known", items: [], omittedItems: 0 },
+                    upstream: { groups: [], omittedGroups: 0 },
+                  },
+                },
+          ),
+        localPrepareInstall: () =>
+          ++attempts === 1
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "install",
+                  message: "Install preflight failed",
+                }),
+              )
+            : Effect.succeed({ commit: () => Effect.void, cancel: Effect.void }),
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.isFalse((yield* updates.install).completed);
+          const failed = yield* updates.getState;
+          assert.equal(failed.status, "downloaded");
+          assert.equal(failed.errorContext, "install");
+          const requested = yield* updates.check("menu");
+          assert.isTrue(requested.checkpointRequested);
+          assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
+          assert.isTrue((yield* updates.install).accepted);
+          assert.equal(attempts, 2);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
   it.effect("keeps the current app usable when local install preflight fails", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const harness = makeHarness({

@@ -548,11 +548,11 @@ export const make = Effect.gen(function* () {
           inspection.status === "checkpoint-requested" || inspection.checkpointRequested;
         const result = { checked: true, checkpointRequested };
         const preserveFailure =
-          state.status === "error" &&
           state.canRetry &&
-          (state.errorContext === "download" || state.errorContext === "install");
+          ((state.status === "error" && state.errorContext === "download") ||
+            (state.downloadedVersion !== null && state.errorContext === "install"));
         const applyRequest = (next: DesktopUpdateState): DesktopUpdateState =>
-          checkpointRequested && next.status !== "error"
+          checkpointRequested && next.status !== "error" && next.errorContext !== "install"
             ? {
                 ...next,
                 status: next.status === "up-to-date" ? "idle" : next.status,
