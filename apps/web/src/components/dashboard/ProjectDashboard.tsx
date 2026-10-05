@@ -9,7 +9,7 @@ import {
   threadRuntimeIsActive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, ScopedThreadRef } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
@@ -44,6 +44,7 @@ import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SidebarInset } from "../ui/sidebar";
+import { ThreadQuickComposerDialog } from "./ThreadQuickComposerDialog";
 
 const EMPTY_SHELL_ATOM = Atom.make<EnvironmentShellState>({
   snapshot: Option.none(),
@@ -112,7 +113,13 @@ function SourceThreadLink({ thread }: { readonly thread: EnvironmentThreadShell 
   );
 }
 
-function DashboardItem({ entry }: { readonly entry: DashboardEntry }) {
+function DashboardItem({
+  entry,
+  onMessage,
+}: {
+  readonly entry: DashboardEntry;
+  readonly onMessage: (target: ScopedThreadRef) => void;
+}) {
   return (
     <details className="group rounded-xl border border-border/70 bg-card/30 open:bg-card/50">
       <summary className="flex cursor-pointer list-none items-start gap-3 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&::-webkit-details-marker]:hidden">
@@ -175,18 +182,28 @@ function DashboardItem({ entry }: { readonly entry: DashboardEntry }) {
               ) : null}
             </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            render={
-              <Link
-                to="/$environmentId/$threadId"
-                params={{ environmentId: entry.thread.environmentId, threadId: entry.thread.id }}
-              />
-            }
-          >
-            Open thread <ArrowUpRightIcon />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() =>
+                onMessage({ environmentId: entry.thread.environmentId, threadId: entry.thread.id })
+              }
+            >
+              Message
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              render={
+                <Link
+                  to="/$environmentId/$threadId"
+                  params={{ environmentId: entry.thread.environmentId, threadId: entry.thread.id }}
+                />
+              }
+            >
+              Open thread <ArrowUpRightIcon />
+            </Button>
+          </div>
         </div>
       </div>
     </details>
@@ -207,6 +224,7 @@ export function ProjectDashboard({
   const { environments } = useEnvironments();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const [filter, setFilter] = useState<DashboardFilter>("all");
+  const [messageTarget, setMessageTarget] = useState<ScopedThreadRef | null>(null);
   const project =
     projects.find(
       (candidate) => candidate.id === projectId && candidate.environmentId === environmentId,
@@ -401,7 +419,9 @@ export function ProjectDashboard({
                   Effort and computer requirements overlap. Opening a request leaves it open.
                 </p>
                 {visibleRequests.length > 0 ? (
-                  visibleRequests.map((entry) => <DashboardItem key={entry.id} entry={entry} />)
+                  visibleRequests.map((entry) => (
+                    <DashboardItem key={entry.id} entry={entry} onMessage={setMessageTarget} />
+                  ))
                 ) : (
                   <div className="rounded-xl border border-dashed border-border px-5 py-8 text-center">
                     <CheckCircle2Icon className="mx-auto mb-2 size-5 text-muted-foreground" />
@@ -454,7 +474,7 @@ export function ProjectDashboard({
                     Progress & updates
                   </h2>
                   {updates.map((entry) => (
-                    <DashboardItem key={entry.id} entry={entry} />
+                    <DashboardItem key={entry.id} entry={entry} onMessage={setMessageTarget} />
                   ))}
                 </section>
               ) : null}
@@ -489,6 +509,12 @@ export function ProjectDashboard({
           )}
         </WorkspacePageContainer>
       </main>
+      <ThreadQuickComposerDialog
+        target={messageTarget}
+        onOpenChange={(open) => {
+          if (!open) setMessageTarget(null);
+        }}
+      />
     </SidebarInset>
   );
 }
