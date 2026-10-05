@@ -1689,8 +1689,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           session.status !== "stopped" &&
           session.status !== "error",
       );
+      const supersedesRecovery =
+        projection.thread.recovery !== undefined &&
+        (projection.thread.recovery.runId !== startingRun.id ||
+          projection.thread.recovery.attemptId !== startingRun.activeAttemptId);
+      const { recovery: _previousRecovery, ...threadWithoutRecovery } = projection.thread;
+      const startingThread = {
+        ...(supersedesRecovery ? threadWithoutRecovery : projection.thread),
+        ...(selectionChanged
+          ? {
+              providerInstanceId: queuedRun.providerInstanceId,
+              modelSelection: queuedRun.modelSelection,
+              updatedAt: now,
+            }
+          : {}),
+      };
       yield* writeSystemEvents(
         [
+          ...(supersedesRecovery && !selectionChanged
+            ? [
+                {
+                  type: "thread.metadata-updated" as const,
+                  threadId,
+                  occurredAt: now,
+                  payload: startingThread,
+                },
+              ]
+            : []),
           ...(selectionChanged
             ? [
                 {
@@ -1701,12 +1726,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   threadId,
                   providerInstanceId: queuedRun.providerInstanceId,
                   occurredAt: now,
-                  payload: {
-                    ...projection.thread,
-                    providerInstanceId: queuedRun.providerInstanceId,
-                    modelSelection: queuedRun.modelSelection,
-                    updatedAt: now,
-                  },
+                  payload: startingThread,
                 },
               ]
             : []),
