@@ -1657,7 +1657,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                   <LegacySidebarFamilyGuides depth={familyRow.depth} />
                   <div
                     style={{ paddingLeft: Math.min(familyRow.depth, 6) * 12 + 32 }}
-                    className="py-1 text-3xs text-sidebar-muted-foreground"
+                    className="py-1 text-3xs text-sidebar-muted-foreground uppercase"
                   >
                     {familyRow.groupHeading}
                   </div>
