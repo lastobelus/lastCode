@@ -265,7 +265,10 @@ import {
   legacySidebarSubagentStatusLabel,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
-import { useLegacySidebarFamiliesStore } from "./legacySidebarFamilies.store";
+import {
+  useCollapsedLegacySidebarFamilies,
+  useLegacySidebarFamiliesStore,
+} from "./legacySidebarFamilies.store";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   deriveProviderInstanceEntries,
@@ -1969,7 +1972,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return counts;
   }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
 
-  const collapsedFamiliesByKey = useLegacySidebarFamiliesStore((state) => state.collapsedByKey);
+  const projectThreadKeys = useMemo(() => [...sidebarThreadByKey.keys()], [sidebarThreadByKey]);
+  const collapsedFamiliesByKey = useCollapsedLegacySidebarFamilies(projectThreadKeys);
   const { projectStatus, hiddenThreadStatus, familyProjection } = useMemo(() => {
     const lastVisitedAtByThreadKey = new Map(
       projectThreads.map((thread, index) => [
