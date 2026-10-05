@@ -683,6 +683,7 @@ describe("ClientSettings sidebar", () => {
     expect(settings.compactLegacySidebarStatuses).toBe(false);
     expect(settings.showThreadWorktreeIndicators).toBe(true);
     expect(settings.legacySidebarScale).toBe(100);
+    expect(settings.legacySidebarThreadGroupingStyle).toBe("typed-groups");
     expect(settings.legacySidebarEnabled).toBe(false);
   });
 

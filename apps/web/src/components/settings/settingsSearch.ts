@@ -896,6 +896,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "thread-grouping-style",
+    title: "Thread grouping style",
+    to: "/settings/lastcode",
+    searchTerms: ["legacy sidebar subagents agent-created minimal typed groups relationships"],
+  },
+  {
     id: "compact-status-indicators",
     title: "Compact status indicators",
     to: "/settings/lastcode",

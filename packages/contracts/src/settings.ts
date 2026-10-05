@@ -95,6 +95,9 @@ export const LegacySidebarScale = Schema.Int.check(
 );
 export type LegacySidebarScale = typeof LegacySidebarScale.Type;
 export const DEFAULT_LEGACY_SIDEBAR_SCALE: LegacySidebarScale = 100;
+
+export const LegacySidebarThreadGroupingStyle = Schema.Literals(["minimal", "typed-groups"]);
+export type LegacySidebarThreadGroupingStyle = typeof LegacySidebarThreadGroupingStyle.Type;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
@@ -512,6 +515,9 @@ export const ClientSettingsSchema = Schema.Struct({
   // time, so manual placement there is ignored (and kept) while it is on.
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("typed-groups")),
   ),
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
@@ -1851,6 +1857,7 @@ export const ClientSettingsPatch = Schema.Struct({
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
+  legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),

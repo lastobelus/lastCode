@@ -806,6 +806,32 @@ describe("V2 environment commands", () => {
       }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
+  it.effect(
+    "saves creator grouping without fetching the conversation or changing its ownership",
+    () =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const projectionRequests: ThreadId[] = [];
+        const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+        for (const creatorGrouping of ["independent", "grouped"] as const) {
+          yield* updateThreadMetadata({
+            commandId: CommandId.make(`creator-placement:${creatorGrouping}`),
+            threadId: v2ThreadId,
+            creatorGrouping,
+          }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        }
+        expect(commands).toEqual(
+          ["independent", "grouped"].map((creatorGrouping) => ({
+            type: "thread.metadata.update",
+            commandId: `creator-placement:${creatorGrouping}`,
+            threadId: v2ThreadId,
+            creatorGrouping,
+          })),
+        );
+        expect(projectionRequests).toEqual([]);
+      }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("delegates model selection to the server without fetching the full projection", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

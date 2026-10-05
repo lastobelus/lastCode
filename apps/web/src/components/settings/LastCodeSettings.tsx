@@ -29,6 +29,7 @@ import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
 import { searchableSetting } from "./settingsSearch";
@@ -382,6 +383,42 @@ export function LastCodeSettingsPanel() {
                 </span>
               </div>
             </div>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("thread-grouping-style")}
+          description="Choose how the Projects sidebar distinguishes subagents from ordinary threads created by an agent. This changes presentation, not thread relationships."
+          resetAction={
+            clientSettings.legacySidebarThreadGroupingStyle !== "typed-groups" ? (
+              <SettingResetButton
+                label="thread grouping style"
+                onClick={() =>
+                  updateClientSettings({ legacySidebarThreadGroupingStyle: "typed-groups" })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={clientSettings.legacySidebarThreadGroupingStyle}
+              onValueChange={(value) => {
+                if (value === "minimal" || value === "typed-groups") {
+                  updateClientSettings({ legacySidebarThreadGroupingStyle: value });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-44" aria-label="Thread grouping style">
+                <SelectValue>
+                  {clientSettings.legacySidebarThreadGroupingStyle === "minimal"
+                    ? "Minimal"
+                    : "Typed groups"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="minimal">Minimal</SelectItem>
+                <SelectItem value="typed-groups">Typed groups</SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
         <SettingsRow

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 
 const STORAGE_KEY = "lastcode:legacy-sidebar-collapsed-families:v1";
 
@@ -35,3 +36,16 @@ export const useLegacySidebarFamiliesStore = create<{
       return { collapsedByKey };
     }),
 }));
+
+/** Keep project projections stable when another project's family is toggled. */
+export function useCollapsedLegacySidebarFamilies(threadKeys: readonly string[]) {
+  return useLegacySidebarFamiliesStore(
+    useShallow((state) => {
+      const collapsedByKey: Record<string, boolean> = {};
+      for (const key of threadKeys) {
+        if (state.collapsedByKey[key]) collapsedByKey[key] = true;
+      }
+      return collapsedByKey;
+    }),
+  );
+}
