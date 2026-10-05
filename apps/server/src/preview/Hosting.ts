@@ -9,7 +9,6 @@ import {
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "node:crypto";
-import * as NodeUtil from "node:util";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -36,10 +35,7 @@ const READY_TIMEOUT_MS = 30_000;
 const EXPIRED_TERMINAL_RETRY_MS = 60_000;
 const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
-const STARTUP_RAW_MAX_CHARS = 16 * 1_024;
-const STARTUP_REDACTION_BUDGET = STARTUP_RAW_MAX_CHARS * 16;
-const STARTUP_OUTPUT_MAX_CHARS = 512;
-const STARTUP_MESSAGE_MAX_CHARS = 1_024;
+const READINESS_MESSAGE_MAX_CHARS = 1_024;
 
 const LeaseStatus = Schema.Literals(["starting", "active", "expired"]);
 const EnvironmentOverrides = Schema.Record(
@@ -96,9 +92,9 @@ export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>
       case "validate":
         return this.detail ?? "Invalid preview launch details.";
       case "ready":
-        return `Preview did not become ready at ${this.url ?? "unknown URL"}.\n${this.detail ?? "No startup diagnostics available."}`.slice(
+        return `Preview did not become ready at ${this.url ?? "unknown URL"}.\n${this.detail ?? "No readiness diagnostics available."}`.slice(
           0,
-          STARTUP_MESSAGE_MAX_CHARS,
+          READINESS_MESSAGE_MAX_CHARS,
         );
       case "read":
         return `Failed to read preview leases at ${this.statePath}.`;
@@ -190,86 +186,6 @@ const discoveryPortKey = (value: string): string => {
   const url = new URL(discoveryUrl(value));
   const port = url.port || (url.protocol === "https:" ? "443" : "80");
   return `${isLoopbackHost(url.hostname) ? "loopback" : url.hostname.toLowerCase()}:${port}`;
-};
-
-/** Select complete trailing lines before redaction work. */
-const startupTextWindow = (text: string): string | null => {
-  if (text.length <= STARTUP_RAW_MAX_CHARS) return text;
-  const tail = text.slice(-STARTUP_RAW_MAX_CHARS);
-  const newline = tail.indexOf("\n");
-  if (newline === -1) return null;
-  return tail.slice(newline + 1);
-};
-
-const startupCredentialMatcher =
-  /\b(?:Bearer|Basic)\s+[^\s,;]+|\b[\w-]*(?:token|key|password|secret|credential|auth)[\w-]*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)|\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/gi;
-
-/** Startup transcripts can echo commands and credentials; redact within a bounded window. */
-const sanitizeStartupText = (
-  text: string,
-  lease: PreviewHostingLease,
-  redactionValues: ReadonlyArray<string>,
-): string => {
-  const environmentValues = [...Object.values(lease.env ?? {}), ...redactionValues];
-  const values = [
-    ...new Set(
-      environmentValues.flatMap((value) =>
-        value === undefined || value.length === 0 ? [] : [value],
-      ),
-    ),
-  ];
-  const window = startupTextWindow(text);
-  if (window === null) return "[Startup output omitted: oversized line or partial credential.]";
-  const plain = NodeUtil.stripVTControlCharacters(window);
-  // Coverage stays fixed in size even when many literal occurrences overlap.
-  // Rendering merged spans once keeps markers out of all subsequent matching.
-  const coverage = new Int32Array(plain.length + 1);
-  let budget = STARTUP_REDACTION_BUDGET;
-  const cover = (start: number, length: number) => {
-    budget -= length;
-    if (budget < 0) return false;
-    coverage[start]! += 1;
-    coverage[start + length]! -= 1;
-    return true;
-  };
-  for (const value of new Set([lease.command, ...values])) {
-    if (value.length === 0) continue;
-    let start = plain.indexOf(value);
-    while (start !== -1) {
-      if (!cover(start, value.length))
-        return "[Startup output omitted: redaction match budget exceeded.]";
-      start = plain.indexOf(value, start + 1);
-    }
-  }
-  for (const match of plain.matchAll(/\bhttps?:\/\/[^\s<>"']+/gi)) {
-    const value = match[0];
-    try {
-      const url = new URL(value);
-      if (!url.username && !url.password && !url.search && !url.hash) continue;
-    } catch {
-      // An invalid URL cannot be scrubbed reliably, so mask its complete span.
-    }
-    if (!cover(match.index, value.length))
-      return "[Startup output omitted: redaction match budget exceeded.]";
-  }
-  for (const match of plain.matchAll(startupCredentialMatcher)) {
-    if (!cover(match.index, match[0].length))
-      return "[Startup output omitted: redaction match budget exceeded.]";
-  }
-  const parts: string[] = [];
-  let active = 0;
-  let masked = false;
-  let start = 0;
-  for (let index = 0; index <= plain.length; index++) {
-    active += coverage[index]!;
-    const nextMasked = active > 0;
-    if (nextMasked === masked) continue;
-    if (index > start) parts.push(masked ? "[redacted]" : plain.slice(start, index));
-    start = index;
-    masked = nextMasked;
-  }
-  if (start < plain.length) parts.push(plain.slice(start));
-  return parts.join("").trim();
 };
 
 const make = Effect.gen(function* () {
@@ -455,45 +371,16 @@ const make = Effect.gen(function* () {
     readiness: string,
   ) {
     const summary = yield* terminalSummary(lease);
-    const diagnostics = yield* terminals
-      .startupDiagnostics({
-        threadId: lease.threadId,
-        terminalId: lease.terminalId,
-      })
-      .pipe(Effect.orElseSucceed(() => null));
-    const history = diagnostics?.history ?? null;
-    const redactionValues = diagnostics?.redactionValues ?? null;
-    // PTYs can rewrite line endings and terminal controls. Literal matching cannot
-    // establish coverage for those values; omit before slicing or stripping output.
-    const unsafeRendering = [
-      lease.command,
-      ...Object.values(lease.env ?? {}),
-      ...(redactionValues ?? []),
-    ].some((value) => value.length > STARTUP_RAW_MAX_CHARS || /\p{Cc}/u.test(value));
-    const output =
-      history === null
-        ? null
-        : redactionValues === null
-          ? "[Startup output omitted: launch credential coverage unavailable.]"
-          : unsafeRendering
-            ? "[Startup output omitted: command or credentials cannot be safely matched after terminal rendering.]"
-            : sanitizeStartupText(history, lease, redactionValues);
-    const tail = output?.split(/\r?\n/).slice(-12).join("\n").slice(-STARTUP_OUTPUT_MAX_CHARS);
     const terminal =
       summary === null
         ? "Terminal metadata unavailable."
         : `Terminal: ${summary.status}; running subprocess: ${summary.hasRunningSubprocess ? "yes" : "no"}${summary.exitCode === null ? "" : `; exit code: ${summary.exitCode}`}${summary.exitSignal === null ? "" : `; signal: ${summary.exitSignal}`}.`;
-    const diagnosticUrl = new URL(lease.url);
-    diagnosticUrl.username = "";
-    diagnosticUrl.password = "";
-    diagnosticUrl.search = "";
-    diagnosticUrl.hash = "";
     return yield* new PreviewHostingError({
       operation: "ready",
       statePath,
       threadId: lease.threadId,
-      url: sanitizeStartupText(diagnosticUrl.href, lease, redactionValues ?? []).slice(0, 120),
-      detail: `${readiness}\n${terminal}\n${tail ? `Recent startup output${tail.length < (output?.length ?? 0) ? " (truncated)" : ""}:\n${tail}` : history === null ? "Startup output unavailable." : "No startup output captured."}`,
+      url: new URL(lease.url).origin,
+      detail: `${readiness}\n${terminal}\nTerminal output is omitted because it may contain credentials.`,
     });
   });
 
@@ -575,7 +462,6 @@ const make = Effect.gen(function* () {
       const summary = yield* terminalSummary(lease);
       if (summary?.status === "running" && summary.hasRunningSubprocess) return;
       yield* terminals.open(openInput(lease));
-      yield* terminals.clear({ threadId: lease.threadId, terminalId: lease.terminalId });
       yield* terminals.write({
         threadId: lease.threadId,
         terminalId: lease.terminalId,

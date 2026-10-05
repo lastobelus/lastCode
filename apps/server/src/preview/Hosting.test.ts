@@ -1,7 +1,5 @@
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
-import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
@@ -19,7 +17,6 @@ import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 import {
   PreviewHostingLeaseId,
-  ProviderInstanceId,
   ThreadId,
   type DiscoveredLocalServer,
   type TerminalOpenInput,
@@ -29,8 +26,6 @@ import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
-
-vi.mock("node:util", { spy: true });
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
 const encodePersistedHostingState = Schema.encodeSync(
@@ -50,7 +45,6 @@ interface TerminalHarness {
     readonly data: string;
   }>;
   readonly closes: Array<{ readonly threadId: string; readonly terminalId: string }>;
-  readonly clears: Array<{ readonly threadId: string; readonly terminalId: string }>;
   readonly historyDeletes: Array<{ readonly threadId: string; readonly terminalId: string }>;
   readonly summaries: TerminalSummary[];
   readonly liveSummaries?: TerminalSummary[];
@@ -66,10 +60,6 @@ interface TerminalHarness {
     readonly terminalId?: string | undefined;
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
-  readonly onClear?: () => Effect.Effect<void, TerminalManager.TerminalError>;
-  startupHistory?: string;
-  readonly startupRedactionValues?: ReadonlyArray<string> | null;
-  readonly onHistory?: () => Effect.Effect<void, TerminalManager.TerminalHistoryError>;
 }
 
 function terminalLayer(harness: TerminalHarness) {
@@ -189,20 +179,7 @@ function terminalLayer(harness: TerminalHarness) {
       return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
-    clear: (input) => {
-      harness.clears.push(input);
-      return harness.onClear?.() ?? Effect.void;
-    },
-    history: () =>
-      (harness.onHistory?.() ?? Effect.void).pipe(Effect.as(harness.startupHistory ?? "")),
-    startupDiagnostics: () =>
-      (harness.onHistory?.() ?? Effect.void).pipe(
-        Effect.as({
-          history: harness.startupHistory ?? "",
-          redactionValues:
-            harness.startupRedactionValues === undefined ? [] : harness.startupRedactionValues,
-        }),
-      ),
+    history: () => Effect.die("Startup transcripts must remain local."),
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
@@ -250,7 +227,6 @@ function testTerminalHarness(overrides: Partial<TerminalHarness> = {}): Terminal
     opens: [],
     writes: [],
     closes: [],
-    clears: [],
     historyDeletes: [],
     summaries: [],
     ...overrides,
@@ -394,7 +370,6 @@ describe("PreviewHosting", () => {
           assert.equal(repeated.expiresAt, lease.expiresAt);
           assert.equal(harness.opens.length, 1);
           assert.equal(harness.writes.length, 1);
-          assert.equal(harness.clears.length, 1);
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
@@ -1319,106 +1294,6 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
-  it.effect(
-    "does not report an earlier attempt's output when a reused lease retry fails quietly",
-    () =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-quiet-retry-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          onClear: () =>
-            Effect.sync(() => {
-              harness.startupHistory = "";
-            }),
-          onWrite: () =>
-            Effect.sync(() => {
-              if (harness.writes.length === 1) {
-                harness.startupHistory = "Error from the previous startup attempt";
-              } else {
-                const summary = harness.summaries[0];
-                if (summary) harness.summaries[0] = { ...summary, hasRunningSubprocess: false };
-              }
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const input = {
-              threadId: "thread-1",
-              command: "pnpm dev --port 5173",
-              cwd: "/workspace",
-              url: PREVIEW_URL,
-            };
-            const lease = yield* hosting.launch(input);
-            const repeated = yield* hosting.launch(input);
-            assert.equal(repeated.id, lease.id);
-            assert.equal(harness.clears.length, 1);
-            assert.equal(harness.writes.length, 1);
-            assert.equal(harness.startupHistory, "Error from the previous startup attempt");
-            const summary = harness.summaries[0];
-            assert.isDefined(summary);
-            if (summary) harness.summaries[0] = { ...summary, hasRunningSubprocess: false };
-
-            const retry = yield* Effect.result(hosting.launch(input));
-            assert.equal(retry._tag, "Failure");
-            if (retry._tag === "Failure") {
-              assert.include(retry.failure.message, "preview command is no longer running");
-              assert.include(retry.failure.message, "No startup output captured.");
-              assert.notInclude(retry.failure.message, "previous startup attempt");
-            }
-            assert.equal(harness.opens.length, 2);
-            assert.equal(harness.clears.length, 2);
-            assert.equal(harness.writes.length, 2);
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("does not write a launch command when clearing its startup history fails", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-failed-clear-" });
-      const config = yield* Effect.provide(
-        ServerConfig.ServerConfig,
-        ServerConfig.layerTest(process.cwd(), root),
-      );
-      const harness = testTerminalHarness({
-        onClear: () =>
-          Effect.fail(
-            new TerminalManager.TerminalWriteError({
-              threadId: "thread-1",
-              terminalId: harness.opens[0]?.terminalId ?? "preview-test",
-              terminalPid: 100,
-              cause: new Error("synthetic terminal clear failure"),
-            }),
-          ),
-      });
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const hosting = yield* PreviewHosting.PreviewHosting;
-          const result = yield* Effect.result(
-            hosting.launch({
-              threadId: "thread-1",
-              command: "pnpm dev --port 5173",
-              cwd: "/workspace",
-              url: PREVIEW_URL,
-            }),
-          );
-          assert.equal(result._tag, "Failure");
-          assert.equal(harness.opens.length, 1);
-          assert.equal(harness.clears.length, 1);
-          assert.deepEqual(harness.writes, []);
-          assert.deepEqual(yield* hosting.list("thread-1"), []);
-          assert.equal(harness.closes.length, 1);
-        }).pipe(Effect.provide(hostingLayer(config, harness))),
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
   it.effect("does not persist an active lease when writing the launch command fails", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1570,6 +1445,10 @@ describe("PreviewHosting", () => {
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.opens.length, 1);
           assert.equal(harness.writes.length, 1);
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "No HTTP response was attributed");
+            assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+          }
           assert.isAtLeast(harness.closes.length, 1);
           assert.isTrue(
             harness.closes.every((close) => close.terminalId === harness.opens[0]?.terminalId),
@@ -1793,7 +1672,12 @@ describe("PreviewHosting", () => {
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") {
             assert.include(result.failure.message, "HTTP responded, but ownership did not match");
-            assert.include(result.failure.message, "No startup output captured.");
+            assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+            assert.include(result.failure.message, "Terminal: running; running subprocess: yes");
+            assert.include(
+              result.failure.message,
+              "Terminal output is omitted because it may contain credentials.",
+            );
           }
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.closes.length, 1);
@@ -1802,460 +1686,18 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "captures a bounded startup failure before deleting history and redacts credentials",
-    () =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(10_000);
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-diagnostics-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const wrote = yield* Deferred.make<void>();
-        let captured = false;
-        const command = "SECRET_VALUE=inline-command-secret pnpm dev --port 5173";
-        const harness = testTerminalHarness({
-          startupHistory: `${command}\nfirst-line-only\n${"early startup noise\n".repeat(200)}\n\u001b[31mError: Cannot find module 'vite'\u001b[0m\nconfig=override-credential\nAPI_TOKEN=ambient-credential\nhttps://operator:password@localhost:5173/?token=query-credential#fragment-secret`,
-          onHistory: () =>
-            Effect.sync(() => {
-              captured = true;
-              assert.deepEqual(harness.historyDeletes, []);
-            }),
-          onCloseAttempt: () =>
-            Effect.sync(() => {
-              assert.isTrue(captured);
-            }),
-          onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const pending = yield* Effect.forkScoped(
-              Effect.result(
-                hosting.launch({
-                  threadId: "thread-1",
-                  command,
-                  cwd: "/workspace",
-                  env: { CUSTOM_CONFIG: "override-credential" },
-                  url: `${PREVIEW_URL}?token=query-credential#fragment-secret`,
-                }),
-              ),
-            );
-            yield* Deferred.await(wrote);
-            yield* Effect.yieldNow;
-            yield* TestClock.adjust(Duration.seconds(31));
-            const result = yield* Fiber.join(pending);
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.equal(result.failure._tag, "PreviewHostingError");
-              assert.include(result.failure.message, "Readiness deadline: 30000 ms");
-              assert.include(result.failure.message, `at ${PREVIEW_URL}.\n`);
-              assert.include(result.failure.message, "running subprocess: yes");
-              assert.include(result.failure.message, "Cannot find module 'vite'");
-              assert.include(result.failure.message, "truncated");
-              assert.isAtMost(result.failure.message.length, 1_024);
-              for (const secret of [
-                "inline-command-secret",
-                "override-credential",
-                "ambient-credential",
-                "operator",
-                "password",
-                "query-credential",
-                "fragment-secret",
-                "\u001b",
-                "first-line-only",
-              ]) {
-                assert.notInclude(result.failure.message, secret);
-              }
-            }
-            assert.equal(harness.historyDeletes.length, 1);
-            assert.deepEqual(yield* hosting.list("thread-1"), []);
-          }).pipe(Effect.provide(hostingLayer(config, harness, false))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect(
-    "reports process exit and missing startup history without blocking failed-launch cleanup",
-    () =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({
-          prefix: "preview-hosting-missing-output-",
-        });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          onHistory: () =>
-            Effect.fail(
-              new TerminalManager.TerminalHistoryError({
-                operation: "read",
-                threadId: "thread-1",
-                terminalId: "preview-test",
-                cause: new Error("history unavailable"),
-              }),
-            ),
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                  exitCode: 1,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command: "pnpm dev",
-                cwd: "/workspace",
-                url: PREVIEW_URL,
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.include(result.failure.message, "preview command is no longer running");
-              assert.include(
-                result.failure.message,
-                "Terminal: exited; running subprocess: no; exit code: 1",
-              );
-              assert.include(result.failure.message, "Startup output unavailable.");
-              assert.notInclude(result.failure.message, "history unavailable");
-            }
-            assert.equal(harness.historyDeletes.length, 1);
-            assert.deepEqual(yield* hosting.list("thread-1"), []);
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each([false, true])(
-    "protects materialized provider credentials when launch coverage is unavailable: %s",
-    (unavailable) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-provider-env-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          startupHistory:
-            "config=materialized-private-value\npostgresql://user:private@database.example/db\nError: Cannot find module 'vite'",
-          startupRedactionValues: unavailable
-            ? null
-            : ["materialized-private-value", "postgresql://user:private@database.example/db"],
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command: "pnpm dev",
-                cwd: "/workspace",
-                url: PREVIEW_URL,
-                providerInstanceId: ProviderInstanceId.make("codex_work"),
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.notInclude(result.failure.message, "materialized-private-value");
-              assert.notInclude(
-                result.failure.message,
-                "postgresql://user:private@database.example/db",
-              );
-              assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
-              assert.include(
-                result.failure.message,
-                unavailable
-                  ? "[Startup output omitted: launch credential coverage unavailable.]"
-                  : "config=[redacted]\n[redacted]\nError: Cannot find module 'vite'",
-              );
-            }
-            assert.equal(harness.historyDeletes.length, 1);
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("bounds redaction work for a full terminal history with many environment values", () =>
+  it.effect.each([
+    { exitCode: 1, exitSignal: null, detail: "exit code: 1" },
+    { exitCode: null, exitSignal: 15, detail: "signal: 15" },
+  ])("reports failed command metadata without reading startup output ($detail)", (exit) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-large-history-" });
-      const config = yield* Effect.provide(
-        ServerConfig.ServerConfig,
-        ServerConfig.layerTest(process.cwd(), root),
-      );
-      const environment = Object.fromEntries(
-        Array.from({ length: 128 }, (_, index) => [
-          `CONFIG_${index}`,
-          `private-value-${index}-suffix`,
-        ]),
-      );
-      const harness = testTerminalHarness({
-        startupHistory: `${"n".repeat(8 * 1_024 * 1_024)}\nError: Cannot find module 'vite'\nconfig=private-value-127-suffix`,
-        onRefreshMetadata: () =>
-          Effect.sync(() => {
-            const summary = harness.summaries[0];
-            if (summary)
-              harness.summaries[0] = { ...summary, status: "exited", hasRunningSubprocess: false };
-          }),
-      });
-      const strip = vi.mocked(NodeUtil.stripVTControlCharacters);
-      strip.mockClear();
-      yield* Effect.acquireUseRelease(
-        Effect.void,
-        () =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              const hosting = yield* PreviewHosting.PreviewHosting;
-              const result = yield* Effect.result(
-                hosting.launch({
-                  threadId: "thread-1",
-                  command: "pnpm dev",
-                  cwd: "/workspace",
-                  env: environment,
-                  url: PREVIEW_URL,
-                }),
-              );
-              assert.equal(result._tag, "Failure");
-              if (result._tag === "Failure") {
-                assert.include(result.failure.message, "Cannot find module 'vite'");
-                assert.notInclude(result.failure.message, "private-value-127-suffix");
-              }
-              assert.isAbove(strip.mock.calls.length, 0);
-              assert.isTrue(strip.mock.calls.every(([input]) => input.length <= 16 * 1_024));
-            }).pipe(Effect.provide(hostingLayer(config, harness))),
-          ),
-        () => Effect.sync(() => strip.mockClear()),
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each([1, 16 * 1_024 - 256])(
-    "redacts short values once without expanding diagnostic markers (%s characters)",
-    (size) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-short-values-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const command = "node ./server[1].js";
-        const harness = testTerminalHarness({
-          startupHistory: `${command}\n${"a".repeat(size)}\nab a[r]e`,
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command,
-                cwd: "/workspace",
-                url: PREVIEW_URL,
-                env: {
-                  SHORT_A: "a",
-                  SHORT_BRACKET: "[",
-                  SHORT_R: "r",
-                  SHORT_E: "e",
-                  LONGER: "ab",
-                },
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.include(
-                result.failure.message,
-                "[redacted]\n[redacted]\n[redacted] [redacted]][redacted]",
-              );
-              assert.isAtMost(result.failure.message.length, 1_024);
-            }
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each(["B", "pnpm dev"])(
-    "masks common credentials before short values or command %s can change their labels",
-    (command) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({
-          prefix: "preview-hosting-generic-secrets-",
-        });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          startupHistory:
-            "Bearer unknown-bearer-secret\nbAsIc unknown-basic-secret\npassword=unknown-password-secret\nPASSWORD='unknown-uppercase-secret'\nHTTP://operator:unknown-userinfo-secret@localhost:5173/?token=unknown-query-secret",
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command,
-                cwd: "/workspace",
-                url: PREVIEW_URL,
-                env: { SHORT_A: "a", SHORT_R: "r", SHORT_E: "e", SHORT_BRACKET: "[" },
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.include(
-                result.failure.message,
-                "[redacted]\n[redacted]\n[redacted]\n[redacted]\n[redacted]",
-              );
-              assert.notInclude(result.failure.message, "unknown-");
-              assert.isAtMost(result.failure.message.length, 1_024);
-            }
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each([
-    { name: "whitespace", key: "SECRET", value: "first second", omitted: false },
-    {
-      name: "multiline",
-      key: "PRIVATE_KEY",
-      value: "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
-      omitted: true,
-    },
-  ])(
-    "protects a complete $name value overlapping a generic assignment",
-    ({ key, value, omitted }) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-overlap-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          startupHistory: `${key}=${value}\nError: Cannot find module 'vite'`,
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command: "pnpm dev",
-                cwd: "/workspace",
-                url: PREVIEW_URL,
-                env: { [key]: value },
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.include(
-                result.failure.message,
-                omitted
-                  ? "cannot be safely matched after terminal rendering"
-                  : "[redacted]\nError: Cannot find module 'vite'",
-              );
-              for (const fragment of value.split(/\s+/)) {
-                assert.notInclude(result.failure.message, fragment);
-              }
-            }
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each([
-    {
-      name: "CRLF-rendered PEM",
-      value: "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
-      history: "-----BEGIN PRIVATE KEY-----\r\nprivate-key-body\r\n-----END PRIVATE KEY-----",
-      fragment: "private-key-body",
-    },
-    {
-      name: "ANSI-stripped credential",
-      value: "\u001b[31mprivate-rendered-value\u001b[0m",
-      history: "private-rendered-value",
-      fragment: "private-rendered-value",
-    },
-    {
-      name: "rendered credential crossing the truncation boundary",
-      value: "credential-prefix\nprivate-rendered-value",
-      history: `credential-prefix\r\nprivate-rendered-value\r\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
-      fragment: "private-rendered-value",
-    },
-    {
-      name: "oversized captured credential",
-      value: "private-rendered-value".repeat(1_000),
-      history: "private-rendered-value",
-      fragment: "private-rendered-value",
-    },
-  ])("omits transcript diagnostics for $name", ({ value, history, fragment }) =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-rendered-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-exit-details-" });
       const config = yield* Effect.provide(
         ServerConfig.ServerConfig,
         ServerConfig.layerTest(process.cwd(), root),
       );
       const harness = testTerminalHarness({
-        startupHistory: `${"old noise\n".repeat(5_000)}${history}`,
-        startupRedactionValues: [value],
         onRefreshMetadata: () =>
           Effect.sync(() => {
             const summary = harness.summaries[0];
@@ -2264,6 +1706,8 @@ describe("PreviewHosting", () => {
                 ...summary,
                 status: "exited",
                 hasRunningSubprocess: false,
+                exitCode: exit.exitCode,
+                exitSignal: exit.exitSignal,
               };
           }),
       });
@@ -2273,166 +1717,37 @@ describe("PreviewHosting", () => {
           const result = yield* Effect.result(
             hosting.launch({
               threadId: "thread-1",
-              command: "pnpm dev",
+              command: "source .env; pnpm dev",
               cwd: "/workspace",
-              url: PREVIEW_URL,
+              url: "http://operator:url-secret@localhost:5173/private-route?token=query-secret#fragment-secret",
             }),
           );
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") {
-            assert.include(result.failure.message, `at ${PREVIEW_URL}.\n`);
+            assert.include(result.failure.message, "at http://localhost:5173.\n");
+            assert.include(result.failure.message, "preview command is no longer running");
             assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
+            assert.include(result.failure.message, exit.detail);
             assert.include(
               result.failure.message,
-              "[Startup output omitted: command or credentials cannot be safely matched after terminal rendering.]",
+              "Terminal output is omitted because it may contain credentials.",
             );
-            assert.notInclude(result.failure.message, fragment);
-            assert.notInclude(result.failure.message, "Cannot find module 'vite'");
             assert.isAtMost(result.failure.message.length, 1_024);
+            for (const privateText of [
+              "source .env",
+              "operator",
+              "url-secret",
+              "private-route",
+              "query-secret",
+              "fragment-secret",
+            ]) {
+              assert.notInclude(result.failure.message, privateText);
+            }
           }
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.historyDeletes.length, 1);
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("omits startup output when overlapping matches exhaust the redaction budget", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-budget-" });
-      const config = yield* Effect.provide(
-        ServerConfig.ServerConfig,
-        ServerConfig.layerTest(process.cwd(), root),
-      );
-      const harness = testTerminalHarness({
-        startupHistory: "a".repeat(8_192),
-        onRefreshMetadata: () =>
-          Effect.sync(() => {
-            const summary = harness.summaries[0];
-            if (summary)
-              harness.summaries[0] = {
-                ...summary,
-                status: "exited",
-                hasRunningSubprocess: false,
-              };
-          }),
-      });
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const hosting = yield* PreviewHosting.PreviewHosting;
-          const result = yield* Effect.result(
-            hosting.launch({
-              threadId: "thread-1",
-              command: "pnpm dev",
-              cwd: "/workspace",
-              url: PREVIEW_URL,
-              env: Object.fromEntries(
-                Array.from({ length: 16 }, (_, index) => [
-                  `CONFIG_${index}`,
-                  "a".repeat(index + 1),
-                ]),
-              ),
-            }),
-          );
-          assert.equal(result._tag, "Failure");
-          if (result._tag === "Failure") {
-            assert.include(
-              result.failure.message,
-              "[Startup output omitted: redaction match budget exceeded.]",
-            );
-            assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
-            assert.notInclude(result.failure.message, "a".repeat(16));
-            assert.isAtMost(result.failure.message.length, 1_024);
-          }
-        }).pipe(Effect.provide(hostingLayer(config, harness))),
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect.each([
-    {
-      name: "credential in an oversized line",
-      command: "pnpm dev",
-      env: { CUSTOM_CONFIG: "boundary-secret" },
-      history: `${"x".repeat(20_000)}boundary-secret\nError: Cannot find module 'vite'`,
-      omitted: false,
-    },
-    {
-      name: "URL crossing the boundary",
-      command: "pnpm dev",
-      env: {},
-      history: `https://operator:password@localhost:5173/?token=${"x".repeat(20_000)}boundary-secret\nError: Cannot find module 'vite'`,
-      omitted: false,
-    },
-    {
-      name: "oversized final line",
-      command: "pnpm dev",
-      env: {},
-      history: `token=${"x".repeat(20_000)}boundary-secret`,
-      omitted: true,
-    },
-    {
-      name: "multiline credential crossing the boundary",
-      command: "pnpm dev",
-      env: { CUSTOM_CONFIG: `credential-prefix\nboundary-secret` },
-      history: `credential-prefix\nboundary-secret\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
-      omitted: true,
-    },
-    {
-      name: "multiline launch command crossing the boundary",
-      command: `printf credential-prefix\nboundary-secret`,
-      env: {},
-      history: `printf credential-prefix\nboundary-secret\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
-      omitted: true,
-    },
-  ])(
-    "does not expose a partial $name from truncated history",
-    ({ command, env, history, omitted }) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-boundary-" });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const harness = testTerminalHarness({
-          startupHistory: `${"old noise\n".repeat(5_000)}${history}`,
-          onRefreshMetadata: () =>
-            Effect.sync(() => {
-              const summary = harness.summaries[0];
-              if (summary)
-                harness.summaries[0] = {
-                  ...summary,
-                  status: "exited",
-                  hasRunningSubprocess: false,
-                };
-            }),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const result = yield* Effect.result(
-              hosting.launch({
-                threadId: "thread-1",
-                command,
-                cwd: "/workspace",
-                env,
-                url: PREVIEW_URL,
-              }),
-            );
-            assert.equal(result._tag, "Failure");
-            if (result._tag === "Failure") {
-              assert.include(result.failure.message, "preview command is no longer running");
-              assert.notInclude(result.failure.message, "boundary-secret");
-              assert.notInclude(result.failure.message, "operator:password");
-              assert.include(
-                result.failure.message,
-                omitted ? "Startup output omitted" : "Cannot find module 'vite'",
-              );
-            }
-            assert.equal(harness.historyDeletes.length, 1);
-          }).pipe(Effect.provide(hostingLayer(config, harness))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

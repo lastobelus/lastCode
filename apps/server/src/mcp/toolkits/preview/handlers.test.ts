@@ -21,7 +21,7 @@ import {
 } from "./handlers.ts";
 import { PreviewStandardToolkit } from "./tools.ts";
 
-it.effect("preview_host returns captured startup diagnostics to its owning agent", () =>
+it.effect("preview_host returns structured startup diagnostics to its owning agent", () =>
   Effect.gen(function* () {
     const threadId = ThreadId.make("preview-startup-thread");
     const dependencies = Layer.mergeAll(
@@ -42,8 +42,7 @@ it.effect("preview_host returns captured startup diagnostics to its owning agent
               statePath: "/isolated/preview-hosting.json",
               threadId,
               url: "http://localhost:5173/",
-              detail:
-                "Terminal: exited; exit code: 1.\nRecent startup output:\nError: Cannot find module 'vite'",
+              detail: "Terminal: exited; running subprocess: no; exit code: 1.",
             }),
           );
         },
@@ -64,7 +63,7 @@ it.effect("preview_host returns captured startup diagnostics to its owning agent
     expect(results.failure).toMatchObject({
       _tag: "PreviewHostingError",
       reason: "unavailable",
-      message: expect.stringContaining("Cannot find module 'vite'"),
+      message: expect.stringContaining("Terminal: exited"),
     });
     expect(results.failure).not.toHaveProperty("statePath");
   }),
