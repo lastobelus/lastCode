@@ -2407,20 +2407,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.process = ptyProcess;
               session.pid = processPid;
               session.status = "running";
+              // Inherited credentials can have arbitrary names (for example DATABASE_URL).
+              // Capture every nonempty value from the actual spawn, not a name heuristic.
               session.startupRedactionValues = [
-                ...new Set(
-                  Object.entries(terminalEnv).flatMap(([name, value]) =>
-                    value &&
-                    ((platform === "win32"
-                      ? Object.keys(session.runtimeEnv ?? {}).some(
-                          (key) => key.toLowerCase() === name.toLowerCase(),
-                        )
-                      : Object.hasOwn(session.runtimeEnv ?? {}, name)) ||
-                      /token|key|password|secret|credential|auth/i.test(name))
-                      ? [value]
-                      : [],
-                  ),
-                ),
+                ...new Set(Object.values(terminalEnv).filter((value) => value.length > 0)),
               ];
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {

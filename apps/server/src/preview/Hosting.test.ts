@@ -1842,8 +1842,11 @@ describe("PreviewHosting", () => {
           ServerConfig.layerTest(process.cwd(), root),
         );
         const harness = testTerminalHarness({
-          startupHistory: "config=materialized-private-value\nError: Cannot find module 'vite'",
-          startupRedactionValues: unavailable ? null : ["materialized-private-value"],
+          startupHistory:
+            "config=materialized-private-value\npostgresql://user:private@database.example/db\nError: Cannot find module 'vite'",
+          startupRedactionValues: unavailable
+            ? null
+            : ["materialized-private-value", "postgresql://user:private@database.example/db"],
           onRefreshMetadata: () =>
             Effect.sync(() => {
               const summary = harness.summaries[0];
@@ -1870,12 +1873,16 @@ describe("PreviewHosting", () => {
             assert.equal(result._tag, "Failure");
             if (result._tag === "Failure") {
               assert.notInclude(result.failure.message, "materialized-private-value");
+              assert.notInclude(
+                result.failure.message,
+                "postgresql://user:private@database.example/db",
+              );
               assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
               assert.include(
                 result.failure.message,
                 unavailable
                   ? "[Startup output omitted: launch credential coverage unavailable.]"
-                  : "config=[redacted]\nError: Cannot find module 'vite'",
+                  : "config=[redacted]\n[redacted]\nError: Cannot find module 'vite'",
               );
             }
             assert.equal(harness.historyDeletes.length, 1);

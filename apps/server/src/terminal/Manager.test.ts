@@ -2454,7 +2454,12 @@ it.layer(
       const providerInstanceId = ProviderInstanceId.make("codex_work");
       let providerCredential = "materialized-private-value";
       const { manager, ptyAdapter } = yield* createManager(5, {
-        env: { T3CODE_SECRET: "server-only", SERVICE_PASSWORD: "inherited-private-value" },
+        env: {
+          T3CODE_SECRET: "server-only",
+          SERVICE_PASSWORD: "inherited-private-value",
+          DATABASE_URL: "postgresql://user:private@database.example/db",
+          CONFIG_DATA: "arbitrarily-named-inherited-credential",
+        },
         resolveProviderInstanceEnvironment: (requestedId, env) =>
           Effect.succeed({
             ...env,
@@ -2482,6 +2487,10 @@ it.layer(
       });
       expect(diagnostics.redactionValues).toContain("materialized-private-value");
       expect(diagnostics.redactionValues).toContain("inherited-private-value");
+      expect(diagnostics.redactionValues).toContain(
+        "postgresql://user:private@database.example/db",
+      );
+      expect(diagnostics.redactionValues).toContain("arbitrarily-named-inherited-credential");
       expect(diagnostics.redactionValues).not.toContain("changed-after-spawn");
       expect(diagnostics.redactionValues).not.toContain("server-only");
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
