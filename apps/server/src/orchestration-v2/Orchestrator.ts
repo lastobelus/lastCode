@@ -3829,6 +3829,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ) {
         return yield* update(previous);
       }
+      let promotion =
+        command.type === "subagent.promote.request"
+          ? {
+              requestId: command.commandId,
+              targetThreadId: previous?.targetThreadId ?? command.targetThreadId,
+              createdBy: command.createdBy,
+              creationSource: command.creationSource,
+              ...(command.title === undefined ? {} : { title: command.title }),
+              requestedAt: now,
+            }
+          : previous!;
+      if (command.type === "subagent.promote.request") {
+        let existingTarget = yield* projectionStore
+          .getThreadShell(promotion.targetThreadId)
+          .pipe(mapDispatchError(command));
+        // Keep the canonical target on ordinary retries, but let a failed
+        // collision recover using the client's fresh destination ID.
+        if (
+          existingTarget !== null &&
+          previous?.status === "failed" &&
+          command.targetThreadId !== promotion.targetThreadId
+        ) {
+          promotion = { ...promotion, targetThreadId: command.targetThreadId };
+          existingTarget = yield* projectionStore
+            .getThreadShell(promotion.targetThreadId)
+            .pipe(mapDispatchError(command));
+        }
+        if (existingTarget !== null) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The destination thread already exists. Choose a new destination.",
+          });
+        }
+      }
       const adapter = yield* providerAdapters
         .get(source.providerInstanceId)
         .pipe(mapDispatchError(command));
@@ -3869,17 +3904,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (latestTurn !== undefined && terminalStatuses.has(latestTurn.status)) ||
         (root !== undefined && terminalStatuses.has(root.status));
       const ready = terminal && providerThread?.nativeThreadRef?.strength === "strong";
-      const promotion =
-        command.type === "subagent.promote.request"
-          ? {
-              requestId: command.commandId,
-              targetThreadId: previous?.targetThreadId ?? command.targetThreadId,
-              createdBy: command.createdBy,
-              creationSource: command.creationSource,
-              ...(command.title === undefined ? {} : { title: command.title }),
-              requestedAt: now,
-            }
-          : previous!;
       const next = {
         ...promotion,
         status: ready ? ("forking" as const) : ("waiting" as const),

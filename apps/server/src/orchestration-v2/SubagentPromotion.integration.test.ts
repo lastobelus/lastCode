@@ -517,6 +517,72 @@ it.effect(
     }).pipe(Effect.provide(TestLayer)),
 );
 
+it.effect("rejects an occupied destination before scheduling any native fork", () =>
+  Effect.gen(function* () {
+    const h = yield* seed("completed");
+    const rejectedId = CommandId.make("occupied-destination-request");
+    const rejected = yield* Effect.exit(request(h.orchestrator, rejectedId, parentId));
+    assert.isTrue(Exit.isFailure(rejected));
+    assert.deepEqual((yield* h.orchestrator.getThreadProjection(sourceId)).thread, h.source);
+    assert.isFalse(Option.isSome(yield* h.outbox.get(`effect:${rejectedId}:subagent.promote`)));
+    assert.equal((yield* h.orchestrator.getThreadProjection(parentId)).thread.title, "Parent");
+    yield* request(h.orchestrator);
+    assert.equal(
+      (yield* h.orchestrator.getThreadProjection(sourceId)).thread.subagentPromotion?.status,
+      "forking",
+    );
+  }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect(
+  "retries a destination collision with a fresh ID without replacing the existing thread",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* seed("completed");
+      yield* request(h.orchestrator);
+      const existing = { ...h.source, id: targetId, title: "Existing destination" };
+      yield* h.sink.write({
+        events: [
+          {
+            id: EventId.make("occupied-destination-created"),
+            type: "thread.created",
+            threadId: targetId,
+            occurredAt: h.now,
+            payload: existing,
+          },
+        ],
+      });
+      yield* h.orchestrator.dispatch(completion(h));
+      assert.equal(
+        (yield* h.orchestrator.getThreadProjection(sourceId)).thread.subagentPromotion?.status,
+        "failed",
+      );
+      const retryId = CommandId.make("retry-destination-collision");
+      const freshTargetId = ThreadId.make("fresh-interactive-thread");
+      yield* request(h.orchestrator, retryId, freshTargetId);
+      const promotion = (yield* h.orchestrator.getThreadProjection(sourceId)).thread
+        .subagentPromotion;
+      assert.equal(promotion?.status, "forking");
+      assert.equal(promotion?.targetThreadId, freshTargetId);
+      const retryCompletion = completion(h, CommandId.make("retry-destination-complete"));
+      yield* h.orchestrator.dispatch({
+        ...retryCompletion,
+        requestId: retryId,
+        providerThread: { ...retryCompletion.providerThread, appThreadId: freshTargetId },
+      });
+      assert.equal(
+        (yield* h.orchestrator.getThreadProjection(sourceId)).thread.subagentPromotion?.status,
+        "promoted",
+      );
+      assert.deepEqual((yield* h.orchestrator.getThreadProjection(targetId)).thread, existing);
+      assert.equal(
+        (yield* h.orchestrator.getThreadProjection(freshTargetId)).messages[0]?.text,
+        "Native subagent result",
+      );
+      assert.lengthOf((yield* h.orchestrator.getThreadProjection(parentId)).messages, 1);
+    }).pipe(Effect.provide(TestLayer)),
+);
+
 it.effect(
   "retries a failed promotion with the same target and ignores late results from the old request",
   () =>
