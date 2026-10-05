@@ -48,6 +48,7 @@ import { acpRegistryManagedBinaryDirectories } from "../provider/acp/AcpRegistry
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Equal from "effect/Equal";
@@ -107,6 +108,7 @@ const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const MAX_SUBPROCESS_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
+const DEFAULT_PROCESS_EXIT_WAIT_MS = 5_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
@@ -376,10 +378,15 @@ type DrainProcessEventAction =
       exitSignal: number | null;
     };
 
+interface TerminatingProcess {
+  readonly terminal: TerminalSummary;
+  readonly exited: Deferred.Deferred<void>;
+}
+
 interface TerminalManagerState {
   sessions: Map<string, TerminalSessionState>;
   killFibers: Map<PtyAdapter.PtyProcess, Fiber.Fiber<void, never>>;
-  terminatingProcesses: Map<PtyAdapter.PtyProcess, TerminalSummary>;
+  terminatingProcesses: Map<PtyAdapter.PtyProcess, TerminatingProcess>;
 }
 
 function truncateTerminalWireLabel(value: string): string {
@@ -1438,6 +1445,7 @@ interface TerminalManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  processExitWaitMs?: number;
   maxRetainedInactiveSessions?: number;
   registerTerminalProcesses?: (input: {
     readonly threadId: string;
@@ -1633,6 +1641,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
+  const processExitWaitMs = options.processExitWaitMs ?? DEFAULT_PROCESS_EXIT_WAIT_MS;
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
@@ -1723,51 +1732,79 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     process: PtyAdapter.PtyProcess,
     threadId: string,
     terminalId: string,
-  ) {
-    const terminated = yield* Effect.try({
-      try: () => process.kill("SIGTERM"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGTERM",
-          terminalPid: process.pid,
-        }),
-    }).pipe(
-      Effect.as(true),
-      Effect.catch((error) =>
-        Effect.logWarning("failed to kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGTERM",
-          cause: error,
-        }).pipe(Effect.as(false)),
+    retainedExit?: Deferred.Deferred<void>,
+  ): Effect.fn.Return<boolean> {
+    const observedExit =
+      retainedExit ?? (yield* readManagerState).terminatingProcesses.get(process)?.exited;
+    const exited = observedExit ?? (yield* Deferred.make<void>());
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        observedExit !== undefined
+          ? () => {}
+          : process.onExit(() => {
+              Deferred.doneUnsafe(exited, Effect.void);
+            }),
       ),
-    );
-    if (!terminated) {
-      return false;
-    }
+      () =>
+        Effect.gen(function* () {
+          if (yield* Deferred.isDone(exited)) return true;
 
-    yield* Effect.sleep(processKillGraceMs);
+          const signal = (name: "SIGTERM" | "SIGKILL") =>
+            Effect.try({
+              try: () => process.kill(name),
+              catch: (cause) =>
+                new TerminalProcessSignalError({
+                  cause,
+                  signal: name,
+                  terminalPid: process.pid,
+                }),
+            }).pipe(
+              Effect.as(true),
+              Effect.catch((error) =>
+                Effect.logWarning("failed to kill terminal process", {
+                  threadId,
+                  terminalId,
+                  signal: name,
+                  cause: error,
+                }).pipe(Effect.as(false)),
+              ),
+            );
 
-    return yield* Effect.try({
-      try: () => process.kill("SIGKILL"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGKILL",
-          terminalPid: process.pid,
+          if (!(yield* signal("SIGTERM"))) return yield* Deferred.isDone(exited);
+          if (yield* Deferred.isDone(exited)) return true;
+          const gracefulExit = yield* Deferred.await(exited).pipe(
+            Effect.timeoutOption(processKillGraceMs),
+          );
+          if (Option.isSome(gracefulExit) || (yield* Deferred.isDone(exited))) return true;
+
+          if (!(yield* signal("SIGKILL"))) return yield* Deferred.isDone(exited);
+          if (yield* Deferred.isDone(exited)) return true;
+          const forcedExit = yield* Deferred.await(exited).pipe(
+            Effect.timeoutOption(processExitWaitMs),
+          );
+          if (Option.isSome(forcedExit) || (yield* Deferred.isDone(exited))) return true;
+          yield* Effect.logWarning("terminal process exit was not confirmed", {
+            threadId,
+            terminalId,
+            terminalPid: process.pid,
+          });
+          return false;
         }),
-    }).pipe(
-      Effect.as(true),
-      Effect.catch((error) =>
-        Effect.logWarning("failed to force-kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGKILL",
-          cause: error,
-        }).pipe(Effect.as(false)),
-      ),
+      (unsubscribe) => Effect.sync(unsubscribe),
     );
+  });
+
+  const completeProcessShutdown = Effect.fn("terminal.completeProcessShutdown")(function* (
+    process: PtyAdapter.PtyProcess,
+  ): Effect.fn.Return<void> {
+    const terminal = yield* modifyManagerState((state) => {
+      const terminating = state.terminatingProcesses.get(process);
+      if (terminating === undefined) return [undefined, state] as const;
+      const terminatingProcesses = new Map(state.terminatingProcesses);
+      terminatingProcesses.delete(process);
+      return [terminating.terminal, { ...state, terminatingProcesses }] as const;
+    });
+    if (terminal !== undefined) yield* publishMetadataUpdate(terminal);
   });
 
   const startKillEscalation = Effect.fn("terminal.startKillEscalation")(function* (
@@ -1779,18 +1816,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (existing !== undefined && existing.pollUnsafe() === undefined) return;
 
     const fiber = yield* runKillEscalation(process, threadId, terminalId).pipe(
-      Effect.tap((completed) =>
-        completed
-          ? modifyManagerState((state) => {
-              if (!state.terminatingProcesses.has(process)) {
-                return [undefined, state] as const;
-              }
-              const terminatingProcesses = new Map(state.terminatingProcesses);
-              terminatingProcesses.delete(process);
-              return [undefined, { ...state, terminatingProcesses }] as const;
-            }).pipe(Effect.andThen(publishMetadataUpdate({ threadId, terminalId })))
-          : Effect.void,
-      ),
+      Effect.tap((completed) => (completed ? completeProcessShutdown(process) : Effect.void)),
       Effect.asVoid,
       Effect.ensuring(
         modifyManagerState((state) => {
@@ -2242,26 +2268,44 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (!process) return;
 
     const updatedAt = yield* nowIso;
-    yield* modifyManagerState((state) => {
-      const terminatingProcesses = new Map(state.terminatingProcesses);
-      terminatingProcesses.set(process, {
-        ...summary(session),
-        status: "running",
-        hasRunningSubprocess: true,
-      });
-      cleanupProcessHandles(session);
-      session.process = null;
-      session.pid = null;
-      session.hasRunningSubprocess = false;
-      session.childCommandLabel = null;
-      session.status = "exited";
-      session.pendingHistoryControlSequence = "";
-      session.pendingProcessEvents = [];
-      session.pendingProcessEventIndex = 0;
-      session.processEventDrainRunning = false;
-      session.updatedAt = updatedAt;
-      return [undefined, { ...state, terminatingProcesses }] as const;
-    });
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const exited = yield* Deferred.make<void>();
+        // Keep an exit witness after detaching the session, including between
+        // failed cleanup attempts. A late exit also clears the visible blocker.
+        const unsubscribe = process.onExit(() => {
+          Deferred.doneUnsafe(exited, Effect.void);
+        });
+        yield* modifyManagerState((state) => {
+          const terminatingProcesses = new Map(state.terminatingProcesses);
+          terminatingProcesses.set(process, {
+            terminal: {
+              ...summary(session),
+              status: "running",
+              hasRunningSubprocess: true,
+            },
+            exited,
+          });
+          cleanupProcessHandles(session);
+          session.process = null;
+          session.pid = null;
+          session.hasRunningSubprocess = false;
+          session.childCommandLabel = null;
+          session.status = "exited";
+          session.pendingHistoryControlSequence = "";
+          session.pendingProcessEvents = [];
+          session.pendingProcessEventIndex = 0;
+          session.processEventDrainRunning = false;
+          session.updatedAt = updatedAt;
+          return [undefined, { ...state, terminatingProcesses }] as const;
+        });
+        yield* restore(Deferred.await(exited)).pipe(
+          Effect.andThen(completeProcessShutdown(process)),
+          Effect.ensuring(Effect.sync(unsubscribe)),
+          Effect.forkIn(workerScope),
+        );
+      }),
+    );
 
     yield* clearKillFiber(process);
     yield* unregisterTerminal({
@@ -2713,9 +2757,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       });
       yield* Effect.forEach(
         terminatingProcesses,
-        ([process, terminal]) =>
+        ([process, { terminal, exited }]) =>
           clearKillFiber(process).pipe(
-            Effect.andThen(runKillEscalation(process, terminal.threadId, terminal.terminalId)),
+            Effect.andThen(
+              runKillEscalation(process, terminal.threadId, terminal.terminalId, exited),
+            ),
           ),
         { concurrency: "unbounded", discard: true },
       );
@@ -2922,7 +2968,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             summary(session),
           ]),
         );
-        for (const terminal of state.terminatingProcesses.values()) {
+        for (const { terminal } of state.terminatingProcesses.values()) {
           terminals.set(toSessionKey(terminal.threadId, terminal.terminalId), terminal);
         }
         return [...terminals.values()].sort(
@@ -2941,10 +2987,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     readManagerState.pipe(
       Effect.map((state) => {
         const terminating = [...state.terminatingProcesses.values()].findLast(
-          (terminal) =>
+          ({ terminal }) =>
             terminal.threadId === input.threadId && terminal.terminalId === input.terminalId,
         );
-        if (terminating !== undefined) return terminating;
+        if (terminating !== undefined) return terminating.terminal;
         const session = state.sessions.get(toSessionKey(input.threadId, input.terminalId));
         return session === undefined ? null : summary(session);
       }),
@@ -3215,7 +3261,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       // Failed handles outlive their sessions. A later close retries them,
       // while startKillEscalation leaves any current cleanup fiber alone.
       const terminating = [...(yield* readManagerState).terminatingProcesses.entries()].filter(
-        ([, terminal]) =>
+        ([, { terminal }]) =>
           terminal.threadId === input.threadId &&
           (input.terminalId === undefined || terminal.terminalId === input.terminalId) &&
           !retainedTerminalIds.includes(terminal.terminalId) &&
@@ -3223,7 +3269,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
       yield* Effect.forEach(
         terminating,
-        ([process, terminal]) =>
+        ([process, { terminal }]) =>
           startKillEscalation(process, terminal.threadId, terminal.terminalId),
         { discard: true },
       );
@@ -3315,14 +3361,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     threadId: string,
   ): Effect.fn.Return<void, TerminalShutdownError> {
     const state = yield* readManagerState;
-    const fibers = [...state.terminatingProcesses.entries()].flatMap(([process, terminal]) => {
+    const fibers = [...state.terminatingProcesses.entries()].flatMap(([process, { terminal }]) => {
       const fiber = state.killFibers.get(process);
       return terminal.threadId === threadId && fiber !== undefined ? [fiber] : [];
     });
     yield* Effect.forEach(fibers, Fiber.await, { concurrency: "unbounded", discard: true });
-    const remaining = [...(yield* readManagerState).terminatingProcesses.values()].filter(
-      (terminal) => terminal.threadId === threadId,
-    );
+    const remaining = [...(yield* readManagerState).terminatingProcesses.values()]
+      .map(({ terminal }) => terminal)
+      .filter((terminal) => terminal.threadId === threadId);
     if (remaining.length > 0) {
       return yield* new TerminalShutdownError({
         threadId,

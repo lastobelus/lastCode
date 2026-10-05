@@ -59,8 +59,15 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   killFailure: unknown | undefined;
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
+  private exitEvent: PtyAdapter.PtyExitEvent | undefined;
   killed = false;
   exitOnSubscribe: PtyAdapter.PtyExitEvent | undefined;
+  exitOnKill: string | undefined = "SIGKILL";
+  onKill: ((signal: string | undefined) => void) | undefined;
+
+  get exitListenerCount(): number {
+    return this.exitListeners.size;
+  }
 
   constructor(pid: number) {
     this.pid = pid;
@@ -86,6 +93,10 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
     if (this.killFailure !== undefined) {
       throw this.killFailure;
     }
+    this.onKill?.(signal);
+    if (this.exitOnKill !== undefined && signal === this.exitOnKill) {
+      this.emitExit({ exitCode: 0, signal: signal === "SIGKILL" ? 9 : null });
+    }
   }
 
   onData(callback: (data: string) => void): () => void {
@@ -96,7 +107,11 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   }
 
   onExit(callback: (event: PtyAdapter.PtyExitEvent) => void): () => void {
-    if (this.exitOnSubscribe) callback(this.exitOnSubscribe);
+    const exited = this.exitEvent ?? this.exitOnSubscribe;
+    if (exited !== undefined) {
+      callback(exited);
+      return () => {};
+    }
     this.exitListeners.add(callback);
     return () => {
       this.exitListeners.delete(callback);
@@ -110,9 +125,12 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   }
 
   emitExit(event: PtyAdapter.PtyExitEvent): void {
+    if (this.exitEvent !== undefined) return;
+    this.exitEvent = event;
     for (const listener of this.exitListeners) {
       listener(event);
     }
+    this.exitListeners.clear();
   }
 }
 
@@ -239,6 +257,7 @@ interface CreateManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  processExitWaitMs?: number;
   maxRetainedInactiveSessions?: number;
   historyByteLimit?: number;
   ptyAdapter?: FakePtyAdapter;
@@ -293,6 +312,7 @@ const createManager = (
           ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
           : {}),
         processKillGraceMs: options.processKillGraceMs ?? 1,
+        processExitWaitMs: options.processExitWaitMs ?? 10,
         ...(options.maxRetainedInactiveSessions !== undefined
           ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
           : {}),
@@ -1969,6 +1989,203 @@ it.layer(
       expect(yield* manager.metadata).toEqual([]);
       expect(yield* manager.refreshMetadata).toEqual([]);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("accepts an exit replayed while detaching a terminal without sending signals", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      process.exitOnSubscribe = { exitCode: 0, signal: null };
+
+      yield* manager.shutdownThread("thread-1");
+
+      expect(process.killSignals).toEqual([]);
+      expect(process.exitListenerCount).toBe(0);
+      expect(yield* manager.metadata).toEqual([]);
+    }),
+  );
+
+  it.effect.each(["SIGTERM", "SIGKILL"])(
+    "accepts synchronous %s exit confirmation and releases its subscription",
+    (signal) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 0 });
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = signal;
+
+        yield* manager.shutdownThread("thread-1");
+
+        expect(process.killSignals).toEqual(
+          signal === "SIGTERM" ? ["SIGTERM"] : ["SIGTERM", "SIGKILL"],
+        );
+        expect(process.exitListenerCount).toBe(0);
+        expect(yield* manager.metadata).toEqual([]);
+      }),
+  );
+
+  it.effect("holds shutdown until delayed SIGKILL exit while keeping other threads usable", () =>
+    Effect.gen(function* () {
+      const forceKillSent = yield* Deferred.make<void>();
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processKillGraceMs: 0,
+        processExitWaitMs: 100,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      process.exitOnKill = undefined;
+      process.onKill = (signal) => {
+        if (signal === "SIGKILL") Deferred.doneUnsafe(forceKillSent, Effect.void);
+      };
+      const stopping = yield* manager.shutdownThread("thread-1").pipe(Effect.forkScoped);
+      yield* Deferred.await(forceKillSent);
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(process.exitListenerCount).toBe(1);
+      const opening = yield* manager
+        .open(openInput({ terminalId: "new-terminal" }))
+        .pipe(Effect.forkScoped);
+      const restarting = yield* manager.restart(restartInput()).pipe(Effect.forkScoped);
+      yield* manager.open(openInput({ threadId: "thread-2" }));
+
+      expect(stopping.pollUnsafe()).toBeUndefined();
+      expect(opening.pollUnsafe()).toBeUndefined();
+      expect(restarting.pollUnsafe()).toBeUndefined();
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(ptyAdapter.processes).toHaveLength(2);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+      expect(yield* manager.metadata).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ threadId: "thread-1", pid: process.pid, status: "running" }),
+          expect.objectContaining({ threadId: "thread-2", status: "running" }),
+        ]),
+      );
+
+      process.emitExit({ exitCode: 0, signal: 9 });
+      yield* Fiber.join(stopping);
+      yield* Fiber.join(opening);
+      yield* Fiber.join(restarting);
+      expect(process.exitListenerCount).toBe(0);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+      yield* manager.shutdownThread("thread-1");
+      yield* manager.shutdownThread("thread-2");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("times out unconfirmed exit and retries only the selected retained process", () =>
+    Effect.gen(function* () {
+      const forceKillSent = yield* Deferred.make<void>();
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processKillGraceMs: 0,
+        processExitWaitMs: 10,
+      });
+      yield* manager.open(openInput());
+      yield* manager.open(openInput({ threadId: "thread-2" }));
+      const original = (yield* manager.metadata).find(
+        (terminal) => terminal.threadId === "thread-1",
+      );
+      const process = ptyAdapter.processes[0]!;
+      process.exitOnKill = undefined;
+      process.onKill = (signal) => {
+        if (signal === "SIGKILL") Deferred.doneUnsafe(forceKillSent, Effect.void);
+      };
+      const stopping = yield* manager
+        .shutdownThread("thread-1")
+        .pipe(Effect.result, Effect.forkScoped);
+      yield* Deferred.await(forceKillSent);
+      expect(stopping.pollUnsafe()).toBeUndefined();
+
+      yield* TestClock.adjust("10 millis");
+      const result = yield* Fiber.join(stopping);
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        expect(result.failure._tag).toBe("TerminalShutdownError");
+        if (result.failure._tag === "TerminalShutdownError") {
+          expect(result.failure.terminalIds).toEqual([DEFAULT_TERMINAL_ID]);
+        }
+      }
+      expect(process.exitListenerCount).toBe(1);
+      expect(yield* manager.metadata).toContainEqual(
+        expect.objectContaining({
+          threadId: "thread-1",
+          pid: process.pid,
+          cwd: original?.cwd,
+          label: original?.label,
+          status: "running",
+          hasRunningSubprocess: true,
+        }),
+      );
+
+      process.exitOnKill = "SIGKILL";
+      yield* manager.shutdownThread("thread-1");
+
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL", "SIGTERM", "SIGKILL"]);
+      expect(process.exitListenerCount).toBe(0);
+      expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
+      expect(yield* manager.metadata).toEqual([
+        expect.objectContaining({ threadId: "thread-2", status: "running" }),
+      ]);
+      yield* manager.shutdownThread("thread-2");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "removes retained metadata when actual exit arrives after the confirmation timeout",
+    () =>
+      Effect.gen(function* () {
+        const forceKillSent = yield* Deferred.make<void>();
+        const removed = yield* Deferred.make<void>();
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          processKillGraceMs: 0,
+          processExitWaitMs: 10,
+        });
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = undefined;
+        process.onKill = (signal) => {
+          if (signal === "SIGKILL") Deferred.doneUnsafe(forceKillSent, Effect.void);
+        };
+        const unsubscribe = yield* manager.subscribeMetadata((event) =>
+          event.type === "remove"
+            ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const stopping = yield* manager
+          .shutdownThread("thread-1")
+          .pipe(Effect.result, Effect.forkScoped);
+        yield* Deferred.await(forceKillSent);
+        yield* TestClock.adjust("10 millis");
+        expect((yield* Fiber.join(stopping))._tag).toBe("Failure");
+        expect(yield* manager.metadata).toHaveLength(1);
+        expect(process.exitListenerCount).toBe(1);
+
+        process.emitExit({ exitCode: 0, signal: 9 });
+        yield* Deferred.await(removed);
+        yield* manager.waitForThreadShutdown("thread-1");
+
+        expect(yield* manager.metadata).toEqual([]);
+        expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(process.exitListenerCount).toBe(0);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("releases a retained exit subscription when the manager scope closes", () =>
+    Effect.gen(function* () {
+      const ptyAdapter = new FakePtyAdapter();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const { manager } = yield* createManager(5, { ptyAdapter });
+          yield* manager.open(openInput());
+          ptyAdapter.processes[0]!.killFailure = new Error("signal failure");
+          expect((yield* manager.shutdownThread("thread-1").pipe(Effect.result))._tag).toBe(
+            "Failure",
+          );
+          expect(ptyAdapter.processes[0]?.exitListenerCount).toBe(1);
+        }),
+      );
+      expect(ptyAdapter.processes[0]?.exitListenerCount).toBe(0);
+    }),
   );
 
   it.effect("keeps a closing terminal blocked when process signaling fails", () =>

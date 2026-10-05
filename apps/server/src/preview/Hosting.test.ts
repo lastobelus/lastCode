@@ -466,6 +466,8 @@ describe("PreviewHosting", () => {
           ptyAdapter: {
             spawn: () =>
               Effect.sync(() => {
+                const exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
+                let exitEvent: PtyAdapter.PtyExitEvent | undefined;
                 const ptyProcess = {
                   pid: 9000 + processes.length,
                   killSignals: [] as Array<string | undefined>,
@@ -475,9 +477,23 @@ describe("PreviewHosting", () => {
                   kill: (signal?: string) => {
                     ptyProcess.killSignals.push(signal);
                     if (ptyProcess.killFailure !== undefined) throw ptyProcess.killFailure;
+                    if (signal === "SIGKILL" && exitEvent === undefined) {
+                      exitEvent = { exitCode: 0, signal: 9 };
+                      for (const listener of exitListeners) listener(exitEvent);
+                      exitListeners.clear();
+                    }
                   },
                   onData: () => () => {},
-                  onExit: () => () => {},
+                  onExit: (callback: (event: PtyAdapter.PtyExitEvent) => void) => {
+                    if (exitEvent !== undefined) {
+                      callback(exitEvent);
+                      return () => {};
+                    }
+                    exitListeners.add(callback);
+                    return () => {
+                      exitListeners.delete(callback);
+                    };
+                  },
                 };
                 processes.push(ptyProcess);
                 return ptyProcess;
