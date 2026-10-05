@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   RunId,
+  NodeId,
+  type OrchestrationV2ProviderTurn,
   RunAttemptId,
   ThreadId,
   type OrchestrationV2AppThread,
@@ -35,6 +37,7 @@ const terminal: ProviderAdapterV2TurnInspection = {
     providerThreadId: ProviderThreadId.make("provider-thread:recovery"),
     providerTurnId: ProviderTurnId.make("provider-turn:recovery"),
     status: "completed",
+    failure: null,
     threadDisposition: "reusable",
   },
 };
@@ -55,6 +58,18 @@ function harness() {
   let beforeFinalize = Effect.void;
   let failedReceiptOutage = false;
   let projectionReads = 0;
+  let hasProviderTurn = true;
+  const providerTurn: OrchestrationV2ProviderTurn = {
+    id: ProviderTurnId.make("provider-turn:recovery"),
+    providerThreadId: ProviderThreadId.make("provider-thread:recovery"),
+    nodeId: NodeId.make("node:recovery"),
+    runAttemptId: identity.attemptId,
+    nativeTurnRef: null,
+    ordinal: 1,
+    status: "running",
+    startedAt: DateTime.makeUnsafe(0),
+    completedAt: null,
+  };
   const statuses: string[] = [];
   const layer = Recovery.layer.pipe(
     Layer.provide(
@@ -73,7 +88,7 @@ function harness() {
                 subagents: [],
                 providerSessions: [],
                 providerThreads: [],
-                providerTurns: [],
+                providerTurns: hasProviderTurn ? [providerTurn] : [],
                 runtimeRequests: [],
                 messages: [],
                 turnItems: [],
@@ -117,6 +132,9 @@ function harness() {
     },
     beforeFinalize(effect: Effect.Effect<void>) {
       beforeFinalize = effect;
+    },
+    omitProviderTurn() {
+      hasProviderTurn = false;
     },
     failFinalize() {
       finalizeFails = true;
@@ -266,7 +284,8 @@ it.effect("publishes exhaustion even when the initial suspect receipt was never 
   test.inspect({ status: "unknown" });
   return Effect.gen(function* () {
     const service = yield* test.register;
-    assert.isUndefined(test.thread.recovery);
+    const initialRecovery = test.thread.recovery;
+    assert.isUndefined(initialRecovery);
     yield* service.reconcile;
     assert.equal(test.finalizations, 0);
     assert.equal(test.thread.recovery?.status, "failed");
@@ -298,3 +317,17 @@ it.effect(
     }).pipe(Effect.provide(test.layer));
   },
 );
+
+it.effect("does not report recovery when the matching provider turn was never saved", () => {
+  const test = harness();
+  test.inspect(terminal);
+  test.omitProviderTurn();
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.statuses, ["failed"]);
+    assert.include(test.thread.recovery!.detail, "provider-turn record is missing");
+    yield* service.assertRepairable(identity);
+  }).pipe(Effect.provide(test.layer));
+});

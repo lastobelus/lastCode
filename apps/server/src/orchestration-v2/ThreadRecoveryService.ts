@@ -171,6 +171,20 @@ const make = Effect.gen(function* () {
           return;
         }
         if (
+          !state.providerTurns.some(
+            (turn) =>
+              turn.id === inspection.event.providerTurnId &&
+              turn.providerThreadId === inspection.event.providerThreadId &&
+              turn.runAttemptId === input.attemptId,
+          )
+        ) {
+          yield* markFailed(
+            input,
+            "The saved provider-turn record is missing or does not match this attempt. Automatic recovery cannot safely restore its history. Open a repair thread to investigate.",
+          );
+          return;
+        }
+        if (
           !(yield* write(
             input,
             "recovering",
@@ -187,18 +201,23 @@ const make = Effect.gen(function* () {
             const turn = latest.providerTurns.find(
               (turn) =>
                 turn.id === inspection.event.providerTurnId &&
+                turn.providerThreadId === inspection.event.providerThreadId &&
                 turn.runAttemptId === input.attemptId,
             );
-            const events: OrchestrationV2DomainEvent[] = [];
-            if (turn !== undefined)
-              events.push({
-                id: yield* ids.allocate.event({ threadId: input.threadId }),
-                type: "provider-turn.updated",
+            if (turn === undefined)
+              return yield* new ThreadRecoveryError({
                 threadId: input.threadId,
-                runId: input.runId,
-                occurredAt: now,
-                payload: { ...turn, status: inspection.event.status, completedAt: now },
+                cause: "Provider turn disappeared during recovery.",
               });
+            const events: OrchestrationV2DomainEvent[] = [];
+            events.push({
+              id: yield* ids.allocate.event({ threadId: input.threadId }),
+              type: "provider-turn.updated",
+              threadId: input.threadId,
+              runId: input.runId,
+              occurredAt: now,
+              payload: { ...turn, status: inspection.event.status, completedAt: now },
+            });
             events.push({
               id: yield* ids.allocate.event({ threadId: input.threadId }),
               type: "thread.metadata-updated",

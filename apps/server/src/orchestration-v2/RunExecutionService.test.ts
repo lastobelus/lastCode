@@ -3392,7 +3392,7 @@ function captureRootRunTermination(input: {
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly recovery?: Partial<ThreadRecoveryService.ThreadRecoveryService["Service"]>;
   readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
-  readonly afterIngestion?: Effect.Effect<void, unknown>;
+  readonly afterIngestion?: Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>;
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -3423,9 +3423,9 @@ function captureRootRunTermination(input: {
     const testLayer = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
-          ...(input.recovery === undefined
-            ? []
-            : [Layer.mock(ThreadRecoveryService.ThreadRecoveryService)(input.recovery)]),
+          input.recovery === undefined
+            ? Layer.empty
+            : Layer.mock(ThreadRecoveryService.ThreadRecoveryService)(input.recovery),
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: (payload) =>
