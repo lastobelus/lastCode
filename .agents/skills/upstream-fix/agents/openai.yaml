@@ -1,0 +1,4 @@
+interface:
+  display_name: "Upstream Fix"
+  short_description: "Ship an upstream change while retaining it in LastCode"
+  default_prompt: "Use $upstream-fix to prepare an upstream T3 Code change and its independent LastCode port."
