@@ -58,7 +58,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
       {backdropVariant ? <SidebarStageBackdrop variant={backdropVariant} /> : null}
       <SidebarTrigger
         // Over the stage artwork: the media viewer's control-on-imagery treatment.
-        variant={backdropVariant ? "media-navigation" : "ghost"}
+        variant={backdropVariant ? "media-navigation" : "ghost-toggle"}
         className="relative top-auto z-10 translate-y-0 md:hidden"
       />
       <div className="relative z-10 -ml-2 flex md:hidden">

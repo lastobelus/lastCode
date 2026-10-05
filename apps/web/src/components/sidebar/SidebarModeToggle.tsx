@@ -22,7 +22,7 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
             aria-pressed={legacySidebarEnabled}
             disabled={!hydrated}
             size="titlebar-icon"
-            variant={onBackdrop ? "media-toggle" : "ghost"}
+            variant={onBackdrop ? "media-toggle" : "ghost-toggle"}
             className="pointer-events-auto relative top-auto translate-y-0"
             onClick={() =>
               updateSettings((settings) => ({
