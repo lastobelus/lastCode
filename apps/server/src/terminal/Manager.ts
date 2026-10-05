@@ -2410,7 +2410,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               // Inherited credentials can have arbitrary names (for example DATABASE_URL).
               // Capture every nonempty value from the actual spawn, not a name heuristic.
               session.startupRedactionValues = [
-                ...new Set(Object.values(terminalEnv).filter((value) => value.length > 0)),
+                ...new Set(Object.values(terminalEnv).flatMap((value) => (value ? [value] : []))),
               ];
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
