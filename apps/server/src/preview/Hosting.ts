@@ -36,6 +36,7 @@ const READY_TIMEOUT_MS = 30_000;
 const EXPIRED_TERMINAL_RETRY_MS = 60_000;
 const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
+const STARTUP_RAW_MAX_CHARS = 16 * 1_024;
 const STARTUP_OUTPUT_MAX_CHARS = 512;
 const STARTUP_MESSAGE_MAX_CHARS = 1_024;
 
@@ -190,23 +191,48 @@ const discoveryPortKey = (value: string): string => {
   return `${isLoopbackHost(url.hostname) ? "loopback" : url.hostname.toLowerCase()}:${port}`;
 };
 
-/** Startup transcripts can echo commands and credentials; redact before taking a tail. */
+/** Select complete trailing lines before redaction work; never retain a known secret suffix. */
+const startupTextWindow = (text: string, sensitiveValues: ReadonlyArray<string>): string | null => {
+  if (text.length <= STARTUP_RAW_MAX_CHARS) return text;
+  const tail = text.slice(-STARTUP_RAW_MAX_CHARS);
+  const newline = tail.indexOf("\n");
+  if (newline === -1) return null;
+  const start = text.length - tail.length + newline + 1;
+  for (const value of sensitiveValues) {
+    if (!value.includes("\n")) continue;
+    // Launch fields are bounded by their contracts. An unusually large inherited
+    // multiline credential cannot be checked safely within the diagnostic budget.
+    if (value.length > STARTUP_RAW_MAX_CHARS) return null;
+    const preceding = Math.min(start, value.length - 1);
+    const boundary = text.slice(start - preceding, start + value.length - 1);
+    const match = boundary.lastIndexOf(value, preceding - 1);
+    if (match !== -1 && match + value.length > preceding) return null;
+  }
+  return tail.slice(newline + 1);
+};
+
+/** Startup transcripts can echo commands and credentials; redact within a bounded window. */
 const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string => {
-  let sanitized = NodeUtil.stripVTControlCharacters(text).replaceAll(
-    lease.command,
-    "[launch command]",
-  );
   const environmentValues = [
     ...Object.values(lease.env ?? {}),
     ...Object.entries(process.env)
       .filter(([name]) => /token|key|password|secret|credential|auth/i.test(name))
       .map(([, value]) => value),
   ];
-  for (const value of new Set(
-    environmentValues
-      .flatMap((value) => (value === undefined || value.length === 0 ? [] : [value]))
-      .toSorted((left, right) => right.length - left.length),
-  )) {
+  const values = [
+    ...new Set(
+      environmentValues
+        .flatMap((value) => (value === undefined || value.length === 0 ? [] : [value]))
+        .toSorted((left, right) => right.length - left.length),
+    ),
+  ];
+  const window = startupTextWindow(text, [lease.command, ...values]);
+  if (window === null) return "[Startup output omitted: oversized line or partial credential.]";
+  let sanitized = NodeUtil.stripVTControlCharacters(window).replaceAll(
+    lease.command,
+    "[launch command]",
+  );
+  for (const value of values) {
     sanitized = sanitized.replaceAll(value, "[redacted]");
   }
   return sanitized

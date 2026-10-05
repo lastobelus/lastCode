@@ -1,5 +1,7 @@
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +28,8 @@ import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+
+vi.mock("node:util", { spy: true });
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
 const encodePersistedHostingState = Schema.encodeSync(
@@ -1811,6 +1815,147 @@ describe("PreviewHosting", () => {
             }
             assert.equal(harness.historyDeletes.length, 1);
             assert.deepEqual(yield* hosting.list("thread-1"), []);
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("bounds redaction work for a full terminal history with many environment values", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-large-history-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const environment = Object.fromEntries(
+        Array.from({ length: 128 }, (_, index) => [
+          `CONFIG_${index}`,
+          `private-value-${index}-suffix`,
+        ]),
+      );
+      const harness = testTerminalHarness({
+        startupHistory: `${"n".repeat(8 * 1_024 * 1_024)}\nError: Cannot find module 'vite'\nconfig=private-value-127-suffix`,
+        onRefreshMetadata: () =>
+          Effect.sync(() => {
+            const summary = harness.summaries[0];
+            if (summary)
+              harness.summaries[0] = { ...summary, status: "exited", hasRunningSubprocess: false };
+          }),
+      });
+      const strip = vi.mocked(NodeUtil.stripVTControlCharacters);
+      strip.mockClear();
+      yield* Effect.acquireUseRelease(
+        Effect.void,
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const hosting = yield* PreviewHosting.PreviewHosting;
+              const result = yield* Effect.result(
+                hosting.launch({
+                  threadId: "thread-1",
+                  command: "pnpm dev",
+                  cwd: "/workspace",
+                  env: environment,
+                  url: PREVIEW_URL,
+                }),
+              );
+              assert.equal(result._tag, "Failure");
+              if (result._tag === "Failure") {
+                assert.include(result.failure.message, "Cannot find module 'vite'");
+                assert.notInclude(result.failure.message, "private-value-127-suffix");
+              }
+              assert.isAbove(strip.mock.calls.length, 0);
+              assert.isTrue(strip.mock.calls.every(([input]) => input.length <= 16 * 1_024));
+            }).pipe(Effect.provide(hostingLayer(config, harness))),
+          ),
+        () => Effect.sync(() => strip.mockClear()),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    {
+      name: "credential in an oversized line",
+      command: "pnpm dev",
+      env: { CUSTOM_CONFIG: "boundary-secret" },
+      history: `${"x".repeat(20_000)}boundary-secret\nError: Cannot find module 'vite'`,
+      omitted: false,
+    },
+    {
+      name: "URL crossing the boundary",
+      command: "pnpm dev",
+      env: {},
+      history: `https://operator:password@localhost:5173/?token=${"x".repeat(20_000)}boundary-secret\nError: Cannot find module 'vite'`,
+      omitted: false,
+    },
+    {
+      name: "oversized final line",
+      command: "pnpm dev",
+      env: {},
+      history: `token=${"x".repeat(20_000)}boundary-secret`,
+      omitted: true,
+    },
+    {
+      name: "multiline credential crossing the boundary",
+      command: "pnpm dev",
+      env: { CUSTOM_CONFIG: `credential-prefix\nboundary-secret` },
+      history: `credential-prefix\nboundary-secret\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
+      omitted: true,
+    },
+    {
+      name: "multiline launch command crossing the boundary",
+      command: `printf credential-prefix\nboundary-secret`,
+      env: {},
+      history: `printf credential-prefix\nboundary-secret\n${"x".repeat(16_320)}\nError: Cannot find module 'vite'`,
+      omitted: true,
+    },
+  ])(
+    "does not expose a partial $name from truncated history",
+    ({ command, env, history, omitted }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-boundary-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          startupHistory: `${"old noise\n".repeat(5_000)}${history}`,
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                };
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command,
+                cwd: "/workspace",
+                env,
+                url: PREVIEW_URL,
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.include(result.failure.message, "preview command is no longer running");
+              assert.notInclude(result.failure.message, "boundary-secret");
+              assert.notInclude(result.failure.message, "operator:password");
+              assert.include(
+                result.failure.message,
+                omitted ? "Startup output omitted" : "Cannot find module 'vite'",
+              );
+            }
+            assert.equal(harness.historyDeletes.length, 1);
           }).pipe(Effect.provide(hostingLayer(config, harness))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
