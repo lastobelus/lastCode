@@ -16,6 +16,7 @@ import {
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
@@ -93,11 +94,34 @@ function LocalCiLimitField(props: {
 export function LocalCiSettingsSection() {
   const settings = useScopedSettings((settings) => settings.lastcodeLocalCi);
   const updateSettings = useUpdateScopedSettings();
-  const { targets } = useSettingsScope();
+  const { connectedEnvironments, targets } = useSettingsScope();
+  const supportsLocalCi =
+    targets.length > 0 &&
+    connectedEnvironments.every(
+      (environment) => environment.serverConfig?.environment.capabilities.lastcodeLocalCi === true,
+    );
   const mixed = (key: keyof LastCodeLocalCiSettings) =>
     targets.some((target) => target.settings.lastcodeLocalCi[key] !== settings[key]);
-  const patch = (value: Partial<LastCodeLocalCiSettings>) =>
-    updateSettings({ lastcodeLocalCi: value });
+  const patch = (value: Partial<LastCodeLocalCiSettings>) => {
+    if (supportsLocalCi) updateSettings({ lastcodeLocalCi: value });
+  };
+
+  if (!supportsLocalCi) {
+    return (
+      <SettingsScopeNotice
+        target="environment"
+        eligibleEnvironmentIds={connectedEnvironments
+          .filter(
+            (environment) =>
+              environment.serverConfig?.environment.capabilities.lastcodeLocalCi === true,
+          )
+          .map((environment) => environment.environmentId)}
+      >
+        Update the selected environments to configure Local CI, or choose a connected environment
+        that supports it.
+      </SettingsScopeNotice>
+    );
+  }
 
   return (
     <SettingsSection title="Local CI" icon={<GaugeIcon className="size-5" />}>
