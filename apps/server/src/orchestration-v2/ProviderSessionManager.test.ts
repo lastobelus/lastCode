@@ -50,6 +50,7 @@ import {
   type ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2SessionRuntime,
   type ProviderAdapterV2Shape,
+  type ProviderAdapterV2TurnInspection,
 } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -476,6 +477,7 @@ function makeProviderAdapter(
     readonly hangSessionScopeClose?: boolean;
     readonly beforeUnload?: Effect.Effect<void>;
     readonly beforeClose?: Effect.Effect<void>;
+    readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
   } = {},
 ): ProviderAdapterV2Shape {
   return {
@@ -530,6 +532,7 @@ function makeProviderAdapter(
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
+          ...(options.inspectTurn === undefined ? {} : { inspectTurn: options.inspectTurn }),
           events: options.failEventStream
             ? Stream.fail(
                 new ProviderAdapterEventStreamError({
@@ -595,6 +598,7 @@ function makeTestLayer(input: {
   readonly hangSessionScopeClose?: boolean;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly beforeClose?: Effect.Effect<void>;
+  readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
@@ -618,6 +622,7 @@ function makeTestLayer(input: {
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
       ...(input.beforeClose === undefined ? {} : { beforeClose: input.beforeClose }),
+      ...(input.inspectTurn === undefined ? {} : { inspectTurn: input.inspectTurn }),
     }),
   );
   const providerEventIngestorTestLayer = ProviderEventIngestor.layer.pipe(
@@ -2464,6 +2469,194 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
           state,
           idleTimeoutMs: 1000,
           failEventStream: true,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "turn probes reject a released runtime while a replacement with the same ID is live",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closeEntered = yield* Deferred.make<void>();
+      const allowClose = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("released-turn-probe");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const probe = {
+          providerThread: makeProviderThread({
+            idAllocator: ids,
+            threadId,
+            providerSessionId,
+            now,
+          }),
+          providerTurnId: ids.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "released-active-turn",
+          }),
+        };
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "active" });
+
+        // An unexpected stream end releases residency without a terminal event,
+        // even while the adapter's finalizer and active-turn reference remain.
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.end(queue!);
+        yield* Deferred.await(closeEntered);
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "unknown" });
+
+        const replacement = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.notStrictEqual(replacement, runtime);
+        assert.deepEqual(yield* replacement.inspectTurn!(probe), { status: "active" });
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "unknown" });
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(allowClose, undefined)),
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            beforeClose: Deferred.succeed(closeEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(allowClose)),
+            ),
+            inspectTurn: () => Effect.succeed({ status: "active" as const }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect("turn probes retain confirmed terminal evidence after session release", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const inspection = yield* Ref.make<ProviderAdapterV2TurnInspection>({ status: "active" });
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("released-terminal-probe");
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const probe = {
+        providerThread: makeProviderThread({ idAllocator: ids, threadId, providerSessionId, now }),
+        providerTurnId: ids.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "released-completed-turn",
+        }),
+      };
+      const event = {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: probe.providerThread.id,
+        providerTurnId: probe.providerTurnId,
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      } satisfies Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
+      yield* Ref.set(inspection, { status: "terminal", event });
+      yield* manager.release({ providerSessionId, reason: "runtime_error" });
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "terminal", event });
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          inspectTurn: () => Ref.get(inspection),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("turn probes recheck residency after an inspection overlaps session release", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const probeEntered = yield* Deferred.make<void>();
+    const allowProbe = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("concurrent-release-probe");
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const probe = yield* runtime.inspectTurn!({
+        providerThread: makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        }),
+        providerTurnId: ids.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "concurrently-released-turn",
+        }),
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(probeEntered);
+      yield* manager.release({ providerSessionId, reason: "runtime_error" });
+      yield* Deferred.succeed(allowProbe, undefined);
+      assert.deepEqual(yield* Fiber.join(probe), { status: "unknown" });
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(allowProbe, undefined)),
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          inspectTurn: () =>
+            Deferred.succeed(probeEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(allowProbe)),
+              Effect.as({ status: "active" as const }),
+            ),
         }),
       ),
     );

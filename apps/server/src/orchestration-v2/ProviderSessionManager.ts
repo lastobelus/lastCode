@@ -1439,8 +1439,24 @@ export const layerWithOptions = (
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const inspectTurn = runtime.inspectTurn;
         return {
           ...runtime,
+          ...(inspectTurn === undefined
+            ? {}
+            : {
+                inspectTurn: (input: Parameters<typeof inspectTurn>[0]) =>
+                  Effect.gen(function* () {
+                    const inspection = yield* inspectTurn(input);
+                    const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    // Released runtimes can retain active turn references after
+                    // their process exits. Confirm residency after the probe,
+                    // but preserve any terminal evidence the adapter retained.
+                    return inspection.status === "active" && current?.runtime !== runtime
+                      ? { status: "unknown" as const }
+                      : inspection;
+                  }),
+              }),
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
