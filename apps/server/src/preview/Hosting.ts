@@ -37,6 +37,7 @@ const EXPIRED_TERMINAL_RETRY_MS = 60_000;
 const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
 const STARTUP_RAW_MAX_CHARS = 16 * 1_024;
+const STARTUP_REDACTION_BUDGET = STARTUP_RAW_MAX_CHARS * 16;
 const STARTUP_OUTPUT_MAX_CHARS = 512;
 const STARTUP_MESSAGE_MAX_CHARS = 1_024;
 
@@ -211,14 +212,8 @@ const startupTextWindow = (text: string, sensitiveValues: ReadonlyArray<string>)
   return tail.slice(newline + 1);
 };
 
-const caseInsensitiveWord = (value: string) =>
-  value.replace(/[a-z]/gi, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`);
-const startupCredentialPattern = [
-  String.raw`\b[hH][tT][tT][pP][sS]?:\/\/[^\s<>"']+`,
-  String.raw`\b(${["Bearer", "Basic"].map(caseInsensitiveWord).join("|")})\s+[^\s,;]+`,
-  String.raw`(\b[\w-]*(?:${["token", "key", "password", "secret", "credential", "auth"].map(caseInsensitiveWord).join("|")})[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`,
-  String.raw`\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b`,
-].join("|");
+const startupCredentialMatcher =
+  /\b(?:Bearer|Basic)\s+[^\s,;]+|\b[\w-]*(?:token|key|password|secret|credential|auth)[\w-]*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)|\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/gi;
 
 /** Startup transcripts can echo commands and credentials; redact within a bounded window. */
 const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string => {
@@ -238,47 +233,55 @@ const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string =
   const window = startupTextWindow(text, [lease.command, ...values]);
   if (window === null) return "[Startup output omitted: oversized line or partial credential.]";
   const plain = NodeUtil.stripVTControlCharacters(window);
-  const literals = [...new Set([lease.command, ...values])]
-    .filter((value) => value.length > 0 && plain.includes(value))
-    .toSorted((left, right) => right.length - left.length);
-  const literalPattern = literals
-    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join("|");
-  const literalMatcher = literalPattern.length === 0 ? null : new RegExp(literalPattern, "g");
-  const literalReplacement = (value: string) =>
-    value === lease.command ? "[launch command]" : "[redacted]";
-  // Common credentials win at the same position, before short values can change
-  // their labels. Every callback emits final text that this pass never rescans.
-  return plain
-    .replace(
-      new RegExp(
-        [startupCredentialPattern, ...(literalPattern.length === 0 ? [] : [literalPattern])].join(
-          "|",
-        ),
-        "g",
-      ),
-      (value, scheme: string | undefined, prefix: string | undefined) => {
-        if (value === lease.command || values.includes(value)) return literalReplacement(value);
-        if (scheme !== undefined) return `${scheme} [redacted]`;
-        if (prefix !== undefined) return `${prefix}[redacted]`;
-        if (/^https?:\/\//i.test(value)) {
-          try {
-            const url = new URL(value);
-            url.username = "";
-            url.password = "";
-            url.search = "";
-            url.hash = "";
-            return literalMatcher === null
-              ? url.href
-              : url.href.replace(literalMatcher, literalReplacement);
-          } catch {
-            return "[redacted URL]";
-          }
-        }
-        return "[redacted]";
-      },
-    )
-    .trim();
+  // Coverage stays fixed in size even when many literal occurrences overlap.
+  // Rendering merged spans once keeps markers out of all subsequent matching.
+  const coverage = new Int32Array(plain.length + 1);
+  let budget = STARTUP_REDACTION_BUDGET;
+  const cover = (start: number, length: number) => {
+    budget -= length;
+    if (budget < 0) return false;
+    coverage[start]! += 1;
+    coverage[start + length]! -= 1;
+    return true;
+  };
+  for (const value of new Set([lease.command, ...values])) {
+    if (value.length === 0) continue;
+    let start = plain.indexOf(value);
+    while (start !== -1) {
+      if (!cover(start, value.length))
+        return "[Startup output omitted: redaction match budget exceeded.]";
+      start = plain.indexOf(value, start + 1);
+    }
+  }
+  for (const match of plain.matchAll(/\bhttps?:\/\/[^\s<>"']+/gi)) {
+    const value = match[0];
+    try {
+      const url = new URL(value);
+      if (!url.username && !url.password && !url.search && !url.hash) continue;
+    } catch {
+      // An invalid URL cannot be scrubbed reliably, so mask its complete span.
+    }
+    if (!cover(match.index, value.length))
+      return "[Startup output omitted: redaction match budget exceeded.]";
+  }
+  for (const match of plain.matchAll(startupCredentialMatcher)) {
+    if (!cover(match.index, match[0].length))
+      return "[Startup output omitted: redaction match budget exceeded.]";
+  }
+  const parts: string[] = [];
+  let active = 0;
+  let masked = false;
+  let start = 0;
+  for (let index = 0; index <= plain.length; index++) {
+    active += coverage[index]!;
+    const nextMasked = active > 0;
+    if (nextMasked === masked) continue;
+    if (index > start) parts.push(masked ? "[redacted]" : plain.slice(start, index));
+    start = index;
+    masked = nextMasked;
+  }
+  if (start < plain.length) parts.push(plain.slice(start));
+  return parts.join("").trim();
 };
 
 const make = Effect.gen(function* () {
@@ -476,11 +479,16 @@ const make = Effect.gen(function* () {
       summary === null
         ? "Terminal metadata unavailable."
         : `Terminal: ${summary.status}; running subprocess: ${summary.hasRunningSubprocess ? "yes" : "no"}${summary.exitCode === null ? "" : `; exit code: ${summary.exitCode}`}${summary.exitSignal === null ? "" : `; signal: ${summary.exitSignal}`}.`;
+    const diagnosticUrl = new URL(lease.url);
+    diagnosticUrl.username = "";
+    diagnosticUrl.password = "";
+    diagnosticUrl.search = "";
+    diagnosticUrl.hash = "";
     return yield* new PreviewHostingError({
       operation: "ready",
       statePath,
       threadId: lease.threadId,
-      url: sanitizeStartupText(lease.url, lease).slice(0, 120),
+      url: sanitizeStartupText(diagnosticUrl.href, lease).slice(0, 120),
       detail: `${readiness}\n${terminal}\n${tail ? `Recent startup output${tail.length < (output?.length ?? 0) ? " (truncated)" : ""}:\n${tail}` : history === null ? "Startup output unavailable." : "No startup output captured."}`,
     });
   });

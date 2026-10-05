@@ -1733,6 +1733,7 @@ describe("PreviewHosting", () => {
             if (result._tag === "Failure") {
               assert.equal(result.failure._tag, "PreviewHostingError");
               assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+              assert.include(result.failure.message, `at ${PREVIEW_URL}.\n`);
               assert.include(result.failure.message, "running subprocess: yes");
               assert.include(result.failure.message, "Cannot find module 'vite'");
               assert.include(result.failure.message, "truncated");
@@ -1898,50 +1899,33 @@ describe("PreviewHosting", () => {
                 };
             }),
         });
-        const replace = vi.spyOn(String.prototype, "replace");
-        yield* Effect.acquireUseRelease(
-          Effect.void,
-          () =>
-            Effect.scoped(
-              Effect.gen(function* () {
-                const hosting = yield* PreviewHosting.PreviewHosting;
-                const result = yield* Effect.result(
-                  hosting.launch({
-                    threadId: "thread-1",
-                    command,
-                    cwd: "/workspace",
-                    url: PREVIEW_URL,
-                    env: {
-                      SHORT_A: "a",
-                      SHORT_BRACKET: "[",
-                      SHORT_R: "r",
-                      SHORT_E: "e",
-                      LONGER: "ab",
-                    },
-                  }),
-                );
-                assert.equal(result._tag, "Failure");
-                if (result._tag === "Failure") {
-                  assert.include(
-                    result.failure.message,
-                    "[redacted] [redacted][redacted][redacted]][redacted]",
-                  );
-                  if (size === 1)
-                    assert.include(result.failure.message, "[launch command]\n[redacted]\n");
-                  assert.isAtMost(result.failure.message.length, 1_024);
-                }
-                // Intermediate strings may grow by one marker per original character,
-                // but replacements must never rescan and expand their own inserted text.
-                assert.isTrue(
-                  replace.mock.contexts.every(
-                    (input) =>
-                      typeof input !== "string" ||
-                      input.length <= 16 * 1_024 * "[launch command]".length,
-                  ),
-                );
-              }).pipe(Effect.provide(hostingLayer(config, harness))),
-            ),
-          () => Effect.sync(() => replace.mockRestore()),
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command,
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+                env: {
+                  SHORT_A: "a",
+                  SHORT_BRACKET: "[",
+                  SHORT_R: "r",
+                  SHORT_E: "e",
+                  LONGER: "ab",
+                },
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.include(
+                result.failure.message,
+                "[redacted]\n[redacted]\n[redacted] [redacted]][redacted]",
+              );
+              assert.isAtMost(result.failure.message.length, 1_024);
+            }
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -1986,16 +1970,118 @@ describe("PreviewHosting", () => {
             );
             assert.equal(result._tag, "Failure");
             if (result._tag === "Failure") {
-              assert.include(result.failure.message, "Bearer [redacted]");
-              assert.include(result.failure.message, "bAsIc [redacted]");
-              assert.include(result.failure.message, "password=[redacted]");
-              assert.include(result.failure.message, "PASSWORD=[redacted]");
+              assert.include(
+                result.failure.message,
+                "[redacted]\n[redacted]\n[redacted]\n[redacted]\n[redacted]",
+              );
               assert.notInclude(result.failure.message, "unknown-");
               assert.isAtMost(result.failure.message.length, 1_024);
             }
           }).pipe(Effect.provide(hostingLayer(config, harness))),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    { name: "whitespace", key: "SECRET", value: "first second" },
+    {
+      name: "multiline",
+      key: "PRIVATE_KEY",
+      value: "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----",
+    },
+  ])("masks a complete $name value overlapping a generic assignment", ({ key, value }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-overlap-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness({
+        startupHistory: `${key}=${value}\nError: Cannot find module 'vite'`,
+        onRefreshMetadata: () =>
+          Effect.sync(() => {
+            const summary = harness.summaries[0];
+            if (summary)
+              harness.summaries[0] = {
+                ...summary,
+                status: "exited",
+                hasRunningSubprocess: false,
+              };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+              env: { [key]: value },
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "[redacted]\nError: Cannot find module 'vite'");
+            for (const fragment of value.split(/\s+/)) {
+              assert.notInclude(result.failure.message, fragment);
+            }
+          }
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("omits startup output when overlapping matches exhaust the redaction budget", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-budget-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness({
+        startupHistory: "a".repeat(8_192),
+        onRefreshMetadata: () =>
+          Effect.sync(() => {
+            const summary = harness.summaries[0];
+            if (summary)
+              harness.summaries[0] = {
+                ...summary,
+                status: "exited",
+                hasRunningSubprocess: false,
+              };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+              env: Object.fromEntries(
+                Array.from({ length: 16 }, (_, index) => [`CONFIG_${index}`, "a".repeat(index + 1)]),
+              ),
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(
+              result.failure.message,
+              "[Startup output omitted: redaction match budget exceeded.]",
+            );
+            assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
+            assert.notInclude(result.failure.message, "a".repeat(16));
+            assert.isAtMost(result.failure.message.length, 1_024);
+          }
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.each([
