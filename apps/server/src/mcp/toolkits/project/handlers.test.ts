@@ -39,7 +39,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       archivedAt: null,
       deletedAt: null,
     } as OrchestrationV2ThreadShell;
-    let launchedSender: ThreadId | undefined;
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const dependencies = Layer.mergeAll(
       NodeCrypto.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -55,7 +55,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         launch: (input) => {
-          launchedSender = input.initialMessage?.senderThreadId;
+          launched.push(input);
           return Effect.succeed({
             threadId: input.threadId,
             projection: {
@@ -80,7 +80,14 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
-    expect(launchedSender).toBe(sourceThreadId);
+    expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
+    expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
+    const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };
+    yield* toolkit
+      .handle("t3_thread_launch", unprompted)
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(launched[1]?.initialMessage).toBeUndefined();
+    expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
   }),
 );
 

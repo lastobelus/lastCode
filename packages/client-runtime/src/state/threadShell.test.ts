@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import * as DateTime from "effect/DateTime";
 import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -48,6 +49,43 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
 }
 
 describe("v2 thread shell lists", () => {
+  it("updates creator placement from the shell stream while retaining environment and ordinary ownership", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const creator = ThreadId.make("creator:origin");
+    const ordinary = {
+      ...v2ThreadShell,
+      createdBy: "agent" as const,
+      creatorThreadId: creator,
+      creatorGrouping: "grouped" as const,
+    };
+    const snapshot = { ...v2ShellSnapshot, threads: [ordinary] };
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    try {
+      const before = registry.get(threads.navigationThreadShellsAtom)[0];
+      expect(before?.creatorThreadId).toBe(creator);
+      expect(before?.creatorGrouping).toBe("grouped");
+      registry.set(
+        snapshotAtom(environmentId),
+        applyShellStreamEvent(snapshot, {
+          kind: "thread.updated",
+          location: "active",
+          sequence: 1,
+          thread: { ...ordinary, creatorGrouping: "independent" },
+        }),
+      );
+      const after = registry.get(threads.navigationThreadShellsAtom)[0];
+      expect(after?.creatorThreadId).toBe(creator);
+      expect(after?.creatorGrouping).toBe("independent");
+      expect(after?.environmentId).toBe(environmentId);
+      expect(after?.lineage).toEqual(ordinary.lineage);
+      expect(after?.source.createdBy).toBe("agent");
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it("preserves ordered reference arrays when a middle thread changes", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const snapshot = {
@@ -101,6 +139,74 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.threadShellsAtom)).toHaveLength(3);
     dispose();
     registry.dispose();
+  });
+
+  it("retains archived subagent cleanup recovery until the cleanup settles", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const recovery = {
+      ...v2ThreadShell,
+      id: ThreadId.make("archived-cleanup"),
+      archivedAt: v2ThreadShell.updatedAt,
+      deletedAt: v2ThreadShell.updatedAt,
+      lineage: {
+        ...v2ThreadShell.lineage,
+        parentThreadId: v2ThreadShell.id,
+        relationshipToParent: "subagent" as const,
+      },
+      worktreeCleanup: {
+        status: "deleting" as const,
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/recovery",
+        startedAt: DateTime.formatIso(v2ThreadShell.updatedAt),
+      },
+    };
+    let snapshot: OrchestrationV2ShellSnapshot = { ...v2ShellSnapshot, threads: [recovery] };
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    try {
+      expect(registry.get(threads.navigationThreadShellsAtom)).toMatchObject([
+        { id: recovery.id, archivedAt: DateTime.formatIso(recovery.archivedAt) },
+      ]);
+      snapshot = applyShellStreamEvent(snapshot, {
+        kind: "thread.updated",
+        location: "active",
+        sequence: 1,
+        thread: {
+          ...recovery,
+          worktreeCleanup: {
+            ...recovery.worktreeCleanup,
+            status: "failed",
+            failedAt: DateTime.formatIso(recovery.updatedAt),
+            error: "worktree is busy",
+          },
+        },
+      });
+      registry.set(snapshotAtom(environmentId), snapshot);
+      expect(registry.get(threads.navigationThreadShellsAtom)[0]?.worktreeCleanup?.status).toBe(
+        "failed",
+      );
+      registry.set(snapshotAtom(environmentId), {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => ({ ...thread, worktreeCleanup: null })),
+      });
+      expect(registry.get(threads.navigationThreadShellsAtom)).toEqual([]);
+      expect(registry.get(threads.threadShellsAtom)[0]?.archivedAt).toBe(
+        DateTime.formatIso(recovery.archivedAt),
+      );
+      registry.set(
+        snapshotAtom(environmentId),
+        applyShellStreamEvent(snapshot, {
+          kind: "thread.removed",
+          location: "active",
+          sequence: 2,
+          threadId: recovery.id,
+        }),
+      );
+      expect(registry.get(threads.threadShellsAtom)).toEqual([]);
+    } finally {
+      dispose();
+      registry.dispose();
+    }
   });
 
   it("shares point and list values without retaining an atom for every listed thread", () => {

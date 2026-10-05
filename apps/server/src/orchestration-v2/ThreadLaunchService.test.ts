@@ -2216,3 +2216,41 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+it.effect(
+  "records creator provenance without an opening message and preserves it when reusing a thread",
+  () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const creator = yield* launches.launch(
+        launchInput({ command: "creator:create-origin", thread: "creator:origin" }),
+      );
+      const input = {
+        ...launchInput({ command: "creator:create-ordinary", thread: "creator:ordinary" }),
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        creatorThreadId: creator.threadId,
+      };
+      const launched = yield* launches.launch(input);
+      assert.equal(launched.projection.thread.creatorThreadId, creator.threadId);
+      assert.equal(launched.projection.thread.creatorGrouping, "grouped");
+      assert.equal(launched.projection.messages.length, 0);
+      assert.equal(launched.projection.thread.lineage.parentThreadId, null);
+      const retry = yield* launches.launch(input);
+      assert.equal(retry.projection.thread.creatorThreadId, creator.threadId);
+      const reused = yield* launches.launch({
+        ...input,
+        commandId: CommandId.make("creator:reuse"),
+        reuseExistingThread: true,
+        creatorThreadId: ThreadId.make("creator:unrelated"),
+      });
+      assert.equal(reused.projection.thread.creatorThreadId, creator.threadId);
+      assert.equal(
+        (yield* threads.getThreadShell(launched.threadId))?.creatorThreadId,
+        creator.threadId,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
