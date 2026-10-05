@@ -10,6 +10,9 @@ import {
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
 
+import { type EnvironmentRpcInput, request } from "../rpc/client.ts";
+import { awaitThreadShell } from "./threadShellAvailability.ts";
+
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
 
@@ -243,9 +246,18 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
-    repairThread: createEnvironmentRpcCommand(runtime, {
+    repairThread: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:repairThread",
-      tag: ORCHESTRATION_V2_WS_METHODS.repairThread,
+      execute: (
+        input: EnvironmentRpcInput<typeof ORCHESTRATION_V2_WS_METHODS.repairThread>,
+        registry,
+        environmentId,
+      ) =>
+        request(ORCHESTRATION_V2_WS_METHODS.repairThread, input).pipe(
+          Effect.tap(({ threadId }) =>
+            awaitThreadShell(registry, snapshotAtom(environmentId), threadId),
+          ),
+        ),
       scheduler,
       concurrency,
     }),
