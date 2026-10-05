@@ -12,8 +12,11 @@ export interface LegacySidebarFamilyRow {
   descendantsStatus: ThreadStatusPill | null;
   expanded: boolean;
   selectedDescendant: boolean;
-  projectExpanded: boolean;
   descendantStatusCounts: Map<string, number>;
+  createdThreadStatusCounts: Map<string, number>;
+  unavailableCreatorLabel: string | null;
+  groupHeading: "Subagents" | "Created by this thread" | null;
+  projectExpanded: boolean;
 }
 
 export const legacySidebarThreadKey = (thread: SidebarThreadSummary) =>
@@ -35,19 +38,32 @@ export function legacySidebarSubagentStatusLabel(
   return "Idle";
 }
 
-export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string {
-  return [
-    `${row.descendantCount} ${row.descendantCount === 1 ? "subagent" : "subagents"}`,
-    ...Array.from(
-      row.descendantStatusCounts,
-      ([label, count]) => `${count} ${label.toLowerCase()}`,
-    ),
-  ].join(" · ");
+export function legacySidebarCreatorGroupingEligible(thread: SidebarThreadSummary): boolean {
+  return (
+    thread.source.createdBy === "agent" &&
+    thread.creatorThreadId !== undefined &&
+    thread.lineage.relationshipToParent === null
+  );
 }
 
-/** Projects a sorted list of visible shells. Only explicit subagent lineage creates a family.
+export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string {
+  const summarize = (counts: ReadonlyMap<string, number>, singular: string, plural: string) => {
+    const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+    if (!total) return null;
+    return `${total} ${total === 1 ? singular : plural} (${Array.from(counts, ([label, count]) => `${count} ${label.toLowerCase()}`).join(", ")})`;
+  };
+  return [
+    summarize(row.descendantStatusCounts, "subagent", "subagents"),
+    summarize(row.createdThreadStatusCounts, "created thread", "created threads"),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Projects sorted visible shells into owned subagent and display-only creator families.
  * Root preview limits never split a family, and a selected child always reveals its ancestors.
- * Unavailable parents and cyclic lineage leave the child reachable as an identified root.
+ * Creator grouping only changes display placement; it never changes the conversation lineage.
+ * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
 export function projectLegacySidebarFamilies(input: {
   threads: readonly SidebarThreadSummary[];
@@ -56,11 +72,14 @@ export function projectLegacySidebarFamilies(input: {
   projectExpanded: boolean;
   previewCount: number;
   listExpanded: boolean;
+  groupingStyle?: "minimal" | "typed-groups";
   statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
 }) {
   const byKey = new Map(input.threads.map((thread) => [legacySidebarThreadKey(thread), thread]));
   const parentByKey = new Map<string, string>();
   const unavailableByKey = new Map<string, string>();
+  const unavailableCreatorByKey = new Map<string, string>();
+  const creatorEdges = new Set<string>();
   for (const [key, thread] of byKey) {
     if (thread.lineage.relationshipToParent !== "subagent") continue;
     const parentId = thread.lineage.parentThreadId;
@@ -78,6 +97,20 @@ export function projectLegacySidebarFamilies(input: {
     }
   }
 
+  for (const [key, thread] of byKey) {
+    if (!legacySidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
+      continue;
+    const creatorId = thread.creatorThreadId!;
+    const creatorKey = scopedThreadKey(scopeThreadRef(thread.environmentId, creatorId));
+    const creator = byKey.get(creatorKey);
+    if (creator && creator.projectId === thread.projectId) {
+      parentByKey.set(key, creatorKey);
+      creatorEdges.add(key);
+    } else {
+      unavailableCreatorByKey.set(key, `Creator unavailable (${creatorId})`);
+    }
+  }
+
   // A parent graph has one outgoing edge per child. Visit each edge once and detach cycles.
   const visited = new Set<string>();
   for (const key of byKey.keys()) {
@@ -87,13 +120,22 @@ export function projectLegacySidebarFamilies(input: {
     while (cursor && !visited.has(cursor)) {
       const cycleIndex = pathIndex.get(cursor);
       if (cycleIndex !== undefined) {
-        for (let index = cycleIndex; index < path.length; index++) {
-          const cycleKey = path[index]!;
+        const cycleKeys = path.slice(cycleIndex);
+        // Display-only creator edges yield to delegated ownership when a mixed cycle forms.
+        const creatorCycleKeys = cycleKeys.filter((cycleKey) => creatorEdges.has(cycleKey));
+        for (const cycleKey of creatorCycleKeys.length ? creatorCycleKeys : cycleKeys) {
           const parentKey = parentByKey.get(cycleKey);
-          unavailableByKey.set(
-            cycleKey,
-            `Parent ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid lineage`,
-          );
+          if (creatorEdges.has(cycleKey)) {
+            unavailableCreatorByKey.set(
+              cycleKey,
+              `Creator ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid grouping`,
+            );
+          } else {
+            unavailableByKey.set(
+              cycleKey,
+              `Parent ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid lineage`,
+            );
+          }
           parentByKey.delete(cycleKey);
         }
         break;
@@ -114,6 +156,19 @@ export function projectLegacySidebarFamilies(input: {
       const siblings = childrenByKey.get(parentKey) ?? [];
       siblings.push(key);
       childrenByKey.set(parentKey, siblings);
+    }
+  }
+  const typedGroups = input.groupingStyle !== "minimal";
+  if (typedGroups) {
+    for (const [key, children] of childrenByKey) {
+      childrenByKey.set(key, [
+        ...children.filter(
+          (childKey) => byKey.get(childKey)!.lineage.relationshipToParent === "subagent",
+        ),
+        ...children.filter(
+          (childKey) => byKey.get(childKey)!.lineage.relationshipToParent !== "subagent",
+        ),
+      ]);
     }
   }
   const selectedPath = new Set<string>();
@@ -141,8 +196,11 @@ export function projectLegacySidebarFamilies(input: {
       descendantsStatus: null,
       expanded: input.collapsedByKey[key] !== true || selectedDescendant,
       selectedDescendant,
-      projectExpanded: input.projectExpanded,
       descendantStatusCounts: new Map(),
+      createdThreadStatusCounts: new Map(),
+      unavailableCreatorLabel: unavailableCreatorByKey.get(key) ?? null,
+      groupHeading: null,
+      projectExpanded: input.projectExpanded,
     });
     for (let index = children.length - 1; index >= 0; index--) {
       stack.push({ key: children[index]!, depth: depth + 1 });
@@ -156,13 +214,18 @@ export function projectLegacySidebarFamilies(input: {
     parent.descendantCount += row.descendantCount + 1;
     const rowStatus = input.statusForThread?.(row.thread) ?? null;
     const label = legacySidebarSubagentStatusLabel(row.thread, rowStatus);
-    parent.descendantStatusCounts.set(label, (parent.descendantStatusCounts.get(label) ?? 0) + 1);
-    for (const [descendantLabel, count] of row.descendantStatusCounts) {
-      parent.descendantStatusCounts.set(
-        descendantLabel,
-        (parent.descendantStatusCounts.get(descendantLabel) ?? 0) + count,
-      );
-    }
+    const ownCounts =
+      row.thread.lineage.relationshipToParent === "subagent"
+        ? parent.descendantStatusCounts
+        : parent.createdThreadStatusCounts;
+    ownCounts.set(label, (ownCounts.get(label) ?? 0) + 1);
+    const addCounts = (target: Map<string, number>, source: ReadonlyMap<string, number>) => {
+      for (const [descendantLabel, count] of source) {
+        target.set(descendantLabel, (target.get(descendantLabel) ?? 0) + count);
+      }
+    };
+    addCounts(parent.descendantStatusCounts, row.descendantStatusCounts);
+    addCounts(parent.createdThreadStatusCounts, row.createdThreadStatusCounts);
     parent.descendantsStatus = resolveProjectStatusIndicator([
       parent.descendantsStatus,
       row.descendantsStatus,
@@ -192,6 +255,21 @@ export function projectLegacySidebarFamilies(input: {
     collapsedDepth = null;
     renderedRows.push(row);
     if (!row.expanded) collapsedDepth = row.depth;
+  }
+  if (typedGroups) {
+    const shownGroups = new Set<string>();
+    for (const row of renderedRows) {
+      if (!row.parentKey) continue;
+      const heading =
+        row.thread.lineage.relationshipToParent === "subagent"
+          ? "Subagents"
+          : "Created by this thread";
+      const groupKey = `${row.parentKey}:${heading}`;
+      if (!shownGroups.has(groupKey)) {
+        row.groupHeading = heading;
+        shownGroups.add(groupKey);
+      }
+    }
   }
   return {
     allRows,

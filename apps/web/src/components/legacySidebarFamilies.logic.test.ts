@@ -3,6 +3,7 @@ import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
   legacySidebarFamilySummary,
+  legacySidebarCreatorGroupingEligible,
   legacySidebarSubagentStatusLabel,
   legacySidebarThreadKey,
   projectLegacySidebarFamilies,
@@ -102,7 +103,7 @@ describe("legacy sidebar subagent families", () => {
     });
     expect(keys(result)).toEqual(["parent"]);
     expect(result.orderedThreadKeys).toEqual([legacySidebarThreadKey(parent)]);
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent · 1 working");
+    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent (1 working)");
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
 
@@ -234,5 +235,164 @@ describe("legacy sidebar subagent families", () => {
     ]);
     expect(legacySidebarSubagentStatusLabel(done, null)).toBe("Done");
     expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toContain("1 done");
+  });
+});
+
+function created(
+  id: string,
+  creatorId?: string,
+  grouping: "grouped" | "independent" = "grouped",
+  overrides: ThreadFixtureOverrides = {},
+) {
+  const value = thread(id, undefined, overrides);
+  return {
+    ...value,
+    source: { ...value.source, createdBy: "agent" as const },
+    ...(creatorId ? { creatorThreadId: ThreadId.make(creatorId), creatorGrouping: grouping } : {}),
+  };
+}
+
+describe("legacy sidebar creator grouping", () => {
+  it("groups ordinary conversations by trusted creator without changing their identity or lineage", () => {
+    const child = created("conversation", "creator");
+    const result = project([child, thread("creator")]);
+    expect(keys(result)).toEqual(["creator", "conversation"]);
+    expect(result.renderedRows[1]?.depth).toBe(1);
+    expect(result.renderedRows[1]?.thread).toBe(child);
+    expect(child.lineage.parentThreadId).toBeNull();
+    expect(child.lineage.relationshipToParent).toBeNull();
+    expect(child.id).toBe("conversation");
+  });
+
+  it("keeps historical unknown creators flat and does not offer regrouping", () => {
+    const historical = created("historical");
+    expect(project([historical, thread("creator")]).renderedRows.map((row) => row.depth)).toEqual([
+      0, 0,
+    ]);
+    expect(legacySidebarCreatorGroupingEligible(historical)).toBe(false);
+  });
+
+  it("promotes and regroups using saved server metadata alone", () => {
+    const child = created("conversation", "creator");
+    const independent = { ...child, creatorGrouping: "independent" as const };
+    expect(keys(project([independent, thread("creator")]))).toEqual(["conversation", "creator"]);
+    expect(project([independent, thread("creator")]).renderedRows[0]?.depth).toBe(0);
+    expect(
+      project([{ ...independent, creatorGrouping: "grouped" }, thread("creator")]).renderedRows[1]
+        ?.depth,
+    ).toBe(1);
+    expect(independent.creatorThreadId).toBe(child.creatorThreadId);
+    expect(legacySidebarCreatorGroupingEligible(independent)).toBe(true);
+  });
+
+  it("shows distinct typed subgroups by default, and a mixed list in minimal style", () => {
+    const threads = [
+      thread("creator"),
+      created("ordinary", "creator"),
+      thread("helper", "creator"),
+    ];
+    const typed = project(threads);
+    expect(keys(typed)).toEqual(["creator", "helper", "ordinary"]);
+    expect(typed.renderedRows.map((row) => row.groupHeading)).toEqual([
+      null,
+      "Subagents",
+      "Created by this thread",
+    ]);
+    const minimal = project(threads, { groupingStyle: "minimal" });
+    expect(keys(minimal)).toEqual(["creator", "ordinary", "helper"]);
+    expect(minimal.renderedRows.every((row) => row.groupHeading === null)).toBe(true);
+    expect(minimal.orderedThreadKeys).toEqual(minimal.renderedRows.map((row) => row.key));
+  });
+
+  it("separates subagent and created-conversation counts in collapsed summaries", () => {
+    const parent = thread("creator");
+    const result = project([parent, thread("helper", "creator"), created("ordinary", "creator")], {
+      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+    });
+    expect(keys(result)).toEqual(["creator"]);
+    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe(
+      "1 subagent (1 idle) · 1 created thread (1 idle)",
+    );
+    expect(result.renderedRows[0]?.descendantCount).toBe(2);
+  });
+
+  it("keeps missing, cross-project, and cross-environment creators as marked reachable roots", () => {
+    const missing = created("missing-child", "missing");
+    const otherProject = created("other-project", "creator", "grouped", {
+      projectId: ProjectId.make("another-project"),
+    });
+    const remote = created("remote-child", "creator", "grouped", {
+      environmentId: EnvironmentId.make("remote"),
+    });
+    const result = project([thread("creator"), missing, otherProject, remote]);
+    expect(result.renderedRows.map((row) => row.depth)).toEqual([0, 0, 0, 0]);
+    expect(
+      result.renderedRows
+        .slice(1)
+        .every((row) => row.unavailableCreatorLabel?.includes("Creator unavailable")),
+    ).toBe(true);
+  });
+
+  it("does not attach forks or true subagents using creator metadata", () => {
+    const fork = created("fork", "creator", "grouped", {
+      lineage: {
+        rootThreadId: ThreadId.make("fork-parent"),
+        parentThreadId: ThreadId.make("fork-parent"),
+        relationshipToParent: "fork",
+      },
+    });
+    const subagent = created("helper", "creator", "grouped", {
+      lineage: {
+        rootThreadId: ThreadId.make("real-parent"),
+        parentThreadId: ThreadId.make("real-parent"),
+        relationshipToParent: "subagent",
+      },
+    });
+    const result = project([thread("creator"), thread("real-parent"), fork, subagent]);
+    expect(keys(result)).toEqual(["creator", "real-parent", "helper", "fork"]);
+    expect(result.renderedRows[2]?.parentKey).toBe(legacySidebarThreadKey(thread("real-parent")));
+    expect(legacySidebarCreatorGroupingEligible(fork)).toBe(false);
+    expect(legacySidebarCreatorGroupingEligible(subagent)).toBe(false);
+  });
+
+  it("detaches creator cycles without discarding true subagent ownership in mixed cycles", () => {
+    const a = created("a", "b");
+    const b = created("b", "a");
+    const invalid = project([a, b]);
+    expect(
+      invalid.renderedRows.every(
+        (row) => row.depth === 0 && row.unavailableCreatorLabel?.includes("invalid grouping"),
+      ),
+    ).toBe(true);
+    const helper = thread("helper", "parent");
+    const parent = created("parent", "helper");
+    const mixed = project([helper, parent]);
+    expect(keys(mixed)).toEqual(["parent", "helper"]);
+    expect(mixed.renderedRows[1]?.parentKey).toBe(legacySidebarThreadKey(parent));
+    expect(mixed.renderedRows[0]?.unavailableCreatorLabel).toContain("invalid grouping");
+  });
+
+  it("reveals nested selected conversations outside preview and collapsed creator families", () => {
+    const parent = thread("creator");
+    const child = created("ordinary", "creator");
+    const result = project([thread("first"), parent, child], {
+      previewCount: 1,
+      activeThreadKey: legacySidebarThreadKey(child),
+      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+    });
+    expect(keys(result)).toEqual(["first", "creator", "ordinary"]);
+    expect(result.renderedRows[1]?.expanded).toBe(true);
+  });
+
+  it("marks the active-parent path as belonging to a collapsed project (R3)", () => {
+    const parent = thread("parent");
+    const result = project([parent, thread("helper", "parent")], {
+      projectExpanded: false,
+      activeThreadKey: legacySidebarThreadKey(parent),
+    });
+    expect(keys(result)).toEqual(["parent"]);
+    expect(result.renderedRows[0]?.projectExpanded).toBe(false);
+    expect(result.renderedRows[0]?.descendantCount).toBe(1);
+    expect(result.orderedThreadKeys).toEqual([legacySidebarThreadKey(parent)]);
   });
 });

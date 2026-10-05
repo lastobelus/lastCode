@@ -7,6 +7,8 @@ import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullR
 import { Spinner } from "~/components/ui/spinner";
 import {
   ArchiveIcon,
+  BotIcon,
+  SparklesIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderPlusIcon,
@@ -113,6 +115,7 @@ import {
   useProject,
   useProjects,
   useThreadShells,
+  useThreadShell,
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import {
@@ -258,6 +261,7 @@ import type { SidebarThreadSummary } from "../types";
 import {
   projectLegacySidebarFamilies,
   legacySidebarFamilySummary,
+  legacySidebarCreatorGroupingEligible,
   legacySidebarSubagentStatusLabel,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
@@ -380,6 +384,7 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   familyRow: LegacySidebarFamilyRow;
+  groupingStyle: "minimal" | "typed-groups";
   compactStatusIndicators: boolean;
   showWorktreeIndicators: boolean;
   showLocalEnvironmentIcon: boolean;
@@ -619,25 +624,55 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const modelLabel = selectedModel
     ? getTriggerDisplayModelLabel(selectedModel)
     : thread.modelSelection.model;
+  const isAgentCreated =
+    thread.lineage.relationshipToParent !== "subagent" && thread.source.createdBy === "agent";
+  const creatorRef = useMemo(
+    () =>
+      isAgentCreated && thread.creatorThreadId
+        ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
+        : null,
+    [isAgentCreated, thread.environmentId, thread.creatorThreadId],
+  );
+  const creatorShell = useThreadShell(creatorRef);
+  const creatorDescription = isAgentCreated
+    ? creatorShell
+      ? `Created by ${creatorShell.title}`
+      : thread.creatorThreadId
+        ? `Creator unavailable (${thread.creatorThreadId})`
+        : "Creator unknown"
+    : null;
+  const lineageDescription =
+    thread.lineage.relationshipToParent === "subagent"
+      ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${props.familyRow.unavailableParentLabel ? ` · ${props.familyRow.unavailableParentLabel}` : ""}`
+      : null;
+  const relationshipDescription = creatorDescription
+    ? `Agent-created · ${creatorDescription}`
+    : lineageDescription;
   const threadHoverDetails = (
-    <SidebarThreadHoverContent
-      branchMismatch={branchMismatch}
-      environmentLabel={threadEnvironmentLabel}
-      environmentIconKind={threadEnvironmentIconKind}
-      environmentIconColor={environmentIconColor}
-      modelInstanceId={modelInstanceId}
-      modelLabel={modelLabel}
-      projectCwd={threadProjectCwd ?? props.projectCwd}
-      projectFaviconPath={threadProject?.faviconPath ?? null}
-      projectTitle={threadProject?.title ?? null}
-      providerEntry={providerEntry}
-      showInstanceBadge={showInstanceBadge}
-      terminalProcessCount={runningTerminalIds.length}
-      terminalStatus={terminalStatus}
-      thread={thread}
-      cleanupBlockerTitle={cleanupBlockerTitle}
-      showCleanup={!hasActiveAnnotation}
-    />
+    <>
+      {relationshipDescription ? (
+        <div className="mb-2 text-xs text-sidebar-muted-foreground">{relationshipDescription}</div>
+      ) : null}
+
+      <SidebarThreadHoverContent
+        branchMismatch={branchMismatch}
+        environmentLabel={threadEnvironmentLabel}
+        environmentIconKind={threadEnvironmentIconKind}
+        environmentIconColor={environmentIconColor}
+        modelInstanceId={modelInstanceId}
+        modelLabel={modelLabel}
+        projectCwd={threadProjectCwd ?? props.projectCwd}
+        projectFaviconPath={threadProject?.faviconPath ?? null}
+        projectTitle={threadProject?.title ?? null}
+        providerEntry={providerEntry}
+        showInstanceBadge={showInstanceBadge}
+        terminalProcessCount={runningTerminalIds.length}
+        terminalStatus={terminalStatus}
+        thread={thread}
+        cleanupBlockerTitle={cleanupBlockerTitle}
+        showCleanup={!hasActiveAnnotation}
+      />
+    </>
   );
   const cleanupHoverDetails = (
     <SidebarThreadCleanupHoverContent
@@ -903,10 +938,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadDetailsTooltipHandle = useMemo(() => TooltipPrimitive.createHandle(), []);
   const setFamilyCollapsed = useLegacySidebarFamiliesStore((state) => state.setCollapsed);
   const family = props.familyRow;
+  const typedGroups = props.groupingStyle === "typed-groups";
   const subagentLabel =
     thread.lineage.relationshipToParent === "subagent"
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${family.unavailableParentLabel ? ` · ${family.unavailableParentLabel}` : ""}`
       : null;
+  const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
+  const relationshipUnavailableLabel =
+    family.unavailableParentLabel ?? family.unavailableCreatorLabel;
 
   return (
     <SidebarMenuSubItem
@@ -928,7 +967,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         role="button"
         tabIndex={0}
         data-active={isActive}
-        aria-label={subagentLabel ? `${thread.title}, ${subagentLabel}` : undefined}
+        aria-label={
+          relationshipLabel
+            ? `${thread.title}, ${relationshipLabel}${creatorDescription ? `, ${creatorDescription}` : ""}${!family.expanded && family.descendantCount ? `, ${legacySidebarFamilySummary(family)}` : ""}`
+            : undefined
+        }
         data-slot="sidebar-menu-sub-button"
         data-sidebar="menu-sub-button"
         data-size="sm"
@@ -943,8 +986,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             : isSelected
               ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
               : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-          (subagentLabel || (family.descendantCount > 0 && !family.expanded)) && "h-10",
-          subagentLabel && family.descendantCount > 0 && !family.expanded && "h-14",
+          typedGroups && family.descendantCount > 0 && !family.expanded && "h-10",
           isCleanupPending && "cursor-not-allowed opacity-65",
           isFileDragOver && "ring-1 ring-inset ring-primary/70",
         )}
@@ -981,7 +1023,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <button
                   type="button"
                   data-thread-selection-safe
-                  aria-label={`${family.expanded ? "Collapse" : "Expand"} subagents of ${thread.title}`}
+                  aria-label={`${family.expanded ? "Collapse" : "Expand"} children of ${thread.title}`}
                   aria-expanded={family.expanded}
                   aria-disabled={family.selectedDescendant || undefined}
                   className="relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
@@ -1002,7 +1044,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </TooltipTrigger>
             <TooltipPopup side="top">
               {family.selectedDescendant
-                ? "The selected subagent keeps this path open"
+                ? "The selected child keeps this path open"
                 : legacySidebarFamilySummary(family)}
             </TooltipPopup>
           </Tooltip>
@@ -1091,18 +1133,71 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
               ) : null}
               <span className="min-w-0 flex-1">
-                <span
-                  className={`block truncate text-sm ${thread.persistent ? "italic" : ""}`}
-                  data-testid={`thread-title-${thread.id}`}
-                >
-                  {thread.title}
-                </span>
-                {subagentLabel ? (
-                  <span className="block truncate text-3xs leading-3 text-sidebar-muted-foreground">
-                    {subagentLabel}
+                <span className="flex min-w-0 items-center gap-1">
+                  <span
+                    className={`min-w-0 flex-1 truncate text-sm ${thread.persistent ? "italic" : ""}`}
+                    data-testid={`thread-title-${thread.id}`}
+                  >
+                    {thread.title}
                   </span>
-                ) : null}
-                {family.descendantCount > 0 && !family.expanded ? (
+                  {relationshipLabel ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-label={relationshipDescription ?? relationshipLabel}
+                            className={cn(
+                              "inline-flex shrink-0 items-center gap-0.5 text-3xs",
+                              typedGroups
+                                ? "rounded border px-1 py-0.5"
+                                : "text-sidebar-muted-foreground",
+                              typedGroups && isAgentCreated && "border-dashed",
+                            )}
+                          />
+                        }
+                      >
+                        {isAgentCreated ? (
+                          <SparklesIcon aria-hidden className="size-3" />
+                        ) : (
+                          <BotIcon aria-hidden className="size-3" />
+                        )}
+                        <span className="hidden @sm/legacy-sidebar:inline">
+                          {isAgentCreated ? "Agent-created" : "Subagent"}
+                        </span>
+                        {relationshipUnavailableLabel ? (
+                          <TriangleAlertIcon
+                            aria-hidden
+                            className="size-3 text-warning-foreground"
+                          />
+                        ) : null}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">
+                        {relationshipDescription}
+                        {relationshipUnavailableLabel ? (
+                          <div>{relationshipUnavailableLabel}</div>
+                        ) : null}
+                      </TooltipPopup>
+                    </Tooltip>
+                  ) : null}
+                  {subagentLabel ? (
+                    <span className="shrink-0 text-3xs text-sidebar-muted-foreground">
+                      {legacySidebarSubagentStatusLabel(thread, threadStatus)}
+                    </span>
+                  ) : null}
+                  {!typedGroups && family.descendantCount > 0 && !family.expanded ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span className="shrink-0 text-3xs text-sidebar-muted-foreground" />
+                        }
+                      >
+                        +{family.descendantCount}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{legacySidebarFamilySummary(family)}</TooltipPopup>
+                    </Tooltip>
+                  ) : null}
+                </span>
+                {typedGroups && family.descendantCount > 0 && !family.expanded ? (
                   <span className="flex items-center gap-1 truncate text-3xs leading-3 text-sidebar-muted-foreground">
                     {family.descendantsStatus ? (
                       <ThreadStatusLabel status={family.descendantsStatus} compact />
@@ -1371,6 +1466,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 });
 
 interface SidebarProjectThreadListProps {
+  groupingStyle: "minimal" | "typed-groups";
   legacySidebarScale: LegacySidebarScale;
   compactStatusIndicators: boolean;
   showWorktreeIndicators: boolean;
@@ -1491,7 +1587,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   return (
     <SidebarMenuSub
       ref={attachThreadListAutoAnimateRef}
-      className="mx-0.5 my-0 w-full translate-x-0 overflow-hidden sm:mx-1"
+      className="@container/legacy-sidebar mx-0.5 my-0 w-full translate-x-0 overflow-hidden sm:mx-1"
       data-legacy-sidebar-scale={legacySidebarScale}
       style={scaleStyle}
     >
@@ -1510,44 +1606,56 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           const thread = familyRow.thread;
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
-            <SidebarThreadRow
-              key={threadKey}
-              thread={thread}
-              familyRow={familyRow}
-              compactStatusIndicators={compactStatusIndicators}
-              showWorktreeIndicators={showWorktreeIndicators}
-              showLocalEnvironmentIcon={showLocalEnvironmentIcon}
-              configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
-              projectCwd={projectCwd}
-              providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
-              orderedProjectThreadKeys={orderedProjectThreadKeys}
-              isActive={activeRouteThreadKey === threadKey}
-              openPullRequestsInRightPanel={openPullRequestsInRightPanel}
-              jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
-              appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
-              renamingThreadKey={renamingThreadKey}
-              renamingTitle={renamingTitle}
-              setRenamingTitle={setRenamingTitle}
-              startThreadRename={startThreadRename}
-              renamingInputRef={renamingInputRef}
-              renamingCommittedRef={renamingCommittedRef}
-              confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-              setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-              confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-              handleThreadClick={handleThreadClick}
-              navigateToThread={navigateToThread}
-              onFileDropThreads={onFileDropThreads}
-              handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-              handleThreadContextMenu={handleThreadContextMenu}
-              clearSelection={clearSelection}
-              commitRename={commitRename}
-              cancelRename={cancelRename}
-              attemptArchiveThread={attemptArchiveThread}
-              openPrLink={openPrLink}
-              onEditAnnotation={onEditAnnotation}
-              onSaveAnnotationBody={onSaveAnnotationBody}
-              onResolveAnnotation={onResolveAnnotation}
-            />
+            <React.Fragment key={threadKey}>
+              {familyRow.groupHeading ? (
+                <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+                  <div
+                    style={{ paddingLeft: Math.min(familyRow.depth, 6) * 12 + 8 }}
+                    className="py-1 text-3xs text-sidebar-muted-foreground"
+                  >
+                    {familyRow.groupHeading}
+                  </div>
+                </SidebarMenuSubItem>
+              ) : null}
+              <SidebarThreadRow
+                groupingStyle={props.groupingStyle}
+                thread={thread}
+                familyRow={familyRow}
+                compactStatusIndicators={compactStatusIndicators}
+                showWorktreeIndicators={showWorktreeIndicators}
+                showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
+                projectCwd={projectCwd}
+                providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
+                orderedProjectThreadKeys={orderedProjectThreadKeys}
+                isActive={activeRouteThreadKey === threadKey}
+                openPullRequestsInRightPanel={openPullRequestsInRightPanel}
+                jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
+                appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
+                renamingThreadKey={renamingThreadKey}
+                renamingTitle={renamingTitle}
+                setRenamingTitle={setRenamingTitle}
+                startThreadRename={startThreadRename}
+                renamingInputRef={renamingInputRef}
+                renamingCommittedRef={renamingCommittedRef}
+                confirmingArchiveThreadKey={confirmingArchiveThreadKey}
+                setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
+                confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+                handleThreadClick={handleThreadClick}
+                navigateToThread={navigateToThread}
+                onFileDropThreads={onFileDropThreads}
+                handleMultiSelectContextMenu={handleMultiSelectContextMenu}
+                handleThreadContextMenu={handleThreadContextMenu}
+                clearSelection={clearSelection}
+                commitRename={commitRename}
+                cancelRename={cancelRename}
+                attemptArchiveThread={attemptArchiveThread}
+                openPrLink={openPrLink}
+                onEditAnnotation={onEditAnnotation}
+                onSaveAnnotationBody={onSaveAnnotationBody}
+                onResolveAnnotation={onResolveAnnotation}
+              />
+            </React.Fragment>
           );
         })}
 
@@ -1646,6 +1754,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   } = props;
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const openHandoff = useOpenHandoff();
+  const groupingStyle = useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle);
   const threadSortOrder = useClientSettings<SidebarThreadSortOrder>(
     (settings) => settings.sidebarThreadSortOrder,
   );
@@ -1847,6 +1956,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       projectExpanded,
       previewCount: sidebarThreadPreviewCount,
       listExpanded: isThreadListExpanded,
+      groupingStyle,
       statusForThread,
     });
     return {
@@ -1865,6 +1975,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     projectExpanded,
     sidebarThreadPreviewCount,
     isThreadListExpanded,
+    groupingStyle,
   ]);
   const {
     hasOverflowingThreads,
@@ -2853,6 +2964,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         persistent: thread.persistent === true,
         supported: supportsPersistence,
       });
+      const creatorGroupingEligible = legacySidebarCreatorGroupingEligible(thread);
+      const creatorRef = thread.creatorThreadId
+        ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
+        : null;
+      const creator = creatorRef ? readThreadShell(creatorRef) : null;
+      const canOpenCreator = creator !== null && threadShellIsVisible(creator);
       const handoffs = readThreadHandoffs(threadRef);
       const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
       const clicked = await api.contextMenu.show(
@@ -2866,6 +2983,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               ? [{ id: "annotate", label: "Annotate thread…" }]
               : []),
             { id: "mark-unread", label: "Mark unread" },
+            ...(creatorGroupingEligible
+              ? [
+                  {
+                    id:
+                      thread.creatorGrouping === "grouped"
+                        ? "creator-independent"
+                        : "creator-grouped",
+                    label:
+                      thread.creatorGrouping === "grouped"
+                        ? "Show independently"
+                        : "Group with creator",
+                  },
+                ]
+              : []),
+            ...(creatorGroupingEligible && canOpenCreator
+              ? [{ id: "open-creator", label: "Open creator thread" }]
+              : []),
             ...(persistenceAction ? [persistenceAction] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
@@ -2902,6 +3036,32 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === clicked);
           if (entry) await openHandoff(threadRef, entry);
         }
+        return;
+      }
+
+      if (clicked === "creator-independent" || clicked === "creator-grouped") {
+        if (!creatorGroupingEligible) return;
+        const result = await updateThreadMetadata({
+          environmentId: threadRef.environmentId,
+          input: {
+            threadId: threadRef.threadId,
+            creatorGrouping: clicked === "creator-grouped" ? "grouped" : "independent",
+          },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to update creator grouping",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+      if (clicked === "open-creator" && creatorRef && canOpenCreator) {
+        await navigateToThread(creatorRef);
         return;
       }
 
@@ -3031,6 +3191,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       setOpenMobile,
       setThreadPersistence,
       startThreadRename,
+      updateThreadMetadata,
+      navigateToThread,
     ],
   );
 
@@ -3166,6 +3328,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       </div>
 
       <SidebarProjectThreadList
+        groupingStyle={groupingStyle}
         legacySidebarScale={legacySidebarScale}
         compactStatusIndicators={compactStatusIndicators}
         showWorktreeIndicators={showWorktreeIndicators}
@@ -3996,6 +4159,7 @@ export default function LegacySidebar() {
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
+  const groupingStyle = useClientSettings((s) => s.legacySidebarThreadGroupingStyle);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
@@ -4362,12 +4526,14 @@ export default function LegacySidebar() {
           projectExpanded,
           previewCount: sidebarThreadPreviewCount,
           listExpanded: expandedThreadListsByProject.has(project.projectKey),
+          groupingStyle,
         }).orderedThreadKeys;
       }),
     [
       sidebarThreadSortOrder,
       sidebarThreadPreviewCount,
       collapsedFamiliesByKey,
+      groupingStyle,
       expandedThreadListsByProject,
       projectExpandedById,
       routeThreadKey,
