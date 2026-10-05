@@ -1331,12 +1331,21 @@ export const layer: Layer.Layer<
               recoveryService !== undefined && Cause.hasInterruptsOnly(cause)
                 ? recoveryService.completed(recoveryIdentity)
                 : recoveryService !== undefined
-                  ? Effect.logWarning(
-                      "Provider event recording stopped; retaining the attempt for recovery",
-                      { runId: input.run.id, cause },
-                    ).pipe(
-                      Effect.andThen(Ref.set(consumerStopped, true)),
-                      Effect.andThen(recoveryService.suspect(recoveryIdentity)),
+                  ? Ref.get(rootRunFinalized).pipe(
+                      Effect.flatMap((finalized) =>
+                        finalized
+                          ? Effect.logWarning("Post-terminal provider event ingestion failed", {
+                              runId: input.run.id,
+                              cause,
+                            })
+                          : Effect.logWarning(
+                              "Provider event recording stopped; retaining the attempt for recovery",
+                              { runId: input.run.id, cause },
+                            ).pipe(
+                              Effect.andThen(Ref.set(consumerStopped, true)),
+                              Effect.andThen(recoveryService.suspect(recoveryIdentity)),
+                            ),
+                      ),
                     )
                   : Ref.get(rootRunFinalized).pipe(
                       Effect.flatMap((finalized) =>

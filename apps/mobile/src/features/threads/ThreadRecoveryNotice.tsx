@@ -3,7 +3,7 @@ import { presentThreadRecovery } from "@t3tools/client-runtime/state/thread-reco
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
 import { ControlPill } from "../../components/ControlPill";
@@ -33,7 +33,9 @@ export function ThreadRecoveryNotice({
     };
   }, []);
   const currentKey = useRef(key);
-  currentKey.current = key;
+  useLayoutEffect(() => {
+    currentKey.current = key;
+  }, [key]);
   const presentation = presentThreadRecovery(recovery);
   if (!recovery || !presentation || (dismissed && recovery.status === "recovered")) return null;
   const act = async () => {
@@ -49,7 +51,7 @@ export function ThreadRecoveryNotice({
       if (presentation.action === "launch-repair") {
         const result = await repair({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-        if (mounted.current && currentKey.current === key)
+        if (mounted.current && currentKey.current === key && navigation.isFocused())
           navigation.navigate("Thread", { environmentId, threadId: result.value.threadId });
       } else {
         const result = await recover({ environmentId, input });

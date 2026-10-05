@@ -245,3 +245,16 @@ it.effect("does not query projections for a healthy active consumer", () => {
     assert.equal(test.finalizations, 0);
   }).pipe(Effect.provide(test.layer));
 });
+
+it.effect("publishes exhaustion even when the initial suspect receipt was never saved", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    assert.isUndefined(test.thread.recovery);
+    yield* service.reconcile;
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.thread.recovery?.status, "failed");
+    yield* service.assertRepairable(identity);
+  }).pipe(Effect.provide(test.layer));
+});

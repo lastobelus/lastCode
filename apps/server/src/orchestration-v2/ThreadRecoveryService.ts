@@ -161,12 +161,10 @@ const make = Effect.gen(function* () {
         )
           return;
         if (inspection.status === "unknown") {
-          if (prior?.status === "suspect") {
-            yield* markFailed(
-              input,
-              "The provider's turn state could not be confirmed. No work was interrupted or restarted.",
-            );
-          }
+          yield* markFailed(
+            input,
+            "The provider's turn state could not be confirmed. No work was interrupted or restarted.",
+          );
           return;
         }
         if (

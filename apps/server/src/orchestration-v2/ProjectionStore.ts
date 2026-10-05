@@ -548,6 +548,8 @@ function needsRecovery(
     }
     case "runtime":
       return (
+        (projection.thread.recovery !== undefined &&
+          ["suspect", "stale", "recovering"].includes(projection.thread.recovery.status)) ||
         projection.runs.some(
           (run) =>
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
@@ -3523,6 +3525,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       THEN json_array_length(payload_json, '$.pendingBackgroundTasks') > 0
                       ELSE 0 END
                 )
+                SELECT thread_id FROM orchestration_v2_projection_threads
+                WHERE CASE WHEN json_valid(payload_json)
+                  THEN json_extract(payload_json, '$.recovery.status') IN ('suspect', 'stale', 'recovering')
+                  ELSE 0 END
+                UNION
                 SELECT thread_id FROM orchestration_v2_projection_runs
                 WHERE status IN ('preparing', 'starting', 'running', 'waiting')
                 UNION

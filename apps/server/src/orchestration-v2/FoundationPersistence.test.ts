@@ -3466,3 +3466,38 @@ it.effect("commits recovery checkpoint effects only with the exact running attem
     assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
   }).pipe(Effect.provide(Layer.fresh(TestLayer))),
 );
+
+it.effect("selects unfinished recovery receipts for startup even without live provider work", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-receipt-candidate");
+    const thread = {
+      ...makeThread(threadId, now),
+      recovery: {
+        runId: RunId.make("run:old-recovery"),
+        attemptId: RunAttemptId.make("attempt:old-recovery"),
+        status: "recovering" as const,
+        detail: "Restoring turn",
+        updatedAt: now,
+      },
+    };
+    yield* sink.write({
+      events: [threadCreatedEvent({ id: "event:recovery-receipt-candidate", thread, now })],
+    });
+    assert.include(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:recovery-receipt-failed"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...thread, recovery: { ...thread.recovery, status: "failed" } },
+        },
+      ],
+    });
+    assert.notInclude(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+  }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+);

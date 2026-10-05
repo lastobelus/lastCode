@@ -4086,3 +4086,47 @@ it.effect(
       assert.include(result.observed, "run:waiting");
     }),
 );
+
+it.effect("does not mark a finalized root suspect when its retained background reader fails", () =>
+  Effect.gen(function* () {
+    let suspected = 0;
+    let completed = 0;
+    const result = yield* captureRootRunTermination({
+      key: "recover-post-terminal",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) =>
+        Stream.fromIterable([
+          backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+          rootTerminalEvent(ids, "completed"),
+        ]).pipe(
+          Stream.concat(
+            Stream.fail(
+              new ProviderAdapterEventStreamError({
+                driver,
+                providerSessionId: ProviderSessionId.make("session:recover-post-terminal"),
+                cause: "Background stream failed",
+              }),
+            ),
+          ),
+        ),
+      inspectTurn: () => Effect.succeed({ status: "unknown" }),
+      recovery: {
+        register: () => Effect.void,
+        suspect: () =>
+          Effect.sync(() => {
+            suspected++;
+          }),
+        completed: () =>
+          Effect.sync(() => {
+            completed++;
+          }),
+      },
+    });
+    assert.equal(completed, 1);
+    assert.equal(suspected, 0);
+    assert.deepEqual(
+      result.observed.filter((event) => event.startsWith("run:")),
+      ["run:waiting"],
+    );
+  }),
+);
