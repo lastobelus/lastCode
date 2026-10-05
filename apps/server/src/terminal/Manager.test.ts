@@ -512,6 +512,171 @@ it.layer(
     }),
   );
 
+  it.effect.each(["awaiting-exit", "metadata-removed"] as const)(
+    "rejects attachment queued during shutdown when %s and permits a fresh attachment afterward",
+    (phase) =>
+      Effect.gen(function* () {
+        const forceKillSent = yield* Deferred.make<void>();
+        const removalStarted = yield* Deferred.make<void>();
+        const releaseRemoval = yield* Deferred.make<void>();
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          processKillGraceMs: 0,
+          processExitWaitMs: 100,
+        });
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = undefined;
+        process.onKill = (signal) => {
+          if (signal === "SIGKILL") Deferred.doneUnsafe(forceKillSent, Effect.void);
+        };
+        const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
+          event.type === "remove"
+            ? Deferred.succeed(removalStarted, undefined).pipe(
+                Effect.andThen(
+                  phase === "metadata-removed" ? Deferred.await(releaseRemoval) : Effect.void,
+                ),
+              )
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
+        const stopping = yield* manager.shutdownThread("thread-1").pipe(Effect.forkScoped);
+        yield* Deferred.await(forceKillSent);
+        if (phase === "metadata-removed") {
+          process.emitExit({ exitCode: 0, signal: 9 });
+          yield* Deferred.await(removalStarted);
+          expect(yield* manager.metadata).toEqual([]);
+        }
+        const rejectedEvents: TerminalAttachStreamEvent[] = [];
+        const attaching = yield* manager
+          .attachStream(openInput(), (event) =>
+            Effect.sync(() => {
+              rejectedEvents.push(event);
+            }),
+          )
+          .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+        expect(attaching.pollUnsafe()).toBeUndefined();
+        expect(stopping.pollUnsafe()).toBeUndefined();
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+
+        if (phase === "awaiting-exit") process.emitExit({ exitCode: 0, signal: 9 });
+        else yield* Deferred.succeed(releaseRemoval, undefined);
+        yield* Fiber.join(stopping);
+        const result = yield* Fiber.join(attaching);
+        expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
+          "TerminalNotRunningError",
+        );
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(rejectedEvents).toEqual([]);
+        expect(yield* manager.metadata).toEqual([]);
+
+        const unsubscribe = yield* manager.attachStream(openInput(), () => Effect.void);
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+        expect(rejectedEvents).toEqual([]);
+        ptyAdapter.processes[1]!.exitOnKill = "SIGTERM";
+        yield* manager.shutdownThread("thread-1");
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not auto-open a session observed alive before concurrent idle close", () =>
+    Effect.gen(function* () {
+      const checking = yield* Deferred.make<void>();
+      const finishCheck = yield* Deferred.make<void>();
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processKillGraceMs: 0,
+        subprocessInspector: () =>
+          Deferred.succeed(checking, undefined).pipe(
+            Effect.andThen(Deferred.await(finishCheck)),
+            Effect.as({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+          ),
+      });
+      yield* manager.open(openInput());
+      const closing = yield* manager.closeIdle({ threadId: "thread-1" }).pipe(Effect.forkScoped);
+      yield* Deferred.await(checking);
+      const attaching = yield* manager
+        .attachStream(openInput(), () => Effect.void)
+        .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+      expect(attaching.pollUnsafe()).toBeUndefined();
+      expect(ptyAdapter.processes[0]?.killSignals).toEqual([]);
+
+      yield* Deferred.succeed(finishCheck, undefined);
+      yield* Fiber.join(closing);
+      yield* manager.waitForThreadShutdown("thread-1");
+      const result = yield* Fiber.join(attaching);
+      expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
+        "TerminalNotRunningError",
+      );
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(yield* manager.metadata).toEqual([]);
+
+      const unsubscribe = yield* manager.attachStream(openInput(), () => Effect.void);
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      yield* manager.shutdownThread("thread-1");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "keeps concurrent shutdown protected after interruption and clears it after completion",
+    () =>
+      Effect.gen(function* () {
+        const firstCleanup = yield* Deferred.make<void>();
+        const secondCleanup = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+        const releaseSecond = yield* Deferred.make<void>();
+        const gates = [
+          { started: firstCleanup, release: releaseFirst },
+          { started: secondCleanup, release: releaseSecond },
+        ];
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          processKillGraceMs: 0,
+          unregisterTerminal: ({ threadId }) =>
+            Effect.suspend(() => {
+              const gate = threadId === "thread-1" ? gates.shift() : undefined;
+              return gate === undefined
+                ? Effect.void
+                : Deferred.succeed(gate.started, undefined).pipe(
+                    Effect.andThen(Deferred.await(gate.release)),
+                  );
+            }),
+        });
+        yield* manager.open(openInput());
+        const first = yield* manager.shutdownThread("thread-1").pipe(Effect.forkScoped);
+        yield* Deferred.await(firstCleanup);
+        const second = yield* manager
+          .shutdownThread("thread-1")
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Fiber.interrupt(first);
+        yield* Deferred.await(secondCleanup);
+        const attaching = yield* manager
+          .attachStream(openInput({ terminalId: "new-terminal" }), () => Effect.void)
+          .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+        expect(attaching.pollUnsafe()).toBeUndefined();
+        const unsubscribeOther = yield* manager.attachStream(
+          openInput({ threadId: "thread-2" }),
+          () => Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeOther));
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+
+        yield* Deferred.succeed(releaseSecond, undefined);
+        yield* Fiber.join(second);
+        const result = yield* Fiber.join(attaching);
+        expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
+          "TerminalNotRunningError",
+        );
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+        const unsubscribe = yield* manager.attachStream(
+          openInput({ terminalId: "new-terminal" }),
+          () => Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        expect(ptyAdapter.spawnInputs).toHaveLength(3);
+        yield* manager.shutdownThread("thread-1");
+        yield* manager.shutdownThread("thread-2");
+      }),
+  );
+
   it.effect("does not recreate a detached terminal from metadata during normal kill grace", () =>
     Effect.gen(function* () {
       const termSent = yield* Deferred.make<void>();
@@ -606,8 +771,7 @@ it.layer(
             : Effect.void,
         );
         yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
-        yield* manager.close({ threadId: "thread-1" });
-        expect((yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result))._tag).toBe(
+        expect((yield* manager.shutdownThread("thread-1").pipe(Effect.result))._tag).toBe(
           "Failure",
         );
         const retainedMetadata = yield* manager.metadata;

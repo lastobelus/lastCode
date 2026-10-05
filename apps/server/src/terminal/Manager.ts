@@ -1655,6 +1655,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     terminatingProcesses: new Map(),
   });
   const threadLocks = yield* KeyedLock.make<string>();
+  // Includes queued Stops and remains active through thread-lock finalization.
+  const pendingThreadShutdowns = new Map<string, number>();
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const terminalMetadataListeners = new Set<
     (event: TerminalMetadataStreamEvent) => Effect.Effect<void>
@@ -2907,12 +2909,44 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
     );
 
-  const openOrAttachForStream = (input: TerminalAttachInput, startIfNeeded = true) =>
-    withThreadLock(
+  const openOrAttachForStream = Effect.fn("terminal.openOrAttachForStream")(function* (
+    input: TerminalAttachInput,
+    startIfNeeded = true,
+  ): Effect.fn.Return<TerminalSessionSnapshot, TerminalError> {
+    const observed = yield* Effect.sync(() => {
+      const state = SynchronizedRef.getUnsafe(managerStateRef);
+      const session = state.sessions.get(toSessionKey(input.threadId, input.terminalId));
+      return {
+        session,
+        terminating:
+          pendingThreadShutdowns.has(input.threadId) ||
+          ((session === undefined || session.process === null) &&
+            [...state.terminatingProcesses.values()].some(
+              ({ terminal, exited }) =>
+                terminal.threadId === input.threadId &&
+                terminal.terminalId === input.terminalId &&
+                !Deferred.isDoneUnsafe(exited),
+            )),
+      };
+    });
+    return yield* withThreadLock(
       input.threadId,
       Effect.gen(function* () {
         const terminalId = input.terminalId;
         const existing = yield* getSession(input.threadId, terminalId);
+
+        // A queued attachment belongs to the lifecycle it observed before
+        // waiting, even if Stop has removed its metadata by lock acquisition.
+        if (
+          observed.terminating ||
+          (observed.session !== undefined &&
+            (Option.isNone(existing) || existing.value !== observed.session))
+        ) {
+          return yield* new TerminalNotRunningError({
+            threadId: input.threadId,
+            terminalId,
+          });
+        }
 
         if (Option.isNone(existing) || existing.value.process === null) {
           const terminating = (yield* readManagerState).terminatingProcesses.values();
@@ -2977,6 +3011,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return snapshot(session);
       }),
     );
+  });
 
   const readAllTerminalMetadata = () =>
     readManagerState.pipe(
@@ -3400,14 +3435,26 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     withThreadLock(threadId, waitForThreadShutdownUnlocked(threadId));
 
   const shutdownThread: TerminalManager["Service"]["shutdownThread"] = (threadId) =>
-    withThreadLock(
-      threadId,
-      Effect.gen(function* () {
-        const closeResult = yield* closeUnlocked({ threadId }).pipe(Effect.result);
-        const shutdown = yield* waitForThreadShutdownUnlocked(threadId).pipe(Effect.result);
-        if (closeResult._tag === "Failure") return yield* closeResult.failure;
-        if (shutdown._tag === "Failure") return yield* shutdown.failure;
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        pendingThreadShutdowns.set(threadId, (pendingThreadShutdowns.get(threadId) ?? 0) + 1);
       }),
+      () =>
+        withThreadLock(
+          threadId,
+          Effect.gen(function* () {
+            const closeResult = yield* closeUnlocked({ threadId }).pipe(Effect.result);
+            const shutdown = yield* waitForThreadShutdownUnlocked(threadId).pipe(Effect.result);
+            if (closeResult._tag === "Failure") return yield* closeResult.failure;
+            if (shutdown._tag === "Failure") return yield* shutdown.failure;
+          }),
+        ),
+      () =>
+        Effect.sync(() => {
+          const remaining = (pendingThreadShutdowns.get(threadId) ?? 1) - 1;
+          if (remaining === 0) pendingThreadShutdowns.delete(threadId);
+          else pendingThreadShutdowns.set(threadId, remaining);
+        }),
     );
 
   const history: TerminalManager["Service"]["history"] = (input) => {
