@@ -59,6 +59,77 @@ describe("stop thread processes feedback", () => {
     expect(feedback().phase).toBe("idle");
   });
 
+  it("keeps an older shutdown pending when a newer request succeeds and expires", () => {
+    const finishFirst = beginStopThreadProcessesFeedback("First thread");
+    vi.advanceTimersByTime(500);
+    const finishSecond = beginStopThreadProcessesFeedback("Second thread");
+    vi.advanceTimersByTime(500);
+    finishSecond("success");
+    expect(feedback()).toMatchObject({ phase: "running", description: "1 stopping · 1 stopped" });
+    vi.advanceTimersByTime(2_499);
+    expect(feedback().description).toBe("1 stopping · 1 stopped");
+    vi.advanceTimersByTime(1);
+    expect(feedback()).toMatchObject({ phase: "running", description: "First thread" });
+    vi.advanceTimersByTime(4_500);
+    expect(feedback().phase).toBe("running");
+    finishFirst("success");
+    expect(feedback()).toMatchObject({ phase: "success", description: "First thread" });
+    vi.runOnlyPendingTimers();
+    expect(feedback().phase).toBe("idle");
+  });
+
+  it("interrupts a newer request without clearing an older shutdown or losing its result", () => {
+    const finishFirst = beginStopThreadProcessesFeedback("First thread");
+    const finishSecond = beginStopThreadProcessesFeedback("Second thread");
+    finishSecond("interrupted");
+    expect(feedback()).toMatchObject({ phase: "running", description: "First thread" });
+    finishSecond("error");
+    expect(feedback().phase).toBe("running");
+    finishFirst("error");
+    expect(feedback()).toMatchObject({ phase: "error", description: "First thread" });
+    vi.advanceTimersByTime(3_000);
+    expect(feedback().phase).toBe("idle");
+  });
+
+  it("shows every completed outcome while another shutdown remains pending", () => {
+    const finishFirst = beginStopThreadProcessesFeedback("First thread");
+    const finishSecond = beginStopThreadProcessesFeedback("Second thread");
+    const finishThird = beginStopThreadProcessesFeedback("Third thread");
+    const finishFourth = beginStopThreadProcessesFeedback("Fourth thread");
+    finishFirst("success");
+    finishSecond("success");
+    finishThird("error");
+    expect(feedback()).toMatchObject({
+      phase: "running",
+      description: "1 stopping · 2 stopped · 1 failed",
+    });
+    vi.advanceTimersByTime(2_999);
+    expect(feedback().description).toBe("1 stopping · 2 stopped · 1 failed");
+    vi.advanceTimersByTime(1);
+    expect(feedback()).toMatchObject({ phase: "running", description: "Fourth thread" });
+    finishFourth("success");
+    vi.runOnlyPendingTimers();
+    expect(feedback().phase).toBe("idle");
+  });
+
+  it("retains overlapping results until each request's own minimum visibility expires", () => {
+    const finishFirst = beginStopThreadProcessesFeedback("First thread");
+    vi.advanceTimersByTime(1_000);
+    const finishSecond = beginStopThreadProcessesFeedback("Second thread");
+    vi.advanceTimersByTime(500);
+    finishFirst("error");
+    expect(feedback()).toMatchObject({ phase: "running", description: "1 stopping · 1 failed" });
+    vi.advanceTimersByTime(1_000);
+    finishSecond("success");
+    expect(feedback()).toMatchObject({ phase: "error", description: "1 stopped · 1 failed" });
+    vi.advanceTimersByTime(500);
+    expect(feedback()).toMatchObject({ phase: "success", description: "Second thread" });
+    vi.advanceTimersByTime(999);
+    expect(feedback().phase).toBe("success");
+    vi.advanceTimersByTime(1);
+    expect(feedback().phase).toBe("idle");
+  });
+
   it("keeps newer feedback and its dismissal when an older request is interrupted", () => {
     const finishFirst = beginStopThreadProcessesFeedback("First thread");
     vi.advanceTimersByTime(1_000);
