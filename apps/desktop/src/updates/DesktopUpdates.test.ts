@@ -626,6 +626,61 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("offers a completed external package after an in-app build fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const availableVersion = "1.2.4-nightly.20260814.1089.1";
+    const build = {
+      schemaVersion: 1 as const,
+      status: "built" as const,
+      checkpointTag,
+      outputDir: "/tmp/completed-external-package",
+      manifestPath: "/tmp/completed-external-package/build-manifest.json",
+      dmgPath: "/tmp/completed-external-package/LastCode.dmg",
+      dmgSha256: "a".repeat(64),
+    };
+    let completedExternally = false;
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed({
+          schemaVersion: 2,
+          status: "available",
+          checkpointTag,
+          availableVersion,
+          checkpointRequested: requestCheckpoint ?? false,
+          ...(completedExternally ? { build } : {}),
+          releaseNotes: {
+            lastCode: { status: "known", items: [], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
+      localBuildEffect: () =>
+        Effect.fail(
+          new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "build",
+            message: "In-app build failed",
+          }),
+        ),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.isFalse((yield* updates.download).completed);
+        assert.equal((yield* updates.getState).errorContext, "download");
+        completedExternally = true;
+        const inspected = yield* updates.check("poll");
+        assert.isFalse(inspected.checkpointRequested);
+        assert.equal(inspected.state.status, "downloaded");
+        assert.equal(inspected.state.downloadedVersion, availableVersion);
+        assert.isNull(inspected.state.localBuildFailure);
+        const installed = yield* updates.install;
+        assert.isTrue(installed.accepted);
+        assert.equal(harness.localInstallArgs()[0]?.dmgPath, build.dmgPath);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("hands the exact local DMG to the helper before stopping backends and quitting", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const dmgPath = "/tmp/lastcode-local-build/LastCode-1.2.4.dmg";

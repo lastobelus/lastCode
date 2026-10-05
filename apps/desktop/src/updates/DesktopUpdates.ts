@@ -581,15 +581,20 @@ export const make = Effect.gen(function* () {
             Effect.as(result),
           );
         }
-        // Rediscovering the same release must not erase its build/install retry.
-        if (preserveFailure && state.availableVersion === inspection.availableVersion) {
-          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
-        }
-        const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const build =
           inspection.build?.checkpointTag === inspection.checkpointTag
             ? inspection.build
             : undefined;
+        // A verified external build clears a build failure, but an install failure
+        // still needs its retry action even when the same package is rediscovered.
+        if (
+          preserveFailure &&
+          state.availableVersion === inspection.availableVersion &&
+          (state.errorContext === "install" || !build)
+        ) {
+          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
+        }
+        const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const available = reduceDesktopUpdateStateOnUpdateAvailable(
           { ...state, downloadedVersion: null },
           inspection.availableVersion,
