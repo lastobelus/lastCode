@@ -228,6 +228,7 @@ function makeHarness(options: HarnessOptions = {}) {
       titleRegeneration,
       projectedProjects,
       outbox,
+      receipts,
       database,
       externalServices,
     ),
@@ -2281,10 +2282,12 @@ it.effect(
         attemptId: RunAttemptId.make("failed-attempt"),
       };
       let repairThreadId: ThreadId | undefined;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
       const repair = ThreadRecoveryRepair.layer.pipe(
         Layer.provide(ProjectionStore.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
+            dispatch: threads.dispatch,
             getThreadShell: (id) =>
               threads.getThreadShell(id).pipe(
                 Effect.map((shell) =>
@@ -2309,8 +2312,17 @@ it.effect(
           Layer.mock(ThreadRecovery.ThreadRecoveryService)({
             withRepairableIncident: (_input, effect) =>
               effect((id) =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
                   repairThreadId = id;
+                  yield* receipts.insertIfAbsent({
+                    commandId: ThreadRecovery.repairAcceptanceCommandId(id),
+                    threadId: id,
+                    commandType: "thread.recovery-repair.accept",
+                    acceptedAt: source.projection.thread.createdAt,
+                    resultSequence: 1,
+                    status: "accepted",
+                    error: null,
+                  });
                 }),
               ),
           }),

@@ -1449,12 +1449,18 @@ export const layerWithOptions = (
                   Effect.gen(function* () {
                     const inspection = yield* inspectTurn(input);
                     const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
-                    // Released runtimes can retain active turn references after
-                    // their process exits. Confirm residency after the probe,
-                    // but preserve any terminal evidence the adapter retained.
-                    return inspection.status === "active" && current?.runtime !== runtime
-                      ? { status: "unknown" as const }
-                      : inspection;
+                    // Cleanup can retain active references or clear them to unknown.
+                    // Lost ownership of this captured runtime is stronger evidence
+                    // than missing adapter state, but never proves native completion.
+                    if (current?.runtime === runtime) return inspection;
+                    if (inspection.status === "terminal")
+                      return { ...inspection, runtimeReleased: true as const };
+                    return {
+                      status: "released" as const,
+                      driver: runtime.driver,
+                      providerThreadId: input.providerThread.id,
+                      providerTurnId: input.providerTurnId,
+                    };
                   }),
               }),
           subscribeEvents,
@@ -1698,11 +1704,8 @@ export const layerWithOptions = (
                       cause: "Provider event stream ended unexpectedly.",
                     }),
                   );
-              yield* publishToSubscribers(entry.eventSubscribers, {
-                type: "failure",
-                cause,
-              });
-              yield* Ref.set(entry.eventSubscribers, new Map());
+              // Release removes this exact runtime before notifying subscribers.
+              // Their cleanup probes must already observe the lost ownership.
               yield* releaseEntry({
                 providerSessionId: entry.runtime.providerSessionId,
                 reason: "runtime_error",

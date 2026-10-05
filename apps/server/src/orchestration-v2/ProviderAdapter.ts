@@ -488,6 +488,15 @@ export type ProviderAdapterV2TurnInspection =
   | {
       readonly status: "terminal";
       readonly event: Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
+      /** The manager no longer owns the exact runtime that retained this terminal. */
+      readonly runtimeReleased?: true;
+    }
+  | {
+      /** Manager evidence of lost runtime ownership, not proof of native completion. */
+      readonly status: "released";
+      readonly driver: ProviderDriverKind;
+      readonly providerThreadId: ProviderThreadId;
+      readonly providerTurnId: ProviderTurnId;
     }
   | { readonly status: "unknown" };
 
@@ -503,7 +512,7 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
-  /** Exact-turn evidence only: missing local state never proves a turn has ended. */
+  /** Exact-turn evidence only: missing adapter state never proves a turn has ended. */
   readonly inspectTurn?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly providerTurnId: ProviderTurnId;

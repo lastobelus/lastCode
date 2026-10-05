@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   RunId,
   NodeId,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderTurn,
   RunAttemptId,
   ThreadId,
@@ -22,7 +23,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as Recovery from "./ThreadRecoveryService.ts";
-import type { ProviderAdapterV2TurnInspection } from "./ProviderAdapter.ts";
+import type { ProviderAdapterV2Event, ProviderAdapterV2TurnInspection } from "./ProviderAdapter.ts";
 
 const identity = {
   threadId: ThreadId.make("thread:recovery"),
@@ -42,6 +43,12 @@ const terminal: ProviderAdapterV2TurnInspection = {
     threadDisposition: "reusable",
   },
 };
+const released: ProviderAdapterV2TurnInspection = {
+  status: "released",
+  driver: ProviderDriverKind.make("codex"),
+  providerThreadId: ProviderThreadId.make("provider-thread:recovery"),
+  providerTurnId: ProviderTurnId.make("provider-turn:recovery"),
+};
 
 function harness() {
   let thread = { id: identity.threadId } as OrchestrationV2AppThread;
@@ -54,6 +61,9 @@ function harness() {
   } as OrchestrationV2Run;
   let laterRuns: OrchestrationV2Run[] = [];
   let finalizations = 0;
+  let finalTerminal: Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> | undefined;
+  let finalRuntimeReleased = false;
+  let finalReceipt: ReadonlyArray<OrchestrationV2DomainEvent> = [];
   let inspection: ProviderAdapterV2TurnInspection = { status: "active" };
   let finalizeFails = false;
   let beforeInspect = Effect.void;
@@ -63,7 +73,7 @@ function harness() {
   let failedReceiptOutage = false;
   let projectionReads = 0;
   let hasProviderTurn = true;
-  const providerTurn: OrchestrationV2ProviderTurn = {
+  let providerTurn: OrchestrationV2ProviderTurn = {
     id: ProviderTurnId.make("provider-turn:recovery"),
     providerThreadId: ProviderThreadId.make("provider-thread:recovery"),
     nodeId: NodeId.make("node:recovery"),
@@ -100,6 +110,29 @@ function harness() {
             }),
         }),
         Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) =>
+            Effect.sync(() => {
+              for (const event of input.events)
+                if (event.type === "thread.metadata-updated") {
+                  if (failedReceiptOutage) throw new Error("database unavailable");
+                  thread = event.payload;
+                  statuses.push(thread.recovery!.status);
+                }
+              return {
+                receipt: {
+                  commandId: input.commandId,
+                  threadId: input.threadId,
+                  commandType: input.commandType,
+                  acceptedAt: input.acceptedAt,
+                  resultSequence: 1,
+                  status: "accepted" as const,
+                  error: null,
+                },
+                storedEvents: [],
+                committed: true,
+                cancelledEffectCount: 0,
+              };
+            }).pipe(Effect.flatMap((result) => afterRepairLinked.pipe(Effect.as(result)))),
           writeIfRunCurrent: (input) =>
             Effect.sync(() => {
               const committed =
@@ -150,6 +183,24 @@ function harness() {
     get finalizations() {
       return finalizations;
     },
+    get finalTerminal() {
+      return finalTerminal;
+    },
+    get finalRuntimeReleased() {
+      return finalRuntimeReleased;
+    },
+    get finalReceipt() {
+      return finalReceipt;
+    },
+    get run() {
+      return run;
+    },
+    get providerTurn() {
+      return providerTurn;
+    },
+    get laterRuns() {
+      return laterRuns;
+    },
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
     },
@@ -167,6 +218,9 @@ function harness() {
     },
     omitProviderTurn() {
       hasProviderTurn = false;
+    },
+    setProviderTurn(update: Partial<OrchestrationV2ProviderTurn>) {
+      providerTurn = { ...providerTurn, ...update };
     },
     failFinalize() {
       finalizeFails = true;
@@ -188,6 +242,16 @@ function harness() {
         },
       ];
     },
+    addQueuedRuns() {
+      laterRuns = [false, true].map((queueHeld, index) => ({
+        ...run,
+        id: RunId.make(`run:queued:${index}`),
+        ordinal: index + 2,
+        startedAt: null,
+        status: "queued" as const,
+        queueHeld,
+      }));
+    },
     register: Effect.gen(function* () {
       const service = yield* Recovery.ThreadRecoveryService;
       yield* service.register({
@@ -195,11 +259,14 @@ function harness() {
         inspect: Effect.suspend(() =>
           beforeInspect.pipe(Effect.andThen(Effect.sync(() => inspection))),
         ),
-        finalize: (_terminal, receipt) =>
+        finalize: (terminal, receipt, options) =>
           beforeFinalize.pipe(
             Effect.andThen(
               Effect.suspend(() => {
                 finalizations++;
+                finalTerminal = terminal;
+                finalRuntimeReleased = options.runtimeReleased;
+                finalReceipt = receipt;
                 return finalizeFails
                   ? Effect.fail(
                       new Recovery.ThreadRecoveryError({
@@ -208,12 +275,14 @@ function harness() {
                       }),
                     )
                   : Effect.sync(() => {
-                      run = { ...run, status: "completed" };
-                      for (const event of receipt)
+                      run = { ...run, status: terminal.status };
+                      for (const event of receipt) {
+                        if (event.type === "provider-turn.updated") providerTurn = event.payload;
                         if (event.type === "thread.metadata-updated") {
                           thread = event.payload;
                           statuses.push(thread.recovery!.status);
                         }
+                      }
                     });
               }),
             ),
@@ -250,6 +319,110 @@ it.effect("does not recover active or unknown turns automatically", () => {
     assert.deepEqual(test.statuses, ["suspect", "failed"]);
     yield* service.recover(identity);
     assert.equal(test.thread.recovery?.status, "failed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("cancels the exact released attempt once and preserves queued runs", () => {
+  const test = harness();
+  test.inspect(released);
+  test.addQueuedRuns();
+  const queued = test.laterRuns;
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    yield* service.reconcile;
+    assert.equal(test.finalizations, 1);
+    assert.deepEqual(test.finalTerminal, {
+      type: "turn.terminal",
+      driver: ProviderDriverKind.make("codex"),
+      providerThreadId: test.providerTurn.providerThreadId,
+      providerTurnId: test.providerTurn.id,
+      runOrdinal: 1,
+      status: "cancelled",
+      failure: null,
+      threadDisposition: "broken",
+    });
+    assert.isTrue(test.finalRuntimeReleased);
+    assert.equal(test.run.status, "cancelled");
+    assert.equal(test.providerTurn.status, "cancelled");
+    assert.deepEqual(test.laterRuns, queued);
+    assert.isFalse(test.finalReceipt.some((event) => event.type === "run.updated"));
+    assert.deepEqual(test.statuses, ["recovering", "recovered"]);
+    assert.include(test.thread.recovery!.detail, "completion and remaining output are unavailable");
+    assert.include(test.thread.recovery!.detail, "no provider work was replayed");
+    assert.include(
+      test.thread.recovery!.detail,
+      "no live runtime or newer attempt was interrupted",
+    );
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("manual recovery can settle a released attempt after an unknown incident", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    const repairThreadId = ThreadId.make("thread:released-repair");
+    yield* service.withRepairableIncident(identity, (recordRepairThread) =>
+      recordRepairThread(repairThreadId),
+    );
+    test.inspect(released);
+    yield* service.reconcile;
+    assert.equal(test.finalizations, 0);
+    yield* service.recover(identity);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "cancelled");
+    assert.equal(test.thread.recovery?.status, "recovered");
+    assert.equal(test.thread.recovery?.repairThreadId, repairThreadId);
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("retains terminal truth and release evidence when the runtime was released", () => {
+  const test = harness();
+  test.inspect({ ...terminal, runtimeReleased: true });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.finalTerminal?.status, "completed");
+    assert.isTrue(test.finalRuntimeReleased);
+    assert.equal(test.run.status, "completed");
+    assert.equal(test.thread.recovery?.status, "recovered");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect.each([
+  { id: ProviderTurnId.make("provider-turn:other") },
+  { providerThreadId: ProviderThreadId.make("provider-thread:other") },
+  { runAttemptId: RunAttemptId.make("attempt:other") },
+  { status: "completed" as const },
+])("does not cancel a released runtime with a mismatched saved turn: %j", (savedTurn) => {
+  const test = harness();
+  test.inspect(released);
+  test.setProviderTurn(savedTurn);
+  const saved = test.providerTurn;
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.recover(identity);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.status, "running");
+    assert.deepEqual(test.providerTurn, saved);
+    assert.equal(test.thread.recovery?.status, "failed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("does not cancel a released attempt superseded before finalization", () => {
+  const test = harness();
+  test.inspect(released);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    test.afterRecovering(
+      Effect.sync(() => {
+        test.supersede();
+      }),
+    );
+    yield* service.recover(identity);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.activeAttemptId, "attempt:new");
+    assert.equal(test.run.status, "running");
+    assert.equal(test.providerTurn.status, "running");
+    assert.deepEqual(test.statuses, ["recovering"]);
   }).pipe(Effect.provide(test.layer));
 });
 it.effect("leaves a superseding attempt untouched", () => {
@@ -408,6 +581,24 @@ it.effect("keeps manual recovery waiting until repair launch and linking finish"
     assert.equal(test.finalizations, 1);
     assert.equal(test.thread.recovery?.status, "recovered");
     assert.equal(test.thread.recovery?.repairThreadId, repairThreadId);
+  }).pipe(Effect.provide(test.layer));
+});
+
+it.effect("rejects source supersession between preparing repair and recording acceptance", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    const result = yield* Effect.exit(
+      service.withRepairableIncident(identity, (accept) =>
+        Effect.sync(() => test.supersede()).pipe(
+          Effect.andThen(accept(ThreadId.make("thread:inert-repair"))),
+        ),
+      ),
+    );
+    assert.isTrue(Exit.isFailure(result));
+    assert.isUndefined(test.thread.recovery?.repairThreadId);
   }).pipe(Effect.provide(test.layer));
 });
 

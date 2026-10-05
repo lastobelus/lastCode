@@ -20,6 +20,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
 import * as Repair from "./ThreadRecoveryRepairService.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 
 const now = DateTime.makeUnsafe("2026-10-01T00:00:00Z");
 const identity = {
@@ -34,8 +35,9 @@ function harness(
     defaultModel?: ModelSelection | null;
     recoveryStatus?: "failed" | "recovering";
     linkFails?: boolean;
-    persistLaunch?: boolean;
-    emptyRepairShell?: boolean;
+    launchFails?: boolean;
+    supersedeAtShell?: boolean;
+    supersedeAtLaunch?: boolean;
     staleAtLaunch?: boolean;
   } = {},
 ) {
@@ -82,6 +84,12 @@ function harness(
   let acceptedRepair: OrchestrationV2ThreadShell | null = null;
   const deletedRepairs = new Map<ThreadId, OrchestrationV2ThreadShell>();
   const reopened: ThreadId[] = [];
+  const created: ThreadId[] = [];
+  const accepted = new Map<string, CommandReceiptStore.CommandReceiptV2>();
+  let launchFails = options.launchFails ?? false;
+  const supersede = () => {
+    source = { ...source, recovery: undefined };
+  };
   const layer = Repair.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -92,12 +100,36 @@ function harness(
             ),
           dispatch: (command) =>
             Effect.sync(() => {
+              if (command.type === "thread.create") {
+                created.push(command.threadId);
+                acceptedRepair = {
+                  ...source,
+                  id: command.threadId,
+                  latestRunId: null,
+                  activeRunId: null,
+                  recovery: undefined,
+                  status: "idle",
+                  modelSelection: command.modelSelection,
+                  runtimeMode: command.runtimeMode,
+                  title: command.title,
+                  branch: command.branch,
+                  worktreePath: command.worktreePath,
+                };
+                if (options.supersedeAtShell) supersede();
+              }
               if (command.type === "thread.unarchive") {
                 reopened.push(command.threadId);
                 if (acceptedRepair?.id === command.threadId)
                   acceptedRepair = { ...acceptedRepair, archivedAt: null };
               }
               return { sequence: 0, storedEvents: [] };
+            }),
+        }),
+        Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({
+          getByCommandId: (id) =>
+            Effect.sync(() => {
+              const receipt = accepted.get(id);
+              return receipt === undefined ? Option.none() : Option.some(receipt);
             }),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -134,43 +166,51 @@ function harness(
         }),
         ServerSettings.layerTest({ defaultRuntimeMode: "approval-required" }),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({
-          launch: (input) => {
-            inputs.push(input);
-            if (options.persistLaunch ?? true)
+          launch: (input) =>
+            Effect.gen(function* () {
+              inputs.push(input);
+              assert.isTrue(
+                accepted.has(ThreadRecovery.repairAcceptanceCommandId(input.threadId!)),
+              );
+              if (options.supersedeAtLaunch) supersede();
+              if (launchFails)
+                return yield* new ThreadLaunch.ThreadLaunchError({
+                  commandId: input.commandId,
+                  threadId: input.threadId,
+                  operation: "dispatch-message",
+                  projectId,
+                  cause: "message not accepted",
+                });
               acceptedRepair = {
-                ...source,
-                id: input.threadId!,
-                latestRunId: options.emptyRepairShell ? null : RunId.make("repair-run"),
+                ...acceptedRepair!,
+                latestRunId: RunId.make("repair-run"),
                 activeRunId: null,
-                modelSelection: input.modelSelection,
-                runtimeMode: input.runtimeMode,
-                title: input.title,
               };
-            return Effect.succeed({
-              threadId: input.threadId!,
-              resumed: false,
-              projection: {
-                thread: { ...source, lastVisitedAt: source.lastVisitedAt ?? null },
-                runs: [],
-                attempts: [],
-                nodes: [],
-                subagents: [],
-                providerSessions: [],
-                providerThreads: [],
-                providerTurns: [],
-                runtimeRequests: [],
-                messages: [],
-                plans: [],
-                turnItems: [],
-                checkpointScopes: [],
-                checkpoints: [],
-                contextHandoffs: [],
-                contextTransfers: [],
-                visibleTurnItems: [],
-                updatedAt: now,
-              },
-            });
-          },
+              return {
+                threadId: input.threadId!,
+                resumed: false,
+                projection: {
+                  thread: { ...source, lastVisitedAt: source.lastVisitedAt ?? null },
+                  runs: [],
+                  attempts: [],
+                  nodes: [],
+                  subagents: [],
+                  providerSessions: [],
+                  providerThreads: [],
+                  providerTurns: [],
+                  runtimeRequests: [],
+                  messages: [],
+                  plans: [],
+                  turnItems: [],
+                  checkpointScopes: [],
+                  checkpoints: [],
+                  contextHandoffs: [],
+                  contextTransfers: [],
+                  visibleTurnItems: [],
+                  updatedAt: now,
+                },
+              };
+            }),
         }),
         Layer.mock(ThreadRecovery.ThreadRecoveryService)({
           withRepairableIncident: (_input, effect) =>
@@ -182,19 +222,24 @@ function harness(
                   }),
                 )
               : effect((repairThreadId) =>
-                  options.linkFails
-                    ? Effect.fail(
-                        new ThreadRecovery.ThreadRecoveryError({
-                          threadId: identity.threadId,
-                          cause: "write failed",
-                        }),
-                      )
-                    : Effect.sync(() => {
-                        source = {
-                          ...source,
-                          recovery: { ...source.recovery!, repairThreadId },
-                        };
-                      }),
+                  Effect.gen(function* () {
+                    if (options.linkFails || source.recovery?.attemptId !== identity.attemptId)
+                      return yield* new ThreadRecovery.ThreadRecoveryError({
+                        threadId: identity.threadId,
+                        cause: "incident changed or write failed",
+                      });
+                    source = { ...source, recovery: { ...source.recovery, repairThreadId } };
+                    const commandId = ThreadRecovery.repairAcceptanceCommandId(repairThreadId);
+                    accepted.set(commandId, {
+                      commandId,
+                      threadId: repairThreadId,
+                      commandType: "thread.recovery-repair.accept",
+                      acceptedAt: now,
+                      resultSequence: 1,
+                      status: "accepted",
+                      error: null,
+                    });
+                  }),
                 ),
         }),
       ),
@@ -204,6 +249,12 @@ function harness(
     layer,
     inputs,
     reopened,
+    created,
+    accepted,
+    supersede,
+    failLaunch(value: boolean) {
+      launchFails = value;
+    },
     deleteRepair() {
       if (acceptedRepair === null) throw new Error("No repair exists");
       deletedRepairs.set(acceptedRepair.id, { ...acceptedRepair, deletedAt: now });
@@ -212,6 +263,10 @@ function harness(
     archiveRepair() {
       if (acceptedRepair === null) throw new Error("No repair exists");
       acceptedRepair = { ...acceptedRepair, archivedAt: now };
+    },
+    leaveRepairPreparing() {
+      if (acceptedRepair === null) throw new Error("No repair exists");
+      acceptedRepair = { ...acceptedRepair, status: "preparing" };
     },
   };
 }
@@ -235,16 +290,85 @@ describe("ThreadRecoveryRepairService", () => {
     }).pipe(Effect.provide(h.layer));
   });
 
-  it.effect("skips a tombstoned repair when its original link was never recorded", () => {
-    const h = harness({ linkFails: true, persistLaunch: true });
+  it.effect("never starts a provider when acceptance fails", () => {
+    const h = harness({ linkFails: true });
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      yield* service.launch(identity).pipe(Effect.flip);
+      yield* service.launch(identity).pipe(Effect.flip);
+      assert.lengthOf(h.inputs, 0);
+      assert.lengthOf(h.created, 1);
+      assert.equal(h.accepted.size, 0);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect(
+    "rejects supersession between inert creation and acceptance without starting an agent",
+    () => {
+      const h = harness({ supersedeAtShell: true });
+      return Effect.gen(function* () {
+        const service = yield* Repair.ThreadRecoveryRepairService;
+        yield* service.launch(identity).pipe(Effect.flip);
+        assert.lengthOf(h.inputs, 0);
+        assert.equal(h.accepted.size, 0);
+      }).pipe(Effect.provide(h.layer));
+    },
+  );
+
+  it.effect("returns an accepted repair even when the source advances during launch", () => {
+    const h = harness({ supersedeAtLaunch: true });
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      const first = yield* service.launch(identity);
+      assert.deepEqual(yield* service.launch(identity), first);
+      assert.lengthOf(h.inputs, 1);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect("resumes the accepted identity after launch failure and source supersession", () => {
+    const h = harness({ launchFails: true });
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      yield* service.launch(identity).pipe(Effect.flip);
+      h.supersede();
+      h.failLaunch(false);
+      const result = yield* service.launch(identity);
+      assert.deepEqual(yield* service.launch(identity), result);
+      assert.lengthOf(h.inputs, 2);
+      assert.equal(h.inputs[0]!.threadId, result.threadId);
+      assert.equal(h.inputs[0]!.commandId, h.inputs[1]!.commandId);
+      assert.deepEqual(h.inputs[0]!.modelSelection, h.inputs[1]!.modelSelection);
+      assert.equal(h.inputs[0]!.initialMessage!.messageId, h.inputs[1]!.initialMessage!.messageId);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect("skips a deleted inert repair whose acceptance was not recorded", () => {
+    const h = harness({ linkFails: true });
     return Effect.gen(function* () {
       const service = yield* Repair.ThreadRecoveryRepairService;
       yield* service.launch(identity).pipe(Effect.flip);
       h.deleteRepair();
       yield* service.launch(identity).pipe(Effect.flip);
       yield* service.launch(identity).pipe(Effect.flip);
+      assert.lengthOf(h.created, 2);
+      assert.notEqual(h.created[0], h.created[1]);
+      assert.lengthOf(h.inputs, 0);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect("resumes accepted preparation after the source incident advances", () => {
+    const h = harness();
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      const first = yield* service.launch(identity);
+      h.leaveRepairPreparing();
+      h.supersede();
+      assert.deepEqual(yield* service.launch(identity), first);
       assert.lengthOf(h.inputs, 2);
-      assert.notEqual(h.inputs[0]!.threadId, h.inputs[1]!.threadId);
+      assert.equal(h.inputs[0]!.commandId, h.inputs[1]!.commandId);
+      assert.equal(h.inputs[0]!.initialMessage!.messageId, h.inputs[1]!.initialMessage!.messageId);
+      assert.equal(h.accepted.size, 1);
+      assert.lengthOf(h.created, 1);
     }).pipe(Effect.provide(h.layer));
   });
 
@@ -262,27 +386,6 @@ describe("ThreadRecoveryRepairService", () => {
     }).pipe(Effect.provide(h.layer));
   });
 
-  it.effect("retries an empty repair shell whose initial message was not accepted", () => {
-    const h = harness({ linkFails: true, persistLaunch: true, emptyRepairShell: true });
-    return Effect.gen(function* () {
-      const service = yield* Repair.ThreadRecoveryRepairService;
-      yield* service.launch(identity).pipe(Effect.flip);
-      yield* service.launch(identity).pipe(Effect.flip);
-      assert.lengthOf(h.inputs, 2);
-      assert.strictEqual(h.inputs[0]!.commandId, h.inputs[1]!.commandId);
-      assert.deepStrictEqual(h.inputs[0]!.modelSelection, h.inputs[1]!.modelSelection);
-    }).pipe(Effect.provide(h.layer));
-  });
-
-  it.effect("does not relaunch an accepted repair when recording the link failed", () => {
-    const h = harness({ linkFails: true, persistLaunch: true });
-    return Effect.gen(function* () {
-      const service = yield* Repair.ThreadRecoveryRepairService;
-      yield* service.launch(identity).pipe(Effect.flip);
-      yield* service.launch(identity).pipe(Effect.flip);
-      assert.lengthOf(h.inputs, 1);
-    }).pipe(Effect.provide(h.layer));
-  });
   it.effect("does not launch when a newer run superseded the incident", () => {
     const h = harness({ staleAtLaunch: true });
     return Effect.gen(function* () {
@@ -326,21 +429,6 @@ describe("ThreadRecoveryRepairService", () => {
       }).pipe(Effect.provide(h.layer));
     },
   );
-  it.effect("retries the identical launch when linking its result failed", () => {
-    const h = harness({ linkFails: true, persistLaunch: false });
-    return Effect.gen(function* () {
-      const service = yield* Repair.ThreadRecoveryRepairService;
-      yield* service.launch(identity).pipe(Effect.flip);
-      yield* service.launch(identity).pipe(Effect.flip);
-      assert.lengthOf(h.inputs, 2);
-      assert.strictEqual(h.inputs[0]!.threadId, h.inputs[1]!.threadId);
-      assert.strictEqual(h.inputs[0]!.commandId, h.inputs[1]!.commandId);
-      assert.strictEqual(
-        h.inputs[0]!.initialMessage!.messageId,
-        h.inputs[1]!.initialMessage!.messageId,
-      );
-    }).pipe(Effect.provide(h.layer));
-  });
   it.effect.each([{ defaultModel: null }, { recoveryStatus: "recovering" as const }])(
     "does not launch when %j",
     (options) => {

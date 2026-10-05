@@ -7537,14 +7537,35 @@ export function makeClaudeAdapterV2(
               if (nativeThreadId === undefined || nativeThreadId === null) {
                 return false;
               }
-              // Root-run stop gate: only this native thread's roster. Session
-              // subagents and wake buffers stay on the session-wide probe.
-              return (
+              if (
                 rosterForNativeThread(
                   yield* Ref.get(pendingBackgroundTasksByNativeThread),
                   nativeThreadId,
                 ).size > 0
-              );
+              ) {
+                return true;
+              }
+              const live = yield* Ref.get(queryContext);
+              if (live?.nativeThreadId !== nativeThreadId) return false;
+              const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [];
+              for (const [taskId, subagent] of yield* Ref.get(sessionSubagentsByTaskId)) {
+                if (
+                  subagent.task.threadId === providerThread.appThreadId &&
+                  subagent.task.status === "running" &&
+                  !live.subagentsFromEarlierProcesses.has(subagent) &&
+                  !buffered.some(
+                    (message) =>
+                      message.type === "system" &&
+                      message.subtype === "task_notification" &&
+                      message.task_id === taskId,
+                  )
+                ) {
+                  return true;
+                }
+              }
+              // Buffered output is finished work. Sibling subagents and wake
+              // buffers still belong only to the session-wide idle probe.
+              return false;
             }),
           ensureThread: Effect.fn("ClaudeAdapterV2.ensureThread")(
             function* (threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) {

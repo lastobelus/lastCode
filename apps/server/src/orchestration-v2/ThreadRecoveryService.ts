@@ -1,5 +1,6 @@
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import {
+  CommandId,
   RunId,
   RunAttemptId,
   ThreadId,
@@ -28,6 +29,7 @@ interface RecoveryRegistration extends ThreadRecoveryIdentity {
   readonly finalize: (
     terminal: Terminal,
     receipt: ReadonlyArray<OrchestrationV2DomainEvent>,
+    options: { readonly runtimeReleased: boolean },
   ) => Effect.Effect<void, ThreadRecoveryError>;
 }
 export class ThreadRecoveryError extends Schema.TaggedError<ThreadRecoveryError>()(
@@ -57,6 +59,9 @@ export class ThreadRecoveryService extends Context.Service<
     ) => Effect.Effect<A, E | ThreadRecoveryError, R>;
   }
 >()("t3/orchestration-v2/ThreadRecoveryService") {}
+
+export const repairAcceptanceCommandId = (repairThreadId: ThreadId) =>
+  CommandId.make(`recovery-repair-accept:${repairThreadId}`);
 
 const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -188,12 +193,30 @@ const make = Effect.gen(function* () {
           );
           return;
         }
+        const runtimeReleased =
+          inspection.status === "released" || inspection.runtimeReleased === true;
+        // Only the manager can confirm loss of this exact captured runtime.
+        // Cancel its abandoned saved attempt without claiming the task finished.
+        const terminal: Terminal =
+          inspection.status === "released"
+            ? {
+                type: "turn.terminal",
+                driver: inspection.driver,
+                providerThreadId: inspection.providerThreadId,
+                providerTurnId: inspection.providerTurnId,
+                runOrdinal: state.run.ordinal,
+                status: "cancelled",
+                failure: null,
+                threadDisposition: "broken",
+              }
+            : inspection.event;
         if (
           !state.providerTurns.some(
             (turn) =>
-              turn.id === inspection.event.providerTurnId &&
-              turn.providerThreadId === inspection.event.providerThreadId &&
-              turn.runAttemptId === input.attemptId,
+              turn.id === terminal.providerTurnId &&
+              turn.providerThreadId === terminal.providerThreadId &&
+              turn.runAttemptId === input.attemptId &&
+              (inspection.status !== "released" || turn.status === "running"),
           )
         ) {
           yield* markFailed(
@@ -206,7 +229,9 @@ const make = Effect.gen(function* () {
           !(yield* write(
             input,
             "recovering",
-            "The provider finished. Reconciling the saved turn state…",
+            inspection.status === "released"
+              ? "The app no longer owns the provider runtime. Cancelling the abandoned saved attempt…"
+              : "The provider finished. Reconciling the saved turn state…",
           ))
         )
           return;
@@ -218,9 +243,10 @@ const make = Effect.gen(function* () {
             const now = yield* DateTime.now;
             const turn = latest.providerTurns.find(
               (turn) =>
-                turn.id === inspection.event.providerTurnId &&
-                turn.providerThreadId === inspection.event.providerThreadId &&
-                turn.runAttemptId === input.attemptId,
+                turn.id === terminal.providerTurnId &&
+                turn.providerThreadId === terminal.providerThreadId &&
+                turn.runAttemptId === input.attemptId &&
+                (inspection.status !== "released" || turn.status === "running"),
             );
             if (turn === undefined)
               return yield* new ThreadRecoveryError({
@@ -234,7 +260,7 @@ const make = Effect.gen(function* () {
               threadId: input.threadId,
               runId: input.runId,
               occurredAt: now,
-              payload: { ...turn, status: inspection.event.status, completedAt: now },
+              payload: { ...turn, status: terminal.status, completedAt: now },
             });
             events.push({
               id: yield* ids.allocate.event({ threadId: input.threadId }),
@@ -248,13 +274,15 @@ const make = Effect.gen(function* () {
                   attemptId: input.attemptId,
                   status: "recovered",
                   detail:
-                    "Recovered the provider's finished turn. Some output may be missing from the conversation; no provider work was repeated.",
+                    inspection.status === "released"
+                      ? "The app no longer owns this provider runtime. Its completion and remaining output are unavailable. Cancelled the abandoned saved attempt; no provider work was replayed and no live runtime or newer attempt was interrupted."
+                      : "Recovered the provider's finished turn. Some output may be missing from the conversation; no provider work was repeated.",
                   updatedAt: now,
                   ...repairLink(input, latest.thread.recovery),
                 },
               },
             });
-            yield* registered.finalize(inspection.event, events);
+            yield* registered.finalize(terminal, events, { runtimeReleased });
           }),
         );
         const registeredAfterFinalization = registrations.get(input.threadId);
@@ -297,12 +325,52 @@ const make = Effect.gen(function* () {
   );
   const recordRepairThread = Effect.fnUntraced(
     function* (input: ThreadRecoveryIdentity & { readonly repairThreadId: ThreadId }) {
-      const recovery = yield* assertRepairable(input);
-      if (!(yield* write(input, "failed", recovery.detail, input.repairThreadId)))
-        return yield* new ThreadRecoveryError({
-          threadId: input.threadId,
-          cause: "Recovery incident changed during repair launch.",
-        });
+      yield* commands.withLock(
+        input.threadId,
+        Effect.gen(function* () {
+          yield* assertRepairable(input);
+          const state = yield* current(input);
+          if (state === null || state.thread.recovery === undefined)
+            return yield* new ThreadRecoveryError({
+              threadId: input.threadId,
+              cause: "Recovery incident changed before repair acceptance.",
+            });
+          const now = yield* DateTime.now;
+          // Keep the accepted target identity even after a new source run clears its notice.
+          // No target dispatch or update admission is nested under this source command lock.
+          const result = yield* sink.commitCommand({
+            commandId: repairAcceptanceCommandId(input.repairThreadId),
+            threadId: input.repairThreadId,
+            commandType: "thread.recovery-repair.accept",
+            acceptedAt: now,
+            effects: [],
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId: input.threadId }),
+                type: "thread.metadata-updated",
+                threadId: input.threadId,
+                occurredAt: now,
+                payload: {
+                  ...state.thread,
+                  recovery: {
+                    ...state.thread.recovery,
+                    repairThreadId: input.repairThreadId,
+                    updatedAt: now,
+                  },
+                },
+              },
+            ],
+          });
+          if (
+            result.receipt.status !== "accepted" ||
+            result.receipt.threadId !== input.repairThreadId
+          )
+            return yield* new ThreadRecoveryError({
+              threadId: input.threadId,
+              cause: "Repair acceptance was not recorded.",
+            });
+        }),
+      );
     },
     (effect, input) =>
       effect.pipe(
@@ -317,7 +385,7 @@ const make = Effect.gen(function* () {
       input.threadId,
       Effect.gen(function* () {
         yield* assertRepairable(input);
-        // Recovery must wait until launch and linking finish; the callback already owns this lock.
+        // Recovery waits until the inert target is durably accepted. Scheduling happens afterward.
         return yield* effect((repairThreadId) => recordRepairThread({ ...input, repairThreadId }));
       }),
     );

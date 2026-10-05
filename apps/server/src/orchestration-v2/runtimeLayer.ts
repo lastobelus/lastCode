@@ -176,6 +176,7 @@ const runExecutionServiceProvided = runExecutionServiceLayer.pipe(
       idAllocatorLayer,
       providerEventIngestorProvided,
       threadRecoveryProvided,
+      projectionStoreLayer,
     ),
   ),
 );
@@ -321,6 +322,7 @@ const threadRecoveryRepairProvided = ThreadRecoveryRepair.layer.pipe(
     Layer.mergeAll(
       threadManagementProvided,
       projectionStoreLayer,
+      commandReceiptStoreProvided,
       ProjectStore.layer,
       threadLaunchProvided,
       threadRecoveryProvided,

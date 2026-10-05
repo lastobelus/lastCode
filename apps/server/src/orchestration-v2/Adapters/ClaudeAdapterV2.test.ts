@@ -6779,9 +6779,25 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.isTrue(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
+        assert.isFalse(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!({
+            ...harness.providerThread,
+            id: ProviderThreadId.make("provider-thread:unrelated-background-subagent"),
+            appThreadId: ThreadId.make("thread:unrelated-background-subagent"),
+          }),
+        );
 
         yield* Queue.offer(harness.sdkMessages, subagentStoppedNotification);
         yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
+        // The completion is buffered for the continuation, but the task is
+        // already finished. Its saved running row must not pin recovery.
+        assert.isFalse(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
 
         yield* Queue.offer(
           harness.sdkMessages,
@@ -6807,6 +6823,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         assert.equal(subagentEvents().at(-1)?.subagent.status, "cancelled");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        assert.isFalse(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );

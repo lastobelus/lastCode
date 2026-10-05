@@ -2475,9 +2475,9 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
   }),
 );
 
-it.effect(
-  "turn probes reject a released runtime while a replacement with the same ID is live",
-  () =>
+it.effect.each(["active", "unknown"] as const)(
+  "turn probes report a released %s runtime while a replacement with the same ID is live",
+  (status) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const closeEntered = yield* Deferred.make<void>();
@@ -2513,7 +2513,19 @@ it.effect(
             nativeTurnId: "released-active-turn",
           }),
         };
-        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "active" });
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status });
+
+        const failureObserved = yield* Deferred.make<ProviderAdapterV2TurnInspection>();
+        const subscription = yield* runtime.subscribeEvents!;
+        yield* subscription.events.pipe(
+          Stream.runDrain,
+          Effect.exit,
+          Effect.tap((exit) => Effect.sync(() => assert.isTrue(Exit.isFailure(exit)))),
+          Effect.andThen(runtime.inspectTurn!(probe)),
+          Effect.flatMap((inspection) => Deferred.succeed(failureObserved, inspection)),
+          Effect.ensuring(subscription.close),
+          Effect.forkChild,
+        );
 
         // An unexpected stream end releases residency without a terminal event,
         // even while the adapter's finalizer and active-turn reference remain.
@@ -2523,7 +2535,14 @@ it.effect(
         yield* Deferred.await(closeEntered);
         assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
         assert.equal((yield* Ref.get(state)).closeCount, 0);
-        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "unknown" });
+        const released = {
+          status: "released",
+          driver: CODEX_DRIVER,
+          providerThreadId: probe.providerThread.id,
+          providerTurnId: probe.providerTurnId,
+        };
+        assert.deepEqual(yield* Deferred.await(failureObserved), released);
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), released);
 
         const replacement = yield* manager.open({
           threadId,
@@ -2532,8 +2551,8 @@ it.effect(
           runtimePolicy,
         });
         assert.notStrictEqual(replacement, runtime);
-        assert.deepEqual(yield* replacement.inspectTurn!(probe), { status: "active" });
-        assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "unknown" });
+        assert.deepEqual(yield* replacement.inspectTurn!(probe), { status });
+        assert.deepEqual(yield* runtime.inspectTurn!(probe), released);
       }).pipe(
         Effect.ensuring(Deferred.succeed(allowClose, undefined)),
         Effect.provide(
@@ -2543,7 +2562,7 @@ it.effect(
             beforeClose: Deferred.succeed(closeEntered, undefined).pipe(
               Effect.andThen(Deferred.await(allowClose)),
             ),
-            inspectTurn: () => Effect.succeed({ status: "active" as const }),
+            inspectTurn: () => Effect.succeed({ status }),
           }),
         ),
       );
@@ -2593,7 +2612,11 @@ it.effect("turn probes retain confirmed terminal evidence after session release"
       yield* Ref.set(inspection, { status: "terminal", event });
       yield* manager.release({ providerSessionId, reason: "runtime_error" });
       assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
-      assert.deepEqual(yield* runtime.inspectTurn!(probe), { status: "terminal", event });
+      assert.deepEqual(yield* runtime.inspectTurn!(probe), {
+        status: "terminal",
+        event,
+        runtimeReleased: true,
+      });
     }).pipe(
       Effect.provide(
         makeTestLayer({
@@ -2630,7 +2653,7 @@ it.effect("turn probes recheck residency after an inspection overlaps session re
         modelSelection,
         runtimePolicy,
       });
-      const probe = yield* runtime.inspectTurn!({
+      const input = {
         providerThread: makeProviderThread({
           idAllocator: ids,
           threadId,
@@ -2641,11 +2664,17 @@ it.effect("turn probes recheck residency after an inspection overlaps session re
           driver: CODEX_DRIVER,
           nativeTurnId: "concurrently-released-turn",
         }),
-      }).pipe(Effect.forkChild);
+      };
+      const probe = yield* runtime.inspectTurn!(input).pipe(Effect.forkChild);
       yield* Deferred.await(probeEntered);
       yield* manager.release({ providerSessionId, reason: "runtime_error" });
       yield* Deferred.succeed(allowProbe, undefined);
-      assert.deepEqual(yield* Fiber.join(probe), { status: "unknown" });
+      assert.deepEqual(yield* Fiber.join(probe), {
+        status: "released",
+        driver: CODEX_DRIVER,
+        providerThreadId: input.providerThread.id,
+        providerTurnId: input.providerTurnId,
+      });
     }).pipe(
       Effect.ensuring(Deferred.succeed(allowProbe, undefined)),
       Effect.provide(
