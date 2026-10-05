@@ -904,6 +904,50 @@ effectIt.effect("caches a failed web probe until its bounded cache entry expires
   }).pipe(Effect.provide(layer));
 });
 
+effectIt.effect(
+  "retries failed configured previews on the next scan without losing ownership",
+  () => {
+    let responds = false;
+    const requests: string[] = [];
+    const rootUrl = `http://localhost:${LSOF_TEST_PORT}/`;
+    const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+      requests.push(String(input));
+      return responds
+        ? Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } }))
+        : Promise.reject(new TypeError("starting up"));
+    }) as typeof globalThis.fetch;
+    const layer = makeLsofScannerLayer({ pid: () => 1234, fetch: fetchFn });
+
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "preview-thread",
+        terminalId: "preview-terminal",
+        processIds: [1234],
+      });
+      expect(yield* scanner.scan([rootUrl, rootUrl])).toHaveLength(0);
+      expect(requests).toEqual([rootUrl, `https://localhost:${LSOF_TEST_PORT}/`]);
+
+      responds = true;
+      yield* TestClock.adjust(Duration.seconds(3));
+      expect(yield* scanner.scan()).toHaveLength(0);
+      expect(requests).toHaveLength(2);
+
+      const servers = yield* scanner.scan([rootUrl]);
+      expect(servers).toHaveLength(1);
+      expect(servers[0]?.terminal).toEqual({
+        threadId: "preview-thread",
+        terminalId: "preview-terminal",
+      });
+      expect(requests).toEqual([rootUrl, `https://localhost:${LSOF_TEST_PORT}/`, rootUrl]);
+
+      expect(yield* scanner.scan([rootUrl])).toEqual(servers);
+      expect(yield* scanner.scan()).toHaveLength(1);
+      expect(requests).toHaveLength(3);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
 effectIt.effect("falls back to HTTPS and does not follow redirects while probing", () => {
   const redirects: Array<string | undefined> = [];
   const fetchFn = (async (

@@ -11,8 +11,8 @@
  *
  * Listening ports are published only after a bounded HTTP(S) probe finds a
  * successful HTML document or a redirect to one.
- * Positive and negative results are cached briefly by candidate URL and listener identity,
- * limiting repeated requests without leaving stale classifications around.
+ * Positive results and automatic discovery failures are cached briefly by candidate URL
+ * and listener identity. Explicit configured URLs retry failures on the next scan.
  *
  * Polling is reference-counted via scoped `retain`. A single layer-scoped fiber
  * polls forever, but each tick is a no-op when the retain count is zero.
@@ -570,6 +570,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     const nowMillis = yield* Clock.currentTimeMillis;
     const cached = yield* Ref.get(webProbeCacheRef);
     const groups = makeWebProbeGroups(servers, configuredUrls);
+    const configuredProbeKeys = new Set(
+      groups.flatMap((group) => (group.configuredKey === null ? [] : [group.configuredKey])),
+    );
     const batchProbes = new Map<
       string,
       Effect.Effect<{ readonly probe: WebProbeCacheEntry; readonly fresh: boolean }>
@@ -585,7 +588,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             if (existing) return [existing] as const;
             const cachedProbe = cached.get(key);
             const cachedIsCurrent =
-              cachedProbe?.pid === pid && cachedProbe.expiresAtMillis > nowMillis;
+              cachedProbe?.pid === pid &&
+              cachedProbe.expiresAtMillis > nowMillis &&
+              // Explicit previews must retry transient startup failures on the next scan.
+              (cachedProbe.isResource || !configuredProbeKeys.has(key));
             const memoized = yield* Effect.cached(
               cachedIsCurrent
                 ? Effect.succeed({ probe: cachedProbe, fresh: false })

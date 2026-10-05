@@ -179,6 +179,7 @@ function terminalLayer(harness: TerminalHarness) {
       return attempt.pipe(Effect.andThen(harness.onClose?.() ?? Effect.void));
     },
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
+    history: () => Effect.die("Startup transcripts must remain local."),
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
@@ -1444,6 +1445,10 @@ describe("PreviewHosting", () => {
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.opens.length, 1);
           assert.equal(harness.writes.length, 1);
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "No HTTP response was attributed");
+            assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+          }
           assert.isAtLeast(harness.closes.length, 1);
           assert.isTrue(
             harness.closes.every((close) => close.terminalId === harness.opens[0]?.terminalId),
@@ -1663,10 +1668,85 @@ describe("PreviewHosting", () => {
           yield* Deferred.await(wrote);
           yield* Effect.yieldNow;
           yield* TestClock.adjust(Duration.seconds(31));
-          assert.equal((yield* Fiber.join(pending))._tag, "Failure");
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "HTTP responded, but ownership did not match");
+            assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+            assert.include(result.failure.message, "Terminal: running; running subprocess: yes");
+            assert.include(
+              result.failure.message,
+              "Terminal output is omitted because it may contain credentials.",
+            );
+          }
           assert.deepEqual(yield* hosting.list("thread-1"), []);
           assert.equal(harness.closes.length, 1);
         }).pipe(Effect.provide(hostingLayer(config, harness, true, [], false))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([
+    { exitCode: 1, exitSignal: null, detail: "exit code: 1" },
+    { exitCode: null, exitSignal: 15, detail: "signal: 15" },
+  ])("reports failed command metadata without reading startup output ($detail)", (exit) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-exit-details-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness({
+        onRefreshMetadata: () =>
+          Effect.sync(() => {
+            const summary = harness.summaries[0];
+            if (summary)
+              harness.summaries[0] = {
+                ...summary,
+                status: "exited",
+                hasRunningSubprocess: false,
+                exitCode: exit.exitCode,
+                exitSignal: exit.exitSignal,
+              };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-1",
+              command: "source .env; pnpm dev",
+              cwd: "/workspace",
+              url: "http://operator:url-secret@localhost:5173/private-route?token=query-secret#fragment-secret",
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "at http://localhost:5173.\n");
+            assert.include(result.failure.message, "preview command is no longer running");
+            assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
+            assert.include(result.failure.message, exit.detail);
+            assert.include(
+              result.failure.message,
+              "Terminal output is omitted because it may contain credentials.",
+            );
+            assert.isAtMost(result.failure.message.length, 1_024);
+            for (const privateText of [
+              "source .env",
+              "operator",
+              "url-secret",
+              "private-route",
+              "query-secret",
+              "fragment-secret",
+            ]) {
+              assert.notInclude(result.failure.message, privateText);
+            }
+          }
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.equal(harness.historyDeletes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );

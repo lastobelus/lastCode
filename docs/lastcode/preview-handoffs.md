@@ -6,6 +6,24 @@ must restore it within that window, and its temporary server must stop at expiry
 without a cleanup request from the user. Viewing or reloading does not extend
 the window.
 
+## Background QA
+
+Routine automated QA runs in a thread-owned background browser against isolated
+development state. It does not require a separate permission prompt or prevent
+the user from continuing to use LastCode. Create a dedicated tab with
+`preview_open({ open: false, reuseExistingTab: false })`, then reuse its returned
+`tabId` for navigation, interactions, and evidence throughout the task. Do not
+hide or repurpose a tab the user is inspecting. Keep foreground application control and human
+acceptance subject to the machine interaction policy.
+
+A newly created blank tab may briefly report `available: false`; navigation
+waits for its browser to become ready. This is different from a managed server
+that fails to start. For managed hosting, run the server in the foreground,
+choose a free port explicitly, and make the requested URL match that listener.
+A responding URL alone is insufficient: LastCode must attribute its listener
+to the managed terminal. Inspect startup diagnostics before retrying a failed
+launch; opening a visible browser does not repair it.
+
 ## Recovering an unreachable preview
 
 The unreachable page's **Ask agent to restore preview** action sends the exact

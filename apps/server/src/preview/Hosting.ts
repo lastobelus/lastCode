@@ -35,6 +35,7 @@ const READY_TIMEOUT_MS = 30_000;
 const EXPIRED_TERMINAL_RETRY_MS = 60_000;
 const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
+const READINESS_MESSAGE_MAX_CHARS = 1_024;
 
 const LeaseStatus = Schema.Literals(["starting", "active", "expired"]);
 const EnvironmentOverrides = Schema.Record(
@@ -91,7 +92,10 @@ export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>
       case "validate":
         return this.detail ?? "Invalid preview launch details.";
       case "ready":
-        return `Preview did not become reachable before the recovery deadline: ${this.url ?? "unknown URL"}.`;
+        return `Preview did not become ready at ${this.url ?? "unknown URL"}.\n${this.detail ?? "No readiness diagnostics available."}`.slice(
+          0,
+          READINESS_MESSAGE_MAX_CHARS,
+        );
       case "read":
         return `Failed to read preview leases at ${this.statePath}.`;
       case "decode":
@@ -350,22 +354,50 @@ const make = Effect.gen(function* () {
 
   const startupError = yield* SynchronizedRef.get(startupErrorRef);
 
-  const makeReadinessError = (lease: PreviewHostingLease) =>
-    new PreviewHostingError({
+  const terminalSummary = (lease: PreviewHostingLease) =>
+    terminals.refreshMetadata.pipe(
+      Effect.andThen(terminals.metadata),
+      Effect.map(
+        (summaries) =>
+          summaries.find(
+            (summary) =>
+              summary.threadId === lease.threadId && summary.terminalId === lease.terminalId,
+          ) ?? null,
+      ),
+    );
+
+  const failReadiness = Effect.fn("PreviewHosting.failReadiness")(function* (
+    lease: PreviewHostingLease,
+    readiness: string,
+  ) {
+    const summary = yield* terminalSummary(lease);
+    const terminal =
+      summary === null
+        ? "Terminal metadata unavailable."
+        : `Terminal: ${summary.status}; running subprocess: ${summary.hasRunningSubprocess ? "yes" : "no"}${summary.exitCode === null ? "" : `; exit code: ${summary.exitCode}`}${summary.exitSignal === null ? "" : `; signal: ${summary.exitSignal}`}.`;
+    return yield* new PreviewHostingError({
       operation: "ready",
       statePath,
       threadId: lease.threadId,
-      url: lease.url,
+      url: new URL(lease.url).origin,
+      detail: `${readiness}\n${terminal}\nTerminal output is omitted because it may contain credentials.`,
     });
+  });
 
   const waitForReady = Effect.fn("PreviewHosting.waitForReady")(function* (
     lease: PreviewHostingLease,
   ) {
+    let observation = "No HTTP response was attributed to the owned preview terminal.";
+    let timeoutMs = 0;
     const result = yield* Effect.scoped(
       Effect.gen(function* () {
         const ready = yield* Deferred.make<DiscoveredLocalServer>();
         const listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => {
           const expectedUrl = discoveryUrl(lease.url);
+          const responding = servers.find((server) => discoveryUrl(server.url) === expectedUrl);
+          if (responding !== undefined) {
+            observation = "HTTP responded, but ownership did not match the preview terminal.";
+          }
           const match = servers.find((server) => {
             if (discoveryUrl(server.url) !== expectedUrl) return false;
             if (server.terminal === null) return false;
@@ -380,26 +412,16 @@ const make = Effect.gen(function* () {
         yield* discovery.retain;
         const currentTime = yield* nowMillis;
         const remainingLeaseMs = Math.max(0, Date.parse(lease.expiresAt) - currentTime);
-        const timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
+        timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
         if (timeoutMs === 0) return Option.none<DiscoveredLocalServer>();
         return yield* Deferred.await(ready).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
       }),
     );
-    if (Option.isNone(result)) return yield* makeReadinessError(lease);
+    if (Option.isNone(result)) {
+      return yield* failReadiness(lease, `${observation} Readiness deadline: ${timeoutMs} ms.`);
+    }
     return result.value;
   });
-
-  const terminalSummary = (lease: PreviewHostingLease) =>
-    terminals.refreshMetadata.pipe(
-      Effect.andThen(terminals.metadata),
-      Effect.map(
-        (summaries) =>
-          summaries.find(
-            (summary) =>
-              summary.threadId === lease.threadId && summary.terminalId === lease.terminalId,
-          ) ?? null,
-      ),
-    );
 
   const verifyLaunchOwnership = Effect.fn("PreviewHosting.verifyLaunchOwnership")(function* (
     lease: PreviewHostingLease,
@@ -504,7 +526,10 @@ const make = Effect.gen(function* () {
         }
         const readyTerminal = yield* terminalSummary(lease);
         if (readyTerminal?.status !== "running" || !readyTerminal.hasRunningSubprocess) {
-          return yield* makeReadinessError(lease);
+          return yield* failReadiness(
+            lease,
+            "HTTP responded, but the preview command is no longer running.",
+          );
         }
         const handedOffAt = startsHandoff ? completedAt : Date.parse(afterReady.handedOffAt);
         const active = {
@@ -741,12 +766,10 @@ const make = Effect.gen(function* () {
         const ensureReady = ensureLeaseReady(selected.lease.id);
         const started = yield* ensureReady;
         if (started === null) {
-          return yield* new PreviewHostingError({
-            operation: "ready",
-            statePath,
-            threadId: input.threadId,
-            url: selected.lease.url,
-          });
+          return yield* failReadiness(
+            selected.lease,
+            "The preview lease expired before readiness completed.",
+          );
         }
         return started;
       });
