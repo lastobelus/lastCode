@@ -373,6 +373,88 @@ function failFirstExpiredStateWriteLayer(
 
 describe("PreviewHosting", () => {
   it.effect.each([false, true])(
+    "lets other threads launch while shutdown blocks new launches in the stopping thread (%s)",
+    (failClose) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-stop-isolation-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const shutdownStarted = yield* Deferred.make<void>();
+        const finishShutdown = yield* Deferred.make<void>();
+        let shutdownFinished = false;
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture("thread-1", "command-terminal")],
+          failClose,
+          onWaitForThreadShutdown: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(shutdownStarted, undefined);
+              yield* Deferred.await(finishShutdown);
+              shutdownFinished = true;
+            }),
+          onOpen: (input) =>
+            Effect.sync(() => {
+              if (input.threadId === "thread-1") assert.isTrue(shutdownFinished);
+            }),
+        });
+        // Keep path normalization synchronous so the immediately-started launch
+        // reaches reservation ordering before the unrelated launch begins.
+        const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+          ...fs,
+          realPath: (filePath) => Effect.succeed(filePath),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const stopping = yield* hosting
+              .stopThread("thread-1")
+              .pipe(Effect.result, Effect.forkScoped);
+            yield* Deferred.await(shutdownStarted);
+            const sameThread = yield* hosting
+              .launch({
+                threadId: "thread-1",
+                command: "pnpm dev --port 5173",
+                cwd: "/workspace/one",
+                worktreePath: "/workspace/one",
+                url: PREVIEW_URL,
+              })
+              .pipe(Effect.forkScoped({ startImmediately: true }));
+            const other = yield* hosting.launch({
+              threadId: "thread-2",
+              command: "pnpm dev --port 5174",
+              cwd: "/workspace/two",
+              worktreePath: "/workspace/two",
+              url: "http://localhost:5174/",
+            });
+
+            assert.equal(other.status, "active");
+            assert.isFalse(shutdownFinished);
+            assert.isUndefined(stopping.pollUnsafe());
+            assert.deepEqual(yield* hosting.list("thread-1"), []);
+            assert.deepEqual(
+              harness.opens.map((terminal) => terminal.threadId),
+              ["thread-2"],
+            );
+            yield* Deferred.succeed(finishShutdown, undefined);
+            assert.equal((yield* Fiber.join(stopping))._tag, failClose ? "Failure" : "Success");
+            const restarted = yield* Fiber.join(sameThread);
+            assert.equal(restarted.status, "active");
+            assert.deepEqual(yield* hosting.list("thread-1"), [restarted]);
+            assert.deepEqual(yield* hosting.list("thread-2"), [other]);
+            assert.deepEqual(
+              harness.opens.map((terminal) => terminal.threadId),
+              ["thread-2", "thread-1"],
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness, true, [], true, fileSystemLayer))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each([false, true])(
     "waits for thread cleanup before completing even when terminal close fails (%s)",
     (failClose) =>
       Effect.gen(function* () {
@@ -551,9 +633,9 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "stops a preview immediately while recovery is waiting for a server that never becomes ready",
-    () =>
+  it.effect.each(["launch", "recover"] as const)(
+    "stops a preview immediately while %s is waiting for a server that never becomes ready",
+    (operation) =>
       Effect.gen(function* () {
         yield* TestClock.setTime(1_000);
         const fs = yield* FileSystem.FileSystem;
@@ -578,16 +660,33 @@ describe("PreviewHosting", () => {
         yield* Effect.scoped(
           Effect.gen(function* () {
             const hosting = yield* PreviewHosting.PreviewHosting;
-            const pendingRecovery = yield* Effect.forkScoped(
-              hosting.recover({
-                threadId: "thread-1",
-                leaseId: PreviewHostingLeaseId.make(preview.id),
-                url: preview.url,
-              }),
-            );
+            const pending = yield* (
+              operation === "recover"
+                ? hosting.recover({
+                    threadId: "thread-1",
+                    leaseId: PreviewHostingLeaseId.make(preview.id),
+                    url: preview.url,
+                  })
+                : hosting.launch({
+                    threadId: preview.threadId,
+                    command: preview.command,
+                    cwd: preview.cwd,
+                    worktreePath: preview.worktreePath,
+                    url: preview.url,
+                  })
+            ).pipe(Effect.result, Effect.forkScoped);
             yield* Deferred.await(wrote);
             yield* hosting.stopThread("thread-1");
-            assert.isNull(yield* Fiber.join(pendingRecovery));
+            const cancelled = yield* Fiber.join(pending);
+            if (operation === "recover") {
+              assert.equal(cancelled._tag, "Success");
+              if (cancelled._tag === "Success") assert.isNull(cancelled.success);
+            } else {
+              assert.equal(cancelled._tag, "Failure");
+              if (cancelled._tag === "Failure") {
+                assert.equal(cancelled.failure._tag, "PreviewHostingError");
+              }
+            }
             assert.deepEqual(harness.summaries, []);
             assert.deepEqual(yield* hosting.list(), []);
             assert.include(
@@ -1413,6 +1512,79 @@ describe("PreviewHosting", () => {
           }).pipe(Effect.provide(hostingLayer(config, harness))),
         );
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("reserves discovery ports atomically across concurrent thread launches", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-concurrent-reservation-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const reservationStarted = yield* Deferred.make<void>();
+      const finishReservation = yield* Deferred.make<void>();
+      let blockedFirstReservation = false;
+      const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        realPath: (filePath) => Effect.succeed(filePath),
+        writeFileString: (filePath, data, options) =>
+          Effect.suspend(() => {
+            const write = fs.writeFileString(filePath, data, options);
+            if (blockedFirstReservation || !data.includes('"status":"starting"')) return write;
+            blockedFirstReservation = true;
+            return Deferred.succeed(reservationStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(finishReservation)),
+              Effect.andThen(write),
+            );
+          }),
+      });
+      const harness = testTerminalHarness();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const first = yield* hosting
+            .launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace/one",
+              worktreePath: "/workspace/one",
+              url: PREVIEW_URL,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(reservationStarted);
+          // This launch reaches the reservation gate while the first lease's
+          // durable write is blocked, before that lease appears in memory.
+          const second = yield* hosting
+            .launch({
+              threadId: "thread-2",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace/two",
+              worktreePath: "/workspace/two",
+              url: "http://127.0.0.1:5173/another-page",
+            })
+            .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+          yield* Deferred.succeed(finishReservation, undefined);
+
+          const lease = yield* Fiber.join(first);
+          const conflict = yield* Fiber.join(second);
+          assert.equal(lease.status, "active");
+          assert.equal(conflict._tag, "Failure");
+          if (conflict._tag === "Failure") {
+            assert.equal(conflict.failure._tag, "PreviewHostingError");
+            if (conflict.failure._tag === "PreviewHostingError") {
+              assert.equal(conflict.failure.operation, "validate");
+              assert.match(conflict.failure.detail ?? "", /discovery port 5173/);
+            }
+          }
+          assert.deepEqual(yield* hosting.list(), [lease]);
+          assert.equal(harness.opens.length, 1);
+          assert.equal(harness.writes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness, true, [], true, fileSystemLayer))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("reserves a discovery port across threads regardless of path or loopback alias", () =>

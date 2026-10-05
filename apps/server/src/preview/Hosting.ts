@@ -1,3 +1,4 @@
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import {
   PREVIEW_URL_MAX_LENGTH,
@@ -686,6 +687,9 @@ const make = Effect.gen(function* () {
     }
   });
 
+  // Only same-thread reservations wait for terminal cleanup. Readiness stays
+  // outside this lock so cleanup can cancel launches and recoveries immediately.
+  const threadLocks = yield* KeyedLock.make<string>();
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = (requestedInput) =>
     Effect.gen(function* () {
@@ -716,7 +720,7 @@ const make = Effect.gen(function* () {
       );
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
-        const selected = yield* launchGate.withPermit(
+        const reservation = launchGate.withPermit(
           withWorkspaceLease(
             path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
@@ -841,6 +845,7 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
+        const selected = yield* threadLocks.withLock(input.threadId, reservation);
 
         // The durable reservation is visible to cleanup before the workspace lock
         // is released. TerminalManager.open takes the same lock itself, so readiness
@@ -968,10 +973,11 @@ const make = Effect.gen(function* () {
   });
 
   const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
-    launchGate.withPermit(removeThreadLocked(threadId));
+    threadLocks.withLock(threadId, removeThreadLocked(threadId));
 
   const stopThread: PreviewHosting["Service"]["stopThread"] = (threadId) =>
-    launchGate.withPermit(
+    threadLocks.withLock(
+      threadId,
       Effect.gen(function* () {
         const previews = yield* removeThreadLocked(threadId).pipe(Effect.result);
         const shutdown = yield* terminals.shutdownThread(threadId).pipe(Effect.result);
