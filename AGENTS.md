@@ -100,7 +100,7 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
 - The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong.
-- Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
+- User-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Routine automated QA in an isolated development instance is authorized: use a thread-owned background preview with `preview_open({ open: false, reuseExistingTab: false })` and keep the returned tab ID. Do not focus an application, switch the user's thread, or operate their live workspace. Ask before foreground computer use or back-and-forth human QA, according to the machine interaction policy.
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
@@ -125,6 +125,19 @@ Most code changes do not need an internal documentation change. Agents can read 
 - `docs/user/` helps users accomplish tasks. Give each major feature a concise section explaining what it does, how to start, and anything unintuitive. A settings path is useful; descriptions of visible buttons, icons, layouts, animations, or every UI state are not. Before adding text, ask what task or decision it helps the user with.
 - Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
 - `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
+
+## Public repository boundary
+
+Keep deployment-specific infrastructure out of this public repository. Do not
+commit real machine names, private endpoints, host roles, network topology,
+private ports, operator schedules, or paths that identify a maintainer's
+environment. Public automation must expose environment-neutral tools and
+document their contracts with generic examples. Put the concrete wiring and
+deployment policy in the private infrastructure repository that owns it.
+
+Before publishing a LastCode change, inspect the diff, PR body, issue text, and
+review replies for infrastructure details. Test fixtures must use unmistakably
+generic names such as `workstation.example`, `managed-server`, or `build-host`.
 
 ## Plans and work artifacts
 
@@ -159,5 +172,5 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Additional tips
 
-- Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
+- Use background browser QA without a separate permission prompt. Foreground computer use and human acceptance remain subject to the machine interaction policy.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
