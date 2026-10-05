@@ -92,6 +92,7 @@ export interface RepositoryIntegritySnapshot {
   readonly branchConfig: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly commonGitDir: string;
   readonly configPath: string;
+  readonly localBranches: ReadonlySet<string>;
   readonly protectedConfig: string;
 }
 
@@ -537,6 +538,14 @@ function readBranchConfig(
   return config;
 }
 
+function readLocalBranches(repoRoot: string): ReadonlySet<string> {
+  return new Set(
+    runGit(repoRoot, ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])
+      .split("\n")
+      .filter((branch) => branch.length > 0),
+  );
+}
+
 export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegritySnapshot {
   const commonGitDir = resolveCommonGitDir(repoRoot);
   const configPath = NodePath.join(commonGitDir, "config");
@@ -551,6 +560,7 @@ export function captureRepositoryIntegrity(repoRoot: string): RepositoryIntegrit
     branchConfig: readBranchConfig(configEntries),
     commonGitDir,
     configPath,
+    localBranches: readLocalBranches(repoRoot),
     protectedConfig: readProtectedConfig(configEntries),
   };
 }
@@ -580,8 +590,18 @@ export function assertRepositoryIntegrity(
     );
   }
   const branchConfig = readBranchConfig(configEntries);
+  const localBranches = readLocalBranches(repoRoot);
   for (const [key, values] of Object.entries(before.branchConfig)) {
     if (JSON.stringify(branchConfig[key]) !== JSON.stringify(values)) {
+      const branch = key.slice("branch.".length, key.lastIndexOf("."));
+      // Renaming or deleting a sibling branch removes its shared config keys.
+      if (
+        branchConfig[key] === undefined &&
+        before.localBranches.has(branch) &&
+        !localBranches.has(branch)
+      ) {
+        continue;
+      }
       throw new Error(
         `Shared repository integrity changed during local CI: existing branch setting ${key} in ${before.configPath} was modified. Stop and inspect the config before continuing.`,
       );

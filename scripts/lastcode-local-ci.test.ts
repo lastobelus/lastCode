@@ -32,6 +32,33 @@ import {
   writeVerifiedQuickCiReceipt,
 } from "./lastcode-local-ci.ts";
 
+function createIntegrityRepository(): string {
+  const repository = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-branch-test-"),
+  );
+  NodeChildProcess.execFileSync("git", ["init", "--quiet", "--initial-branch", "main"], {
+    cwd: repository,
+  });
+  NodeChildProcess.execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Integrity Test",
+      "-c",
+      "user.email=integrity-test@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "initial commit",
+    ],
+    { cwd: repository },
+  );
+  return repository;
+}
+
 describe("lastcode-local-ci", () => {
   it("formats concise final summaries for resumable output", () => {
     expect(formatLocalCiSummary("full", "abc123")).toBe(
@@ -317,14 +344,10 @@ describe("lastcode-local-ci", () => {
   });
 
   it("rejects changes to branch settings that existed when CI started", () => {
-    const repository = NodeFS.mkdtempSync(
-      NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-existing-branch-test-"),
-    );
-    NodeChildProcess.execFileSync(
-      "git",
-      ["init", "--quiet", "--initial-branch", "lastcode/userland-build"],
-      { cwd: repository },
-    );
+    const repository = createIntegrityRepository();
+    NodeChildProcess.execFileSync("git", ["branch", "lastcode/userland-build"], {
+      cwd: repository,
+    });
     NodeChildProcess.execFileSync(
       "git",
       ["config", "branch.lastcode/userland-build.remote", "origin"],
@@ -340,6 +363,71 @@ describe("lastcode-local-ci", () => {
 
     expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
       "existing branch setting branch.lastcode/userland-build.remote",
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
+  it.each(["rename", "delete"] as const)(
+    "allows sibling branch config removal after a real branch %s",
+    (operation) => {
+      const repository = createIntegrityRepository();
+      const branch = "feature/sibling.v1";
+      NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
+      NodeChildProcess.execFileSync("git", ["config", `branch.${branch}.gh-merge-base`, "main"], {
+        cwd: repository,
+      });
+      NodeChildProcess.execFileSync("git", ["config", `branch.${branch}.remote`, "origin"], {
+        cwd: repository,
+      });
+      const snapshot = captureRepositoryIntegrity(repository);
+
+      NodeChildProcess.execFileSync(
+        "git",
+        operation === "rename"
+          ? ["branch", "-m", branch, "feature/renamed.v1"]
+          : ["branch", "-D", branch],
+        { cwd: repository },
+      );
+
+      expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+      NodeFS.rmSync(repository, { recursive: true, force: true });
+    },
+  );
+
+  it.each(["existing", "orphan"] as const)("rejects removal of an %s branch config key", (kind) => {
+    const repository = createIntegrityRepository();
+    const branch = "feature/protected.v1";
+    if (kind === "existing") {
+      NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
+    }
+    const key = `branch.${branch}.gh-merge-base`;
+    NodeChildProcess.execFileSync("git", ["config", key, "main"], { cwd: repository });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync("git", ["config", "--unset", key], { cwd: repository });
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+      `existing branch setting ${key}`,
+    );
+    NodeFS.rmSync(repository, { recursive: true, force: true });
+  });
+
+  it("rejects changed config values even after their local branch disappears", () => {
+    const repository = createIntegrityRepository();
+    const branch = "feature/removed.v1";
+    const key = `branch.${branch}.gh-merge-base`;
+    NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
+    NodeChildProcess.execFileSync("git", ["config", key, "main"], { cwd: repository });
+    const snapshot = captureRepositoryIntegrity(repository);
+
+    NodeChildProcess.execFileSync("git", ["update-ref", "-d", `refs/heads/${branch}`], {
+      cwd: repository,
+    });
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    NodeChildProcess.execFileSync("git", ["config", key, "other-base"], { cwd: repository });
+
+    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+      `existing branch setting ${key}`,
     );
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
