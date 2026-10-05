@@ -2494,7 +2494,7 @@ it.layer(
       expect(diagnostics.redactionValues).not.toContain("changed-after-spawn");
       expect(diagnostics.redactionValues).not.toContain("server-only");
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
-      expect(JSON.stringify(snapshot)).not.toContain("materialized-private-value");
+      expect(encodeUnknownJson(snapshot)).not.toContain("materialized-private-value");
     }),
   );
 
@@ -2798,7 +2798,7 @@ it.layer(
       });
       expect(afterRestart.redactionValues).toContain("second-secret-arbitrary");
       expect(afterRestart.redactionValues).not.toContain("first-secret-arbitrary");
-      expect(JSON.stringify(restarted)).not.toContain("second-secret-arbitrary");
+      expect(encodeUnknownJson(restarted)).not.toContain("second-secret-arbitrary");
       const logPath = yield* historyLogPath(logsDir);
       expect(yield* readFileString(logPath)).toBe("");
 
