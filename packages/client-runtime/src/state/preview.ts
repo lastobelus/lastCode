@@ -1,6 +1,4 @@
-import { type PreviewHostingLeaseMetadata, WS_METHODS } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
-import * as Stream from "effect/Stream";
+import { WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -11,7 +9,7 @@ import {
   createEnvironmentRpcSubscriptionAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
 } from "./runtime.ts";
-import { getInitialServerConfig, subscribe } from "../rpc/client.ts";
+import { subscribe } from "../rpc/client.ts";
 
 export const previewAutomationHostFocusConcurrencyKey = (value: {
   readonly environmentId: string;
@@ -36,16 +34,14 @@ export function createPreviewEnvironmentAtoms<R, E>(
   return {
     hostingLeases: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:preview:hosting-leases",
-      subscribe: (_input: {}) =>
-        Stream.unwrap(
-          getInitialServerConfig().pipe(
-            Effect.map((config) =>
-              config.environment.capabilities.previewHostingProcessControl === true
-                ? subscribe(WS_METHODS.subscribePreviewHosting, {})
-                : Stream.succeed([] as ReadonlyArray<PreviewHostingLeaseMetadata>),
-            ),
-          ),
-        ),
+      subscribe: (input: {}) =>
+        subscribe(WS_METHODS.subscribePreviewHosting, input, {
+          capability: {
+            supports: (config) =>
+              config.environment.capabilities.previewHostingProcessControl === true,
+            unsupportedValue: [],
+          },
+        }),
     }),
     hostingStopThread: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:hosting-stop-thread",
