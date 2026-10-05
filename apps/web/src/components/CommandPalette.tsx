@@ -64,6 +64,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TextSearchIcon,
+  LayoutDashboardIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -2264,6 +2265,24 @@ function OpenCommandPaletteDialog(props: {
     projectGroups[0] ??
     null;
   if (contextualProjectGroup) {
+    actionItems.push({
+      kind: "action",
+      value: "action:project-dashboard",
+      searchTerms: ["dashboard", "project", "attention", "questions", "reviews", "qa", "progress"],
+      title: "Open project dashboard",
+      description: contextualProjectGroup.displayName,
+      icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({
+          to: "/dashboard",
+          search: {
+            environmentId:
+              contextualProjectRef?.environmentId ?? contextualProjectGroup.environmentId,
+            projectId: contextualProjectRef?.projectId ?? contextualProjectGroup.id,
+          },
+        });
+      },
+    });
     actionItems.push({
       kind: "action",
       value: "action:project-settings",
