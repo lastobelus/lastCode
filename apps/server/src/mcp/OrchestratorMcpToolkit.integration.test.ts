@@ -29,6 +29,8 @@ import {
   ProviderTurnId,
   type ScheduledTask,
   ScheduledTaskId,
+  RunId,
+  RunAttemptId,
   type ScheduledTaskUpsertInput,
   type ServerProvider,
   ThreadId,
@@ -3885,3 +3887,115 @@ describe("orchestrator MCP toolkit", () => {
     ),
   );
 });
+
+it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", () =>
+  Effect.gen(function* () {
+    const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+    const registry = ProviderAdapterRegistry.makeLayer([
+      makeDeterministicAdapter({
+        instanceId: codexInstanceId,
+        driver: ProviderDriverKind.make("codex"),
+        capabilities: CodexProviderCapabilitiesV2,
+        capturedTurns,
+        shouldComplete: () => false,
+        response: () => "unused",
+      }),
+    ]);
+    const orchestratorLayer = makeOrchestratorV2ReplayLayerWithRegistry(
+      { name: "mcp-recovery-json" },
+      registry,
+      { runEffectWorker: false },
+    );
+    const orchestrationLayer = Layer.merge(
+      orchestratorLayer,
+      ThreadManagementService.layer.pipe(Layer.provide(orchestratorLayer)),
+    );
+    const testLayer = McpHttpServer.OrchestratorToolkitRegistrationLive.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(orchestrationLayer),
+      Layer.provide(registry),
+      Layer.provide(
+        makeProviderRegistryLayer([
+          makeProviderSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: codexModel,
+          }),
+        ]),
+      ),
+      Layer.provide(unusedScheduledTaskStubLayer),
+      Layer.provide(NodeServices.layer),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("recovery-json:create"),
+        threadId: parentThreadId,
+        projectId,
+        title: "Recovery evidence",
+        modelSelection: codexSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const server = yield* McpServer.McpServer;
+      const read = Effect.gen(function* () {
+        const result = yield* server
+          .callTool({ name: "t3_thread_read", arguments: { threadId: parentThreadId } })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, {
+              environmentId: EnvironmentId.make("recovery-json-environment"),
+              threadId: parentThreadId,
+              providerSessionId: "recovery-json-session",
+              providerInstanceId: codexInstanceId,
+              capabilities: new Set(["orchestration"]),
+              issuedAt: 1,
+            }),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(result.isError).toBe(false);
+        // The MCP transport validates structuredContent as JSON, after the toolkit returns.
+        const encoded = yield* Schema.encodeEffect(McpSchema.CallToolResult)(result);
+        return yield* decodeThreadReadResult(encoded.structuredContent);
+      });
+      const withoutRecovery = yield* read;
+      expect(withoutRecovery.thread).not.toHaveProperty("recovery");
+      const projection = yield* orchestrator.getThreadProjection(parentThreadId);
+      const updatedAt = DateTime.makeUnsafe("2026-10-05T12:34:56.000Z");
+      yield* (yield* EventSink.EventSinkV2).write({
+        events: [
+          {
+            id: EventId.make("recovery-json:evidence"),
+            type: "thread.metadata-updated",
+            threadId: parentThreadId,
+            occurredAt: updatedAt,
+            payload: {
+              ...projection.thread,
+              recovery: {
+                runId: RunId.make("recovery-run"),
+                attemptId: RunAttemptId.make("recovery-attempt"),
+                status: "failed",
+                detail: "Missing completion",
+                updatedAt,
+                repairThreadId: ThreadId.make("repair-thread"),
+              },
+            },
+          },
+        ],
+      });
+      const decoded = yield* read;
+      expect(decoded.thread.recovery).toEqual({
+        runId: "recovery-run",
+        attemptId: "recovery-attempt",
+        status: "failed",
+        detail: "Missing completion",
+        updatedAt: "2026-10-05T12:34:56.000Z",
+        repairThreadId: "repair-thread",
+      });
+    }).pipe(Effect.provide(testLayer));
+  }),
+);
