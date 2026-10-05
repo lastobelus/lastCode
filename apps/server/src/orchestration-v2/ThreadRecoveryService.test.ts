@@ -15,6 +15,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -258,6 +259,50 @@ it.effect("exhausts deterministic recovery without repeatedly finalizing", () =>
       repairThreadId: ThreadId.make("thread:repair"),
     });
     assert.equal(test.thread.recovery?.repairThreadId, "thread:repair");
+  }).pipe(Effect.provide(test.layer));
+});
+
+it.effect.each(["unknown", "failed", "recovered"] as const)(
+  "preserves the repair conversation when manual recovery returns %s",
+  (outcome) => {
+    const test = harness();
+    test.inspect({ status: "unknown" });
+    return Effect.gen(function* () {
+      const service = yield* test.register;
+      yield* service.reconcile;
+      const repairThreadId = ThreadId.make("thread:existing-repair");
+      yield* service.recordRepairThread({ ...identity, repairThreadId });
+      if (outcome !== "unknown") test.inspect(terminal);
+      if (outcome === "failed") test.failFinalize();
+      const result = yield* Effect.exit(service.recover(identity));
+      assert.equal(Exit.isFailure(result), outcome === "failed");
+      assert.equal(test.thread.recovery?.status, outcome === "recovered" ? "recovered" : "failed");
+      assert.equal(test.thread.recovery?.repairThreadId, repairThreadId);
+      assert.equal(test.finalizations, outcome === "unknown" ? 0 : 1);
+    }).pipe(Effect.provide(test.layer));
+  },
+);
+
+it.effect("does not carry the repair conversation into a superseding incident", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    yield* service.recordRepairThread({
+      ...identity,
+      repairThreadId: ThreadId.make("thread:old-repair"),
+    });
+    test.supersede();
+    const successor = { ...identity, attemptId: RunAttemptId.make("attempt:new") };
+    yield* service.register({
+      ...successor,
+      inspect: Effect.succeed({ status: "unknown" }),
+      finalize: () => Effect.void,
+    });
+    yield* service.reconcile;
+    assert.equal(test.thread.recovery?.attemptId, successor.attemptId);
+    assert.isUndefined(test.thread.recovery?.repairThreadId);
   }).pipe(Effect.provide(test.layer));
 });
 

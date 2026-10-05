@@ -70,6 +70,15 @@ const make = Effect.gen(function* () {
     `${input.threadId}:${input.runId}:${input.attemptId}`;
   const matches = (a: ThreadRecoveryIdentity, b: ThreadRecoveryIdentity) =>
     a.runId === b.runId && a.attemptId === b.attemptId;
+  const repairLink = (
+    input: ThreadRecoveryIdentity,
+    recovery: OrchestrationV2ThreadRecovery | undefined,
+  ) =>
+    recovery?.runId === input.runId &&
+    recovery.attemptId === input.attemptId &&
+    recovery.repairThreadId !== undefined
+      ? { repairThreadId: recovery.repairThreadId }
+      : {};
   const current = Effect.fnUntraced(function* (input: ThreadRecoveryIdentity) {
     const projection = yield* projections.getRuntimeRecoveryProjection(input.threadId);
     const run = projection.runs.find(
@@ -121,6 +130,7 @@ const make = Effect.gen(function* () {
                   status,
                   detail,
                   updatedAt: now,
+                  ...repairLink(input, state.thread.recovery),
                   ...(repairThreadId === undefined ? {} : { repairThreadId }),
                 },
               },
@@ -232,6 +242,7 @@ const make = Effect.gen(function* () {
                   detail:
                     "Recovered the provider's finished turn. Some output may be missing from the conversation; no provider work was repeated.",
                   updatedAt: now,
+                  ...repairLink(input, latest.thread.recovery),
                 },
               },
             });
