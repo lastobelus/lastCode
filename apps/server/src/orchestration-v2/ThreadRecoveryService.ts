@@ -49,12 +49,12 @@ export class ThreadRecoveryService extends Context.Service<
     readonly completed: (input: ThreadRecoveryIdentity) => Effect.Effect<void>;
     readonly recover: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
     readonly reconcile: Effect.Effect<void>;
-    readonly assertRepairable: (
+    readonly withRepairableIncident: <A, E, R>(
       input: ThreadRecoveryIdentity,
-    ) => Effect.Effect<void, ThreadRecoveryError>;
-    readonly recordRepairThread: (
-      input: ThreadRecoveryIdentity & { readonly repairThreadId: ThreadId },
-    ) => Effect.Effect<void, ThreadRecoveryError>;
+      effect: (
+        recordRepairThread: (repairThreadId: ThreadId) => Effect.Effect<void, ThreadRecoveryError>,
+      ) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | ThreadRecoveryError, R>;
   }
 >()("t3/orchestration-v2/ThreadRecoveryService") {}
 
@@ -275,6 +275,52 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+  const assertRepairable = Effect.fnUntraced(
+    function* (input: ThreadRecoveryIdentity) {
+      const state = yield* current(input);
+      const recovery = state?.thread.recovery;
+      if (
+        recovery?.status !== "failed" ||
+        recovery.runId !== input.runId ||
+        recovery.attemptId !== input.attemptId
+      )
+        return yield* new ThreadRecoveryError({
+          threadId: input.threadId,
+          cause: "Recovery incident is no longer current.",
+        });
+      return recovery;
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
+      ),
+  );
+  const recordRepairThread = Effect.fnUntraced(
+    function* (input: ThreadRecoveryIdentity & { readonly repairThreadId: ThreadId }) {
+      const recovery = yield* assertRepairable(input);
+      if (!(yield* write(input, "failed", recovery.detail, input.repairThreadId)))
+        return yield* new ThreadRecoveryError({
+          threadId: input.threadId,
+          cause: "Recovery incident changed during repair launch.",
+        });
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
+      ),
+  );
+  const withRepairableIncident: ThreadRecoveryService["Service"]["withRepairableIncident"] = (
+    input,
+    effect,
+  ) =>
+    lock.withLock(
+      input.threadId,
+      Effect.gen(function* () {
+        yield* assertRepairable(input);
+        // Recovery must wait until launch and linking finish; the callback already owns this lock.
+        return yield* effect((repairThreadId) => recordRepairThread({ ...input, repairThreadId }));
+      }),
+    );
   return ThreadRecoveryService.of({
     register: (input) =>
       Effect.sync(() => {
@@ -320,49 +366,7 @@ const make = Effect.gen(function* () {
         { concurrency: 4, discard: true },
       ),
     ),
-    assertRepairable: (input) =>
-      current(input).pipe(
-        Effect.flatMap((state) => {
-          const recovery = state?.thread.recovery;
-          return recovery?.status === "failed" &&
-            recovery.runId === input.runId &&
-            recovery.attemptId === input.attemptId
-            ? Effect.void
-            : Effect.fail(
-                new ThreadRecoveryError({
-                  threadId: input.threadId,
-                  cause: "Recovery incident is no longer current.",
-                }),
-              );
-        }),
-        Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
-      ),
-    recordRepairThread: (input) =>
-      lock
-        .withLock(
-          input.threadId,
-          Effect.gen(function* () {
-            const state = yield* current(input);
-            const recovery = state?.thread.recovery;
-            if (
-              recovery?.status !== "failed" ||
-              recovery.runId !== input.runId ||
-              recovery.attemptId !== input.attemptId
-            )
-              return yield* new ThreadRecoveryError({
-                threadId: input.threadId,
-                cause: "Recovery incident is no longer current.",
-              });
-            if (!(yield* write(input, "failed", recovery.detail, input.repairThreadId)))
-              return yield* new ThreadRecoveryError({
-                threadId: input.threadId,
-                cause: "Recovery incident changed during repair launch.",
-              });
-          }),
-        )
-        .pipe(
-          Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
-        ),
+    withRepairableIncident,
   });
 });
 export const layer = Layer.effect(ThreadRecoveryService, make);

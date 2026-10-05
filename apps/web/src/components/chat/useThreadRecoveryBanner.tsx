@@ -4,6 +4,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { CircleCheckIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useThreadShell } from "../../state/entities";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -24,6 +25,9 @@ export function useThreadRecoveryBanner({
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const [dismissedKey, setDismissedKey] = useState<string | null>(null);
   const recovery = thread?.recovery;
+  const repairThread = useThreadShell(
+    recovery?.repairThreadId ? { environmentId, threadId: recovery.repairThreadId } : null,
+  );
   const key = `${environmentId}:${thread?.id}:${recovery?.runId}:${recovery?.attemptId}`;
   const mounted = useRef(true);
   useEffect(() => {
@@ -36,7 +40,10 @@ export function useThreadRecoveryBanner({
   useLayoutEffect(() => {
     currentKey.current = key;
   }, [key]);
-  const presentation = presentThreadRecovery(recovery);
+  const presentation = presentThreadRecovery(
+    recovery,
+    repairThread !== null && repairThread.deletedAt === null,
+  );
   if (
     !thread ||
     !recovery ||
@@ -47,15 +54,11 @@ export function useThreadRecoveryBanner({
   const pending = pendingKey === key;
   const runAction = async () => {
     if (pending || presentation.busy) return;
-    if (recovery.repairThreadId) {
-      onOpenThread(recovery.repairThreadId);
-      return;
-    }
     setPendingKey(key);
     setError(null);
     const input = { threadId: thread.id, runId: recovery.runId, attemptId: recovery.attemptId };
     try {
-      if (presentation.action === "launch-repair") {
+      if (presentation.action === "launch-repair" || presentation.action === "view-repair") {
         const result = await repair({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         if (mounted.current && currentKey.current === key) onOpenThread(result.value.threadId);
@@ -102,7 +105,7 @@ export function useThreadRecoveryBanner({
         onClick={() => void runAction()}
       >
         {pending
-          ? presentation.action === "launch-repair"
+          ? presentation.action === "launch-repair" || presentation.action === "view-repair"
             ? "Opening…"
             : recovery.status === "suspect"
               ? "Checking…"

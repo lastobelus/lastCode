@@ -11,7 +11,10 @@ export function recoverySuppressesWorking(
   );
 }
 
-export function presentThreadRecovery(recovery: OrchestrationV2ThreadRecovery | null | undefined) {
+export function presentThreadRecovery(
+  recovery: OrchestrationV2ThreadRecovery | null | undefined,
+  repairThreadAvailable: boolean,
+) {
   if (!recovery) return null;
   const common = {
     description: recovery.detail,
@@ -54,16 +57,23 @@ export function presentThreadRecovery(recovery: OrchestrationV2ThreadRecovery | 
         label: null,
         busy: false,
       } as const;
-    case "failed":
+    case "failed": {
+      const canViewRepairThread = recovery.repairThreadId !== undefined && repairThreadAvailable;
+      const repairDescription = canViewRepairThread
+        ? "Open the repair conversation to see its progress."
+        : recovery.repairThreadId
+          ? "Open a repair conversation to continue investigating this run."
+          : "Open a new repair conversation using this project’s default provider and model.";
       return {
         ...common,
         title: "Couldn't recover this run",
-        description: `${recovery.detail} ${recovery.repairThreadId ? "Open the repair conversation to see its progress." : "Open a new repair conversation using this project’s default provider and model."}`,
+        description: `${recovery.detail} ${repairDescription}`,
         variant: "warning",
-        action: recovery.repairThreadId ? "view-repair" : "launch-repair",
-        label: recovery.repairThreadId ? "View repair thread" : "Open repair thread",
+        action: canViewRepairThread ? "view-repair" : "launch-repair",
+        label: canViewRepairThread ? "View repair thread" : "Open repair thread",
         busy: false,
       } as const;
+    }
   }
 }
 

@@ -60,6 +60,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
@@ -2281,6 +2282,7 @@ it.effect(
       };
       let repairThreadId: ThreadId | undefined;
       const repair = ThreadRecoveryRepair.layer.pipe(
+        Layer.provide(ProjectionStore.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getThreadShell: (id) =>
@@ -2305,11 +2307,12 @@ it.effect(
         ),
         Layer.provide(
           Layer.mock(ThreadRecovery.ThreadRecoveryService)({
-            assertRepairable: () => Effect.void,
-            recordRepairThread: (input) =>
-              Effect.sync(() => {
-                repairThreadId = input.repairThreadId;
-              }),
+            withRepairableIncident: (_input, effect) =>
+              effect((id) =>
+                Effect.sync(() => {
+                  repairThreadId = id;
+                }),
+              ),
           }),
         ),
       );

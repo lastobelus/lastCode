@@ -6,6 +6,7 @@ import {
   RunId,
   ThreadId,
   type ModelSelection,
+  type OrchestrationV2AppThread,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
@@ -78,6 +80,8 @@ function harness(
   };
   const inputs: ThreadLaunch.ThreadLaunchInput[] = [];
   let acceptedRepair: OrchestrationV2ThreadShell | null = null;
+  const deletedRepairs = new Map<ThreadId, OrchestrationV2ThreadShell>();
+  const reopened: ThreadId[] = [];
   const layer = Repair.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -86,6 +90,27 @@ function harness(
             Effect.succeed(
               id === source.id ? source : acceptedRepair?.id === id ? acceptedRepair : null,
             ),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              if (command.type === "thread.unarchive") {
+                reopened.push(command.threadId);
+                if (acceptedRepair?.id === command.threadId)
+                  acceptedRepair = { ...acceptedRepair, archivedAt: null };
+              }
+              return { sequence: 0, storedEvents: [] };
+            }),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: (id, fields) => {
+            const deleted = deletedRepairs.get(id);
+            return deleted === undefined
+              ? Effect.fail(
+                  new ProjectionStore.ProjectionStoreThreadNotFoundError({ threadId: id }),
+                )
+              : Effect.succeed({
+                  thread: deleted as unknown as OrchestrationV2AppThread,
+                } as ProjectionStore.ProjectionRecords<(typeof fields)[number]>);
+          },
         }),
         Layer.mock(ProjectStore.ProjectStoreV2)({
           get: () =>
@@ -111,7 +136,7 @@ function harness(
         Layer.mock(ThreadLaunch.ThreadLaunchService)({
           launch: (input) => {
             inputs.push(input);
-            if (options.persistLaunch)
+            if (options.persistLaunch ?? true)
               acceptedRepair = {
                 ...source,
                 id: input.threadId!,
@@ -148,7 +173,7 @@ function harness(
           },
         }),
         Layer.mock(ThreadRecovery.ThreadRecoveryService)({
-          assertRepairable: () =>
+          withRepairableIncident: (_input, effect) =>
             options.staleAtLaunch
               ? Effect.fail(
                   new ThreadRecovery.ThreadRecoveryError({
@@ -156,29 +181,87 @@ function harness(
                     cause: "new run started",
                   }),
                 )
-              : Effect.void,
-          recordRepairThread: (input) =>
-            options.linkFails
-              ? Effect.fail(
-                  new ThreadRecovery.ThreadRecoveryError({
-                    threadId: input.threadId,
-                    cause: "write failed",
-                  }),
-                )
-              : Effect.sync(() => {
-                  source = {
-                    ...source,
-                    recovery: { ...source.recovery!, repairThreadId: input.repairThreadId },
-                  };
-                }),
+              : effect((repairThreadId) =>
+                  options.linkFails
+                    ? Effect.fail(
+                        new ThreadRecovery.ThreadRecoveryError({
+                          threadId: identity.threadId,
+                          cause: "write failed",
+                        }),
+                      )
+                    : Effect.sync(() => {
+                        source = {
+                          ...source,
+                          recovery: { ...source.recovery!, repairThreadId },
+                        };
+                      }),
+                ),
         }),
       ),
     ),
   );
-  return { layer, inputs };
+  return {
+    layer,
+    inputs,
+    reopened,
+    deleteRepair() {
+      if (acceptedRepair === null) throw new Error("No repair exists");
+      deletedRepairs.set(acceptedRepair.id, { ...acceptedRepair, deletedAt: now });
+      acceptedRepair = null;
+    },
+    archiveRepair() {
+      if (acceptedRepair === null) throw new Error("No repair exists");
+      acceptedRepair = { ...acceptedRepair, archivedAt: now };
+    },
+  };
 }
 
 describe("ThreadRecoveryRepairService", () => {
+  it.effect("replaces deleted linked repair conversations and reuses each replacement", () => {
+    const h = harness();
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      const first = yield* service.launch(identity);
+      h.deleteRepair();
+      const second = yield* service.launch(identity);
+      assert.notEqual(second.threadId, first.threadId);
+      assert.deepEqual(yield* service.launch(identity), second);
+      h.deleteRepair();
+      const third = yield* service.launch(identity);
+      assert.notEqual(third.threadId, first.threadId);
+      assert.notEqual(third.threadId, second.threadId);
+      assert.deepEqual(yield* service.launch(identity), third);
+      assert.lengthOf(h.inputs, 3);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect("skips a tombstoned repair when its original link was never recorded", () => {
+    const h = harness({ linkFails: true, persistLaunch: true });
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      yield* service.launch(identity).pipe(Effect.flip);
+      h.deleteRepair();
+      yield* service.launch(identity).pipe(Effect.flip);
+      yield* service.launch(identity).pipe(Effect.flip);
+      assert.lengthOf(h.inputs, 2);
+      assert.notEqual(h.inputs[0]!.threadId, h.inputs[1]!.threadId);
+    }).pipe(Effect.provide(h.layer));
+  });
+
+  it.effect("reopens an archived repair without launching its agent again", () => {
+    const h = harness();
+    return Effect.gen(function* () {
+      const service = yield* Repair.ThreadRecoveryRepairService;
+      const first = yield* service.launch(identity);
+      h.archiveRepair();
+      assert.deepEqual(yield* service.launch(identity), first);
+      assert.deepEqual(h.reopened, [first.threadId]);
+      assert.deepEqual(yield* service.launch(identity), first);
+      assert.lengthOf(h.reopened, 1);
+      assert.lengthOf(h.inputs, 1);
+    }).pipe(Effect.provide(h.layer));
+  });
+
   it.effect("retries an empty repair shell whose initial message was not accepted", () => {
     const h = harness({ linkFails: true, persistLaunch: true, emptyRepairShell: true });
     return Effect.gen(function* () {
@@ -244,7 +327,7 @@ describe("ThreadRecoveryRepairService", () => {
     },
   );
   it.effect("retries the identical launch when linking its result failed", () => {
-    const h = harness({ linkFails: true });
+    const h = harness({ linkFails: true, persistLaunch: false });
     return Effect.gen(function* () {
       const service = yield* Repair.ThreadRecoveryRepairService;
       yield* service.launch(identity).pipe(Effect.flip);

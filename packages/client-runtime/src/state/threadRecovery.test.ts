@@ -66,12 +66,12 @@ describe("thread recovery presentation", () => {
   it("does not replace working or claim failure for unconfirmed suspicion", () => {
     expect(recoverySuppressesWorking(recovery("suspect"))).toBe(false);
     expect(threadRecoveryStatusLabel(recovery("suspect"))).toBeNull();
-    expect(presentThreadRecovery(recovery("suspect"))?.action).toBe("recover");
-    expect(presentThreadRecovery(undefined)).toBeNull();
+    expect(presentThreadRecovery(recovery("suspect"), false)?.action).toBe("recover");
+    expect(presentThreadRecovery(undefined, false)).toBeNull();
   });
 
   it("prevents another action while deterministic recovery runs", () => {
-    const state = presentThreadRecovery(recovery("recovering"));
+    const state = presentThreadRecovery(recovery("recovering"), false);
     expect(state?.busy).toBe(true);
     expect(state?.action).toBeNull();
     expect(state?.suppressWorking).toBe(true);
@@ -79,19 +79,36 @@ describe("thread recovery presentation", () => {
   });
 
   it("offers agent repair only after deterministic techniques fail, then opens the existing thread", () => {
-    expect(presentThreadRecovery(recovery("stale"))?.action).toBe("recover");
-    expect(presentThreadRecovery(recovery("failed"))?.action).toBe("launch-repair");
+    expect(presentThreadRecovery(recovery("stale"), false)?.action).toBe("recover");
+    expect(presentThreadRecovery(recovery("failed"), false)?.action).toBe("launch-repair");
     expect(
-      presentThreadRecovery({
-        ...recovery("failed"),
-        repairThreadId: ThreadId.make("repair-1"),
-      })?.action,
+      presentThreadRecovery(
+        {
+          ...recovery("failed"),
+          repairThreadId: ThreadId.make("repair-1"),
+        },
+        true,
+      )?.action,
     ).toBe("view-repair");
     expect(threadRecoveryStatusLabel(recovery("failed"))).toBe("Needs repair");
   });
 
+  it("offers to open a repair conversation when its linked shell is missing or deleted", () => {
+    const incident = {
+      ...recovery("failed"),
+      repairThreadId: ThreadId.make("deleted-repair"),
+    };
+    const unavailable = presentThreadRecovery(incident, false);
+    expect(unavailable?.action).toBe("launch-repair");
+    expect(unavailable?.label).toBe("Open repair thread");
+    expect(unavailable?.description).toContain("continue investigating this run");
+    const available = presentThreadRecovery(incident, true);
+    expect(available?.action).toBe("view-repair");
+    expect(available?.label).toBe("View repair thread");
+  });
+
   it("keeps a recovery receipt without an action or a broken-working indicator", () => {
-    expect(presentThreadRecovery(recovery("recovered"))?.action).toBeNull();
+    expect(presentThreadRecovery(recovery("recovered"), false)?.action).toBeNull();
     expect(recoverySuppressesWorking(recovery("recovered"))).toBe(false);
     expect(threadRecoveryStatusLabel(recovery("recovered"))).toBeNull();
   });

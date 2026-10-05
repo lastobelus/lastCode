@@ -56,8 +56,10 @@ function harness() {
   let finalizations = 0;
   let inspection: ProviderAdapterV2TurnInspection = { status: "active" };
   let finalizeFails = false;
+  let beforeInspect = Effect.void;
   let beforeFinalize = Effect.void;
   let afterRecovering = Effect.void;
+  let afterRepairLinked = Effect.void;
   let failedReceiptOutage = false;
   let projectionReads = 0;
   let hasProviderTurn = true;
@@ -113,15 +115,24 @@ function harness() {
                   }
               return { committed, storedEvents: [] };
             }).pipe(
-              Effect.flatMap((result) =>
-                input.events.some(
+              Effect.flatMap((result) => {
+                if (
+                  input.events.some(
+                    (event) =>
+                      event.type === "thread.metadata-updated" &&
+                      event.payload.recovery?.repairThreadId !== undefined &&
+                      event.payload.recovery.status === "failed",
+                  )
+                )
+                  return afterRepairLinked.pipe(Effect.as(result));
+                return input.events.some(
                   (event) =>
                     event.type === "thread.metadata-updated" &&
                     event.payload.recovery?.status === "recovering",
                 )
                   ? afterRecovering.pipe(Effect.as(result))
-                  : Effect.succeed(result),
-              ),
+                  : Effect.succeed(result);
+              }),
             ),
         }),
       ),
@@ -142,8 +153,14 @@ function harness() {
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
     },
+    beforeInspect(effect: Effect.Effect<void>) {
+      beforeInspect = effect;
+    },
     afterRecovering(effect: Effect.Effect<void>) {
       afterRecovering = effect;
+    },
+    afterRepairLinked(effect: Effect.Effect<void>) {
+      afterRepairLinked = effect;
     },
     beforeFinalize(effect: Effect.Effect<void>) {
       beforeFinalize = effect;
@@ -175,7 +192,9 @@ function harness() {
       const service = yield* Recovery.ThreadRecoveryService;
       yield* service.register({
         ...identity,
-        inspect: Effect.sync(() => inspection),
+        inspect: Effect.suspend(() =>
+          beforeInspect.pipe(Effect.andThen(Effect.sync(() => inspection))),
+        ),
         finalize: (_terminal, receipt) =>
           beforeFinalize.pipe(
             Effect.andThen(
@@ -254,10 +273,9 @@ it.effect("exhausts deterministic recovery without repeatedly finalizing", () =>
     yield* service.reconcile;
     assert.equal(test.finalizations, 1);
     assert.equal(test.thread.recovery?.status, "failed");
-    yield* service.recordRepairThread({
-      ...identity,
-      repairThreadId: ThreadId.make("thread:repair"),
-    });
+    yield* service.withRepairableIncident(identity, (recordRepairThread) =>
+      recordRepairThread(ThreadId.make("thread:repair")),
+    );
     assert.equal(test.thread.recovery?.repairThreadId, "thread:repair");
   }).pipe(Effect.provide(test.layer));
 });
@@ -271,7 +289,9 @@ it.effect.each(["unknown", "failed", "recovered"] as const)(
       const service = yield* test.register;
       yield* service.reconcile;
       const repairThreadId = ThreadId.make("thread:existing-repair");
-      yield* service.recordRepairThread({ ...identity, repairThreadId });
+      yield* service.withRepairableIncident(identity, (recordRepairThread) =>
+        recordRepairThread(repairThreadId),
+      );
       if (outcome !== "unknown") test.inspect(terminal);
       if (outcome === "failed") test.failFinalize();
       const result = yield* Effect.exit(service.recover(identity));
@@ -289,10 +309,9 @@ it.effect("does not carry the repair conversation into a superseding incident", 
   return Effect.gen(function* () {
     const service = yield* test.register;
     yield* service.reconcile;
-    yield* service.recordRepairThread({
-      ...identity,
-      repairThreadId: ThreadId.make("thread:old-repair"),
-    });
+    yield* service.withRepairableIncident(identity, (recordRepairThread) =>
+      recordRepairThread(ThreadId.make("thread:old-repair")),
+    );
     test.supersede();
     const successor = { ...identity, attemptId: RunAttemptId.make("attempt:new") };
     yield* service.register({
@@ -301,6 +320,121 @@ it.effect("does not carry the repair conversation into a superseding incident", 
       finalize: () => Effect.void,
     });
     yield* service.reconcile;
+    assert.equal(test.thread.recovery?.attemptId, successor.attemptId);
+    assert.isUndefined(test.thread.recovery?.repairThreadId);
+  }).pipe(Effect.provide(test.layer));
+});
+
+it.effect("does not launch repair when manual recovery takes the incident first", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    const inspecting = yield* Deferred.make<void>();
+    const finishInspection = yield* Deferred.make<void>();
+    const launchStarted = yield* Deferred.make<void>();
+    test.inspect(terminal);
+    test.beforeInspect(
+      Deferred.succeed(inspecting, undefined).pipe(
+        Effect.andThen(Deferred.await(finishInspection)),
+      ),
+    );
+    const recovery = yield* service.recover(identity).pipe(Effect.forkChild);
+    yield* Deferred.await(inspecting);
+    assert.equal(test.thread.recovery?.status, "failed");
+    const repair = yield* service
+      .withRepairableIncident(identity, (recordRepairThread) =>
+        Deferred.succeed(launchStarted, undefined).pipe(
+          Effect.andThen(recordRepairThread(ThreadId.make("thread:late-repair"))),
+        ),
+      )
+      .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+    assert.isFalse(yield* Deferred.isDone(launchStarted));
+    yield* Deferred.succeed(finishInspection, undefined);
+    yield* Fiber.join(recovery);
+    const result = yield* Fiber.join(repair);
+    assert.isTrue(Exit.isFailure(result));
+    assert.isFalse(yield* Deferred.isDone(launchStarted));
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.thread.recovery?.status, "recovered");
+    assert.isUndefined(test.thread.recovery?.repairThreadId);
+  }).pipe(Effect.provide(test.layer));
+});
+
+it.effect("keeps manual recovery waiting until repair launch and linking finish", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    const launchStarted = yield* Deferred.make<void>();
+    const finishLaunch = yield* Deferred.make<void>();
+    const linking = yield* Deferred.make<void>();
+    const finishLink = yield* Deferred.make<void>();
+    const inspecting = yield* Deferred.make<void>();
+    const repairThreadId = ThreadId.make("thread:serialized-repair");
+    test.inspect(terminal);
+    test.beforeInspect(
+      Effect.sync(() => {
+        assert.equal(test.thread.recovery?.repairThreadId, repairThreadId);
+      }).pipe(Effect.andThen(Deferred.succeed(inspecting, undefined))),
+    );
+    test.afterRepairLinked(
+      Deferred.succeed(linking, undefined).pipe(Effect.andThen(Deferred.await(finishLink))),
+    );
+    const repair = yield* service
+      .withRepairableIncident(identity, (recordRepairThread) =>
+        Deferred.succeed(launchStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(finishLaunch)),
+          Effect.andThen(recordRepairThread(repairThreadId)),
+        ),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(launchStarted);
+    const recovery = yield* service
+      .recover(identity)
+      .pipe(Effect.forkChild({ startImmediately: true }));
+    assert.isFalse(yield* Deferred.isDone(inspecting));
+    assert.equal(test.finalizations, 0);
+    yield* Deferred.succeed(finishLaunch, undefined);
+    yield* Deferred.await(linking);
+    assert.isFalse(yield* Deferred.isDone(inspecting));
+    assert.equal(test.thread.recovery?.status, "failed");
+    yield* Deferred.succeed(finishLink, undefined);
+    yield* Fiber.join(repair);
+    yield* Fiber.join(recovery);
+    assert.isTrue(yield* Deferred.isDone(inspecting));
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.thread.recovery?.status, "recovered");
+    assert.equal(test.thread.recovery?.repairThreadId, repairThreadId);
+  }).pipe(Effect.provide(test.layer));
+});
+
+it.effect("rejects a stale repair before launching against a newer failed incident", () => {
+  const test = harness();
+  test.inspect({ status: "unknown" });
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.reconcile;
+    test.supersede();
+    const successor = { ...identity, attemptId: RunAttemptId.make("attempt:new") };
+    yield* service.register({
+      ...successor,
+      inspect: Effect.succeed({ status: "unknown" }),
+      finalize: () => Effect.void,
+    });
+    yield* service.reconcile;
+    let launched = false;
+    const result = yield* Effect.exit(
+      service.withRepairableIncident(identity, () =>
+        Effect.sync(() => {
+          launched = true;
+        }),
+      ),
+    );
+    assert.isTrue(Exit.isFailure(result));
+    assert.isFalse(launched);
     assert.equal(test.thread.recovery?.attemptId, successor.attemptId);
     assert.isUndefined(test.thread.recovery?.repairThreadId);
   }).pipe(Effect.provide(test.layer));
@@ -348,7 +482,7 @@ it.effect("publishes exhaustion even when the initial suspect receipt was never 
     yield* service.reconcile;
     assert.equal(test.finalizations, 0);
     assert.equal(test.thread.recovery?.status, "failed");
-    yield* service.assertRepairable(identity);
+    yield* service.withRepairableIncident(identity, () => Effect.void);
   }).pipe(Effect.provide(test.layer));
 });
 
@@ -415,7 +549,7 @@ it.effect("does not report recovery when the matching provider turn was never sa
     assert.equal(test.finalizations, 0);
     assert.deepEqual(test.statuses, ["failed"]);
     assert.include(test.thread.recovery!.detail, "provider-turn record is missing");
-    yield* service.assertRepairable(identity);
+    yield* service.withRepairableIncident(identity, () => Effect.void);
   }).pipe(Effect.provide(test.layer));
 });
 
@@ -446,7 +580,7 @@ it.effect(
       assert.equal(test.finalizations, 0);
       assert.equal(test.thread.recovery?.status, "failed");
       assert.equal(test.thread.recovery?.attemptId, successor.attemptId);
-      yield* service.assertRepairable(successor);
+      yield* service.withRepairableIncident(successor, () => Effect.void);
     }).pipe(Effect.provide(test.layer));
   },
 );

@@ -320,6 +320,7 @@ const threadRecoveryRepairProvided = ThreadRecoveryRepair.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       threadManagementProvided,
+      projectionStoreLayer,
       ProjectStore.layer,
       threadLaunchProvided,
       threadRecoveryProvided,
