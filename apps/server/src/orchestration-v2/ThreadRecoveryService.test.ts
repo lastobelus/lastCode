@@ -56,6 +56,7 @@ function harness() {
   let inspection: ProviderAdapterV2TurnInspection = { status: "active" };
   let finalizeFails = false;
   let beforeFinalize = Effect.void;
+  let afterRecovering = Effect.void;
   let failedReceiptOutage = false;
   let projectionReads = 0;
   let hasProviderTurn = true;
@@ -110,7 +111,17 @@ function harness() {
                     statuses.push(thread.recovery!.status);
                   }
               return { committed, storedEvents: [] };
-            }),
+            }).pipe(
+              Effect.flatMap((result) =>
+                input.events.some(
+                  (event) =>
+                    event.type === "thread.metadata-updated" &&
+                    event.payload.recovery?.status === "recovering",
+                )
+                  ? afterRecovering.pipe(Effect.as(result))
+                  : Effect.succeed(result),
+              ),
+            ),
         }),
       ),
     ),
@@ -129,6 +140,9 @@ function harness() {
     },
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
+    },
+    afterRecovering(effect: Effect.Effect<void>) {
+      afterRecovering = effect;
     },
     beforeFinalize(effect: Effect.Effect<void>) {
       beforeFinalize = effect;
@@ -331,3 +345,35 @@ it.effect("does not report recovery when the matching provider turn was never sa
     yield* service.assertRepairable(identity);
   }).pipe(Effect.provide(test.layer));
 });
+
+it.effect(
+  "keeps a successor registered when it supersedes recovery before finalization rechecks ownership",
+  () => {
+    const test = harness();
+    test.inspect(terminal);
+    return Effect.gen(function* () {
+      const published = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      test.afterRecovering(
+        Deferred.succeed(published, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const service = yield* test.register;
+      const oldRecovery = yield* service.reconcile.pipe(Effect.forkChild);
+      yield* Deferred.await(published);
+      test.supersede();
+      const successor = { ...identity, attemptId: RunAttemptId.make("attempt:new") };
+      yield* service.register({
+        ...successor,
+        inspect: Effect.succeed({ status: "unknown" }),
+        finalize: () => Effect.void,
+      });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(oldRecovery);
+      yield* service.reconcile;
+      assert.equal(test.finalizations, 0);
+      assert.equal(test.thread.recovery?.status, "failed");
+      assert.equal(test.thread.recovery?.attemptId, successor.attemptId);
+      yield* service.assertRepairable(successor);
+    }).pipe(Effect.provide(test.layer));
+  },
+);

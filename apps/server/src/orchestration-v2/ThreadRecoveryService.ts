@@ -238,7 +238,12 @@ const make = Effect.gen(function* () {
             yield* registered.finalize(inspection.event, events);
           }),
         );
-        registrations.delete(input.threadId);
+        const registeredAfterFinalization = registrations.get(input.threadId);
+        if (
+          registeredAfterFinalization !== undefined &&
+          matches(registeredAfterFinalization, input)
+        )
+          registrations.delete(input.threadId);
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
