@@ -3168,6 +3168,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
+      if (clicked === "annotate") {
+        setAnnotationEditorTarget(thread);
+        return;
+      }
+
       if (clicked === "mark-unread") {
         markThreadUnread(threadRef);
         return;
