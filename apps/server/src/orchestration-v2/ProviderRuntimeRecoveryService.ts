@@ -257,7 +257,10 @@ export const make = Effect.gen(function* () {
         const superseded =
           incidentRun === undefined ||
           projection.runs.some(
-            (run) => run.ordinal > incidentRun.ordinal && run.startedAt !== null,
+            (run) =>
+              run.ordinal > incidentRun.ordinal &&
+              (run.startedAt !== null ||
+                ["preparing", "starting", "running", "waiting"].includes(run.status)),
           );
         const { recovery: _previousRecovery, ...thread } = projection.thread;
         events.push({

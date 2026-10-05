@@ -136,3 +136,75 @@ it.effect(
       assert.equal(after.runs.find((candidate) => candidate.id === run.id)?.status, "running");
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect.each(["waiting", "completed"] as const)(
+  "clears an old recovery receipt before a provider-independent successor becomes %s",
+  (status) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make(`recovery-successor-${status}`);
+      yield* orchestrator.dispatch(
+        create(threadId, ProjectId.make(`recovery-successor-project-${status}`)),
+      );
+      const send = (id: string) => ({
+        type: "message.dispatch" as const,
+        commandId: CommandId.make(id),
+        threadId,
+        messageId: MessageId.make(id),
+        text: id,
+        attachments: [],
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        dispatchMode: { type: "start_immediately" as const },
+      });
+      yield* orchestrator.dispatch(send(`first-${status}`));
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const first = initial.runs[0]!;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`first-ended-${status}`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...first, status: "cancelled", startedAt: now, completedAt: now },
+          },
+          {
+            id: EventId.make(`old-receipt-${status}`),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...initial.thread,
+              recovery: {
+                runId: first.id,
+                attemptId: first.activeAttemptId!,
+                status: "failed",
+                detail: "Old failure",
+                updatedAt: now,
+              },
+            },
+          },
+        ],
+      });
+      // The effect worker is disabled: no adapter or recovery registration runs.
+      yield* orchestrator.dispatch(send(`successor-${status}`));
+      const successor = yield* orchestrator.getThreadProjection(threadId);
+      assert.isUndefined(successor.thread.recovery);
+      const next = successor.runs.at(-1)!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`successor-ended-${status}`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...next, status, startedAt: now },
+          },
+        ],
+      });
+      assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.recovery);
+    }).pipe(Effect.provide(testLayer)),
+);

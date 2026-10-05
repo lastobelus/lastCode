@@ -921,6 +921,14 @@ export const layer: Layer.Layer<
             Option.isSome(recovery) && input.session.inspectTurn !== undefined
               ? recovery.value
               : undefined;
+          const markSuspect =
+            recoveryService
+              ?.suspect(recoveryIdentity)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
+                ),
+              ) ?? Effect.void;
           const consumerStopped = yield* Ref.make(false);
           const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
           const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
@@ -1213,7 +1221,15 @@ export const layer: Layer.Layer<
                   providerThread: yield* Ref.get(latestProviderThread),
                   providerTurnId: turnId,
                 });
-              }),
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ThreadRecoveryService.ThreadRecoveryError({
+                      threadId: input.run.threadId,
+                      cause,
+                    }),
+                ),
+              ),
               finalize: (terminal, receipt) =>
                 Effect.gen(function* () {
                   const terminalEvents = yield* providerEventIngestor.normalize({
@@ -1225,7 +1241,15 @@ export const layer: Layer.Layer<
                     event: terminal,
                   });
                   yield* finalizeRootRun(terminal, [...receipt, ...terminalEvents]);
-                }),
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ThreadRecoveryService.ThreadRecoveryError({
+                        threadId: input.run.threadId,
+                        cause,
+                      }),
+                  ),
+                ),
             });
           }
           const providerEventFiber = yield* eventSubscription.events.pipe(
@@ -1321,7 +1345,7 @@ export const layer: Layer.Layer<
                 const terminal = yield* Ref.get(terminalEvent);
                 if (terminal === null) {
                   yield* Ref.set(consumerStopped, true);
-                  yield* recoveryService?.suspect(recoveryIdentity) ?? Effect.void;
+                  yield* markSuspect;
                   return;
                 }
                 yield* finalizeRootRun(terminal);
@@ -1343,7 +1367,7 @@ export const layer: Layer.Layer<
                               { runId: input.run.id, cause },
                             ).pipe(
                               Effect.andThen(Ref.set(consumerStopped, true)),
-                              Effect.andThen(recoveryService.suspect(recoveryIdentity)),
+                              Effect.andThen(markSuspect),
                             ),
                       ),
                     )

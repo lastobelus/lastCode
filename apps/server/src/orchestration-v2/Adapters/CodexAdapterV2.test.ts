@@ -2082,13 +2082,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       yield* TestClock.adjust("500 millis");
       yield* Fiber.join(interrupt);
       yield* harness.firstTerminal;
-      assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
+      const terminal = harness.terminalEvents()[0];
+      assert.isDefined(terminal);
+      assert.equal(terminal.status, "interrupted");
       assert.deepEqual(
         yield* harness.runtime.inspectTurn!({
           providerThread: harness.providerThread,
           providerTurnId,
         }),
-        { status: "terminal", event: harness.terminalEvents()[0] },
+        { status: "terminal", event: terminal },
       );
       assert.deepEqual(
         yield* harness.runtime.inspectTurn!({

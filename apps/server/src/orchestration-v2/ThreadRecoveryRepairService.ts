@@ -34,6 +34,11 @@ export class ThreadRecoveryRepairService extends Context.Service<
   }
 >()("t3/orchestration-v2/ThreadRecoveryRepairService") {}
 
+const encodeIncidentKey = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String, Schema.String])),
+);
+const isThreadRecoveryRepairError = Schema.is(ThreadRecoveryRepairError);
+
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -68,7 +73,7 @@ const make = Effect.gen(function* () {
             });
           }
           const key = NodeCrypto.createHash("sha256")
-            .update(JSON.stringify([input.threadId, input.runId, input.attemptId]))
+            .update(encodeIncidentKey([input.threadId, input.runId, input.attemptId]))
             .digest("hex");
           const repairThreadId = ThreadId.make(`recovery-${key}`);
           const existing = yield* threads.getThreadShell(repairThreadId);
@@ -141,7 +146,7 @@ const make = Effect.gen(function* () {
       )
       .pipe(
         Effect.mapError((cause) =>
-          cause instanceof ThreadRecoveryRepairError
+          isThreadRecoveryRepairError(cause)
             ? cause
             : new ThreadRecoveryRepairError({
                 detail:

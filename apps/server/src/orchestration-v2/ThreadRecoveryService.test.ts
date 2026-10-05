@@ -11,6 +11,8 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -50,6 +52,7 @@ function harness() {
   let finalizations = 0;
   let inspection: ProviderAdapterV2TurnInspection = { status: "active" };
   let finalizeFails = false;
+  let beforeFinalize = Effect.void;
   let failedReceiptOutage = false;
   let projectionReads = 0;
   const statuses: string[] = [];
@@ -112,6 +115,9 @@ function harness() {
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
     },
+    beforeFinalize(effect: Effect.Effect<void>) {
+      beforeFinalize = effect;
+    },
     failFinalize() {
       finalizeFails = true;
     },
@@ -138,19 +144,28 @@ function harness() {
         ...identity,
         inspect: Effect.sync(() => inspection),
         finalize: (_terminal, receipt) =>
-          Effect.suspend(() => {
-            finalizations++;
-            return finalizeFails
-              ? Effect.fail("write failed")
-              : Effect.sync(() => {
-                  run = { ...run, status: "completed" };
-                  for (const event of receipt)
-                    if (event.type === "thread.metadata-updated") {
-                      thread = event.payload;
-                      statuses.push(thread.recovery!.status);
-                    }
-                });
-          }),
+          beforeFinalize.pipe(
+            Effect.andThen(
+              Effect.suspend(() => {
+                finalizations++;
+                return finalizeFails
+                  ? Effect.fail(
+                      new Recovery.ThreadRecoveryError({
+                        threadId: identity.threadId,
+                        cause: "write failed",
+                      }),
+                    )
+                  : Effect.sync(() => {
+                      run = { ...run, status: "completed" };
+                      for (const event of receipt)
+                        if (event.type === "thread.metadata-updated") {
+                          thread = event.payload;
+                          statuses.push(thread.recovery!.status);
+                        }
+                    });
+              }),
+            ),
+          ),
       });
       return service;
     }),
@@ -258,3 +273,28 @@ it.effect("publishes exhaustion even when the initial suspect receipt was never 
     yield* service.assertRepairable(identity);
   }).pipe(Effect.provide(test.layer));
 });
+
+it.effect(
+  "does not overwrite recovery with a suspect publication queued behind finalization",
+  () => {
+    const test = harness();
+    test.inspect(terminal);
+    return Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      test.beforeFinalize(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const service = yield* test.register;
+      const recovery = yield* service.reconcile.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const suspect = yield* service.suspect(identity).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(recovery);
+      yield* Fiber.join(suspect);
+      assert.deepEqual(test.statuses, ["recovering", "recovered"]);
+      assert.equal(test.thread.recovery?.status, "recovered");
+    }).pipe(Effect.provide(test.layer));
+  },
+);
