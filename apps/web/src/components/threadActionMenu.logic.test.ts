@@ -16,6 +16,7 @@ const baseState: ThreadActionMenuState = {
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
+  hasRunningAction: false,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
@@ -133,6 +134,11 @@ describe("buildThreadActionMenuItems", () => {
       (candidate) => candidate.id === "regenerate-title",
     );
     expect(item).toMatchObject({ label: "Regenerating…", disabled: true });
+  });
+
+  it("offers cancellation only while an Action is running", () => {
+    expect(ids(baseState)).not.toContain("cancel-action");
+    expect(ids({ ...baseState, hasRunningAction: true })).toContain("cancel-action");
   });
 
   it("marks delete as destructive and keeps it last", () => {

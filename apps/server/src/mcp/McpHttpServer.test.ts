@@ -3,7 +3,13 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ActionResumeError,
+  PreviewTabId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -19,6 +25,8 @@ import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { ActionResume } from "../actionResume/ActionResume.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -118,6 +126,111 @@ const callSnapshot = (args: Record<string, unknown>) =>
       );
   });
 
+it.effect("returns the Action service's update drain rejection over MCP", () =>
+  Effect.gen(function* () {
+    let requestedAction: string | undefined;
+    const maintenance = new ActionResumeError({
+      reason: "internal_error",
+      message: "LastCode is draining for an update.",
+    });
+    const layer = McpHttpServer.ActionResumeToolkitRegistrationLive.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(
+        Layer.mock(ActionResume)({
+          runProjectActionAndResume: (_invocation, actionId) => {
+            requestedAction = actionId;
+            return Effect.fail(maintenance);
+          },
+        }),
+      ),
+    );
+
+    const result = yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const listTool = server.tools.find(({ tool }) => tool.name === "list_project_actions");
+      expect(listTool?.tool.inputSchema).toEqual({
+        type: "object",
+        additionalProperties: false,
+      });
+      return yield* server
+        .callTool({ name: "run_project_action_and_resume", arguments: { actionId: "qa" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocation,
+            capabilities: new Set(["action-resume"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    }).pipe(Effect.provide(layer));
+
+    expect(result.isError).toBe(true);
+    expect(requestedAction).toBe("qa");
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining(maintenance.message),
+        }),
+      ]),
+    );
+  }),
+);
+
+it.effect("inspects retained Action output within the credential-scoped thread", () =>
+  Effect.gen(function* () {
+    let inspected:
+      | { readonly threadId: ThreadId; readonly providerInstanceId: ProviderInstanceId }
+      | undefined;
+    let inspectedRunId: string | undefined;
+    const layer = McpHttpServer.ActionResumeToolkitRegistrationLive.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(
+        Layer.mock(ActionResume)({
+          inspectActionRun: (input, runId) =>
+            Effect.sync(() => {
+              inspected = input;
+              inspectedRunId = runId;
+              return {
+                runId,
+                actionName: "QA",
+                lifecycleOutcome: "succeeded" as const,
+                exitCode: 0,
+                exitSignal: null,
+                outputTail: "retained output",
+              };
+            }),
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.mock(UpdateDrainAdmission)({
+          admit: () => Effect.die("read-only inspection must bypass update drain admission"),
+        }),
+      ),
+    );
+
+    const result = yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const inspectTool = server.tools.find(({ tool }) => tool.name === "inspect_action_run");
+      expect(inspectTool).toBeDefined();
+      return yield* server
+        .callTool({ name: "inspect_action_run", arguments: { runId: "run-1" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocation,
+            capabilities: new Set(["action-resume"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    }).pipe(Effect.provide(layer));
+
+    expect(result.isError).toBe(false);
+    expect(inspected).toEqual({
+      threadId,
+      providerInstanceId: invocation.thread.providerInstanceId,
+    });
+    expect(inspectedRunId).toBe("run-1");
+  }),
+);
 it("normalizes empty successful notification responses to accepted", () => {
   const notificationResponse = McpHttpServer.normalizeMcpHttpResponse(
     HttpServerResponse.text("", { status: 200, contentType: "application/json" }),
