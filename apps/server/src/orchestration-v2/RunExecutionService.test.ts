@@ -4833,6 +4833,339 @@ it.effect.each(["node_first", "queued_before_reader", "after_pending_marker"] as
 );
 
 it.effect.each(
+  (["failed", "interrupted", "cancelled"] as const).flatMap((status) => [
+    { status, outcome: "completion_lost" as const },
+    { status, outcome: "queued_completions" as const },
+    { status, outcome: "unknown_probe" as const },
+  ]),
+)("drains retained $status roots after recording fails ($outcome)", ({ status, outcome }) =>
+  Effect.gen(function* () {
+    const key = `recover-retained-terminal:${status}:${outcome}`;
+    const ids = backgroundScenarioIds(key);
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const now = yield* DateTime.now;
+    const parentProvider = makeRecoveryProviderThreadFixture(ids, key);
+    const childProvider = {
+      ...parentProvider,
+      id: ProviderThreadId.make(`${ids.providerThreadId}:child`),
+      appThreadId: ids.childThreadId,
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      forkedFrom: { providerThreadId: parentProvider.id, providerTurnId: ids.rootProviderTurnId },
+    } satisfies OrchestrationV2ProviderThread;
+    const nativeParent = {
+      ...makeRunOwnedSubagentFixture({
+        ids,
+        providerInstanceId,
+        childThreadId: ids.childThreadId,
+        driver,
+        status: "running",
+      }),
+      providerThreadId: childProvider.id,
+    };
+    const parentNode = makeRunOwnedSubagentNodeFixture({ ids, status: "running" });
+    const parentItem = {
+      ...makeRunOwnedSubagentTurnItemFixture({
+        ids: { ...ids, itemId: TurnItemId.make(`${ids.itemId}:subagent`) },
+        providerInstanceId,
+        childThreadId: ids.childThreadId,
+        driver,
+        status: "running",
+      }),
+      providerThreadId: childProvider.id,
+    };
+    const childNode = {
+      ...makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
+      providerThreadId: childProvider.id,
+    };
+    const linkedChildItem = makeLinkedChildTurnItemFixture({
+      ids,
+      driver,
+      type: "command_execution",
+    });
+    if (linkedChildItem.type !== "command_execution")
+      return yield* Effect.die("Expected a native child command");
+    const childItem = { ...linkedChildItem, providerThreadId: childProvider.id };
+    const commandItem = {
+      ...childItem,
+      id: ids.itemId,
+      threadId: ids.threadId,
+      runId: ids.runId,
+      nodeId: ids.rootNodeId,
+      providerThreadId: ids.providerThreadId,
+      providerTurnId: ids.rootProviderTurnId,
+      input: "command",
+    } satisfies Extract<OrchestrationV2TurnItem, { type: "command_execution" }>;
+    const toolItem = {
+      ...commandItem,
+      id: TurnItemId.make(`${ids.itemId}:tool`),
+      type: "dynamic_tool",
+      toolName: "example_tool",
+      input: { value: "work" },
+    } satisfies Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>;
+    const savedHistory = {
+      ...commandItem,
+      id: TurnItemId.make(`${ids.itemId}:saved-history`),
+      status: "completed",
+      completedAt: now,
+      output: "Previously saved output",
+      exitCode: 0,
+    } satisfies OrchestrationV2TurnItem;
+    const savedChildHistory = {
+      ...savedHistory,
+      id: TurnItemId.make(`${ids.childItemId}:saved-history`),
+      threadId: ids.childThreadId,
+      runId: null,
+      nodeId: childNode.id,
+      providerThreadId: childProvider.id,
+      providerTurnId: null,
+    };
+    const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+    const publication = yield* Semaphore.make(1);
+    const probe = yield* Ref.make<"pending" | "unknown" | "drained">(
+      outcome === "unknown_probe" ? "unknown" : "pending",
+    );
+    const commandPersisted = yield* Deferred.make<void>();
+    const firstMarkerConsumed = yield* Deferred.make<void>();
+    const closed = yield* Deferred.make<void>();
+    let firstMarker = true;
+    let subscriptions = 0;
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    const complete = publication.withPermits(1)(
+      Effect.gen(function* () {
+        // Native completion clears the tracker before emitting multiple
+        // node/item updates. The marker uses the same publication permit.
+        yield* Ref.set(probe, "drained");
+        yield* Queue.offerAll(queue, [
+          {
+            type: "node.updated",
+            driver,
+            node: { ...parentNode, status: "completed", completedAt: now },
+          },
+          {
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...commandItem,
+              status: "completed",
+              completedAt: now,
+              output: "Real command output",
+              exitCode: 0,
+            },
+          },
+          {
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...toolItem,
+              status: "completed",
+              completedAt: now,
+              output: "Real tool output",
+            },
+          },
+          {
+            type: "subagent.updated",
+            driver,
+            subagent: {
+              ...nativeParent,
+              status: "completed",
+              completedAt: now,
+              result: "Real child result",
+            },
+          },
+          {
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...parentItem,
+              status: "completed",
+              completedAt: now,
+              result: "Real child result",
+            },
+          },
+          {
+            type: "node.updated",
+            driver,
+            node: { ...childNode, status: "completed", completedAt: now },
+          },
+          {
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...childItem,
+              status: "completed",
+              completedAt: now,
+              output: "Real child output",
+              exitCode: 0,
+            },
+          },
+        ] satisfies ReadonlyArray<ProviderAdapterV2Event>);
+      }),
+    );
+    const terminal = rootTerminalEvent(ids, status);
+    const result = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      // The tool and native child were saved without reaching the failed
+      // reader's tracker or routing state. No child-created event is replayed.
+      persistedBackgroundEvents: [
+        { type: "turn_item.updated", driver, turnItem: toolItem },
+        { type: "turn_item.updated", driver, turnItem: savedHistory },
+        { type: "turn_item.updated", driver, turnItem: savedChildHistory },
+        { type: "provider_thread.updated", driver, providerThread: childProvider },
+        { type: "node.updated", driver, node: childNode },
+        { type: "turn_item.updated", driver, turnItem: childItem },
+      ],
+      onIngested: (event) =>
+        event.type === "turn_item.updated" && event.turnItem.id === commandItem.id
+          ? Deferred.succeed(commandPersisted, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      failRecordingEvent: (event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.id === commandItem.id &&
+        event.turnItem.status === "running",
+      subscribeEvents: Effect.gen(function* () {
+        subscriptions++;
+        if (subscriptions === 1)
+          return {
+            events: Stream.make(
+              { type: "subagent.updated", driver, subagent: nativeParent },
+              { type: "node.updated", driver, node: parentNode },
+              { type: "turn_item.updated", driver, turnItem: parentItem },
+              { type: "turn_item.updated", driver, turnItem: commandItem },
+            ),
+            close: Effect.void,
+          };
+        if (outcome === "queued_completions") yield* complete;
+        return {
+          events: Stream.fromQueue(queue),
+          close: Queue.end(queue).pipe(
+            Effect.andThen(Deferred.succeed(closed, undefined)),
+            Effect.asVoid,
+          ),
+          requestDrain: (barrier) =>
+            publication.withPermits(1)(
+              Effect.gen(function* () {
+                const captured = yield* barrier.observe;
+                const first = firstMarker;
+                firstMarker = false;
+                yield* Queue.offer(queue, {
+                  type: "events.barrier",
+                  driver,
+                  after: barrier
+                    .after(captured)
+                    .pipe(
+                      Effect.andThen(
+                        first ? Deferred.succeed(firstMarkerConsumed, undefined) : Effect.void,
+                      ),
+                      Effect.asVoid,
+                    ),
+                });
+              }),
+            ),
+        } satisfies ProviderAdapterV2EventSubscription;
+      }),
+      hasPendingBackgroundWorkForThread: () =>
+        Ref.get(probe).pipe(
+          Effect.flatMap((state) =>
+            state === "unknown"
+              ? Effect.die("Native probe unavailable")
+              : Effect.succeed(state === "pending"),
+          ),
+        ),
+      inspectTurn: () => Effect.succeed({ status: "terminal", event: terminal }),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        yield* Deferred.await(commandPersisted);
+        const registered = registration;
+        if (registered === undefined) return yield* Effect.die("Recovery was not registered");
+        const inspection = yield* registered.inspect;
+        assert.equal(inspection.status, "terminal");
+        if (inspection.status !== "terminal")
+          return yield* Effect.die("Expected retained terminal");
+        assert.equal(inspection.event.status, status);
+        yield* registered.finalize(inspection.event, [], { runtimeReleased: false });
+        if (outcome !== "queued_completions") {
+          yield* Deferred.await(firstMarkerConsumed);
+          assert.isFalse(yield* Deferred.isDone(closed));
+          if (outcome === "unknown_probe") yield* complete;
+          else
+            yield* publication.withPermits(1)(
+              Ref.set(probe, "drained").pipe(
+                Effect.andThen(
+                  Queue.offer(queue, {
+                    type: "provider_thread.updated",
+                    driver,
+                    providerThread: parentProvider,
+                  }),
+                ),
+              ),
+            );
+        }
+        yield* Deferred.await(closed);
+      }),
+    });
+    const ownedItemIds = new Set([commandItem.id, toolItem.id, parentItem.id, childItem.id]);
+    assert.equal(subscriptions, 2);
+    assert.deepEqual(
+      result.observed.filter((value) => value.startsWith("run:")),
+      [`run:${status}`],
+    );
+    assert.equal(result.effects.length, status === "failed" ? 0 : 1);
+    assert.deepEqual(
+      result.written
+        .filter((item) => ownedItemIds.has(item.id))
+        .map((item) => [item.id, item.status])
+        .sort(),
+      outcome === "completion_lost"
+        ? [...ownedItemIds].map((id) => [id, "interrupted"]).sort()
+        : [],
+    );
+    assert.isFalse(
+      result.written.some(
+        (item) => item.id === savedHistory.id || item.id === savedChildHistory.id,
+      ),
+    );
+    if (outcome !== "completion_lost") {
+      const completions = result.ingested.flatMap((event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.status === "completed" &&
+        ownedItemIds.has(event.turnItem.id)
+          ? [event.turnItem]
+          : [],
+      );
+      assert.deepEqual(
+        completions.map((item) => item.id),
+        [...ownedItemIds],
+      );
+      assert.deepEqual(
+        completions.flatMap((item) =>
+          item.type === "command_execution" || item.type === "dynamic_tool" ? [item.output] : [],
+        ),
+        ["Real command output", "Real tool output", "Real child output"],
+      );
+      assert.isTrue(
+        result.ingested.some(
+          (event) =>
+            event.type === "node.updated" &&
+            event.node.id === childNode.id &&
+            event.node.status === "completed",
+        ),
+      );
+    }
+  }),
+);
+
+it.effect.each(
   (["codex", "claudeAgent"] as const).flatMap((provider) => [
     { provider, lifecycle: "confirmed_release" as const },
     { provider, lifecycle: "stale_subscription" as const },
@@ -4887,11 +5220,18 @@ it.effect.each(
     const childNode = {
       ...makeRunOwnedSubagentChildNodeFixture({ ids, status: "running" }),
       providerThreadId: provider === "codex" ? childProvider.id : null,
-    };
+    } satisfies OrchestrationV2ExecutionNode;
+    const linkedChildItem = makeLinkedChildTurnItemFixture({
+      ids,
+      driver: fixtureDriver,
+      type: "command_execution",
+    });
+    if (linkedChildItem.type !== "command_execution")
+      return yield* Effect.die("Expected a native child command");
     const childItem = {
-      ...makeLinkedChildTurnItemFixture({ ids, driver: fixtureDriver, type: "command_execution" }),
+      ...linkedChildItem,
       providerThreadId: childNode.providerThreadId,
-    };
+    } satisfies Extract<OrchestrationV2TurnItem, { type: "command_execution" }>;
     const terminal = { ...rootTerminalEvent(ids, "completed"), driver: fixtureDriver };
     const initial: ProviderAdapterV2Event[] = (
       [

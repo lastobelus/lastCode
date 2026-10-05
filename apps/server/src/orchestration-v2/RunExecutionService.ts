@@ -1020,7 +1020,7 @@ export const layer: Layer.Layer<
           const drainObserved = yield* Ref.make<ProviderBackgroundWorkObservation | "unobserved">(
             "unobserved",
           );
-          const makeBackgroundSettlement = Effect.gen(function* () {
+          const hydrateBackgroundProjection = Effect.gen(function* () {
             {
               // Reload saved rows: recording can commit an item before its
               // lifecycle tracker fails, and a child can finish or be resumed
@@ -1033,6 +1033,8 @@ export const layer: Layer.Layer<
               let open = emptyOpenRunOwnedSubagentProjection();
               const rootItems = new Map<TurnItemId, OrchestrationV2TurnItem>();
               const parentNodeIds = new Set<NodeId>();
+              const ownedThreadIds = new Set<ThreadId>();
+              const ownedProviderThreadIds = new Set<ProviderThreadId>();
               for (const subagent of source.subagents) {
                 if (
                   subagent.threadId !== input.run.threadId ||
@@ -1048,6 +1050,8 @@ export const layer: Layer.Layer<
                 )
                   continue;
                 parentNodeIds.add(subagent.id);
+                if (subagent.providerThreadId !== null)
+                  ownedProviderThreadIds.add(subagent.providerThreadId);
                 open = withLinkedChildThreadId(open, subagent.childThreadId);
                 if (!isSettledSubagentStatus(subagent.status))
                   open = { ...open, subagents: new Map(open.subagents).set(subagent.id, subagent) };
@@ -1058,6 +1062,12 @@ export const layer: Layer.Layer<
                   if (
                     item.origin !== "provider_native" ||
                     item.providerInstanceId !== input.run.providerInstanceId ||
+                    (item.providerThreadId !== null &&
+                      !source.providerThreads.some(
+                        (thread) =>
+                          thread.id === item.providerThreadId &&
+                          thread.providerSessionId === input.providerSessionId,
+                      )) ||
                     (source.subagents.some((subagent) => subagent.id === item.subagentId) &&
                       !parentNodeIds.has(item.subagentId))
                   )
@@ -1097,6 +1107,7 @@ export const layer: Layer.Layer<
                 const hasIndependentRun = child.runs.some(
                   (run) => run.id !== input.run.id && run.startedAt !== null,
                 );
+                if (!hasIndependentRun) ownedThreadIds.add(childThreadId);
                 const ownedNodeIds = new Set<NodeId>();
                 const ownedProviderThread = (
                   providerThreadId: ProviderThreadId | null | undefined,
@@ -1119,6 +1130,8 @@ export const layer: Layer.Layer<
                       (!hasIndependentRun && node.runId === null))
                   ) {
                     ownedNodeIds.add(node.id);
+                    if (node.providerThreadId !== null)
+                      ownedProviderThreadIds.add(node.providerThreadId);
                     if (isOpenExecutionNodeStatus(node.status))
                       open = { ...open, nodes: new Map(open.nodes).set(node.id, node) };
                   }
@@ -1143,7 +1156,22 @@ export const layer: Layer.Layer<
               }
               yield* Ref.set(openRunOwnedSubagents, open);
               yield* Ref.set(openRootBackgroundTurnItems, rootItems);
+              // A native child can commit before lifecycle tracking fails.
+              // Restore only saved links from this session before consuming
+              // its queued completion events; separately started children
+              // keep their own readers.
+              yield* Ref.update(eventRouting, (state) => ({
+                ...state,
+                ownedThreadIds: new Set([...state.ownedThreadIds, ...ownedThreadIds]),
+                ownedProviderThreadIds: new Set([
+                  ...state.ownedProviderThreadIds,
+                  ...ownedProviderThreadIds,
+                ]),
+              }));
             }
+          });
+          const makeBackgroundSettlement = Effect.gen(function* () {
+            yield* hydrateBackgroundProjection;
             const completedAt = yield* DateTime.now;
             const events = [
               ...(yield* cascadeTerminalizeRunOwnedSubagents({
@@ -1265,6 +1293,9 @@ export const layer: Layer.Layer<
                 return;
               }
               const providerThread = yield* Ref.get(latestProviderThread);
+              const deferBackgroundSettlement =
+                !settleBackground && (yield* Ref.get(recoveredBackgroundDrain));
+              if (deferBackgroundSettlement) yield* hydrateBackgroundProjection;
               const openSubagents = yield* Ref.get(openRunOwnedSubagents);
               yield* writeFinalRunEvents({
                 run: input.run,
@@ -1280,7 +1311,12 @@ export const layer: Layer.Layer<
                   : {
                       hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
                     }),
-                openRunOwnedSubagents: openSubagents,
+                // A retained non-completed root can still own native work.
+                // Record its truthful terminal now, then let the ordered
+                // drain record actual results before settling missing ones.
+                openRunOwnedSubagents: deferBackgroundSettlement
+                  ? emptyOpenRunOwnedSubagentProjection()
+                  : openSubagents,
                 ...(settleBackground
                   ? {
                       backgroundSettlement: yield* makeBackgroundSettlement,
@@ -1305,7 +1341,7 @@ export const layer: Layer.Layer<
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
                 ),
               );
-              if (isRunOwnedSubagentTerminalStatus(terminal.status)) {
+              if (!deferBackgroundSettlement && isRunOwnedSubagentTerminalStatus(terminal.status)) {
                 yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
               }
               if (settleBackground) {
@@ -1460,11 +1496,6 @@ export const layer: Layer.Layer<
             if (!(yield* Ref.get(rootTerminalSeen))) {
               return false;
             }
-            const terminal = yield* Ref.get(terminalEvent);
-            // Non-completed terminals drop background tracking immediately.
-            if (terminal !== null && terminal.status !== "completed") {
-              return true;
-            }
             if (yield* Ref.get(recoveredBackgroundDrain)) {
               const observation = yield* Ref.get(drainObserved);
               // Empty lifecycle refs cannot establish an outcome: a row can
@@ -1498,6 +1529,12 @@ export const layer: Layer.Layer<
                 );
                 return false;
               }
+              return true;
+            }
+            const terminal = yield* Ref.get(terminalEvent);
+            // Ordinary non-completed terminals drop background tracking.
+            // Recovered readers above must first ingest their ordered drain.
+            if (terminal !== null && terminal.status !== "completed") {
               return true;
             }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
@@ -1574,12 +1611,11 @@ export const layer: Layer.Layer<
                 Effect.gen(function* () {
                   // Subscribe before probing/finalizing so work that ends
                   // during recovery is buffered for the retained drain.
-                  const resumedSubscription =
-                    !runtimeReleased && terminal.status === "completed"
-                      ? input.session.subscribeEvents === undefined
-                        ? { events: input.session.events, close: Effect.void }
-                        : yield* input.session.subscribeEvents
-                      : undefined;
+                  const resumedSubscription = !runtimeReleased
+                    ? input.session.subscribeEvents === undefined
+                      ? { events: input.session.events, close: Effect.void }
+                      : yield* input.session.subscribeEvents
+                    : undefined;
                   const terminalEvents = yield* providerEventIngestor
                     .normalize({
                       providerSessionId: input.providerSessionId,
