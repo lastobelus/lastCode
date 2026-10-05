@@ -518,7 +518,8 @@ it.layer(
       Effect.gen(function* () {
         const forceKillSent = yield* Deferred.make<void>();
         const removalStarted = yield* Deferred.make<void>();
-        const releaseRemoval = yield* Deferred.make<void>();
+        const closeStarted = yield* Deferred.make<void>();
+        const releaseClose = yield* Deferred.make<void>();
         const { manager, ptyAdapter } = yield* createManager(5, {
           processKillGraceMs: 0,
           processExitWaitMs: 100,
@@ -531,17 +532,24 @@ it.layer(
         };
         const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
           event.type === "remove"
-            ? Deferred.succeed(removalStarted, undefined).pipe(
-                Effect.andThen(
-                  phase === "metadata-removed" ? Deferred.await(releaseRemoval) : Effect.void,
-                ),
-              )
+            ? Deferred.succeed(removalStarted, undefined).pipe(Effect.asVoid)
             : Effect.void,
         );
         yield* Effect.addFinalizer(() => Effect.sync(unsubscribeMetadata));
+        const unsubscribeEvents = yield* manager.subscribe((event) =>
+          phase === "metadata-removed" && event.type === "closed"
+            ? Deferred.succeed(closeStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseClose)),
+              )
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribeEvents));
         const stopping = yield* manager.shutdownThread("thread-1").pipe(Effect.forkScoped);
         yield* Deferred.await(forceKillSent);
         if (phase === "metadata-removed") {
+          // Close owns the thread lock while delivering this event, so a slow
+          // event consumer pins Stop independently of the exit observers.
+          yield* Deferred.await(closeStarted);
           process.emitExit({ exitCode: 0, signal: 9 });
           yield* Deferred.await(removalStarted);
           expect(yield* manager.metadata).toEqual([]);
@@ -559,7 +567,7 @@ it.layer(
         expect(ptyAdapter.spawnInputs).toHaveLength(1);
 
         if (phase === "awaiting-exit") process.emitExit({ exitCode: 0, signal: 9 });
-        else yield* Deferred.succeed(releaseRemoval, undefined);
+        else yield* Deferred.succeed(releaseClose, undefined);
         yield* Fiber.join(stopping);
         const result = yield* Fiber.join(attaching);
         expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
