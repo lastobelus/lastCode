@@ -6,6 +6,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import * as NodeTimersPromises from "node:timers/promises";
+import * as NodeTimers from "node:timers";
 import {
   DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
   type LastCodeLocalCiSettings,
@@ -546,6 +548,60 @@ export function runGit(repoRoot: string, args: ReadonlyArray<string>): string {
   return runProcess(repoRoot, "git", args, { capture: true });
 }
 
+async function runGitWithCancellation(
+  repoRoot: string,
+  args: ReadonlyArray<string>,
+  signal: AbortSignal,
+): Promise<string> {
+  signal.throwIfAborted();
+  const inheritedEnv = cleanGitEnvironment(process.env);
+  return new Promise((resolve, reject) => {
+    // These read-only guards need a captured Git child, not another CI worker.
+    // Await close even on cancellation so cleanup precedes lease release.
+    const child = NodeChildProcess.spawn("git", [...args], {
+      cwd: repoRoot,
+      env: {
+        ...inheritedEnv,
+        PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let spawnError: Error | undefined;
+    let terminationTimer: ReturnType<typeof NodeTimers.setTimeout> | undefined;
+    const abort = () => {
+      child.kill("SIGTERM");
+      terminationTimer = NodeTimers.setTimeout(() => child.kill("SIGKILL"), 2_000);
+    };
+    child.stdout.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    child.once("close", (code) => {
+      signal.removeEventListener("abort", abort);
+      if (terminationTimer !== undefined) NodeTimers.clearTimeout(terminationTimer);
+      if (signal.aborted) return reject(signal.reason ?? new Error("Local CI cancelled."));
+      if (spawnError) return reject(spawnError);
+      if (code !== 0) {
+        return reject(
+          new Error(
+            `git ${args.join(" ")} failed with exit code ${code ?? "unknown"}.\n${stderr.trim()}`,
+          ),
+        );
+      }
+      resolve(stdout.trim());
+    });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+}
+
 export function resolveRepoRoot(cwd = process.cwd()): string {
   return runGit(cwd, ["rev-parse", "--show-toplevel"]);
 }
@@ -625,17 +681,30 @@ export function prepareLocalCiRepository(cwd = process.cwd()): PreparedLocalCiRe
   return { integrity, repoRoot: resolveRepoRoot(cwd) };
 }
 
-export function assertRepositoryIntegrity(
+export async function assertRepositoryIntegrity(
   repoRoot: string,
   before: RepositoryIntegritySnapshot,
-): void {
-  const coreBare = readCoreBare(repoRoot, before.configPath);
+  signal = new AbortController().signal,
+): Promise<void> {
+  const coreBare = await runGitWithCancellation(
+    repoRoot,
+    ["config", "--file", before.configPath, "--bool", "--get", "core.bare"],
+    signal,
+  );
   if (coreBare !== "false") {
     throw new Error(
       `Shared repository integrity changed during local CI: core.bare=${coreBare || "unset"}. Stop and inspect ${before.configPath}.`,
     );
   }
-  const configEntries = readConfigEntries(repoRoot, before.configPath);
+  const configEntries = (
+    await runGitWithCancellation(
+      repoRoot,
+      ["config", "--file", before.configPath, "--null", "--list"],
+      signal,
+    )
+  )
+    .split("\0")
+    .filter((entry) => entry.length > 0);
   const protectedConfig = readProtectedConfig(configEntries);
   if (protectedConfig !== before.protectedConfig) {
     throw new Error(
@@ -643,7 +712,17 @@ export function assertRepositoryIntegrity(
     );
   }
   const branchConfig = readBranchConfig(configEntries);
-  const localBranches = readLocalBranches(repoRoot);
+  const localBranches = new Set(
+    (
+      await runGitWithCancellation(
+        repoRoot,
+        ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"],
+        signal,
+      )
+    )
+      .split("\n")
+      .filter((branch) => branch.length > 0),
+  );
   for (const [key, values] of Object.entries(before.branchConfig)) {
     if (JSON.stringify(branchConfig[key]) !== JSON.stringify(values)) {
       const branch = key.slice("branch.".length, key.lastIndexOf("."));
@@ -660,7 +739,11 @@ export function assertRepositoryIntegrity(
       );
     }
   }
-  const commonGitDir = resolveCommonGitDir(repoRoot);
+  const commonGitDir = await runGitWithCancellation(
+    repoRoot,
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    signal,
+  );
   if (commonGitDir !== before.commonGitDir) {
     throw new Error(
       `Shared repository integrity changed during local CI: common Git directory moved from ${before.commonGitDir} to ${commonGitDir}.`,
@@ -668,26 +751,44 @@ export function assertRepositoryIntegrity(
   }
 }
 
-export function writeVerifiedFullCiStamp(
+export async function writeVerifiedFullCiStamp(
   repoRoot: string,
   integrity: RepositoryIntegritySnapshot,
   stamp: Omit<FullCiStamp, "schemaVersion">,
-): string {
-  assertRepositoryIntegrity(repoRoot, integrity);
+  signal = new AbortController().signal,
+): Promise<string> {
+  await assertRepositoryIntegrity(repoRoot, integrity, signal);
+  signal.throwIfAborted();
   return writeFullCiStamp(integrity.commonGitDir, stamp);
 }
 
-export function writeVerifiedQuickCiReceipt(
+export async function writeVerifiedQuickCiReceipt(
   repoRoot: string,
   integrity: RepositoryIntegritySnapshot,
   receipt: Omit<QuickCiReceipt, "schemaVersion" | "gateVersion">,
-): string {
-  assertRepositoryIntegrity(repoRoot, integrity);
+  signal = new AbortController().signal,
+): Promise<string> {
+  await assertRepositoryIntegrity(repoRoot, integrity, signal);
+  signal.throwIfAborted();
   return writeQuickCiReceipt(integrity.commonGitDir, receipt);
 }
 
 export function assertCleanWorktree(repoRoot: string): void {
   const status = runGit(repoRoot, ["status", "--porcelain", "--untracked-files=all"]);
+  if (status) {
+    throw new Error(`Working tree must be clean for local CI.\n${status}`);
+  }
+}
+
+async function assertCleanWorktreeWithCancellation(
+  repoRoot: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const status = await runGitWithCancellation(
+    repoRoot,
+    ["status", "--porcelain", "--untracked-files=all"],
+    signal,
+  );
   if (status) {
     throw new Error(`Working tree must be clean for local CI.\n${status}`);
   }
@@ -733,7 +834,7 @@ async function executeLocalCi(
   signal: AbortSignal,
   prePushUpdates?: ReadonlyArray<PrePushUpdate>,
 ): Promise<void> {
-  assertCleanWorktree(repoRoot);
+  await assertCleanWorktreeWithCancellation(repoRoot, signal);
   const commitBefore = runGit(repoRoot, ["rev-parse", "HEAD"]);
   let baseCommit: string | undefined;
   let quickBase: QuickCiBase | undefined;
@@ -786,12 +887,17 @@ async function executeLocalCi(
     }
   }
 
-  const reuseReceipt = () => {
-    assertCleanWorktree(repoRoot);
-    if (runGit(repoRoot, ["rev-parse", "HEAD"]) !== commitBefore) {
+  const reuseReceipt = async () => {
+    signal.throwIfAborted();
+    await assertCleanWorktreeWithCancellation(repoRoot, signal);
+    if ((await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal)) !== commitBefore) {
       throw new Error("HEAD changed before local CI receipt reuse. Run Quick CI again.");
     }
-    if (quickBase && runGit(repoRoot, ["rev-parse", quickBase.remoteRef]) !== baseCommit) {
+    if (
+      quickBase &&
+      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+        baseCommit
+    ) {
       throw new Error("The Quick CI base changed before receipt reuse. Run Quick CI again.");
     }
     if (
@@ -804,6 +910,8 @@ async function executeLocalCi(
         quickBase.remoteRef,
       )
     ) {
+      await assertRepositoryIntegrity(repoRoot, repositoryIntegrity, signal);
+      signal.throwIfAborted();
       console.log(
         `[lastcode:ci] Reusing Quick CI receipt for ${commitBefore} against ${baseCommit}.`,
       );
@@ -818,7 +926,11 @@ async function executeLocalCi(
     }
     return false;
   };
-  if (reuseReceipt()) return;
+  // Git operations above block the event loop. Dispatch a pending signal before
+  // treating a cached receipt as a successful run.
+  await NodeTimersPromises.setImmediate();
+  signal.throwIfAborted();
+  if (await reuseReceipt()) return;
 
   const lease = await acquireLocalCiBudget({
     policy,
@@ -831,20 +943,26 @@ async function executeLocalCi(
   });
   try {
     signal.throwIfAborted();
-    assertCleanWorktree(repoRoot);
-    if (runGit(repoRoot, ["rev-parse", "HEAD"]) !== commitBefore) {
+    await assertCleanWorktreeWithCancellation(repoRoot, signal);
+    if ((await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal)) !== commitBefore) {
       throw new Error("HEAD changed while waiting for local CI capacity. Run Quick CI again.");
     }
-    if (quickBase && runGit(repoRoot, ["rev-parse", quickBase.remoteRef]) !== baseCommit) {
+    if (
+      quickBase &&
+      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+        baseCommit
+    ) {
       throw new Error("The Quick CI base changed while waiting for capacity. Run Quick CI again.");
     }
     // Another invocation may have completed this exact validation while we queued.
-    if (reuseReceipt()) return;
+    if (await reuseReceipt()) return;
     if (policy.backgroundPriority) NodeOS.setPriority(0, NodeOS.constants.priority.PRIORITY_LOW);
     const scope =
       quickBase && baseCommit ? resolveQuickCiScope(repoRoot, baseCommit, commitBefore) : undefined;
     if (scope) console.log(`[lastcode:ci] Typecheck scope: ${scope.kind} (${scope.reason}).`);
     const steps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
+    await NodeTimersPromises.setImmediate();
+    signal.throwIfAborted();
 
     const transferOutputDirectory = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-local-ci-"),
@@ -871,6 +989,7 @@ async function executeLocalCi(
     );
     try {
       for (const [index, step] of steps.entries()) {
+        signal.throwIfAborted();
         console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
         lastCodeAction.progress({
           state: "working",
@@ -932,29 +1051,43 @@ async function executeLocalCi(
       NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
     }
 
-    const commitAfter = runGit(repoRoot, ["rev-parse", "HEAD"]);
+    // Synchronous scope/Git-only runs must also dispatch pending cancellation
+    // before publishing success. Revalidate the checkout after yielding.
+    await NodeTimersPromises.setImmediate();
+    signal.throwIfAborted();
+    const commitAfter = await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal);
     if (commitAfter !== commitBefore) {
       throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
     }
-    assertCleanWorktree(repoRoot);
-    if (quickBase && runGit(repoRoot, ["rev-parse", quickBase.remoteRef]) !== baseCommit) {
+    await assertCleanWorktreeWithCancellation(repoRoot, signal);
+    if (
+      quickBase &&
+      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+        baseCommit
+    ) {
       throw new Error("The Quick CI base changed during validation. Run Quick CI again.");
     }
 
-    // Cleanup is part of validation. Never publish success while a compiler
-    // still owns the slot, including when its launcher has exited early.
-    lease.release();
+    // Verify all owned checks have stopped, but keep capacity until the receipt
+    // is published so a queued invocation can reuse the completed validation.
+    lease.recordChild(undefined);
 
     if (options.mode === "full" && (baseCommit || checkpointContext)) {
-      const stampPath = writeVerifiedFullCiStamp(repoRoot, repositoryIntegrity, {
-        commit: commitBefore,
-        completedAt: new Date().toISOString(),
-        context: checkpointContext ?? {
-          kind: "pull-request",
-          baseCommit: baseCommit!,
-          baseRef: LASTCODE_BASE_BRANCH,
+      const stampPath = await writeVerifiedFullCiStamp(
+        repoRoot,
+        repositoryIntegrity,
+        {
+          commit: commitBefore,
+          completedAt: new Date().toISOString(),
+          context: checkpointContext ?? {
+            kind: "pull-request",
+            baseCommit: baseCommit!,
+            baseRef: LASTCODE_BASE_BRANCH,
+          },
         },
-      });
+        signal,
+      );
+      lease.release();
       console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
       console.log(`[lastcode:ci] Stamp: ${stampPath}`);
       console.log(formatLocalCiSummary("full", commitBefore));
@@ -965,12 +1098,18 @@ async function executeLocalCi(
         facts: { mode: "full" },
       });
     } else if (options.mode === "quick" && baseCommit && quickBase) {
-      const receiptPath = writeVerifiedQuickCiReceipt(repoRoot, repositoryIntegrity, {
-        commit: commitBefore,
-        baseCommit,
-        baseRef: quickBase.remoteRef,
-        completedAt: new Date().toISOString(),
-      });
+      const receiptPath = await writeVerifiedQuickCiReceipt(
+        repoRoot,
+        repositoryIntegrity,
+        {
+          commit: commitBefore,
+          baseCommit,
+          baseRef: quickBase.remoteRef,
+          completedAt: new Date().toISOString(),
+        },
+        signal,
+      );
+      lease.release();
       console.log(`\n[lastcode:ci] Quick local CI passed for ${commitBefore}.`);
       console.log(`[lastcode:ci] Receipt: ${receiptPath}`);
       console.log(formatLocalCiSummary("quick", commitBefore, baseCommit));
@@ -1030,7 +1169,7 @@ async function runLocalCi(options: LocalCiOptions): Promise<void> {
   } finally {
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", interrupt);
-    assertRepositoryIntegrity(repoRoot, repositoryIntegrity);
+    await assertRepositoryIntegrity(repoRoot, repositoryIntegrity);
   }
 }
 
