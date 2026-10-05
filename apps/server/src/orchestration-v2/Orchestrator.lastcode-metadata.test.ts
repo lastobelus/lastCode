@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   OrchestrationV2Command,
+  OrchestrationV2AppThreadJson,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -73,6 +74,7 @@ const create = (threadId: ThreadId, projectId: ProjectId) => ({
 });
 
 const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeStoredThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 
 it.effect(
   "preserves a question through automatic usage recovery and clears it on a user reply",
@@ -681,4 +683,200 @@ it.effect("allows admitted work to update metadata while a turn waits for intake
       assert.equal((yield* Fiber.join(turn))._tag, "Failure");
     }).pipe(Effect.provide(layer));
   }),
+);
+
+const dashboardItem = (id: string) => ({
+  id,
+  title: `Request ${id}`,
+  body: "Choose the next step.",
+  kind: "question" as const,
+  status: "open" as const,
+  priority: "normal" as const,
+  effort: "quick" as const,
+  requiresComputer: false,
+});
+
+it.effect(
+  "persists independent dashboard requests, preserves identity, and exposes them without transcripts",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("dashboard:requests");
+      const created = yield* orchestrator.dispatch(
+        create(threadId, ProjectId.make("dashboard:project")),
+      );
+      const upsert = (
+        suffix: string,
+        item: import("@t3tools/contracts").ThreadDashboardItemInput,
+      ) =>
+        orchestrator.dispatch({
+          type: "thread.dashboard-item.upsert",
+          commandId: CommandId.make(`dashboard:${suffix}`),
+          threadId,
+          item,
+        });
+      const first = yield* upsert("first", dashboardItem("question-1"));
+      const createdAt = (yield* projections.getThread(threadId)).dashboardItems?.[0]?.createdAt;
+      const second = yield* upsert("second", {
+        ...dashboardItem("qa-1"),
+        kind: "qa",
+        requiresComputer: true,
+      });
+      yield* TestClock.adjust("1 second");
+      const result = yield* upsert("resolve-first", {
+        ...dashboardItem("question-1"),
+        status: "resolved",
+        title: "Answered question",
+      });
+      let items = (yield* projections.getThread(threadId)).dashboardItems ?? [];
+      assert.deepEqual(
+        items.map((item) => [item.id, item.status]),
+        [
+          ["question-1", "resolved"],
+          ["qa-1", "open"],
+        ],
+      );
+      assert.equal(items[0]?.createdAt, createdAt);
+      assert.notEqual(items[0]?.updatedAt, createdAt);
+      const shell = yield* projections.getThreadShell(threadId);
+      assert.deepEqual(shell?.dashboardItems, items);
+      const createdEvent = created.storedEvents[0]!.event;
+      assert.ok(createdEvent.type === "thread.created");
+      let replay = ProjectionStore.emptyProjection(createdEvent);
+      for (const storedEvent of [
+        ...first.storedEvents,
+        ...second.storedEvents,
+        ...result.storedEvents,
+      ]) {
+        replay = ProjectionStore.applyToProjection(replay, storedEvent.event);
+      }
+      assert.deepEqual(ProjectionStore.threadShellFromProjection(replay).dashboardItems, items);
+
+      assert.isFalse("messages" in shell!);
+      const stored = result.storedEvents[0];
+      assert.isDefined(stored);
+      const streamItem = shellStreamItemFromThreadShell({ stored, shell });
+      assert.equal(streamItem.kind, "thread.updated");
+      if (streamItem.kind === "thread.updated")
+        assert.deepEqual(streamItem.thread.dashboardItems, items);
+      const rows = yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`;
+      assert.deepEqual((yield* decodeStoredThread(rows[0]!.payload_json)).dashboardItems, items);
+      assert.deepEqual(yield* projections.getSettlementCandidates(threadId), []);
+      assert.equal(
+        (yield* Effect.exit(
+          orchestrator.dispatch({
+            type: "thread.auto-settle",
+            commandId: CommandId.make("dashboard:auto-settle"),
+            threadId,
+            snapshotAt: yield* DateTime.now,
+          }),
+        ))._tag,
+        "Failure",
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("dashboard:settle"),
+        threadId,
+      });
+      assert.deepEqual((yield* projections.getThread(threadId)).dashboardItems, items);
+      yield* upsert("reopen-first", dashboardItem("question-1"));
+      assert.isNull((yield* projections.getThread(threadId)).settledOverride);
+      yield* orchestrator.dispatch({
+        type: "thread.attention.clear",
+        commandId: CommandId.make("dashboard:clear-attention"),
+        threadId,
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("dashboard:send"),
+        threadId,
+        messageId: MessageId.make("dashboard:reply"),
+        text: "Answer to the first question",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "queue_after_active" },
+      });
+      items = (yield* projections.getThread(threadId)).dashboardItems ?? [];
+      assert.deepEqual(
+        items.map((item) => [item.id, item.status]),
+        [
+          ["question-1", "open"],
+          ["qa-1", "open"],
+        ],
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.dashboard-item.remove",
+        commandId: CommandId.make("dashboard:remove-first"),
+        threadId,
+        itemId: "question-1",
+      });
+      assert.deepEqual(
+        (yield* projections.getThread(threadId)).dashboardItems?.map((item) => item.id),
+        ["qa-1"],
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "enforces the per-thread item bound while allowing updates and leaves informational items eligible for settlement",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("dashboard:bounds");
+      yield* orchestrator.dispatch(create(threadId, ProjectId.make("dashboard:bounds-project")));
+      for (let i = 0; i < 32; i++) {
+        yield* orchestrator.dispatch({
+          type: "thread.dashboard-item.upsert",
+          commandId: CommandId.make(`dashboard:bounds:${i}`),
+          threadId,
+          item: { ...dashboardItem(`item-${i}`), kind: "metric" },
+        });
+      }
+      assert.equal((yield* projections.getSettlementCandidates(threadId)).length, 1);
+      assert.equal(
+        (yield* Effect.exit(
+          orchestrator.dispatch({
+            type: "thread.dashboard-item.upsert",
+            commandId: CommandId.make("dashboard:overflow"),
+            threadId,
+            item: dashboardItem("overflow"),
+          }),
+        ))._tag,
+        "Failure",
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.dashboard-item.upsert",
+        commandId: CommandId.make("dashboard:bounds-update"),
+        threadId,
+        item: { ...dashboardItem("item-0"), kind: "summary", title: "Updated summary" },
+      });
+      assert.equal((yield* projections.getThread(threadId)).dashboardItems?.length, 32);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("dashboard:snooze"),
+        threadId,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.dashboard-item.upsert",
+        commandId: CommandId.make("dashboard:actionable-update"),
+        threadId,
+        item: dashboardItem("item-0"),
+      });
+      assert.isNull((yield* projections.getThread(threadId)).snoozedUntil);
+      assert.equal((yield* projections.getSettlementCandidates(threadId)).length, 0);
+      yield* orchestrator.dispatch({
+        type: "thread.dashboard-item.upsert",
+        commandId: CommandId.make("dashboard:resolve-update"),
+        threadId,
+        item: { ...dashboardItem("item-0"), status: "resolved" },
+      });
+      assert.equal((yield* projections.getSettlementCandidates(threadId)).length, 1);
+    }).pipe(Effect.provide(testLayer)),
 );

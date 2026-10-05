@@ -142,6 +142,8 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.annotation.reopen":
     case "thread.attention.set":
     case "thread.attention.clear":
+    case "thread.dashboard-item.upsert":
+    case "thread.dashboard-item.remove":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":

@@ -487,6 +487,42 @@ it.effect("continues an accepted waiting promotion while its source is archived"
 );
 
 it.effect(
+  "preserves source-owned dashboard requests without copying them to the promoted thread",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* seed("completed");
+      for (const kind of ["question", "qa"] as const) {
+        yield* h.orchestrator.dispatch({
+          type: "thread.dashboard-item.upsert",
+          commandId: CommandId.make(`source-dashboard-${kind}`),
+          threadId: sourceId,
+          item: {
+            id: `source-${kind}`,
+            title: `Source ${kind}`,
+            body: "A request owned by the original subagent thread.",
+            kind,
+            status: "open",
+            priority: "normal",
+            effort: "focused",
+            requiresComputer: kind === "qa",
+          },
+        });
+      }
+      const ownedItems = (yield* h.orchestrator.getThreadProjection(sourceId)).thread
+        .dashboardItems;
+      assert.lengthOf(ownedItems ?? [], 2);
+      yield* request(h.orchestrator);
+      yield* h.orchestrator.dispatch(completion(h));
+
+      const source = (yield* h.orchestrator.getThreadProjection(sourceId)).thread;
+      const promoted = (yield* h.orchestrator.getThreadProjection(targetId)).thread;
+      assert.equal(source.subagentPromotion?.status, "promoted");
+      assert.deepEqual(source.dashboardItems, ownedItems);
+      assert.deepEqual(promoted.dashboardItems, []);
+    }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect(
   "creates an interactive native fork and one parent notification despite duplicate completion",
   () =>
     Effect.gen(function* () {
