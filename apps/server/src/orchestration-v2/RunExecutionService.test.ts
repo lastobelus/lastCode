@@ -53,6 +53,7 @@ import {
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
+import * as ThreadRecoveryService from "./ThreadRecoveryService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 
 const driver = ProviderDriverKind.make("codex");
@@ -3389,6 +3390,9 @@ function captureRootRunTermination(input: {
   ) => Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   readonly startTurn?: ProviderAdapterV2SessionRuntime["startTurn"];
   readonly refreshAfterTurn?: Effect.Effect<void>;
+  readonly recovery?: Partial<ThreadRecoveryService.ThreadRecoveryService["Service"]>;
+  readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
+  readonly afterIngestion?: Effect.Effect<void, unknown>;
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -3419,6 +3423,9 @@ function captureRootRunTermination(input: {
     const testLayer = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ...(input.recovery === undefined
+            ? []
+            : [Layer.mock(ThreadRecoveryService.ThreadRecoveryService)(input.recovery)]),
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: (payload) =>
@@ -3439,6 +3446,7 @@ function captureRootRunTermination(input: {
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
             ingestNormalized: () => Effect.succeed([]),
+            normalize: () => Effect.succeed([]),
           }),
           ServerSettings.layerTest(),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
@@ -3460,6 +3468,7 @@ function captureRootRunTermination(input: {
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           events: Stream.empty,
+          ...(input.inspectTurn === undefined ? {} : { inspectTurn: input.inspectTurn }),
           subscribeEvents: Effect.succeed({
             events:
               input.events?.(ids) ??
@@ -3543,6 +3552,7 @@ function captureRootRunTermination(input: {
     }).pipe(Effect.provide(testLayer));
 
     yield* Deferred.await(ingestionDone);
+    yield* input.afterIngestion ?? Effect.void;
     return { written: yield* Ref.get(writtenItems), observed: yield* Ref.get(observed) };
   });
 }
@@ -3836,7 +3846,7 @@ function makeRunOwnedSubagentChildNodeFixture(input: {
 function rootTerminalEvent(
   ids: BackgroundScenarioIds,
   status: "completed" | "interrupted" | "cancelled" | "failed",
-): ProviderAdapterV2Event {
+): Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> {
   const common = {
     type: "turn.terminal" as const,
     driver,
@@ -4015,4 +4025,64 @@ it.effect("releases ingestion after idle subagent rows and items settle", () =>
       "root-finalized",
     ]);
   }),
+);
+
+it.effect(
+  "retains a failed event consumer for confirmed-terminal recovery without starting another turn",
+  () =>
+    Effect.gen(function* () {
+      let registration:
+        | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+        | undefined;
+      let starts = 0;
+      let suspected = false;
+      const ids = backgroundScenarioIds("recover-consumer");
+      const terminal = rootTerminalEvent(ids, "completed");
+      const result = yield* captureRootRunTermination({
+        key: "recover-consumer",
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: () =>
+          Stream.fail(
+            new ProviderAdapterEventStreamError({
+              driver,
+              providerSessionId: ProviderSessionId.make("session:recover-consumer"),
+              cause: "Recording stream failed",
+            }),
+          ),
+        startTurn: () =>
+          Effect.sync(() => {
+            starts++;
+          }),
+        inspectTurn: () => Effect.succeed({ status: "terminal", event: terminal }),
+        recovery: {
+          register: (value) =>
+            Effect.sync(() => {
+              registration = value;
+            }),
+          suspect: () =>
+            Effect.sync(() => {
+              suspected = true;
+            }),
+          completed: () => Effect.void,
+        },
+        afterIngestion: Effect.gen(function* () {
+          assert.isTrue(suspected);
+          assert.isDefined(registration);
+          const inspection = yield* registration!.inspect;
+          assert.equal(inspection.status, "terminal");
+          if (inspection.status === "terminal")
+            yield* registration!.finalize(inspection.event, [
+              {
+                id: EventId.make("recovery:receipt"),
+                type: "thread.metadata-updated",
+                threadId: ids.threadId,
+                occurredAt: yield* DateTime.now,
+                payload: { id: ids.threadId } as OrchestrationV2AppThread,
+              },
+            ]);
+        }),
+      });
+      assert.equal(starts, 1);
+      assert.include(result.observed, "run:waiting");
+    }),
 );

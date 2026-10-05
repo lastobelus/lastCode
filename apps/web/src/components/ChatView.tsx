@@ -1,3 +1,5 @@
+import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
 import {
   parseThreadAnnotationSubmission,
   saveThreadAnnotationSubmission,
@@ -7262,6 +7264,13 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, navigate],
   );
 
+  const threadRecoveryBanner = useThreadRecoveryBanner({
+    thread: activeThreadShell,
+    environmentId,
+    onOpenThread: onOpenRelatedThread,
+  });
+  const suppressStaleWorking = recoverySuppressesWorking(activeThreadShell?.recovery);
+
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
     if (presentation === null || !activeThread) {
@@ -7727,6 +7736,7 @@ export default function ChatView(props: ChatViewProps) {
     threadAnnotationExpanded,
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    const threadRecoveryItems = threadRecoveryBanner === null ? [] : [threadRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = backgroundWorkBannerItem === null ? [] : [backgroundWorkBannerItem];
     const resumeCompactionItems =
@@ -7743,6 +7753,7 @@ export default function ChatView(props: ChatViewProps) {
     const annotationItems = threadAnnotationBannerItem === null ? [] : [threadAnnotationBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...threadRecoveryItems,
         ...feedbackBannerItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
@@ -7758,6 +7769,7 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
+      ...threadRecoveryItems,
       ...feedbackBannerItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
@@ -7814,6 +7826,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell,
     serverRuntime?.usageLimitResetAt,
     feedbackBannerItems,
+    threadRecoveryBanner,
     limitRecoveryBanner,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
@@ -11343,13 +11356,17 @@ export default function ChatView(props: ChatViewProps) {
                       onAnnotationReopen: () => void changeThreadAnnotationResolution("reopen"),
                     }
                   : {})}
-                isWorking={!paintOnlyDisplayedTimeline && isWorking}
-                runlessWorkActive={runlessWorkStartedAt !== null}
+                isWorking={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isWorking}
+                runlessWorkActive={!suppressStaleWorking && runlessWorkStartedAt !== null}
                 activeTurnInProgress={
-                  !paintOnlyDisplayedTimeline && (isWorking || !latestRunSettled)
+                  !paintOnlyDisplayedTimeline &&
+                  !suppressStaleWorking &&
+                  (isWorking || !latestRunSettled)
                 }
-                isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
-                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                isCompacting={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isCompacting}
+                activeTurnStartedAt={
+                  paintOnlyDisplayedTimeline || suppressStaleWorking ? null : activeWorkStartedAt
+                }
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
                 {...(paintOnlyDisplayedTimeline
@@ -11655,6 +11672,7 @@ export default function ChatView(props: ChatViewProps) {
                                 ) : null
                               }
                               bannerItems={composerBannerItems}
+                              suppressStaleActivity={suppressStaleWorking}
                               // With attachments or contexts aboard the pick just inserts the
                               // text, so it sends as a prompt like the typed path would.
                               onUsageLimitsCommand={

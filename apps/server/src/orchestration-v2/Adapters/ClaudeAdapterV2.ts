@@ -3238,8 +3238,25 @@ export function makeClaudeAdapterV2(
         const runtimeContext = yield* Effect.context<never>();
         const runPromise = Effect.runPromiseWith(runtimeContext);
 
+        // Keep terminal evidence independently of event consumers so a failed
+        // persistence reader can reconcile the exact turn. Bound both history
+        // (one terminal per thread) and the number of retained threads.
+        const terminalEvidence = new Map<
+          string,
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
+        >();
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-          Queue.offer(events, event).pipe(Effect.asVoid);
+          Effect.suspend(() => {
+            if (event.type === "turn.terminal") {
+              terminalEvidence.delete(event.providerThreadId);
+              terminalEvidence.set(event.providerThreadId, event);
+              if (terminalEvidence.size > 32) {
+                const oldest = terminalEvidence.keys().next().value;
+                if (oldest !== undefined) terminalEvidence.delete(oldest);
+              }
+            }
+            return Queue.offer(events, event).pipe(Effect.asVoid);
+          });
 
         // Claude emits retry progress but no recovered frame; the next
         // assistant message is the first reliable evidence of recovery.
@@ -7475,6 +7492,18 @@ export function makeClaudeAdapterV2(
           getModelContextWindow: (selection) =>
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          inspectTurn: ({ providerThread, providerTurnId }) =>
+            Effect.gen(function* () {
+              const event = terminalEvidence.get(providerThread.id);
+              if (event?.providerTurnId === providerTurnId) {
+                return { status: "terminal" as const, event };
+              }
+              const turn = yield* Ref.get(activeTurn);
+              const active =
+                turn?.providerTurnId === providerTurnId &&
+                turn.input.providerThread.id === providerThread.id;
+              return { status: active ? ("active" as const) : ("unknown" as const) };
+            }),
           hasPendingBackgroundWork: Effect.gen(function* () {
             // Session capability: any native thread with pending work pins idle.
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {

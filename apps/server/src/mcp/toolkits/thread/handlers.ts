@@ -1,3 +1,5 @@
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -76,6 +78,39 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (
   return { ...context, request, item };
 });
 export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
+  t3_thread_recover: (input) =>
+    Effect.gen(function* () {
+      yield* readWritableThread(input.threadId);
+      const service = yield* ThreadRecovery.ThreadRecoveryService;
+      yield* service
+        .recover(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+      return { ok: true as const };
+    }),
+  t3_thread_repair: (input) =>
+    Effect.gen(function* () {
+      const { caller } = yield* readWritableThread(input.threadId);
+      if (caller.runtimeMode !== "full-access" || caller.interactionMode !== "default") {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "Starting a repair agent requires a live full-access/default thread.",
+        });
+      }
+      const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+      return yield* service
+        .launch(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+    }),
   run_scheduled_task_now: (input) =>
     Effect.gen(function* () {
       const { caller } = yield* readMutationCaller();

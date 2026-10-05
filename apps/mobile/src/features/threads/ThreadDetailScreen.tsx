@@ -1,3 +1,5 @@
+import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import { ThreadRecoveryNotice } from "./ThreadRecoveryNotice";
 import { useAtomValue } from "@effect/atom-react";
 import { useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
@@ -451,6 +453,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const pendingBackgroundWork = presentPendingBackgroundWork(
     props.selectedThread.pendingBackgroundTasks,
   );
+  const suppressStaleWorking = recoverySuppressesWorking(props.selectedThread.recovery);
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
@@ -461,6 +464,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     if (connectionStatus !== null) {
       return connectionStatus;
     }
+    if (suppressStaleWorking) return null;
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
       return null;
     }
@@ -1100,8 +1104,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
               latestRun={props.activityRun}
-              activeWorkStartedAt={props.activeWorkStartedAt}
-              runlessWorkActive={props.runlessWorkActive ?? false}
+              activeWorkStartedAt={suppressStaleWorking ? null : props.activeWorkStartedAt}
+              runlessWorkActive={!suppressStaleWorking && (props.runlessWorkActive ?? false)}
               listRef={listRef}
               freeze={freeze}
               anchorMessageId={anchorMessageId}
@@ -1194,6 +1198,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     />
                   </Animated.View>
                 ) : null}
+                <ThreadRecoveryNotice
+                  key={`${selectedThreadKey}:${props.selectedThread.recovery?.runId}:${props.selectedThread.recovery?.attemptId}`}
+                  thread={props.selectedThread}
+                  environmentId={props.environmentId}
+                />
                 <UsageLimitRecoveryCard
                   key={props.selectedThread.latestRun?.runId}
                   thread={props.selectedThread}

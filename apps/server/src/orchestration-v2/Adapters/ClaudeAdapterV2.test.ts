@@ -24,6 +24,7 @@ import {
   type ProviderApprovalDecision,
   ProviderSessionId,
   ProviderTurnId,
+  ProviderThreadId,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -2208,6 +2209,51 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("retains exact terminal evidence independently of drained event delivery", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("inspect-turn"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      const providerTurnId = (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+        driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+        nativeTurnId: "turn:inspect-turn",
+      });
+      const input = { providerThread: harness.providerThread, providerTurnId };
+      assert.deepEqual(yield* harness.runtime.inspectTurn!(input), { status: "active" });
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000605",
+          result: "Done.",
+        }),
+      );
+      const event = yield* Queue.take(harness.terminalReceipts);
+      assert.deepEqual(yield* harness.runtime.inspectTurn!(input), { status: "terminal", event });
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          ...input,
+          providerTurnId: ProviderTurnId.make("unknown-turn"),
+        }),
+        { status: "unknown" },
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          ...input,
+          providerThread: { ...input.providerThread, id: ProviderThreadId.make("another-thread") },
+        }),
+        { status: "unknown" },
+      );
+    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },

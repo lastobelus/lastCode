@@ -483,6 +483,14 @@ export interface ProviderAdapterV2HistoricalContext {
   readonly context: string;
 }
 
+export type ProviderAdapterV2TurnInspection =
+  | { readonly status: "active" }
+  | {
+      readonly status: "terminal";
+      readonly event: Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
+    }
+  | { readonly status: "unknown" };
+
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
@@ -495,6 +503,11 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Exact-turn evidence only: missing local state never proves a turn has ended. */
+  readonly inspectTurn?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly providerTurnId: ProviderTurnId;
+  }) => Effect.Effect<ProviderAdapterV2TurnInspection, ProviderAdapterV2Error>;
   /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it

@@ -1,3 +1,6 @@
+import { ThreadRecoveryInput, ThreadRecoveryResult, ThreadRepairResult } from "@t3tools/contracts";
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   ScheduledTaskId,
   ScheduledTask,
@@ -281,7 +284,27 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadRecoverTool = Tool.make("t3_thread_recover", {
+  ...commandTool,
+  description:
+    "Check and reconcile a detected stale run using bounded deterministic recovery. Requires exact incident IDs from t3_thread_read. Does not restart completed work or launch an agent.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRecoveryResult,
+  dependencies: [...commandTool.dependencies, ThreadRecovery.ThreadRecoveryService],
+}).annotate(Tool.Destructive, true);
+const ThreadRepairTool = Tool.make("t3_thread_repair", {
+  ...commandTool,
+  description:
+    "Only after explicit user authorization: open an ordinary repair-agent thread for an incident whose deterministic recovery failed. Uses project default provider/model. Repeated calls return the same repair thread; never use automatically.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRepairResult,
+  dependencies: [...commandTool.dependencies, ThreadRecoveryRepair.ThreadRecoveryRepairService],
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 export const ThreadToolkit = Toolkit.make(
+  ThreadRecoverTool,
+  ThreadRepairTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,

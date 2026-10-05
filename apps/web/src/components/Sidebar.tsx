@@ -1177,6 +1177,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       };
     if (status === "cleanup-failed")
       return { label: "Cleanup failed", icon: "failed" as const, className: "text-error" };
+    if (status === "not-responding" || status === "needs-repair")
+      return {
+        label: status === "needs-repair" ? "Needs repair" : "Not responding",
+        icon: "failed" as const,
+        className: "text-warning",
+      };
     if (status === "approval")
       return { label: "Approval", icon: "approval" as const, className: "text-warning" };
     if (status === "input")
@@ -1216,7 +1222,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     !thread.hasPendingUserInput &&
     thread.attention?.kind !== "question" &&
     thread.pendingBackgroundTasks.length === 0 &&
-    cleanup === null;
+    cleanup === null &&
+    status !== "not-responding" &&
+    status !== "needs-repair";
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({

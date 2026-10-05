@@ -3381,3 +3381,88 @@ it.effect("publishes live events in commit order across concurrent writers", () 
     }).pipe(Effect.provide(eventSinkLayer));
   }).pipe(Effect.provide(databaseLayer)),
 );
+
+it.effect("commits recovery checkpoint effects only with the exact running attempt", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-effects");
+    const runId = RunId.make("run:recovery-effects");
+    const attemptId = RunAttemptId.make("attempt:recovery-effects");
+    const commandId = CommandId.make("command:recovery-effects");
+    const run: OrchestrationV2Run = {
+      id: runId,
+      threadId,
+      ordinal: 1,
+      providerInstanceId,
+      modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make("message:recovery-effects"),
+      rootNodeId: null,
+      activeAttemptId: attemptId,
+      status: "running",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:recovery-effects:thread",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+        {
+          id: EventId.make("event:recovery-effects:run"),
+          type: "run.created",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: run,
+        },
+      ],
+    });
+    const input = {
+      threadId,
+      runId,
+      activeAttemptId: attemptId,
+      expectedStatus: "running" as const,
+      events: [
+        {
+          id: EventId.make("event:recovery-effects:complete"),
+          type: "run.updated" as const,
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...run, status: "waiting" as const },
+        },
+      ],
+      effects: [
+        {
+          id: "effect:recovery-checkpoint",
+          commandId,
+          threadId,
+          request: {
+            type: "checkpoint.capture" as const,
+            runId,
+            scopeId: CheckpointScopeId.make("scope:recovery"),
+          },
+        },
+      ],
+    };
+    assert.isFalse(
+      (yield* sink.writeIfRunCurrent({
+        ...input,
+        activeAttemptId: RunAttemptId.make("attempt:obsolete"),
+      })).committed,
+    );
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 0);
+    assert.isTrue((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+    assert.isFalse((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+  }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+);
