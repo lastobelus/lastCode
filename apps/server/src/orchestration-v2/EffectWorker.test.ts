@@ -29,6 +29,7 @@ import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
@@ -84,6 +85,7 @@ function makeExecutorLayer(input: {
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const dependencies = Layer.mergeAll(
+    Layer.mock(SubagentPromotionService.SubagentPromotionService)({ execute: () => Effect.void }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({

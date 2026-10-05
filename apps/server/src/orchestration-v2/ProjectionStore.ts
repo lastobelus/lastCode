@@ -141,6 +141,7 @@ export const ProjectionStoreV2Error = Schema.Union([
 export type ProjectionStoreV2Error = typeof ProjectionStoreV2Error.Type;
 
 export type ProjectionRecoveryKind =
+  | "subagent-promotions"
   | "queued-runs"
   | "runtime"
   | "subagent-results"
@@ -512,6 +513,8 @@ function needsRecovery(
 ): boolean {
   if (projection.thread.deletedAt !== null) return false;
   switch (kind) {
+    case "subagent-promotions":
+      return projection.thread.subagentPromotion?.status === "waiting";
     case "queued-runs":
       return (
         projection.thread.archivedAt === null &&
@@ -1450,6 +1453,7 @@ export function threadShellFromProjection(
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     lastVisitedAt: projection.thread.lastVisitedAt,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
+    subagentPromotion: projection.thread.subagentPromotion ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
     deletedAt: projection.thread.deletedAt,
   };
@@ -1679,6 +1683,7 @@ function shellFromState(input: {
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     lastVisitedAt: input.state.thread.lastVisitedAt,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
+    subagentPromotion: input.state.thread.subagentPromotion ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
     deletedAt: input.state.thread.deletedAt,
   };
@@ -3437,6 +3442,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
           switch (kind) {
+            case "subagent-promotions":
+              return sql`
+                SELECT thread_id FROM orchestration_v2_projection_threads
+                WHERE CASE WHEN json_valid(payload_json) THEN
+                  json_extract(payload_json, '$.subagentPromotion.status') = 'waiting'
+                  AND json_extract(payload_json, '$.deletedAt') IS NULL
+                  ELSE 0 END
+              `;
             case "queued-runs":
               return sql`
                 SELECT thread_id FROM orchestration_v2_projection_runs

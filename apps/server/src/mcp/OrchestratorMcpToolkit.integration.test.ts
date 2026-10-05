@@ -702,6 +702,21 @@ describe("orchestrator MCP toolkit", () => {
             yield* invoke("t3_thread_organize", { action: "unpin" });
             expect((yield* orchestrator.getThreadShell(parentThreadId))?.pinnedAt).toBeNull();
 
+            const noPromotion = yield* invoke("t3_subagent_promotion_status", {
+              threadId: parentThreadId,
+            });
+            expect(noPromotion.structuredContent).toEqual({ promotion: null });
+            const ordinaryThreadPromotion = yield* invoke("t3_subagent_promote", {
+              threadId: parentThreadId,
+            });
+            expect(ordinaryThreadPromotion.structuredContent).toMatchObject({
+              code: "orchestration_error",
+            });
+            expect(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).thread.subagentPromotion ??
+                null,
+            ).toBeNull();
+
             if (parentRun === undefined || parentRun.rootNodeId === null) {
               return yield* Effect.die(new Error("Parent run missing."));
             }
@@ -2334,6 +2349,22 @@ describe("orchestrator MCP toolkit", () => {
               code: "thread_not_found",
             });
             expect((yield* orchestrator.getThreadShell(foreignThreadId))?.pinnedAt).toBeNull();
+
+            for (const tool of [
+              "t3_subagent_promote",
+              "t3_subagent_promotion_status",
+              "t3_subagent_promotion_cancel",
+            ]) {
+              const foreignPromotion = yield* invoke(tool, {
+                threadId: foreignThreadId,
+                ...(tool === "t3_subagent_promotion_cancel"
+                  ? { requestId: "foreign-promotion" }
+                  : {}),
+              });
+              expect(foreignPromotion.structuredContent).toMatchObject({
+                code: "thread_not_found",
+              });
+            }
 
             const foreignReadCall = yield* invoke("t3_thread_read", {
               threadId: foreignThreadId,

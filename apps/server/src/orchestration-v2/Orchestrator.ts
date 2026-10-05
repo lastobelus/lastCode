@@ -19,6 +19,7 @@ import {
   CommandId,
   isProviderNativeSubagentThread,
   MessageId,
+  TurnItemId,
   type ModelSelection,
   OrchestrationV2Command,
   type OrchestrationV2InternalCommand,
@@ -426,6 +427,11 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
     case "provider.switch":
+    case "subagent.promote.request":
+    case "subagent.promote.cancel":
+    case "subagent.promote.advance":
+    case "subagent.promote.complete":
+    case "subagent.promote.fail":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -3554,6 +3560,351 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       } satisfies PendingOrchestrationEffectV2;
       yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
+    },
+  );
+
+  // Native children cannot accept app messages. Nested promotions notify the
+  // nearest interactive ancestor, which can relay instructions through its provider.
+  const promotionNotificationParent = (parentId: ThreadId | null) =>
+    Effect.gen(function* () {
+      const seen = new Set<ThreadId>();
+      while (parentId !== null && !seen.has(parentId)) {
+        seen.add(parentId);
+        const parent = yield* projectionStore.getThreadShell(parentId);
+        if (parent === null || parent.deletedAt !== null) return null;
+        if (!isProviderNativeSubagentThread(parent)) return parent;
+        parentId = parent.lineage.parentThreadId;
+      }
+      return null;
+    });
+
+  const dispatchSubagentPromotion = Effect.fn("orchestrationV2.dispatch.subagentPromotion")(
+    function* (
+      command: Extract<
+        OrchestrationV2ServerCommand,
+        { readonly type: `subagent.promote.${string}` }
+      >,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["providerThreads", "providerTurns", "nodes"])
+        .pipe(mapDispatchError(command));
+      const source = projection.thread;
+      const now = yield* DateTime.now;
+      const emitEvent = emit(events, command);
+      const update = (subagentPromotion: OrchestrationV2AppThread["subagentPromotion"]) =>
+        emitEvent({
+          type: "thread.metadata-updated",
+          threadId: source.id,
+          occurredAt: now,
+          payload: { ...source, subagentPromotion, updatedAt: now },
+        });
+      const previous = source.subagentPromotion;
+      if (command.type === "subagent.promote.cancel") {
+        if (previous?.requestId !== command.requestId || previous.status !== "waiting") {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Only a waiting promotion can be cancelled.",
+          });
+        }
+        return yield* update(null);
+      }
+      // Late effect results and duplicate requests cannot create a second app thread.
+      if (
+        command.type !== "subagent.promote.request" &&
+        (previous?.requestId !== command.requestId ||
+          source.deletedAt !== null ||
+          (command.type === "subagent.promote.advance"
+            ? previous.status !== "waiting"
+            : previous.status !== "forking"))
+      ) {
+        return yield* update(previous);
+      }
+      if (command.type === "subagent.promote.fail") {
+        return yield* update({
+          ...previous!,
+          status: "failed",
+          error: command.error,
+          updatedAt: now,
+        });
+      }
+      if (command.type === "subagent.promote.complete") {
+        const promotion = previous!;
+        const targetId = promotion.targetThreadId;
+        if (
+          command.providerThread.appThreadId !== targetId ||
+          command.providerThread.nativeThreadRef?.strength !== "strong"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The provider did not return a native fork for the requested destination.",
+          });
+        }
+        const existingTarget = yield* projectionStore
+          .getThreadShell(targetId)
+          .pipe(mapDispatchError(command));
+        if (existingTarget !== null) {
+          return yield* update({
+            ...promotion,
+            status: "failed",
+            error:
+              "The destination thread already exists. Cancelled promotion to avoid replacing it.",
+            updatedAt: now,
+          });
+        }
+        const target: OrchestrationV2AppThread = {
+          ...source,
+          id: targetId,
+          title: promotion.title ?? `${source.title} — interactive`,
+          createdBy: promotion.createdBy,
+          creationSource: promotion.creationSource,
+          activeProviderThreadId: command.providerThread.id,
+          subagentPromotion: null,
+          lineage: {
+            parentThreadId: source.id,
+            relationshipToParent: "fork",
+            rootThreadId: source.lineage.rootThreadId,
+          },
+          forkedFrom: {
+            type: "provider_thread",
+            providerThreadId:
+              projection.providerThreads.find(
+                (thread) => thread.id === source.activeProviderThreadId,
+              )?.id ?? command.providerThread.forkedFrom!.providerThreadId,
+            ...(promotion.sourceProviderTurnId === undefined
+              ? {}
+              : { providerTurnId: promotion.sourceProviderTurnId }),
+          },
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          deletedAt: null,
+          settledAt: null,
+          settledOverride: null,
+          unsettledAt: null,
+          snoozedAt: null,
+          snoozedUntil: null,
+          lastVisitedAt: null,
+          persistent: false,
+          annotation: null,
+          attention: null,
+          actionResume: null,
+          worktreeCleanup: null,
+          pinnedAt: null,
+          pinOrderKey: null,
+          activeOrderKey: null,
+          limitRecovery: null,
+          titleRegeneration: null,
+          rollbackFailure: null,
+        };
+        yield* emitEvent({
+          type: "thread.created",
+          threadId: targetId,
+          occurredAt: now,
+          payload: target,
+        });
+        yield* emitEvent({
+          type: "provider-thread.updated",
+          threadId: targetId,
+          occurredAt: now,
+          payload: {
+            ...command.providerThread,
+            providerSessionId: null,
+            ownerNodeId: null,
+            status: "idle",
+          },
+        });
+        for (const turn of command.snapshot.providerTurns) {
+          yield* emitEvent({
+            type: "provider-turn.updated",
+            threadId: targetId,
+            occurredAt: now,
+            payload: {
+              ...turn,
+              providerThreadId: command.providerThread.id,
+              runAttemptId: null,
+            },
+          });
+        }
+        for (const [ordinal, original] of command.snapshot.messages.entries()) {
+          const messageId = MessageId.make(`${targetId}:promotion-message:${ordinal}`);
+          const message: OrchestrationV2ConversationMessage = {
+            ...original,
+            id: messageId,
+            threadId: targetId,
+            runId: null,
+            nodeId: null,
+            streaming: false,
+          };
+          yield* emitEvent({
+            type: "message.updated",
+            threadId: targetId,
+            occurredAt: now,
+            payload: message,
+          });
+          if (original.role === "system") continue;
+          const itemBase = {
+            id: TurnItemId.make(`${targetId}:promotion-item:${ordinal}`),
+            threadId: targetId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: command.providerThread.id,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal,
+            status: "completed" as const,
+            title: null,
+            startedAt: original.createdAt,
+            completedAt: original.updatedAt,
+            updatedAt: original.updatedAt,
+            messageId,
+            text: original.text,
+            attachments: original.attachments,
+          };
+          yield* emitEvent({
+            type: "turn-item.updated",
+            threadId: targetId,
+            occurredAt: now,
+            payload:
+              original.role === "user"
+                ? {
+                    ...itemBase,
+                    type: "user_message",
+                    inputIntent: "turn_start",
+                    createdBy: original.createdBy,
+                    creationSource: original.creationSource,
+                  }
+                : { ...itemBase, type: "assistant_message", streaming: false },
+          });
+        }
+        yield* update({ ...promotion, status: "promoted", error: null, updatedAt: now });
+        const parent = yield* promotionNotificationParent(source.lineage.parentThreadId).pipe(
+          mapDispatchError(command),
+        );
+        if (parent !== null && parent.deletedAt === null && parent.archivedAt === null) {
+          const text = `Subagent ${source.id} promoted to interactive thread ${targetId}. Send further work there with t3_thread_send; do not resume the original subagent.`;
+          yield* dispatchMessage(
+            {
+              type: "message.dispatch",
+              commandId: command.commandId,
+              threadId: parent.id,
+              messageId: MessageId.make(`${promotion.requestId}:handoff`),
+              text,
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "server",
+              dispatchMode: { type: "queue_after_active" },
+              notification: {
+                source: { kind: "subagent", childThreadId: targetId },
+                outcome: "completed",
+                summary: "Subagent promoted to interactive thread",
+                detail: text,
+              },
+            },
+            events,
+            effects,
+          );
+        }
+        return;
+      }
+      if (
+        !isProviderNativeSubagentThread(source) ||
+        source.deletedAt !== null ||
+        (command.type === "subagent.promote.request" && source.archivedAt !== null)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Only an available provider-native subagent can be promoted.",
+        });
+      }
+      if (
+        command.type === "subagent.promote.request" &&
+        previous != null &&
+        previous.status !== "failed"
+      ) {
+        return yield* update(previous);
+      }
+      const adapter = yield* providerAdapters
+        .get(source.providerInstanceId)
+        .pipe(mapDispatchError(command));
+      const capabilities = yield* adapter.getCapabilities().pipe(mapDispatchError(command));
+      if (!capabilities.threads.canForkThread || !capabilities.threads.canForkFromSubagentThread) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This provider cannot fork native subagent conversations.",
+        });
+      }
+      const providerThread =
+        projection.providerThreads.find((thread) => thread.id === source.activeProviderThreadId) ??
+        projection.providerThreads.findLast((thread) => thread.appThreadId === source.id);
+      const latestTurn = projection.providerTurns
+        .filter((turn) => turn.providerThreadId === providerThread?.id)
+        .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+      // Recovery cancels native children through their runless root, even when
+      // no provider remains to finish its turn record. Never use an older root
+      // as completion evidence for a newer provider turn.
+      const root = projection.nodes.findLast(
+        (node) =>
+          node.kind === "root_turn" &&
+          node.runId === null &&
+          node.providerThreadId === providerThread?.id &&
+          (latestTurn === undefined ||
+            node.id === latestTurn.nodeId ||
+            node.providerTurnId === latestTurn.id),
+      );
+      const terminalStatuses = new Set([
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "rolled_back",
+      ]);
+      const terminal =
+        (latestTurn !== undefined && terminalStatuses.has(latestTurn.status)) ||
+        (root !== undefined && terminalStatuses.has(root.status));
+      const ready = terminal && providerThread?.nativeThreadRef?.strength === "strong";
+      const promotion =
+        command.type === "subagent.promote.request"
+          ? {
+              requestId: command.commandId,
+              targetThreadId: previous?.targetThreadId ?? command.targetThreadId,
+              createdBy: command.createdBy,
+              creationSource: command.creationSource,
+              ...(command.title === undefined ? {} : { title: command.title }),
+              requestedAt: now,
+            }
+          : previous!;
+      const next = {
+        ...promotion,
+        status: ready ? ("forking" as const) : ("waiting" as const),
+        ...(ready && latestTurn !== undefined ? { sourceProviderTurnId: latestTurn.id } : {}),
+        error: null,
+        updatedAt: now,
+      };
+      if (terminal && !ready) {
+        return yield* update({
+          ...next,
+          status: "failed",
+          error: "The subagent's native conversation is unavailable for forking.",
+        });
+      }
+      yield* update(next);
+      if (ready)
+        yield* Ref.update(effects, (current) => [
+          ...current,
+          {
+            id: `effect:${next.requestId}:subagent.promote`,
+            commandId: command.commandId,
+            threadId: source.id,
+            request: { type: "subagent.promote" as const, requestId: next.requestId },
+          },
+        ]);
     },
   );
 
@@ -9655,6 +10006,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       | undefined;
     switch (command.type) {
+      case "subagent.promote.request":
+      case "subagent.promote.cancel":
+      case "subagent.promote.advance":
+      case "subagent.promote.complete":
+      case "subagent.promote.fail":
+        yield* dispatchSubagentPromotion(command, events, effects);
+        break;
       case "thread.worktree-cleanup.retry":
       case "thread.worktree-cleanup.abandon":
       case "thread.worktree-cleanup.update":
@@ -9775,7 +10133,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
           worktreeCleanup = planned.success;
         }
-        return yield* mapDispatchError(command)(
+        const deletion = yield* mapDispatchError(command)(
           planThreadDeletion({
             command,
             projection: { ...projection, thread: { ...projection.thread, worktreeCleanup } },
@@ -9786,6 +10144,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             idAllocator,
           }),
         );
+        const sourceId = projection.thread.lineage.parentThreadId;
+        if (projection.thread.forkedFrom?.type === "provider_thread" && sourceId !== null) {
+          const sourceShell = yield* projectionStore
+            .getThreadShell(sourceId)
+            .pipe(mapDispatchError(command));
+          if (sourceShell?.subagentPromotion?.targetThreadId === command.threadId) {
+            const source = yield* projectionStore
+              .getThread(sourceId)
+              .pipe(mapDispatchError(command));
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "thread.metadata-updated",
+              threadId: sourceId,
+              occurredAt: now,
+              payload: { ...source, subagentPromotion: null, updatedAt: now },
+            });
+          }
+        }
+        return { ...deletion, events: [...deletion.events, ...(yield* Ref.get(events))] };
       }
       case "thread.archive":
       case "thread.unarchive":
@@ -10165,6 +10544,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) => {
+    if (command.type === "subagent.promote.complete" || command.type === "thread.delete") {
+      const operation = Effect.gen(function* () {
+        const thread = yield* projectionStore
+          .getThreadShell(command.threadId)
+          .pipe(mapDispatchError(command));
+        const notificationParent =
+          command.type === "subagent.promote.complete"
+            ? yield* promotionNotificationParent(thread?.lineage.parentThreadId ?? null).pipe(
+                mapDispatchError(command),
+              )
+            : null;
+        const ids = [
+          ...new Set([
+            command.threadId,
+            ...(command.type === "subagent.promote.complete" &&
+            command.providerThread.appThreadId !== null
+              ? [command.providerThread.appThreadId]
+              : []),
+            ...(thread?.lineage.parentThreadId == null ? [] : [thread.lineage.parentThreadId]),
+            ...(notificationParent === null ? [] : [notificationParent.id]),
+          ]),
+        ].toSorted();
+        return yield* ids.reduceRight(
+          (effect, id) => threadDispatch.withLock(id, effect),
+          dispatchWithReceiptEffect(command),
+        );
+      });
+      return command.type === "thread.delete"
+        ? threadDispatch.withPersistenceLock(operation)
+        : operation;
+    }
     if (command.type === "thread.persistence.set") {
       return threadDispatch.withPersistenceLock(
         Effect.gen(function* () {
@@ -10210,9 +10620,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       });
     }
-    return command.type === "thread.archive" ||
-      command.type === "thread.delete" ||
-      command.type.startsWith("thread.worktree-cleanup.")
+    return command.type === "thread.archive" || command.type.startsWith("thread.worktree-cleanup.")
       ? threadDispatch.withPersistenceLock(dispatch)
       : dispatch;
   };
@@ -10259,6 +10667,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // below. Replaying the full event table on every server start delays live
   // queue promotion in proportion to the lifetime size of the database.
   const terminalEventsAfterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
+  const advanceSubagentPromotion = (threadId: ThreadId, sequence: number) =>
+    Effect.gen(function* () {
+      const thread = yield* projectionStore.getThreadShell(threadId);
+      const promotion = thread?.subagentPromotion;
+      if (promotion?.status !== "waiting" || thread?.deletedAt !== null) return;
+      yield* dispatchWithReceipt({
+        type: "subagent.promote.advance",
+        threadId,
+        requestId: promotion.requestId,
+        commandId: CommandId.make(`${promotion.requestId}:advance:${sequence}`),
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to advance subagent promotion", { threadId, cause }),
+      ),
+    );
+  for (const eventType of ["provider-turn.updated", "node.updated"] as const) {
+    yield* eventSink.stream({ afterSequence: terminalEventsAfterSequence, eventType }).pipe(
+      Stream.filter((stored) => {
+        const event = stored.event;
+        return (
+          (event.type === "provider-turn.updated" ||
+            (event.type === "node.updated" &&
+              event.payload.kind === "root_turn" &&
+              event.payload.runId === null)) &&
+          ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(
+            event.payload.status,
+          )
+        );
+      }),
+      Stream.runForEach((stored) =>
+        advanceSubagentPromotion(stored.event.threadId, stored.sequence),
+      ),
+      Effect.forkDetach,
+    );
+  }
   // Queue promotion can wait on a provider or a thread lock. Subscribe to run
   // updates before buffering so that wait never retains unrelated tool bodies.
   yield* eventSink
@@ -10284,6 +10728,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // worker. Queue recovery instead holds unstarted runs until an explicit
   // queue.resume command arrives.
   const recoverDelegatedTasks = Effect.gen(function* () {
+    const waitingPromotions = yield* projectionStore
+      .getRecoveryThreadIds("subagent-promotions")
+      .pipe(Effect.orDie);
+    const sequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
+    yield* Effect.forEach(waitingPromotions, (id) => advanceSubagentPromotion(id, sequence), {
+      concurrency: 8,
+      discard: true,
+    });
     yield* projectionStore.getRecoveryThreadIds("subagent-results").pipe(
       Effect.flatMap((threadIds) =>
         Effect.forEach(

@@ -357,6 +357,19 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+export const OrchestrationV2SubagentPromotion = Schema.Struct({
+  requestId: CommandId,
+  targetThreadId: ThreadId,
+  sourceProviderTurnId: Schema.optional(ProviderTurnId),
+  status: Schema.Literals(["waiting", "forking", "failed", "promoted"]),
+  error: Schema.NullOr(Schema.String),
+  requestedAt: Schema.DateTimeUtc,
+  updatedAt: Schema.DateTimeUtc,
+  title: Schema.optional(TrimmedNonEmptyString),
+  ...OrchestrationV2CreationFields,
+});
+export type OrchestrationV2SubagentPromotion = typeof OrchestrationV2SubagentPromotion.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -374,6 +387,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   persistent: Schema.optional(Schema.Boolean),
@@ -1745,6 +1759,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1874,8 +1889,17 @@ export const OrchestrationV2StoredEvent = Schema.Struct({
 });
 export type OrchestrationV2StoredEvent = typeof OrchestrationV2StoredEvent.Type;
 
+const OrchestrationV2SubagentPromotionJson = OrchestrationV2SubagentPromotion.mapFields(
+  (fields) => ({
+    ...fields,
+    requestedAt: Schema.DateTimeUtcFromString,
+    updatedAt: Schema.DateTimeUtcFromString,
+  }),
+);
+
 export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((fields) => ({
   ...fields,
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -2281,6 +2305,7 @@ export type OrchestrationV2LatestVisibleMessageSummaryJson =
 
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2901,6 +2926,20 @@ export const OrchestrationV2Command = Schema.Union([
     checkpointId: CheckpointId,
   }),
   Schema.Struct({
+    type: Schema.Literal("subagent.promote.request"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    threadId: ThreadId,
+    targetThreadId: ThreadId,
+    title: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.cancel"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.fork"),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
@@ -2980,6 +3019,31 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.advance"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    providerThread: OrchestrationV2ProviderThread,
+    snapshot: Schema.Struct({
+      providerTurns: Schema.Array(OrchestrationV2ProviderTurn),
+      messages: Schema.Array(OrchestrationV2ConversationMessage),
+    }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.fail"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    error: Schema.String,
+  }),
+
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

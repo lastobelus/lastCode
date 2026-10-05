@@ -303,6 +303,12 @@ Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 
+For providers that support it, choose **Promote to interactive thread** to continue
+a subagent's conversation yourself. If it is still working, promotion waits until
+it finishes; you can cancel the wait without stopping the subagent. Once ready,
+open the interactive thread from the same control. The original conversation stays
+available, and the parent is told to direct further messages to the new thread.
+
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.

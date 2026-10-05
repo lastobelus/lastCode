@@ -215,6 +215,19 @@ export function summarizeT3ToolCalls(
     case "thread-fork":
       label = phrase("Requested", "request", quantity(selected.length, "thread fork"));
       break;
+    case "subagent-promote":
+      label = phrase("Requested", "request", quantity(selected.length, "subagent promotion"));
+      break;
+    case "subagent-promotion-status":
+      label = phrase("Checked", "check", `subagent promotion ${times}`);
+      break;
+    case "subagent-promotion-cancel":
+      label = phrase(
+        "Requested cancellation of",
+        "cancel",
+        quantity(selected.length, "subagent promotion"),
+      );
+      break;
     case "thread-merge":
       label = phrase("Requested", "request", quantity(selected.length, "context merge"));
       break;

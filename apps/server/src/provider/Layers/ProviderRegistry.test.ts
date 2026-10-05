@@ -27,6 +27,7 @@ import {
   ProviderInstanceId,
   ServerSettings,
   type ServerProvider,
+  type OrchestrationV2ProviderCapabilities,
   type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
@@ -64,9 +65,28 @@ import {
 } from "../providerStatusCache.ts";
 import { COMPACT_SLASH_COMMAND } from "../providerSnapshot.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
+import { CodexProviderCapabilitiesV2 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import { ProviderAdapterCapabilitiesError } from "../../orchestration-v2/ProviderAdapter.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+const makeCatalogAdapter = (
+  capabilities?: OrchestrationV2ProviderCapabilities,
+): ProviderInstance["orchestrationAdapter"] => ({
+  instanceId: ProviderInstanceId.make("catalog-fixture"),
+  driver: ProviderDriverKind.make("test-provider"),
+  getCapabilities: () =>
+    capabilities === undefined
+      ? Effect.fail(
+          new ProviderAdapterCapabilitiesError({
+            driver: ProviderDriverKind.make("test-provider"),
+          }),
+        )
+      : Effect.succeed(capabilities),
+  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+  openSession: () => Effect.die("Catalog tests do not start provider sessions"),
+});
+
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
@@ -1141,7 +1161,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(CodexProviderCapabilitiesV2),
               textGeneration: {} as ProviderInstance["textGeneration"],
             } satisfies ProviderInstance;
             const instanceRegistryLayer = Layer.succeed(
@@ -1163,6 +1183,10 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             for (const restarted of [false, true]) {
               yield* Effect.gen(function* () {
                 const registry = yield* ProviderRegistry.ProviderRegistry;
+                assert.deepStrictEqual(
+                  (yield* registry.getProviders)[0]?.threadCapabilities,
+                  CodexProviderCapabilitiesV2.threads,
+                );
                 const expectedModels = restarted
                   ? retainedModels
                   : [customModel, ...cachedProvider.models];
@@ -1508,7 +1532,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const instanceRegistryLayer = Layer.succeed(
@@ -1609,7 +1633,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             },
             snapshotForCwd,
             invalidateCaches: Ref.update(cacheInvalidations, (count) => count + 1),
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           });
           const firstInstance = makeInstance(machineProvider, () =>
@@ -1851,7 +1875,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             },
             {
@@ -1878,7 +1902,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             },
           ] satisfies ReadonlyArray<ProviderInstance>;
@@ -2067,7 +2091,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               streamChanges: Stream.fromPubSub(changes),
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const instanceRegistryLayer = Layer.succeed(
@@ -2195,7 +2219,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 streamChanges: Stream.fromPubSub(changes),
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             } satisfies ProviderInstance;
             const instanceRegistryLayer = Layer.succeed(
@@ -2298,7 +2322,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const instanceRegistryLayer = Layer.succeed(
@@ -2399,7 +2423,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           });
           const codexInstance = makeInstance(codexProvider);

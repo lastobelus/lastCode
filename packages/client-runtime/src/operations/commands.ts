@@ -237,6 +237,14 @@ export interface ForkThreadFromRunInput extends CommandMetadata {
   readonly title?: string;
 }
 
+export interface RequestSubagentPromotionInput extends ThreadCommandInput {
+  readonly targetThreadId: ThreadId;
+}
+
+export interface CancelSubagentPromotionInput extends ThreadCommandInput {
+  readonly requestId: CommandId;
+}
+
 export interface MergeThreadBackInput extends CommandMetadata {
   readonly sourceThreadId: ThreadId;
   readonly targetThreadId: ThreadId;
@@ -1020,6 +1028,30 @@ export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRu
     ...(input.title === undefined ? {} : { title: input.title }),
   });
 });
+
+export const requestSubagentPromotion = Effect.fn("EnvironmentCommands.requestSubagentPromotion")(
+  function* (input: RequestSubagentPromotionInput) {
+    return yield* dispatch({
+      type: "subagent.promote.request",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      targetThreadId: input.targetThreadId,
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+    });
+  },
+);
+
+export const cancelSubagentPromotion = Effect.fn("EnvironmentCommands.cancelSubagentPromotion")(
+  function* (input: CancelSubagentPromotionInput) {
+    return yield* dispatch({
+      type: "subagent.promote.cancel",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      requestId: input.requestId,
+    });
+  },
+);
 
 export const mergeThreadBack = Effect.fn("EnvironmentCommands.mergeThreadBack")(function* (
   input: MergeThreadBackInput,

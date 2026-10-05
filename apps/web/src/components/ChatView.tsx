@@ -437,6 +437,7 @@ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
+import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
 import { resolveTimelineIsAtEnd, worktreeSetupAgentStarted } from "./chat/MessagesTimeline.logic";
 import {
@@ -1623,6 +1624,12 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+    reportFailure: false,
+  });
+  const requestSubagentPromotion = useAtomCommand(threadEnvironment.requestSubagentPromotion, {
+    reportFailure: false,
+  });
+  const cancelSubagentPromotion = useAtomCommand(threadEnvironment.cancelSubagentPromotion, {
     reportFailure: false,
   });
   const forkThreadFromRun = useAtomCommand(threadEnvironment.forkFromRun, {
@@ -11484,6 +11491,58 @@ export default function ChatView(props: ChatViewProps) {
                         <div className="relative z-10">
                           {showProviderSubagentBar ? (
                             <ProviderSubagentBar
+                              key={activeThreadId}
+                              promotion={activeThread?.subagentPromotion ?? null}
+                              promotionAvailable={canPromoteSubagent(
+                                selectedProviderEntry?.snapshot.threadCapabilities,
+                              )}
+                              onPromote={
+                                canPromoteSubagent(
+                                  selectedProviderEntry?.snapshot.threadCapabilities,
+                                ) && !activeEnvironmentUnavailable
+                                  ? async () => {
+                                      if (!activeThread) return;
+                                      const result = await requestSubagentPromotion({
+                                        environmentId,
+                                        input: {
+                                          threadId: activeThread.id,
+                                          targetThreadId:
+                                            activeThread.subagentPromotion?.targetThreadId ??
+                                            newThreadId(),
+                                          creationSource: "web",
+                                        },
+                                      });
+                                      if (result._tag === "Failure")
+                                        throw squashAtomCommandFailure(result);
+                                    }
+                                  : null
+                              }
+                              onCancelPromotion={
+                                activeThread?.subagentPromotion?.status === "waiting" &&
+                                !activeEnvironmentUnavailable
+                                  ? async () => {
+                                      const promotion = activeThread.subagentPromotion;
+                                      if (!promotion) return;
+                                      const result = await cancelSubagentPromotion({
+                                        environmentId,
+                                        input: {
+                                          threadId: activeThread.id,
+                                          requestId: promotion.requestId,
+                                        },
+                                      });
+                                      if (result._tag === "Failure")
+                                        throw squashAtomCommandFailure(result);
+                                    }
+                                  : null
+                              }
+                              onOpenPromoted={
+                                activeThread?.subagentPromotion?.status === "promoted"
+                                  ? () =>
+                                      onOpenRelatedThread(
+                                        activeThread.subagentPromotion!.targetThreadId,
+                                      )
+                                  : null
+                              }
                               provider={selectedProviderEntry ?? null}
                               modelLabel={providerSubagentModelLabel}
                               effortLabel={providerSubagentEffortLabel}

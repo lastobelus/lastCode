@@ -52,6 +52,8 @@ import {
   dismissThreadUserInput,
   editQueuedRun,
   forkThreadFromRun,
+  requestSubagentPromotion,
+  cancelSubagentPromotion,
   interruptThreadTurn,
   mergeThreadBack,
   promoteQueuedRun,
@@ -621,6 +623,46 @@ describe("V2 environment commands", () => {
               },
             ],
       );
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("requests promotion on the source thread and cancels the same request", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const provide = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        supervisor,
+      );
+      const requestId = CommandId.make("subagent-promotion");
+      const targetThreadId = ThreadId.make("interactive-subagent");
+      yield* requestSubagentPromotion({
+        commandId: requestId,
+        threadId: v2ThreadId,
+        targetThreadId,
+        creationSource: "mobile",
+      }).pipe(provide);
+      yield* cancelSubagentPromotion({
+        commandId: CommandId.make("cancel-promotion"),
+        threadId: v2ThreadId,
+        requestId,
+      }).pipe(provide);
+      expect(commands).toEqual([
+        {
+          type: "subagent.promote.request",
+          commandId: requestId,
+          threadId: v2ThreadId,
+          targetThreadId,
+          createdBy: "user",
+          creationSource: "mobile",
+        },
+        {
+          type: "subagent.promote.cancel",
+          commandId: CommandId.make("cancel-promotion"),
+          threadId: v2ThreadId,
+          requestId,
+        },
+      ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
