@@ -15,7 +15,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import type { ProviderAdapterV2Event } from "./ProviderAdapter.ts";
+import type { ProviderAdapterV2Event, ProviderAdapterV2TurnInspection } from "./ProviderAdapter.ts";
 
 type Terminal = Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
 export interface ThreadRecoveryIdentity {
@@ -24,15 +24,11 @@ export interface ThreadRecoveryIdentity {
   readonly attemptId: RunAttemptId;
 }
 interface RecoveryRegistration extends ThreadRecoveryIdentity {
-  readonly inspect: Effect.Effect<
-    | { readonly status: "active" | "unknown" }
-    | { readonly status: "terminal"; readonly event: Terminal },
-    unknown
-  >;
+  readonly inspect: Effect.Effect<ProviderAdapterV2TurnInspection, ThreadRecoveryError>;
   readonly finalize: (
     terminal: Terminal,
     receipt: ReadonlyArray<OrchestrationV2DomainEvent>,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, ThreadRecoveryError>;
 }
 export class ThreadRecoveryError extends Schema.TaggedError<ThreadRecoveryError>()(
   "ThreadRecoveryError",
@@ -60,7 +56,7 @@ export class ThreadRecoveryService extends Context.Service<
       input: ThreadRecoveryIdentity & { readonly repairThreadId: ThreadId },
     ) => Effect.Effect<void, ThreadRecoveryError>;
   }
->()("lastcode/ThreadRecoveryService") {}
+>()("t3/orchestration-v2/ThreadRecoveryService") {}
 
 const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -82,7 +78,12 @@ const make = Effect.gen(function* () {
     // A receipt for an older run must never replace a newer run's recovery state.
     if (
       run === undefined ||
-      projection.runs.some((other) => other.ordinal > run.ordinal && other.startedAt !== null)
+      projection.runs.some(
+        (other) =>
+          other.ordinal > run.ordinal &&
+          (other.startedAt !== null ||
+            ["preparing", "starting", "running", "waiting"].includes(other.status)),
+      )
     )
       return null;
     return { thread: projection.thread, run, providerTurns: projection.providerTurns };
@@ -92,12 +93,14 @@ const make = Effect.gen(function* () {
     status: OrchestrationV2ThreadRecovery["status"],
     detail: string,
     repairThreadId?: ThreadId,
+    expectedStatus?: "running",
   ) =>
     commands.withLock(
       input.threadId,
       Effect.gen(function* () {
         const state = yield* current(input);
-        if (state === null) return false;
+        if (state === null || (expectedStatus !== undefined && state.run.status !== expectedStatus))
+          return false;
         const now = yield* DateTime.now;
         const result = yield* sink.writeIfRunCurrent({
           threadId: input.threadId,
@@ -231,47 +234,11 @@ const make = Effect.gen(function* () {
     );
   return ThreadRecoveryService.of({
     register: (input) =>
-      Effect.gen(function* () {
+      Effect.sync(() => {
         const previous = registrations.get(input.threadId);
         if (previous !== undefined && !matches(previous, input))
           pendingFailures.delete(incidentKey(previous));
         registrations.set(input.threadId, input);
-        yield* commands
-          .withLock(
-            input.threadId,
-            Effect.gen(function* () {
-              const state = yield* current(input);
-              if (
-                state === null ||
-                state.thread.recovery === undefined ||
-                (state.thread.recovery.runId === input.runId &&
-                  state.thread.recovery.attemptId === input.attemptId)
-              )
-                return;
-              const { recovery: _oldRecovery, ...thread } = state.thread;
-              const now = yield* DateTime.now;
-              yield* sink.writeIfRunCurrent({
-                threadId: input.threadId,
-                runId: input.runId,
-                activeAttemptId: input.attemptId,
-                expectedStatus: state.run.status,
-                events: [
-                  {
-                    id: yield* ids.allocate.event({ threadId: input.threadId }),
-                    type: "thread.metadata-updated",
-                    threadId: input.threadId,
-                    occurredAt: now,
-                    payload: thread,
-                  },
-                ],
-              });
-            }),
-          )
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not clear an older recovery receipt", cause),
-            ),
-          );
       }),
     completed: (input) =>
       Effect.sync(() => {
@@ -283,11 +250,17 @@ const make = Effect.gen(function* () {
       lock
         .withLock(
           input.threadId,
-          write(
-            input,
-            "suspect",
-            "Turn updates stopped being recorded. Checking the provider before attempting recovery.",
-          ),
+          Effect.gen(function* () {
+            const registered = registrations.get(input.threadId);
+            if (registered === undefined || !matches(registered, input)) return;
+            yield* write(
+              input,
+              "suspect",
+              "Turn updates stopped being recorded. Checking the provider before attempting recovery.",
+              undefined,
+              "running",
+            );
+          }),
         )
         .pipe(
           Effect.asVoid,

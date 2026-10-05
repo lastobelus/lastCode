@@ -29,7 +29,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
-  type OrchestrationV2AppThread,
+  OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -10515,6 +10515,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       default:
         return yield* dispatchUnsupported(command);
+    }
+    // A fresh attempt supersedes the old recovery incident for every provider,
+    // including providers without a recovery probe. Queued placeholders do not.
+    const plannedEvents = yield* Ref.get(events);
+    const startingRuns = plannedEvents.filter(
+      (event) =>
+        (event.type === "run.created" || event.type === "run.updated") &&
+        event.payload.status === "starting",
+    );
+    for (const event of startingRuns) {
+      if (event.type !== "run.created" && event.type !== "run.updated") continue;
+      const plannedThread = plannedEvents.findLast(
+        (candidate) =>
+          candidate.threadId === event.threadId &&
+          candidate.type.startsWith("thread.") &&
+          Schema.is(OrchestrationV2AppThread)(candidate.payload),
+      )?.payload;
+      const thread = Schema.is(OrchestrationV2AppThread)(plannedThread)
+        ? plannedThread
+        : yield* projectionStore.getThread(event.threadId).pipe(mapDispatchError(command));
+      if (
+        thread.recovery === undefined ||
+        (thread.recovery.runId === event.payload.id &&
+          thread.recovery.attemptId === event.payload.activeAttemptId)
+      )
+        continue;
+      const { recovery: _previousRecovery, ...cleared } = thread;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: thread.id,
+        occurredAt: event.occurredAt,
+        payload: cleared,
+      });
     }
     return {
       events: yield* Ref.get(events),

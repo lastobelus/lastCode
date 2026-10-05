@@ -125,7 +125,7 @@ function harness(
               threadId: input.threadId!,
               resumed: false,
               projection: {
-                thread: source,
+                thread: { ...source, lastVisitedAt: source.lastVisitedAt ?? null },
                 runs: [],
                 attempts: [],
                 nodes: [],
