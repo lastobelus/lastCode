@@ -15,6 +15,12 @@ import * as Schema from "effect/Schema";
 
 import { PortableLockContentionError } from "../lastcode-lock.mjs";
 import { acquireLocalCiAdmissionLock } from "./lastcode-ci-admission-lock.ts";
+import {
+  getCurrentProcessStartIdentity,
+  isProcessIdentityRunning,
+  isProcessRunning,
+  readProcessIdentities,
+} from "./lastcode-ci-process-identity.ts";
 
 const decodePolicy = Schema.decodeUnknownSync(LastCodeLocalCiSettings);
 const LEASE_SUFFIX = ".lease.json";
@@ -23,7 +29,9 @@ const RETRY_INTERVAL_MS = 500;
 
 type Lease = {
   readonly pid: number;
+  readonly startIdentity: string;
   childPid: number | null;
+  childStartIdentity: string | null;
   readonly token: string;
   readonly maxConcurrentRuns: number;
   readonly repoRoot: string;
@@ -31,6 +39,7 @@ type Lease = {
 
 type Waiter = {
   readonly pid: number;
+  readonly startIdentity: string;
   readonly token: string;
   readonly order: number;
 };
@@ -81,25 +90,28 @@ export async function readLocalCiPolicy(env = NodeProcess.env) {
   }
 }
 
-function isProcessRunning(pid: number) {
-  try {
-    NodeProcess.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // Permission failures do not prove that another user's process has exited.
-    return !hasErrorCode(error, "ESRCH");
+function hasLivingChild(
+  lease: Pick<Lease, "childPid" | "childStartIdentity">,
+  identities = readProcessIdentities(lease.childPid === null ? [] : [lease.childPid]),
+) {
+  if (lease.childPid === null) return false;
+  if (NodeProcess.platform === "win32") {
+    return isProcessIdentityRunning(lease.childPid, lease.childStartIdentity, identities);
   }
-}
-
-function hasLivingChild(lease: Pick<Lease, "childPid">) {
+  if (!isProcessRunning(-lease.childPid)) return false;
+  const leader = identities.get(lease.childPid);
+  // A leaderless group can still contain owned descendants. Only a positively
+  // identified replacement group leader proves that this group ID was reused.
   return (
-    lease.childPid !== null &&
-    isProcessRunning(NodeProcess.platform === "win32" ? lease.childPid : -lease.childPid)
+    lease.childStartIdentity === null ||
+    leader === undefined ||
+    leader.group !== lease.childPid ||
+    leader.startIdentity === lease.childStartIdentity
   );
 }
 
-function readActiveLeases(directory: string) {
-  const active: Lease[] = [];
+function readLeases(directory: string) {
+  const leases: Lease[] = [];
   for (const name of NodeFS.readdirSync(directory)) {
     if (!name.endsWith(LEASE_SUFFIX)) continue;
     const path = NodePath.join(directory, name);
@@ -127,12 +139,19 @@ function readActiveLeases(directory: string) {
       !Number.isSafeInteger(lease.pid) ||
       typeof lease.pid !== "number" ||
       lease.pid <= 0 ||
+      typeof lease.startIdentity !== "string" ||
+      lease.startIdentity.length === 0 ||
       !(
         lease.childPid === null ||
         (typeof lease.childPid === "number" &&
           Number.isSafeInteger(lease.childPid) &&
           lease.childPid > 0)
       ) ||
+      !(
+        lease.childStartIdentity === null ||
+        (typeof lease.childStartIdentity === "string" && lease.childStartIdentity.length > 0)
+      ) ||
+      (lease.childPid === null && lease.childStartIdentity !== null) ||
       typeof lease.token !== "string" ||
       `${lease.token}${LEASE_SUFFIX}` !== name ||
       !Number.isSafeInteger(lease.maxConcurrentRuns) ||
@@ -145,23 +164,21 @@ function readActiveLeases(directory: string) {
         "Invalid local CI lease. Admission has stopped to avoid exceeding the budget.",
       );
     }
-    if (isProcessRunning(lease.pid) || hasLivingChild({ childPid: lease.childPid })) {
-      active.push({
-        pid: lease.pid,
-        childPid: lease.childPid,
-        token: lease.token,
-        maxConcurrentRuns: lease.maxConcurrentRuns,
-        repoRoot: lease.repoRoot,
-      });
-    } else {
-      NodeFS.rmSync(path, { force: true });
-    }
+    leases.push({
+      pid: lease.pid,
+      startIdentity: lease.startIdentity,
+      childPid: lease.childPid,
+      childStartIdentity: lease.childStartIdentity,
+      token: lease.token,
+      maxConcurrentRuns: lease.maxConcurrentRuns,
+      repoRoot: lease.repoRoot,
+    });
   }
-  return active;
+  return leases;
 }
 
-function readActiveWaiters(directory: string) {
-  const active: Waiter[] = [];
+function readWaiters(directory: string) {
+  const waiters: Waiter[] = [];
   for (const name of NodeFS.readdirSync(directory)) {
     if (!name.endsWith(WAITER_SUFFIX)) continue;
     const path = NodePath.join(directory, name);
@@ -183,6 +200,8 @@ function readActiveWaiters(directory: string) {
       typeof waiter.pid !== "number" ||
       !Number.isSafeInteger(waiter.pid) ||
       waiter.pid <= 0 ||
+      typeof waiter.startIdentity !== "string" ||
+      waiter.startIdentity.length === 0 ||
       typeof waiter.token !== "string" ||
       `${waiter.token}${WAITER_SUFFIX}` !== name ||
       typeof waiter.order !== "number" ||
@@ -191,13 +210,14 @@ function readActiveWaiters(directory: string) {
     ) {
       throw new Error("Invalid local CI waiter. Admission has stopped.");
     }
-    if (isProcessRunning(waiter.pid)) {
-      active.push({ pid: waiter.pid, token: waiter.token, order: waiter.order });
-    } else {
-      NodeFS.rmSync(path, { force: true });
-    }
+    waiters.push({
+      pid: waiter.pid,
+      startIdentity: waiter.startIdentity,
+      token: waiter.token,
+      order: waiter.order,
+    });
   }
-  return active.sort(
+  return waiters.sort(
     (left, right) => left.order - right.order || left.token.localeCompare(right.token),
   );
 }
@@ -261,7 +281,9 @@ async function acquireBudget(
   let registered = false;
   const lease: Lease = {
     pid: NodeProcess.pid,
+    startIdentity: getCurrentProcessStartIdentity(),
     childPid: null,
+    childStartIdentity: null,
     token,
     maxConcurrentRuns: policy.maxConcurrentRuns,
     repoRoot: NodePath.resolve(options.repoRoot),
@@ -285,13 +307,43 @@ async function acquireBudget(
       if (releaseMutex !== undefined) {
         try {
           options.signal?.throwIfAborted();
-          const active = readActiveLeases(directory);
-          const waiters = readActiveWaiters(directory);
+          const leases = readLeases(directory);
+          const queued = readWaiters(directory);
+          // One targeted OS query covers the small lease set and this queue.
+          const identities = readProcessIdentities([
+            ...leases.flatMap((owner) =>
+              owner.childPid === null ? [owner.pid] : [owner.pid, owner.childPid],
+            ),
+            ...queued.map((waiter) => waiter.pid),
+          ]);
+          const active = leases.filter((owner) => {
+            if (
+              isProcessIdentityRunning(owner.pid, owner.startIdentity, identities) ||
+              hasLivingChild(owner, identities)
+            )
+              return true;
+            NodeFS.rmSync(NodePath.join(directory, `${owner.token}${LEASE_SUFFIX}`), {
+              force: true,
+            });
+            return false;
+          });
+          const waiters = queued.filter((waiter) => {
+            if (isProcessIdentityRunning(waiter.pid, waiter.startIdentity, identities)) return true;
+            NodeFS.rmSync(NodePath.join(directory, `${waiter.token}${WAITER_SUFFIX}`), {
+              force: true,
+            });
+            return false;
+          });
           if (!registered) {
             const order = Math.max(0, ...waiters.map((waiter) => waiter.order)) + 1;
             if (!Number.isSafeInteger(order))
               throw new Error("The local CI queue order exceeded its supported range.");
-            const waiter: Waiter = { pid: NodeProcess.pid, token, order };
+            const waiter: Waiter = {
+              pid: NodeProcess.pid,
+              startIdentity: lease.startIdentity,
+              token,
+              order,
+            };
             writeRecord(waiterPath, waiter);
             waiters.push(waiter);
             registered = true;
@@ -327,6 +379,10 @@ async function acquireBudget(
                   );
                 }
                 lease.childPid = pid ?? null;
+                lease.childStartIdentity =
+                  pid === undefined
+                    ? null
+                    : (readProcessIdentities([pid]).get(pid)?.startIdentity ?? null);
                 writeRecord(leasePath, lease);
               },
             };

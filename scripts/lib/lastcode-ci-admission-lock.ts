@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
 
 import { acquirePortableLock, PortableLockContentionError } from "../lastcode-lock.mjs";
+import {
+  getCurrentProcessStartIdentity,
+  isProcessIdentityRunning,
+  readProcessIdentities,
+} from "./lastcode-ci-process-identity.ts";
 
 const LOCK_DIRECTORY = "admission.lock.d";
 const OWNER_FILENAME = /^owner-([\da-f-]+)\.json$/u;
@@ -20,15 +25,6 @@ type AdmissionLockOptions = {
 
 function hasErrorCode(error: unknown, code: string) {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
-function isProcessRunning(pid: number) {
-  try {
-    NodeProcess.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !hasErrorCode(error, "ESRCH");
-  }
 }
 
 function readOwner(lockPath: string) {
@@ -67,12 +63,15 @@ function readOwner(lockPath: string) {
     typeof owner.pid !== "number" ||
     !Number.isSafeInteger(owner.pid) ||
     owner.pid <= 0 ||
+    !("startIdentity" in owner) ||
+    typeof owner.startIdentity !== "string" ||
+    owner.startIdentity.length === 0 ||
     !("token" in owner) ||
     owner.token !== token
   ) {
     throw new Error("Invalid local CI admission owner. Admission has stopped.");
   }
-  return { pid: owner.pid, filename };
+  return { pid: owner.pid, startIdentity: owner.startIdentity, filename };
 }
 
 function removeEmptyDirectory(path: string) {
@@ -127,7 +126,7 @@ export async function acquireLocalCiAdmissionLock(
   try {
     NodeFS.writeFileSync(
       NodePath.join(candidatePath, filename),
-      `${JSON.stringify({ pid: NodeProcess.pid, token })}\n`,
+      `${JSON.stringify({ pid: NodeProcess.pid, startIdentity: getCurrentProcessStartIdentity(), token })}\n`,
       { mode: 0o600 },
     );
     if (options.onCandidatePrepared !== undefined) await options.onCandidatePrepared();
@@ -152,7 +151,13 @@ export async function acquireLocalCiAdmissionLock(
       const owner = readOwner(lockPath);
       if (owner === undefined) {
         removeEmptyDirectory(lockPath);
-      } else if (!isProcessRunning(owner.pid)) {
+      } else if (
+        !isProcessIdentityRunning(
+          owner.pid,
+          owner.startIdentity,
+          readProcessIdentities([owner.pid]),
+        )
+      ) {
         if (options.onStaleOwnerObserved !== undefined) await options.onStaleOwnerObserved();
         removeOwner(lockPath, owner.filename);
       } else {

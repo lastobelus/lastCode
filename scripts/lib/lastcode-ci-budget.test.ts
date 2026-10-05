@@ -15,6 +15,7 @@ import {
   tryAcquireLocalCiBudget,
 } from "./lastcode-ci-budget.ts";
 import { acquireLocalCiAdmissionLock } from "./lastcode-ci-admission-lock.ts";
+import * as ProcessIdentity from "./lastcode-ci-process-identity.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -23,9 +24,11 @@ vi.mock("node:os", async (importOriginal) => {
 
 const directories: string[] = [];
 const children: NodeChildProcess.ChildProcess[] = [];
+const cleanups: Array<() => Promise<void>> = [];
 const originalHome = NodeOS.homedir();
 
 afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   await Promise.all(
     children.splice(0).map(async (child) => {
       if (child.exitCode !== null || child.signalCode !== null) return;
@@ -57,6 +60,7 @@ type WorkerMessage = {
   readonly type: string;
   readonly summary?: string;
   readonly acquired?: boolean;
+  readonly pid?: number;
 };
 
 function worker(directory: string, maxConcurrentRuns: number, repoRoot = "workspace.example") {
@@ -145,12 +149,13 @@ function lockWorker(directory: string, pauseAt?: "prepared" | "stale") {
   `);
 }
 
-function processWorker(source: string) {
+function processWorker(source: string, detached = false) {
   const child = NodeChildProcess.spawn(
     NodeProcess.execPath,
     ["--input-type=module", "--eval", source],
     {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
+      detached,
     },
   );
   children.push(child);
@@ -188,6 +193,7 @@ function processWorker(source: string) {
     ]);
   };
   return {
+    pid: child.pid!,
     closed,
     next,
     send: (message: Record<string, unknown>) => child.send(message),
@@ -201,6 +207,58 @@ function processWorker(source: string) {
       await closed;
     },
   };
+}
+
+async function leaderlessCheck() {
+  const childSource = "process.stdout.write('ready\\n'); setInterval(() => {}, 60000)";
+  const fixture = processWorker(
+    `
+    import NodeChildProcess from "node:child_process";
+    import NodeProcess from "node:process";
+    const child = NodeChildProcess.spawn(NodeProcess.execPath, ["--eval", ${JSON.stringify(childSource)}], {stdio: ["ignore", "pipe", "ignore"]});
+    child.stdout.once("data", () => NodeProcess.send({type: "descendant-ready", pid: child.pid}));
+    NodeProcess.on("message", (message) => {
+      if (message.type === "exit-leader") NodeProcess.exit(0);
+    });
+  `,
+    true,
+  );
+  let stopped = false;
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    try {
+      // This group was captured from our detached fixture's spawn, and contains
+      // only the leader and descendant started above.
+      NodeProcess.kill(-fixture.pid, "SIGTERM");
+    } catch (error) {
+      if (
+        !(typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH")
+      )
+        throw error;
+    }
+    await fixture.closed.catch(() => undefined);
+  };
+  cleanups.push(stop);
+  const descendant = await fixture.next("descendant-ready");
+  return { ...fixture, descendantPid: descendant.pid!, stop };
+}
+
+function staleLease(directory: string, childPid: number | null = null) {
+  const path = NodePath.join(directory, "stale.lease.json");
+  NodeFS.writeFileSync(
+    path,
+    JSON.stringify({
+      pid: NodeProcess.pid,
+      startIdentity: "previous-process-start",
+      childPid,
+      childStartIdentity: childPid === null ? null : "previous-child-start",
+      token: "stale",
+      maxConcurrentRuns: 1,
+      repoRoot: "workspace.example",
+    }),
+  );
+  return path;
 }
 
 async function detachedCheck() {
@@ -380,7 +438,12 @@ describe("machine-wide local CI admission", () => {
   it("does not overtake a registered live waiter even when capacity is free", async () => {
     const directory = temporaryDirectory();
     const waiterPath = NodePath.join(directory, "queued.waiter.json");
-    const waiter = { pid: NodeProcess.pid, token: "queued", order: 1 };
+    const waiter = {
+      pid: NodeProcess.pid,
+      startIdentity: ProcessIdentity.getCurrentProcessStartIdentity(),
+      token: "queued",
+      order: 1,
+    };
     NodeFS.writeFileSync(waiterPath, JSON.stringify(waiter));
     expect(
       await tryAcquireLocalCiBudget({
@@ -508,6 +571,121 @@ describe("machine-wide local CI admission", () => {
     await queued.release();
   });
 
+  it("reclaims old owners and waiters whose live PID now has a different start identity", async () => {
+    const directory = temporaryDirectory();
+    const leasePath = staleLease(directory);
+    const waiterPath = NodePath.join(directory, "stale.waiter.json");
+    NodeFS.writeFileSync(
+      waiterPath,
+      JSON.stringify({
+        pid: NodeProcess.pid,
+        startIdentity: "previous-process-start",
+        token: "stale",
+        order: 1,
+      }),
+    );
+    const lease = await tryAcquireLocalCiBudget({
+      policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+      repoRoot: "workspace.example",
+      directory,
+    });
+    expect(lease).toBeDefined();
+    expect(NodeFS.existsSync(leasePath)).toBe(false);
+    expect(NodeFS.existsSync(waiterPath)).toBe(false);
+    lease!.release();
+  });
+
+  it("distinguishes a replacement child process or group from the recorded child", async () => {
+    const directory = temporaryDirectory();
+    const check = await detachedCheck();
+    const path = staleLease(directory, check.pid);
+    const lease = await tryAcquireLocalCiBudget({
+      policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+      repoRoot: "workspace.example",
+      directory,
+    });
+    expect(lease).toBeDefined();
+    expect(NodeFS.existsSync(path)).toBe(false);
+    // Reclaiming stale metadata does not terminate the replacement process.
+    expect(ProcessIdentity.isProcessRunning(check.pid)).toBe(true);
+    lease!.release();
+    await check.stop();
+  });
+
+  it("keeps capacity when an occupied PID's start identity is inaccessible", async () => {
+    const directory = temporaryDirectory();
+    const path = staleLease(directory);
+    const lookup = vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(new Map());
+    try {
+      expect(
+        await tryAcquireLocalCiBudget({
+          policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+          repoRoot: "workspace.example",
+          directory,
+        }),
+      ).toBeUndefined();
+      expect(NodeFS.existsSync(path)).toBe(true);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it("keeps capacity when a live child group's start identity is inaccessible", async () => {
+    const directory = temporaryDirectory();
+    const check = await detachedCheck();
+    const path = staleLease(directory, check.pid);
+    const knownOwner = ProcessIdentity.readProcessIdentities([NodeProcess.pid]);
+    const lookup = vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(knownOwner);
+    try {
+      expect(
+        await tryAcquireLocalCiBudget({
+          policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+          repoRoot: "workspace.example",
+          directory,
+        }),
+      ).toBeUndefined();
+      expect(NodeFS.existsSync(path)).toBe(true);
+    } finally {
+      lookup.mockRestore();
+      await check.stop();
+    }
+  });
+
+  it.skipIf(NodeProcess.platform === "win32")(
+    "keeps a leaderless owned group until its descendant exits",
+    async () => {
+      const directory = temporaryDirectory();
+      const owner = worker(directory, 1);
+      await owner.start();
+      await owner.next("acquired");
+      const check = await leaderlessCheck();
+      owner.send({ type: "record-child", pid: check.pid });
+      await owner.next("recorded");
+      const leasePath = NodeFS.readdirSync(directory).find((name) => name.endsWith(".lease.json"))!;
+      const stored = JSON.parse(NodeFS.readFileSync(NodePath.join(directory, leasePath), "utf8"));
+      expect(stored.startIdentity).toBe(
+        ProcessIdentity.readProcessIdentities([owner.pid]).get(owner.pid)?.startIdentity,
+      );
+      expect(stored.childStartIdentity).toBe(
+        ProcessIdentity.readProcessIdentities([check.pid]).get(check.pid)?.startIdentity,
+      );
+      check.send({ type: "exit-leader" });
+      await check.closed;
+      expect(ProcessIdentity.isProcessRunning(check.pid)).toBe(false);
+      expect(ProcessIdentity.isProcessRunning(check.descendantPid)).toBe(true);
+      owner.send({ type: "crash" });
+      await owner.closed;
+      const queued = worker(directory, 1);
+      await queued.start();
+      await queued.next("waiting");
+      queued.send({ type: "status" });
+      expect((await queued.next("status")).acquired).toBe(false);
+      await check.stop();
+      await queued.next("acquired");
+      await queued.release();
+    },
+  );
+
   it("retains a living child group after its owner exits and refuses early release", async () => {
     const directory = temporaryDirectory();
     const owner = worker(directory, 1);
@@ -560,6 +738,19 @@ describe("machine-wide local CI admission", () => {
 });
 
 describe("portable CI admission mutex", () => {
+  it("reclaims a directory lock whose PID now belongs to a different process", async () => {
+    const directory = temporaryDirectory();
+    const lockPath = NodePath.join(directory, "admission.lock.d");
+    const token = "11111111-1111-1111-1111-111111111111";
+    NodeFS.mkdirSync(lockPath);
+    NodeFS.writeFileSync(
+      NodePath.join(lockPath, `owner-${token}.json`),
+      JSON.stringify({ pid: NodeProcess.pid, startIdentity: "previous-process-start", token }),
+    );
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    expect(NodeFS.readdirSync(lockPath)).not.toContain(`owner-${token}.json`);
+    release();
+  });
   it("publishes only prepared ownership and ignores a crashed private candidate", async () => {
     const directory = temporaryDirectory();
     const incomplete = lockWorker(directory, "prepared");

@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
 import { expect, it } from "vite-plus/test";
+import { getCurrentProcessStartIdentity } from "./lib/lastcode-ci-process-identity.ts";
 import {
   assertSupportedNodeVersion,
   resolveLocalCiSteps,
@@ -251,7 +252,9 @@ it.skipIf(NodeProcess.platform === "win32")(
         occupiedLease,
         JSON.stringify({
           pid: process.pid,
+          startIdentity: getCurrentProcessStartIdentity(),
           childPid: null,
+          childStartIdentity: null,
           token: "fixture-active",
           maxConcurrentRuns: 1,
           repoRoot,
