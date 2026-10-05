@@ -45,6 +45,15 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["quick ci mode", "github only", "always local"])(
+    "finds the environment Quick CI mode for %s",
+    (query) => {
+      expect(searchSettings(query).map((item) => item.id)).toContain("local-ci-quick-mode");
+      expect(SETTINGS_SEARCH_ITEMS.find((item) => item.id === "local-ci-quick-mode")?.scope).toBe(
+        "environment-defaults",
+      );
+    },
+  );
   it.each(["send shortcut", "multiline", "new line"])("finds Send shortcut for %s", (query) => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });

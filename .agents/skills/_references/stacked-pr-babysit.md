@@ -87,8 +87,9 @@ does not redirect Quick CI. Remote waiting alone does not require this change.
    in its owned checkout. Inspect the range/diff first; do not apply this recipe
    blindly to merge commits or a child that did not incorporate that parent head.
    Merely retargeting the PR can leave the parent's original commits in its range.
-5. Verify the child retains its intended changes, retarget it to main, obtain
-   fresh Quick CI before pushing, push with a lease, and request new review/CI.
+5. Verify the child retains its intended changes, retarget it to main, apply the
+   current Quick CI policy before pushing, push with a lease, and request new
+   review/CI. Local checks remain optional; exact GitHub CI remains required.
    Propagate changed ancestor boundaries through the remaining descendants.
    Repeat until every authorized member is verified merged.
 

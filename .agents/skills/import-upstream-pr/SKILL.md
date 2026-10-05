@@ -96,10 +96,11 @@ Treat every conflict resolution and downstream adaptation as first-party code.
 3. Complete dependency installation before starting checks. A partially
    completed install is not evidence; require its zero exit and terminal
    completion.
-4. Run focused behavior tests, targeted lint, the affected package typecheck,
-   and `git diff --check <destination-base> <port-head>` under the repository's
+4. Run focused behavior tests, targeted lint, and
+   `git diff --check <destination-base> <port-head>` under the repository's
    canonical toolchain. A bare `git diff --check` does not inspect an already
-   committed port. Record the toolchain command and versions with the receipt.
+   committed port. Route workspace typechecks through the Quick CI policy in
+   `lastcode-pr`. Record the toolchain command and versions with validation.
 5. Add focused regression tests for backend or automation behavior. Do not run
    repo-wide checks merely for intake.
 6. For user-visible behavior, obtain browser/computer-use approval and use the
@@ -116,19 +117,15 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 1. Immediately before delivery, fetch `origin/lastcode/main` again. If the port
    parent moved, rebase the imported commits and rerun affected validation.
-2. Before the guarded push, require a clean worktree and record the local head,
-   destination base, and existing remote topic SHA (or its absence). Then push
-   in a clean environment so the pre-push `pnpm lastcode:ci:quick` gate sees
-   ordinary Git/SSH variables. Do not export `GIT_SSH_COMMAND` or inject an SSH
-   command through Git configuration around the push; those settings flow into
-   tests that intentionally control `GIT_SSH`.
-3. If Quick CI passes but the idle SSH transport subsequently dies, do not
-   treat its generic success line as an exact-head receipt. Require the local
-   head to equal the recorded head, the worktree to remain clean, the fetched
-   destination base to equal the recorded base, and the remote topic SHA (or
-   absence) to remain unchanged. Only then retry that recorded head with
-   `--no-verify` and an exact `--force-with-lease` tied to the recorded remote
-   topic state. Otherwise rerun the guarded push and its hook.
+2. Before publishing, follow the optional local Quick CI policy in `lastcode-pr`
+   from the clean exact port head. Automatic mode runs locally when capacity is
+   free and otherwise defers to required GitHub CI. Verify the head and
+   destination base on either a passing receipt or a GitHub deferral, then
+   decide whether and what to push. Keep the ordinary pre-push hook enabled.
+3. If transport fails after the hook accepts the receipt, verify the local head,
+   worktree, destination base, and remote topic state before retrying. Reuse the
+   same receipt only for the unchanged commit and base; otherwise re-evaluate
+   the Quick CI policy.
 4. Open a PR targeting `lastcode/main` only when explicitly requested. Include
    the upstream PR and pinned head, observed state/date, import method,
    adaptations, rationale, validation, closure/review context, and published
