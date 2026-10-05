@@ -55,6 +55,19 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Recover a thread
+
+LastCode checks Codex and Claude threads when their updates stop being recorded.
+Long thinking or tool calls alone do not trigger recovery. When the provider confirms
+that the affected turn ended, LastCode reconciles its status automatically without
+repeating the work. The recovery notice tells you when some output may be missing.
+
+Use **Check now** or **Recover** in the thread's notice to check again. If automatic
+recovery cannot finish, **Open repair thread** starts a separate investigation using
+the project's default provider and model. Your original conversation stays in place;
+**View repair thread** returns to the same investigation. Configure a project model
+default first if LastCode asks for one.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

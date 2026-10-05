@@ -1,3 +1,4 @@
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import {
@@ -85,6 +86,8 @@ export type ThreadListV2Status =
   | "approval"
   | "input"
   | "question"
+  | "not-responding"
+  | "needs-repair"
   | "working"
   | "waiting"
   | "failed"
@@ -210,9 +213,16 @@ export function threadHasUnseenCompletion(
 export function resolveThreadListV2Status(
   thread: Pick<
     EnvironmentThreadShell,
-    "actionResume" | "attention" | "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
+    | "actionResume"
+    | "attention"
+    | "hasPendingApprovals"
+    | "hasPendingUserInput"
+    | "runtime"
+    | "recovery"
   >,
 ): ThreadListV2Status {
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals) {
     return "approval";
   }

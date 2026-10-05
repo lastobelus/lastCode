@@ -79,7 +79,11 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
+import {
+  CommandPolicyV2,
+  resolveMessageDispatchIntent,
+  runNeedsRecovery,
+} from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
@@ -4333,6 +4337,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Target run ${input.targetRunId} was not found.`,
         });
       }
+      if (!input.forceRestart && runNeedsRecovery(input.projection.thread, targetRun)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: input.command.commandId,
+          commandType: input.command.type,
+          cause:
+            "This turn needs recovery before it can receive messages. Your message remains queued.",
+        });
+      }
       if (isNativeMaintenanceCommand(input)) {
         return yield* new OrchestratorDispatchError({
           commandId: input.command.commandId,
@@ -5314,6 +5326,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         if (
           active !== undefined &&
+          !runNeedsRecovery(projection.thread, active) &&
           activeTurn !== undefined &&
           providerThread?.providerSessionId != null &&
           (activeMessage === undefined || !isNativeMaintenanceCommand(activeMessage))

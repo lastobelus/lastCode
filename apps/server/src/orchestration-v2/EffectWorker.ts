@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import {
@@ -782,6 +783,8 @@ export const layer = layerWithOptions();
 export interface OrchestrationEffectDaemonOptions {
   readonly concurrency?: number;
   readonly livenessPollIntervalMs?: number;
+  /** Shares the existing wake-up cadence; runs once across all worker lanes. */
+  readonly reconcileThreadHealth?: Effect.Effect<void>;
 }
 
 const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
@@ -800,11 +803,27 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       const livenessPollIntervalMs = Number.isFinite(requestedLivenessPollIntervalMs)
         ? Math.max(1, Math.floor(requestedLivenessPollIntervalMs))
         : DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS;
+      const nextHealthCheck = yield* Ref.make(0);
+      const healthCheckRunning = yield* Ref.make(false);
+      const reconcileThreadHealth = Effect.gen(function* () {
+        if (options.reconcileThreadHealth === undefined) return;
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const due = yield* Ref.modify(nextHealthCheck, (next) =>
+          now < next ? [false, next] : [true, now + livenessPollIntervalMs],
+        );
+        if (!due || (yield* Ref.getAndSet(healthCheckRunning, true))) return;
+        yield* options.reconcileThreadHealth.pipe(
+          Effect.catchCause((cause) => Effect.logWarning("Thread health check failed", cause)),
+          Effect.ensuring(Ref.set(healthCheckRunning, false)),
+          Effect.forkScoped,
+        );
+      });
       // Post-commit notifications are the low-latency path. `availableAt` is the
       // durable retry schedule, and the long liveness poll only recovers from a
       // missed in-process notification or work inserted by another process.
       const runWorker = Effect.gen(function* () {
         while (true) {
+          yield* reconcileThreadHealth;
           const outcome = yield* worker.runOnce.pipe(
             Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
             Effect.catchCause((cause) =>

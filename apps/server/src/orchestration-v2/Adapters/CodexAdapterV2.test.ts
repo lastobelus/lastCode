@@ -2067,6 +2067,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         driver: CodexAdapterV2.CODEX_DRIVER_KIND,
         nativeTurnId,
       });
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId,
+        }),
+        { status: "active" },
+      );
       const interrupt = yield* harness.runtime
         .interruptTurn({ providerThread: harness.providerThread, providerTurnId })
         .pipe(Effect.forkScoped);
@@ -2076,6 +2083,30 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       yield* Fiber.join(interrupt);
       yield* harness.firstTerminal;
       assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId,
+        }),
+        { status: "terminal", event: harness.terminalEvents()[0] },
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: ProviderTurnId.make("unknown-turn"),
+        }),
+        { status: "unknown" },
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: {
+            ...harness.providerThread,
+            id: ProviderThreadId.make("another-thread"),
+          },
+          providerTurnId,
+        }),
+        { status: "unknown" },
+      );
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),

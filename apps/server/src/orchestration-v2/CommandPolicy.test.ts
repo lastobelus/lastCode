@@ -7,9 +7,11 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   RunId,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { CursorProviderCapabilitiesV2 } from "./Adapters/CursorAdapterV2.ts";
@@ -34,6 +36,7 @@ function dispatchProjection(
   const providerThreadId = ProviderThreadId.make("command-policy-provider-thread");
   const providerSessionId = ProviderSessionId.make("command-policy-provider-session");
   return {
+    thread: {},
     runs:
       sessionCapabilities === undefined
         ? []
@@ -140,6 +143,63 @@ it("targets the latest active run for explicit steer and restart intent", () => 
     { type: "start_immediately" },
   );
 });
+
+it.each(["suspect", "stale", "recovering", "failed"] as const)(
+  "queues auto and steer deliveries while the matching attempt is %s",
+  (status) => {
+    const projection = dispatchProjection(baseCapabilities);
+    const attemptId = RunAttemptId.make("recovery-attempt");
+    const recovering = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        recovery: {
+          runId: activeRunId,
+          attemptId,
+          status,
+          detail: "Event reader failed",
+          updatedAt: DateTime.makeUnsafe("2026-01-01T00:00:00Z"),
+        },
+      },
+      runs: projection.runs.map((run) => ({ ...run, activeAttemptId: attemptId })),
+    };
+    for (const intent of ["auto", "steer", undefined] as const) {
+      assert.deepEqual(
+        CommandPolicy.resolveMessageDispatchIntent(
+          recovering,
+          { type: "steer_active", targetRunId: activeRunId },
+          intent,
+        ),
+        { type: "queue_after_active" },
+      );
+    }
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        recovering,
+        { type: "start_immediately" },
+        "restart",
+      ),
+      { type: "restart_active", targetRunId: activeRunId },
+    );
+    for (const recovery of [
+      { ...recovering.thread.recovery, status: "recovered" as const },
+      { ...recovering.thread.recovery, attemptId: RunAttemptId.make("old-attempt") },
+      { ...recovering.thread.recovery, runId: RunId.make("old-run") },
+    ]) {
+      assert.deepEqual(
+        CommandPolicy.resolveMessageDispatchIntent(
+          {
+            ...recovering,
+            thread: { ...recovering.thread, recovery },
+          },
+          { type: "start_immediately" },
+          "auto",
+        ),
+        { type: "steer_active", targetRunId: activeRunId },
+      );
+    }
+  },
+);
 
 const layer = it.layer(CommandPolicy.layer);
 
