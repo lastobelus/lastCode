@@ -87,6 +87,43 @@ describe("workspace document reading session", () => {
     expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
   });
 
+  it("retries an interrupted explicit reload after reconnecting and ignores its obsolete result", async () => {
+    await open();
+    const originalFrame = renderer.root.findByType("iframe");
+    let completeInterrupted!: (url: string) => void;
+    refresh.mockReturnValueOnce(
+      new Promise((resolve) => {
+        completeInterrupted = resolve;
+      }),
+    );
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} revision={1} />));
+    expect(renderer.root.findByType("iframe")).toBe(originalFrame);
+
+    const offline = vi.fn(async () => null);
+    useAssetUrlRefresh.mockReturnValue(offline);
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} revision={1} />));
+    expect(offline).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findByType("iframe")).toBe(originalFrame);
+    expect(renderer.root.findByProps({ role: "status" })).toBeDefined();
+
+    const recovered = vi.fn(async () => "https://environment.test/report.html?signature=recovered");
+    useAssetUrlRefresh.mockReturnValue(recovered);
+    await act(async () => renderer.update(<WorkspaceBrowserPreview {...props} revision={1} />));
+    expect(recovered).toHaveBeenCalledTimes(1);
+    const refreshedFrame = renderer.root.findByType("iframe");
+    expect(refreshedFrame).not.toBe(originalFrame);
+    expect(refreshedFrame.props.src).toBe(
+      "https://environment.test/report.html?signature=recovered&preview-revision=1",
+    );
+    expect(renderer.root.findAllByProps({ role: "status" })).toHaveLength(0);
+
+    await act(async () =>
+      completeInterrupted("https://environment.test/report.html?signature=old"),
+    );
+    expect(renderer.root.findByType("iframe")).toBe(refreshedFrame);
+    expect(refreshedFrame.props.src).toContain("signature=recovered");
+  });
+
   it("reauthorizes and replaces the document only on explicit reload", async () => {
     await open();
     const frame = renderer.root.findByType("iframe");
