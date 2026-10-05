@@ -1874,6 +1874,130 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each([1, 16 * 1_024 - 256])(
+    "redacts short values once without expanding diagnostic markers (%s characters)",
+    (size) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-short-values-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const command = "node ./server[1].js";
+        const harness = testTerminalHarness({
+          startupHistory: `${command}\n${"a".repeat(size)}\nab a[r]e`,
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                };
+            }),
+        });
+        const replace = vi.spyOn(String.prototype, "replace");
+        yield* Effect.acquireUseRelease(
+          Effect.void,
+          () =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const hosting = yield* PreviewHosting.PreviewHosting;
+                const result = yield* Effect.result(
+                  hosting.launch({
+                    threadId: "thread-1",
+                    command,
+                    cwd: "/workspace",
+                    url: PREVIEW_URL,
+                    env: {
+                      SHORT_A: "a",
+                      SHORT_BRACKET: "[",
+                      SHORT_R: "r",
+                      SHORT_E: "e",
+                      LONGER: "ab",
+                    },
+                  }),
+                );
+                assert.equal(result._tag, "Failure");
+                if (result._tag === "Failure") {
+                  assert.include(
+                    result.failure.message,
+                    "[redacted] [redacted][redacted][redacted]][redacted]",
+                  );
+                  if (size === 1)
+                    assert.include(result.failure.message, "[launch command]\n[redacted]\n");
+                  assert.isAtMost(result.failure.message.length, 1_024);
+                }
+                // Intermediate strings may grow by one marker per original character,
+                // but replacements must never rescan and expand their own inserted text.
+                assert.isTrue(
+                  replace.mock.contexts.every(
+                    (input) =>
+                      typeof input !== "string" ||
+                      input.length <= 16 * 1_024 * "[launch command]".length,
+                  ),
+                );
+              }).pipe(Effect.provide(hostingLayer(config, harness))),
+            ),
+          () => Effect.sync(() => replace.mockRestore()),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["B", "pnpm dev"])(
+    "masks common credentials before short values or command %s can change their labels",
+    (command) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "preview-hosting-generic-secrets-",
+        });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          startupHistory:
+            "Bearer unknown-bearer-secret\nbAsIc unknown-basic-secret\npassword=unknown-password-secret\nPASSWORD='unknown-uppercase-secret'\nHTTP://operator:unknown-userinfo-secret@localhost:5173/?token=unknown-query-secret",
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                };
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command,
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+                env: { SHORT_A: "a", SHORT_R: "r", SHORT_E: "e", SHORT_BRACKET: "[" },
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.include(result.failure.message, "Bearer [redacted]");
+              assert.include(result.failure.message, "bAsIc [redacted]");
+              assert.include(result.failure.message, "password=[redacted]");
+              assert.include(result.failure.message, "PASSWORD=[redacted]");
+              assert.notInclude(result.failure.message, "unknown-");
+              assert.isAtMost(result.failure.message.length, 1_024);
+            }
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect.each([
     {
       name: "credential in an oversized line",

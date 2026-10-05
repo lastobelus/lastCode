@@ -211,6 +211,15 @@ const startupTextWindow = (text: string, sensitiveValues: ReadonlyArray<string>)
   return tail.slice(newline + 1);
 };
 
+const caseInsensitiveWord = (value: string) =>
+  value.replace(/[a-z]/gi, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`);
+const startupCredentialPattern = [
+  String.raw`\b[hH][tT][tT][pP][sS]?:\/\/[^\s<>"']+`,
+  String.raw`\b(${["Bearer", "Basic"].map(caseInsensitiveWord).join("|")})\s+[^\s,;]+`,
+  String.raw`(\b[\w-]*(?:${["token", "key", "password", "secret", "credential", "auth"].map(caseInsensitiveWord).join("|")})[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`,
+  String.raw`\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b`,
+].join("|");
+
 /** Startup transcripts can echo commands and credentials; redact within a bounded window. */
 const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string => {
   const environmentValues = [
@@ -221,41 +230,53 @@ const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string =
   ];
   const values = [
     ...new Set(
-      environmentValues
-        .flatMap((value) => (value === undefined || value.length === 0 ? [] : [value]))
-        .toSorted((left, right) => right.length - left.length),
+      environmentValues.flatMap((value) =>
+        value === undefined || value.length === 0 ? [] : [value],
+      ),
     ),
   ];
   const window = startupTextWindow(text, [lease.command, ...values]);
   if (window === null) return "[Startup output omitted: oversized line or partial credential.]";
-  let sanitized = NodeUtil.stripVTControlCharacters(window).replaceAll(
-    lease.command,
-    "[launch command]",
-  );
-  for (const value of values) {
-    sanitized = sanitized.replaceAll(value, "[redacted]");
-  }
-  return sanitized
-    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (value) => {
-      try {
-        const url = new URL(value);
-        url.username = "";
-        url.password = "";
-        url.search = "";
-        url.hash = "";
-        return url.href;
-      } catch {
-        return "[redacted URL]";
-      }
-    })
-    .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]")
+  const plain = NodeUtil.stripVTControlCharacters(window);
+  const literals = [...new Set([lease.command, ...values])]
+    .filter((value) => value.length > 0 && plain.includes(value))
+    .toSorted((left, right) => right.length - left.length);
+  const literalPattern = literals
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  const literalMatcher = literalPattern.length === 0 ? null : new RegExp(literalPattern, "g");
+  const literalReplacement = (value: string) =>
+    value === lease.command ? "[launch command]" : "[redacted]";
+  // Common credentials win at the same position, before short values can change
+  // their labels. Every callback emits final text that this pass never rescans.
+  return plain
     .replace(
-      /(\b[\w-]*(?:token|key|password|secret|credential|auth)[\w-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-      "$1[redacted]",
-    )
-    .replace(
-      /\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/g,
-      "[redacted]",
+      new RegExp(
+        [startupCredentialPattern, ...(literalPattern.length === 0 ? [] : [literalPattern])].join(
+          "|",
+        ),
+        "g",
+      ),
+      (value, scheme: string | undefined, prefix: string | undefined) => {
+        if (value === lease.command || values.includes(value)) return literalReplacement(value);
+        if (scheme !== undefined) return `${scheme} [redacted]`;
+        if (prefix !== undefined) return `${prefix}[redacted]`;
+        if (/^https?:\/\//i.test(value)) {
+          try {
+            const url = new URL(value);
+            url.username = "";
+            url.password = "";
+            url.search = "";
+            url.hash = "";
+            return literalMatcher === null
+              ? url.href
+              : url.href.replace(literalMatcher, literalReplacement);
+          } catch {
+            return "[redacted URL]";
+          }
+        }
+        return "[redacted]";
+      },
     )
     .trim();
 };
