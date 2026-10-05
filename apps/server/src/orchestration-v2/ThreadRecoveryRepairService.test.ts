@@ -236,7 +236,8 @@ describe("ThreadRecoveryRepairService", () => {
           worktreePath: "/workspace/work",
           branch: "work",
         });
-        assert.strictEqual(launch.creatorThreadId, identity.threadId);
+        assert.strictEqual(launch.createdBy, "user");
+        assert.isUndefined(launch.creatorThreadId);
         assert.include(launch.initialMessage!.text, "Do not directly mutate the live database");
         assert.include(launch.initialMessage!.text, "Target attempt: attempt");
       }).pipe(Effect.provide(h.layer));
