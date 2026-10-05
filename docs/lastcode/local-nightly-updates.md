@@ -62,6 +62,8 @@ picker.
    when the sidebar update button is clicked. A manual check from the sidebar,
    Settings, or application menu also requests an immediate checkpoint when the
    checkpoint service is installed on this Mac, including on a daily schedule.
+   If an interval run is already active, the request waits for a follow-up run
+   without interrupting the current one.
    The check still discovers releases that are already ready. If no newer release
    is ready, the app confirms the request while the service runs in the background;
    check again later to pick up its result.
@@ -166,8 +168,10 @@ revision.
 
 ## Failure handling and logs
 
-A failed check or build leaves the current app installed and changes the
-sidebar button to a persistent red retry state. Hovering a local build failure
+A failed check leaves the current app installed and reports the error. If an
+update is already ready to build or install, that action stays available.
+A failed build changes the sidebar button to a persistent red retry state.
+Hovering a local build failure
 opens an interactive panel with the last phase, estimated percentage, and exact
 error. **Copy details** creates a bounded, control-sequence-sanitized summary
 with the installed and target versions, selected checkpoint, failure context,

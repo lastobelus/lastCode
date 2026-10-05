@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 
 import {
   checkpointServiceRunNowArguments,
+  checkpointServiceRunNowPaths,
   isDailyCheckpointLaunchAgent,
   LASTCODE_CHECKPOINT_SERVICE_LABEL,
   requestCheckpointServiceRunNow,
@@ -429,8 +430,10 @@ function main(argv: ReadonlyArray<string>): void {
       console.log(`[lastcode:service] Disabled plist retained at ${backupPath}.`);
     }
     if (NodeFS.existsSync(supervisorConfigPath)) NodeFS.rmSync(supervisorConfigPath);
-    const scheduleRequestPath = NodePath.join(logDirectory, "checkpoint-schedule-run-now.request");
-    if (NodeFS.existsSync(scheduleRequestPath)) NodeFS.rmSync(scheduleRequestPath);
+    const { requestPath, serviceRequestPath } = checkpointServiceRunNowPaths(home);
+    for (const pendingRequestPath of [requestPath, serviceRequestPath]) {
+      NodeFS.rmSync(pendingRequestPath, { force: true });
+    }
     if (NodeFS.existsSync(scheduleStatePath)) NodeFS.rmSync(scheduleStatePath);
     clearNightlyServiceState(logDirectory);
     return;

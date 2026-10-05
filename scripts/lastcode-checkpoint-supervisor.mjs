@@ -52,6 +52,7 @@ export function supervisorPaths(home = NodeOS.homedir()) {
   const rootDirectory = NodePath.join(home, ".lastcode", "automation");
   return {
     configPath: NodePath.join(rootDirectory, "checkpoint-supervisor.json"),
+    requestPath: NodePath.join(rootDirectory, "checkpoint-service-run-now.request"),
     runHistoryPath: NodePath.join(rootDirectory, "checkpoint-runs.jsonl"),
     statePath: NodePath.join(rootDirectory, "checkpoint-service-state.json"),
     threadToolPath: NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread"),
@@ -803,6 +804,46 @@ export function checkpointSchedulerPid(environment, parentPid = process.ppid) {
   return pid;
 }
 
+export function consumeCheckpointIntervalRequest(requestPath) {
+  const claimedPath = `${requestPath}.${process.pid}.${NodeCrypto.randomUUID()}.claimed`;
+  try {
+    // Requests published after this claim keep their own pending marker.
+    NodeFS.renameSync(requestPath, claimedPath);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return false;
+    throw error;
+  }
+  NodeFS.unlinkSync(claimedPath);
+  return true;
+}
+
+export function runCheckpointSupervisorEntrypoint(options = {}, overrides = {}) {
+  const runAttempt = overrides.runAttempt ?? (() => runCheckpointSupervisor(options, overrides));
+  if (checkpointSchedulerPid(options.environment ?? process.env) !== undefined) {
+    return runAttempt();
+  }
+
+  const paths = supervisorPaths(options.home ?? NodeOS.homedir());
+  const consumeRequest =
+    overrides.consumeRequest ?? (() => consumeCheckpointIntervalRequest(paths.requestPath));
+  consumeRequest();
+  while (true) {
+    let state;
+    let failed = false;
+    let failure;
+    try {
+      state = runAttempt();
+    } catch (error) {
+      failed = true;
+      failure = error;
+    }
+    // Each follow-up requires a new request; failures never retry on their own.
+    if (consumeRequest()) continue;
+    if (failed) throw failure;
+    return state;
+  }
+}
+
 export function runCheckpointSupervisor(options = {}, overrides = {}) {
   const home = options.home ?? NodeOS.homedir();
   const repoRoot = options.repoRoot ?? process.cwd();
@@ -1085,7 +1126,7 @@ if (import.meta.main) {
     process.exitCode = 64;
   } else {
     try {
-      runCheckpointSupervisor();
+      runCheckpointSupervisorEntrypoint();
     } catch (error) {
       console.error(
         `[lastcode:checkpoint-supervisor] ${error instanceof Error ? error.message : String(error)}`,

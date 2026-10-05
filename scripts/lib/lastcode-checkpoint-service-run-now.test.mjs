@@ -33,7 +33,12 @@ describe("checkpoint service run-now request", () => {
     expect(requestCheckpointServiceRunNow({ homeDirectory, uid: 501 }, deps)).toEqual({
       status: "requested",
     });
-    expect(deps.writeRequest).not.toHaveBeenCalled();
+    expect(deps.writeRequest).toHaveBeenCalledWith(paths.serviceRequestPath, {
+      requestedAt: "2026-09-11T12:34:56.000Z",
+    });
+    expect(deps.writeRequest.mock.invocationCallOrder[0]).toBeLessThan(
+      deps.runLaunchctl.mock.invocationCallOrder[0],
+    );
     expect(deps.runLaunchctl).toHaveBeenCalledWith(
       checkpointServiceRunNowArguments("gui/501/codes.lastobelus.lastcode-nightly-checkpoint"),
     );
@@ -59,6 +64,17 @@ describe("checkpoint service run-now request", () => {
     expect(() => requestCheckpointServiceRunNow({ homeDirectory, uid: 501 }, deps)).toThrow(
       "Service is not loaded",
     );
+  });
+
+  it("does not report success or start the service if queuing fails", () => {
+    const deps = dependencies("<string>lastcode-checkpoint-supervisor.mjs</string>");
+    deps.writeRequest.mockImplementation(() => {
+      throw new Error("Could not persist checkpoint request");
+    });
+    expect(() => requestCheckpointServiceRunNow({ homeDirectory, uid: 501 }, deps)).toThrow(
+      "Could not persist checkpoint request",
+    );
+    expect(deps.runLaunchctl).not.toHaveBeenCalled();
   });
 
   it("retains a daily schedule for automatic post-merge requests", () => {

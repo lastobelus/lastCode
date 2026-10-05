@@ -8,6 +8,7 @@ export const LASTCODE_CHECKPOINT_SERVICE_LABEL = "codes.lastobelus.lastcode-nigh
 
 const SCHEDULE_HELPER_FILE = "lastcode-checkpoint-schedule.mjs";
 const SCHEDULE_REQUEST_FILE = "checkpoint-schedule-run-now.request";
+const SERVICE_REQUEST_FILE = "checkpoint-service-run-now.request";
 
 export function checkpointServiceRunNowPaths(homeDirectory) {
   const automationDirectory = NodePath.join(homeDirectory, ".lastcode", "automation");
@@ -19,6 +20,7 @@ export function checkpointServiceRunNowPaths(homeDirectory) {
       `${LASTCODE_CHECKPOINT_SERVICE_LABEL}.plist`,
     ),
     requestPath: NodePath.join(automationDirectory, SCHEDULE_REQUEST_FILE),
+    serviceRequestPath: NodePath.join(automationDirectory, SERVICE_REQUEST_FILE),
   };
 }
 
@@ -44,7 +46,8 @@ function writeJsonAtomic(path, value) {
 /**
  * Request a run from an installed checkpoint LaunchAgent without interrupting it.
  * `deferDaily` is reserved for automatic post-merge requests; an explicit
- * manual request must write the daily scheduler marker before kickstarting it.
+ * manual request must persist a marker before kickstarting it. Interval runs
+ * drain requests made while they are active; daily runs use the scheduler marker.
  */
 export function requestCheckpointServiceRunNow(options, overrides = {}) {
   const paths = checkpointServiceRunNowPaths(options.homeDirectory);
@@ -66,11 +69,9 @@ export function requestCheckpointServiceRunNow(options, overrides = {}) {
   if (!dependencies.exists(paths.plistPath)) return { status: "not-installed" };
   const daily = isDailyCheckpointLaunchAgent(dependencies.readFile(paths.plistPath));
   if (options.deferDaily && daily) return { status: "deferred" };
-  if (daily) {
-    dependencies.writeRequest(paths.requestPath, {
-      requestedAt: dependencies.now().toISOString(),
-    });
-  }
+  dependencies.writeRequest(daily ? paths.requestPath : paths.serviceRequestPath, {
+    requestedAt: dependencies.now().toISOString(),
+  });
   const service = `gui/${options.uid}/${LASTCODE_CHECKPOINT_SERVICE_LABEL}`;
   dependencies.runLaunchctl(checkpointServiceRunNowArguments(service));
   return { status: "requested" };

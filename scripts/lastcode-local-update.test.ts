@@ -81,7 +81,7 @@ function inspectRepository(
   return JSON.parse(resultLine.slice("LASTCODE_LOCAL_UPDATE_RESULT=".length));
 }
 
-function checkpointInspectionFixture(serviceInstalled = true) {
+function checkpointInspectionFixture(serviceInstalled = true, daily = true) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-inspect-service-"));
   const repo = NodePath.join(root, "repo");
   NodeFS.mkdirSync(repo);
@@ -97,10 +97,17 @@ function checkpointInspectionFixture(serviceInstalled = true) {
   const revision = commitFile(repo, "tracked.txt", "revision\n", "local revision");
   tagInstallable(repo, revisionTag, revision);
 
-  const { plistPath, requestPath } = checkpointServiceRunNowPaths(root);
+  const servicePaths = checkpointServiceRunNowPaths(root);
+  const { plistPath } = servicePaths;
+  const requestPath = daily ? servicePaths.requestPath : servicePaths.serviceRequestPath;
   if (serviceInstalled) {
     NodeFS.mkdirSync(NodePath.dirname(plistPath), { recursive: true });
-    NodeFS.writeFileSync(plistPath, "<string>lastcode-checkpoint-schedule.mjs</string>");
+    NodeFS.writeFileSync(
+      plistPath,
+      daily
+        ? "<string>lastcode-checkpoint-schedule.mjs</string>"
+        : "<string>lastcode-checkpoint-supervisor.mjs</string>",
+    );
   }
   const launchctlCalls: Array<Array<string>> = [];
   return {
@@ -121,7 +128,7 @@ function checkpointInspectionFixture(serviceInstalled = true) {
       platform: "darwin" as const,
       uid: 501,
       runLaunchctl: (args: string[]) => {
-        assert.isTrue(NodeFS.existsSync(requestPath), "write the daily marker before launchctl");
+        assert.isTrue(NodeFS.existsSync(requestPath), "persist the request before launchctl");
         launchctlCalls.push([...args]);
       },
     },
@@ -802,6 +809,26 @@ describe("lastcode-local-update", () => {
       }
     },
   );
+
+  it("queues an interval request while still discovering a ready release", () => {
+    const fixture = checkpointInspectionFixture(true, false);
+    try {
+      assert.deepInclude(
+        inspectLocalUpdate(
+          { ...fixture.options, requestCheckpoint: true, releaseNotesFormat: "grouped-v1" },
+          fixture.overrides,
+        ),
+        { status: "available", checkpointRequested: true, checkpointTag: fixture.revisionTag },
+      );
+      assert.isTrue(NodeFS.existsSync(fixture.requestPath));
+      assert.isFalse(NodeFS.existsSync(checkpointServiceRunNowPaths(fixture.root).requestPath));
+      assert.deepEqual(fixture.launchctlCalls, [
+        ["kickstart", "gui/501/codes.lastobelus.lastcode-nightly-checkpoint"],
+      ]);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 
   it.each([true, false])(
     "reports an accepted request only when no installable tags exist (grouped: %s)",

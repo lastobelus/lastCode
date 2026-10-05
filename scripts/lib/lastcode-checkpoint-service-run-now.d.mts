@@ -3,6 +3,7 @@ export const LASTCODE_CHECKPOINT_SERVICE_LABEL: "codes.lastobelus.lastcode-night
 export function checkpointServiceRunNowPaths(homeDirectory: string): {
   readonly plistPath: string;
   readonly requestPath: string;
+  readonly serviceRequestPath: string;
 };
 
 export function isDailyCheckpointLaunchAgent(plist: string): boolean;
