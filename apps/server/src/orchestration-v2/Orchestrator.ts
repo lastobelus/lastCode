@@ -17,6 +17,9 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  hasOpenActionableDashboardItems,
+  isActionableDashboardItem,
+  THREAD_DASHBOARD_MAX_ITEMS,
   isProviderNativeSubagentThread,
   MessageId,
   TurnItemId,
@@ -381,6 +384,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.annotation.reopen":
     case "thread.attention.set":
     case "thread.attention.clear":
+    case "thread.dashboard-item.upsert":
+    case "thread.dashboard-item.remove":
     case "thread.create":
     case "thread.archive":
     case "thread.unarchive":
@@ -2313,7 +2318,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.annotation.resolve"
           | "thread.annotation.reopen"
           | "thread.attention.set"
-          | "thread.attention.clear";
+          | "thread.attention.clear"
+          | "thread.dashboard-item.upsert"
+          | "thread.dashboard-item.remove";
       }
     >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -2337,7 +2344,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         | "thread.annotation-resolved"
         | "thread.annotation-reopened"
         | "thread.attention-set"
-        | "thread.attention-cleared",
+        | "thread.attention-cleared"
+        | "thread.metadata-updated",
       payload: OrchestrationV2AppThread,
     ) =>
       emit(
@@ -2370,6 +2378,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...thread,
         persistent: command.persistent,
         updatedAt: now,
+      });
+      return;
+    }
+    if (
+      command.type === "thread.dashboard-item.upsert" ||
+      command.type === "thread.dashboard-item.remove"
+    ) {
+      const items = thread.dashboardItems ?? [];
+      let dashboardItems;
+      if (command.type === "thread.dashboard-item.upsert") {
+        const previous = items.find((item) => item.id === command.item.id);
+        if (previous === undefined && items.length >= THREAD_DASHBOARD_MAX_ITEMS) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} already has ${THREAD_DASHBOARD_MAX_ITEMS} dashboard items.`,
+          });
+        }
+        const item = {
+          ...command.item,
+          createdAt: previous?.createdAt ?? nowIso,
+          updatedAt: nowIso,
+        };
+        dashboardItems =
+          previous === undefined
+            ? [...items, item]
+            : items.map((existing) => (existing.id === item.id ? item : existing));
+      } else {
+        dashboardItems = items.filter((item) => item.id !== command.itemId);
+      }
+      yield* emitThread("thread.metadata-updated", {
+        ...thread,
+        dashboardItems,
+        updatedAt: now,
+        ...(command.type === "thread.dashboard-item.upsert" &&
+        isActionableDashboardItem(command.item)
+          ? {
+              settledOverride: null,
+              settledAt: null,
+              unsettledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+            }
+          : {}),
       });
       return;
     }
@@ -3748,6 +3800,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           persistent: false,
           annotation: null,
           attention: null,
+          dashboardItems: [],
           actionResume: null,
           worktreeCleanup: null,
           pinnedAt: null,
@@ -10105,6 +10158,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.annotation.reopen":
       case "thread.attention.set":
       case "thread.attention.clear":
+      case "thread.dashboard-item.upsert":
+      case "thread.dashboard-item.remove":
         yield* dispatchThreadMetadata(command, events);
         break;
       case "thread.create":
@@ -10127,6 +10182,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           );
         if (
           thread.attention != null ||
+          hasOpenActionableDashboardItems(thread.dashboardItems) ||
           thread.settledOverride !== null ||
           DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt)
         ) {

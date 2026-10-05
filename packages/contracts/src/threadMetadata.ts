@@ -23,6 +23,58 @@ export const ThreadAttention = Schema.Struct({
 });
 export type ThreadAttention = typeof ThreadAttention.Type;
 
+export const THREAD_DASHBOARD_MAX_ITEMS = 32;
+
+const ThreadDashboardItemId = TrimmedNonEmptyString.check(Schema.isMaxLength(80));
+
+export const ThreadDashboardItemInput = Schema.Struct({
+  id: ThreadDashboardItemId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(160)),
+  body: Schema.String.check(Schema.isMaxLength(4_000)),
+  kind: Schema.Literals(["question", "review", "qa", "metric", "progress", "summary"]),
+  status: Schema.Literals(["open", "resolved"]),
+  priority: Schema.Literals(["normal", "high"]),
+  effort: Schema.Literals(["quick", "focused", "unspecified"]),
+  requiresComputer: Schema.Boolean,
+});
+export type ThreadDashboardItemInput = typeof ThreadDashboardItemInput.Type;
+
+export const ThreadDashboardItem = Schema.Struct({
+  ...ThreadDashboardItemInput.fields,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ThreadDashboardItem = typeof ThreadDashboardItem.Type;
+
+export const ThreadDashboardItems = Schema.Array(ThreadDashboardItem).check(
+  Schema.isMaxLength(THREAD_DASHBOARD_MAX_ITEMS),
+  Schema.makeFilter(
+    (items) =>
+      new Set(items.map((item) => item.id)).size === items.length ||
+      "dashboard item ids must be unique within the thread",
+  ),
+);
+
+export function isActionableDashboardItem(
+  item: Pick<ThreadDashboardItem, "kind" | "status">,
+): boolean {
+  return (
+    item.status === "open" &&
+    (item.kind === "question" || item.kind === "review" || item.kind === "qa")
+  );
+}
+
+export function hasOpenActionableDashboardItems(
+  items: ReadonlyArray<ThreadDashboardItem> | undefined,
+): boolean {
+  return items?.some(isActionableDashboardItem) ?? false;
+}
+
+export class ThreadDashboardToolError extends Schema.TaggedError<ThreadDashboardToolError>()(
+  "ThreadDashboardToolError",
+  { message: Schema.String },
+) {}
+
 const ThreadWorktreeCleanupBase = {
   repositoryRoot: TrimmedNonEmptyString,
   repositoryKey: Schema.optional(TrimmedNonEmptyString),

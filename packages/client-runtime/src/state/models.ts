@@ -145,6 +145,7 @@ export interface EnvironmentThreadShell {
   readonly persistent?: boolean;
   readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
   readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
+  readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
   readonly source: OrchestrationV2ThreadShell;
@@ -304,6 +305,7 @@ export function presentThreadShell(
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
     annotation: thread.annotation ?? null,
     attention: thread.attention ?? null,
+    dashboardItems: thread.dashboardItems ?? [],
     actionResume: thread.actionResume ?? null,
     worktreeCleanup: thread.worktreeCleanup ?? null,
     source: thread,

@@ -62,6 +62,8 @@ import { ActionResumeToolkitHandlersLive } from "./toolkits/actionResume/handler
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
 import { ThreadAttentionToolkitHandlersLive } from "./toolkits/threadAttention/handlers.ts";
 import { ThreadAttentionToolkit } from "./toolkits/threadAttention/tools.ts";
+import { ThreadDashboardToolkitHandlersLive } from "./toolkits/threadDashboard/handlers.ts";
+import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -736,6 +738,9 @@ export const ActionResumeToolkitRegistrationLive = McpServer.toolkit(ActionResum
 const threadAttentionToolkitRegistration = () =>
   McpServer.toolkit(ThreadAttentionToolkit).pipe(Layer.provide(ThreadAttentionToolkitHandlersLive));
 
+const threadDashboardToolkitRegistration = () =>
+  McpServer.toolkit(ThreadDashboardToolkit).pipe(Layer.provide(ThreadDashboardToolkitHandlersLive));
+
 const makeMcpTransport = (path: McpEndpointPath) =>
   McpServer.layerHttp({
     name: "T3 Code",
@@ -757,10 +762,11 @@ const FullToolkitLive = Layer.mergeAll(
   DeviceToolkitRegistrationLive,
   ActionResumeToolkitRegistrationLive,
   threadAttentionToolkitRegistration(),
+  threadDashboardToolkitRegistration(),
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp")));
 
 // Sessions created while agent browser access is disabled still receive the
-// attention tools, but preview tools stay absent from discovery entirely.
+// attention and dashboard tools, but preview tools stay absent from discovery entirely.
 const ThreadAttentionOnlyToolkitLive = Layer.mergeAll(
   OrchestratorToolkitRegistrationLive,
   ThreadToolkitRegistrationLive,
@@ -769,6 +775,7 @@ const ThreadAttentionOnlyToolkitLive = Layer.mergeAll(
   EnvironmentRegistrationLive,
   WorktreeToolkitRegistrationLive,
   threadAttentionToolkitRegistration(),
+  threadDashboardToolkitRegistration(),
   PullRequestsToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp/thread")));
 

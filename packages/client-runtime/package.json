@@ -374,6 +374,10 @@
     "./state/subagent-promotion": {
       "types": "./src/state/subagentPromotion.ts",
       "default": "./src/state/subagentPromotion.ts"
+    },
+    "./state/dashboard": {
+      "types": "./src/state/dashboard.ts",
+      "default": "./src/state/dashboard.ts"
     }
   },
   "scripts": {

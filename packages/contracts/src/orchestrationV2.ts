@@ -1,5 +1,11 @@
 import { ActionResumeState } from "./actionResume.ts";
-import { ThreadAnnotation, ThreadAttention, ThreadWorktreeCleanup } from "./threadMetadata.ts";
+import {
+  ThreadAnnotation,
+  ThreadAttention,
+  ThreadDashboardItemInput,
+  ThreadDashboardItems,
+  ThreadWorktreeCleanup,
+} from "./threadMetadata.ts";
 export * from "./threadMetadata.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
@@ -397,6 +403,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   attention: Schema.optional(Schema.NullOr(ThreadAttention)),
+  dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   lineage: OrchestrationV2AppThreadLineage,
@@ -1764,6 +1771,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   attention: Schema.optional(Schema.NullOr(ThreadAttention)),
+  dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
@@ -2557,6 +2565,18 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literals(["thread.annotation.resolve", "thread.annotation.reopen"]),
     commandId: CommandId,
     threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.dashboard-item.upsert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    item: ThreadDashboardItemInput,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.dashboard-item.remove"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    itemId: ThreadDashboardItemInput.fields.id,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.attention.set"),

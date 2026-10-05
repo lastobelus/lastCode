@@ -6,6 +6,7 @@ import {
   type RuntimeMode,
   ThreadId,
   type ThreadAttention,
+  type ThreadDashboardItemInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -31,6 +32,8 @@ export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleErro
       "reopen-annotation",
       "set-attention",
       "clear-attention",
+      "upsert-dashboard-item",
+      "remove-dashboard-item",
     ]),
     threadId: ThreadId,
     cause: Schema.Defect(),
@@ -70,6 +73,16 @@ export class ThreadLifecycleService extends Context.Service<
     readonly clearAttention: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly upsertDashboardItem: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly item: ThreadDashboardItemInput;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly removeDashboardItem: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly itemId: string;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly archive: (input: {
       readonly commandId: CommandId;
@@ -137,6 +150,16 @@ const make = Effect.gen(function* () {
       dispatch("set-attention", input.threadId, { type: "thread.attention.set", ...input }),
     clearAttention: (input) =>
       dispatch("clear-attention", input.threadId, { type: "thread.attention.clear", ...input }),
+    upsertDashboardItem: (input) =>
+      dispatch("upsert-dashboard-item", input.threadId, {
+        type: "thread.dashboard-item.upsert",
+        ...input,
+      }),
+    removeDashboardItem: (input) =>
+      dispatch("remove-dashboard-item", input.threadId, {
+        type: "thread.dashboard-item.remove",
+        ...input,
+      }),
     archive: (input) =>
       dispatch("archive", input.threadId, {
         type: "thread.archive",

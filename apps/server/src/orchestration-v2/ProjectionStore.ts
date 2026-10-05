@@ -32,6 +32,7 @@ import type {
   MessageId,
 } from "@t3tools/contracts";
 import {
+  hasOpenActionableDashboardItems,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -193,6 +194,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "pinnedAt"
   | "autoSettleDisabledAt"
   | "attention"
+  | "dashboardItems"
   | "snoozedUntil"
   | "snoozedAt"
   | "latestRunId"
@@ -1392,6 +1394,7 @@ export function threadShellFromProjection(
     persistent: projection.thread.persistent ?? false,
     annotation: projection.thread.annotation ?? null,
     attention: projection.thread.attention ?? null,
+    dashboardItems: projection.thread.dashboardItems ?? [],
     actionResume: projection.thread.actionResume ?? null,
     worktreeCleanup: projection.thread.worktreeCleanup ?? null,
     pullRequests: threadPullRequestsOf(projection.thread),
@@ -1637,6 +1640,7 @@ function shellFromState(input: {
     persistent: input.state.thread.persistent ?? false,
     annotation: input.state.thread.annotation ?? null,
     attention: input.state.thread.attention ?? null,
+    dashboardItems: input.state.thread.dashboardItems ?? [],
     actionResume: input.state.thread.actionResume ?? null,
     worktreeCleanup: input.state.thread.worktreeCleanup ?? null,
     pullRequests: threadPullRequestsOf(input.state.thread),
@@ -5214,6 +5218,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
               AND json_extract(t.payload_json, '$.attention') IS NULL
               AND NOT EXISTS (
+                SELECT 1 FROM json_each(t.payload_json, '$.dashboardItems') item
+                WHERE json_extract(item.value, '$.status') = 'open'
+                  AND json_extract(item.value, '$.kind') IN ('question', 'review', 'qa')
+              )
+              AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id
                   AND active.status IN ('preparing', 'starting', 'running', 'waiting')
@@ -5748,6 +5757,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 thread.pinnedAt == null &&
                 thread.autoSettleDisabledAt == null &&
                 thread.attention == null &&
+                !hasOpenActionableDashboardItems(thread.dashboardItems) &&
                 !runs.some(isActivityRunForShell) &&
                 !runtimeRequests.some((request) => request.status === "pending"),
             )
