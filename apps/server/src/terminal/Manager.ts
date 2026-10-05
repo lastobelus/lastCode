@@ -195,6 +195,14 @@ export class TerminalManager extends Context.Service<
     /** Read the persisted transcript without opening or restarting the terminal. */
     readonly history: (input: TerminalClearInput) => Effect.Effect<string, TerminalHistoryError>;
 
+    /** Server-only transcript and exact spawn credential coverage; never part of wire snapshots. */
+    readonly startupDiagnostics: (
+      input: TerminalClearInput,
+    ) => Effect.Effect<
+      { readonly history: string; readonly redactionValues: ReadonlyArray<string> | null },
+      TerminalHistoryError
+    >;
+
     /**
      * Restart a terminal session in place.
      *
@@ -324,6 +332,8 @@ interface TerminalSessionState {
   childCommandLabel: string | null;
   shellFamily: TerminalShellFamily | null;
   runtimeEnv: Record<string, string> | null;
+  startupRedactionValues: ReadonlyArray<string> | null;
+  startupHistoryCovered: boolean;
 }
 
 interface PersistHistoryRequest {
@@ -2317,6 +2327,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const startingAt = yield* nowIso;
     yield* modifyManagerState((state) => {
       session.status = "starting";
+      session.startupRedactionValues = null;
+      session.startupHistoryCovered = session.history.value().length === 0;
       session.cwd = input.cwd;
       session.worktreePath = input.worktreePath ?? null;
       session.cols = input.cols;
@@ -2395,6 +2407,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.process = ptyProcess;
               session.pid = processPid;
               session.status = "running";
+              session.startupRedactionValues = [
+                ...new Set(
+                  Object.entries(terminalEnv).flatMap(([name, value]) =>
+                    value &&
+                    ((platform === "win32"
+                      ? Object.keys(session.runtimeEnv ?? {}).some(
+                          (key) => key.toLowerCase() === name.toLowerCase(),
+                        )
+                      : Object.hasOwn(session.runtimeEnv ?? {}, name)) ||
+                      /token|key|password|secret|credential|auth/i.test(name))
+                      ? [value]
+                      : [],
+                  ),
+                ),
+              ];
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
                 if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
@@ -2730,6 +2757,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         childCommandLabel: null,
         shellFamily: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
+        startupRedactionValues: null,
+        startupHistoryCovered: false,
       };
 
       const createdSession = session;
@@ -3126,6 +3155,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const terminalId = input.terminalId;
         const session = yield* requireSession(input.threadId, terminalId);
         session.history.clear();
+        session.startupHistoryCovered = session.startupRedactionValues !== null;
         session.pendingHistoryControlSequence = "";
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
@@ -3179,6 +3209,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           childCommandLabel: null,
           shellFamily: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          startupRedactionValues: null,
+          startupHistoryCovered: false,
         };
         const createdSession = session;
         yield* modifyManagerState((state) => {
@@ -3321,6 +3353,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Effect.map((persistedHistory) => persistedHistory.value()),
     );
   };
+  const startupDiagnostics: TerminalManager["Service"]["startupDiagnostics"] = (input) =>
+    withThreadLock(
+      input.threadId,
+      Effect.gen(function* () {
+        const transcript = yield* history(input);
+        const session = yield* getSession(input.threadId, input.terminalId);
+        return {
+          history: transcript,
+          redactionValues:
+            Option.isSome(session) && session.value.startupHistoryCovered
+              ? (session.value.startupRedactionValues?.slice() ?? null)
+              : null,
+        };
+      }),
+    );
   return TerminalManager.of({
     open,
     attachStream,
@@ -3328,6 +3375,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     resize,
     clear,
     history,
+    startupDiagnostics,
     restart,
     close,
     closeThreadExcept: (threadId, retainedTerminalIds, retainedTerminalPrefixes) =>

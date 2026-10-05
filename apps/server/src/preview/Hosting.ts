@@ -216,13 +216,12 @@ const startupCredentialMatcher =
   /\b(?:Bearer|Basic)\s+[^\s,;]+|\b[\w-]*(?:token|key|password|secret|credential|auth)[\w-]*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)|\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/gi;
 
 /** Startup transcripts can echo commands and credentials; redact within a bounded window. */
-const sanitizeStartupText = (text: string, lease: PreviewHostingLease): string => {
-  const environmentValues = [
-    ...Object.values(lease.env ?? {}),
-    ...Object.entries(process.env)
-      .filter(([name]) => /token|key|password|secret|credential|auth/i.test(name))
-      .map(([, value]) => value),
-  ];
+const sanitizeStartupText = (
+  text: string,
+  lease: PreviewHostingLease,
+  redactionValues: ReadonlyArray<string>,
+): string => {
+  const environmentValues = [...Object.values(lease.env ?? {}), ...redactionValues];
   const values = [
     ...new Set(
       environmentValues.flatMap((value) =>
@@ -467,13 +466,20 @@ const make = Effect.gen(function* () {
     readiness: string,
   ) {
     const summary = yield* terminalSummary(lease);
-    const history = yield* terminals
-      .history({
+    const diagnostics = yield* terminals
+      .startupDiagnostics({
         threadId: lease.threadId,
         terminalId: lease.terminalId,
       })
       .pipe(Effect.orElseSucceed(() => null));
-    const output = history === null ? null : sanitizeStartupText(history, lease);
+    const history = diagnostics?.history ?? null;
+    const redactionValues = diagnostics?.redactionValues ?? null;
+    const output =
+      history === null
+        ? null
+        : redactionValues === null
+          ? "[Startup output omitted: launch credential coverage unavailable.]"
+          : sanitizeStartupText(history, lease, redactionValues);
     const tail = output?.split(/\r?\n/).slice(-12).join("\n").slice(-STARTUP_OUTPUT_MAX_CHARS);
     const terminal =
       summary === null
@@ -488,7 +494,7 @@ const make = Effect.gen(function* () {
       operation: "ready",
       statePath,
       threadId: lease.threadId,
-      url: sanitizeStartupText(diagnosticUrl.href, lease).slice(0, 120),
+      url: sanitizeStartupText(diagnosticUrl.href, lease, redactionValues ?? []).slice(0, 120),
       detail: `${readiness}\n${terminal}\n${tail ? `Recent startup output${tail.length < (output?.length ?? 0) ? " (truncated)" : ""}:\n${tail}` : history === null ? "Startup output unavailable." : "No startup output captured."}`,
     });
   });

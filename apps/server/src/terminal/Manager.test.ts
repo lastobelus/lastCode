@@ -1572,6 +1572,30 @@ it.layer(
       }),
   );
 
+  it.effect("does not assign current credential coverage to restored terminal history", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { manager, logsDir } = yield* createManager(5, {
+        env: {},
+        resolveProviderInstanceEnvironment: () =>
+          Effect.succeed({ CONFIG: "current-private-value" }),
+      });
+      yield* fs.makeDirectory(logsDir, { recursive: true });
+      yield* fs.writeFileString(yield* historyLogPath(logsDir), "previous-private-value\n");
+      yield* manager.open(openInput({ providerInstanceId: ProviderInstanceId.make("codex_work") }));
+      const input = { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID };
+      const restored = yield* manager.startupDiagnostics(input);
+      expect(restored.history).toBe("previous-private-value\n");
+      expect(restored.redactionValues).toBeNull();
+      yield* manager.clear(input);
+      const cleared = yield* manager.startupDiagnostics(input);
+      expect(cleared.history).toBe("");
+      expect(cleared.redactionValues).toContain("current-private-value");
+      yield* manager.close({ threadId: "thread-1" });
+      expect((yield* manager.startupDiagnostics(input)).redactionValues).toBeNull();
+    }),
+  );
+
   it.effect("flushes pending terminal output before reading persisted history", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter, getEvents } = yield* createManager();
@@ -2428,12 +2452,14 @@ it.layer(
   it.effect("resolves a provider instance environment before spawning", () =>
     Effect.gen(function* () {
       const providerInstanceId = ProviderInstanceId.make("codex_work");
+      let providerCredential = "materialized-private-value";
       const { manager, ptyAdapter } = yield* createManager(5, {
-        env: { T3CODE_SECRET: "server-only" },
+        env: { T3CODE_SECRET: "server-only", SERVICE_PASSWORD: "inherited-private-value" },
         resolveProviderInstanceEnvironment: (requestedId, env) =>
           Effect.succeed({
             ...env,
             PROVIDER_SECRET: requestedId === providerInstanceId ? "secret-value" : "wrong",
+            CONFIG: providerCredential,
             CODEX_HOME: "/accounts/codex-work",
           }),
       });
@@ -2448,6 +2474,18 @@ it.layer(
       expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_SECRET).toBeUndefined();
       expect(snapshot).not.toHaveProperty("env");
       expect(snapshot).not.toHaveProperty("providerInstanceId");
+      expect(snapshot).not.toHaveProperty("startupRedactionValues");
+      providerCredential = "changed-after-spawn";
+      const diagnostics = yield* manager.startupDiagnostics({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+      });
+      expect(diagnostics.redactionValues).toContain("materialized-private-value");
+      expect(diagnostics.redactionValues).toContain("inherited-private-value");
+      expect(diagnostics.redactionValues).not.toContain("changed-after-spawn");
+      expect(diagnostics.redactionValues).not.toContain("server-only");
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(JSON.stringify(snapshot)).not.toContain("materialized-private-value");
     }),
   );
 
@@ -2667,6 +2705,12 @@ it.layer(
       expect(ptyAdapter.processes[0]?.killed).toBe(true);
       expect(ptyAdapter.spawnInputs).toHaveLength(2);
       expect(ptyAdapter.spawnInputs[1]?.env.PROVIDER_SECRET).toBe("second-secret");
+      const diagnostics = yield* manager.startupDiagnostics({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+      });
+      expect(diagnostics.redactionValues).toContain("second-secret");
+      expect(diagnostics.redactionValues).not.toContain("first-secret");
     }),
   );
 
@@ -2692,7 +2736,10 @@ it.layer(
             [providerInstanceId]: {
               driver: ProviderDriverKind.make("codex"),
               config: { homePath },
-              environment: [{ name: "PROVIDER_SECRET", value, sensitive: true }],
+              environment: [
+                { name: "PROVIDER_SECRET", value, sensitive: true },
+                { name: "CONFIG", value: `${value}-arbitrary`, sensitive: true },
+              ],
             },
           },
         });
@@ -2717,6 +2764,12 @@ it.layer(
       expect((yield* manager.open(openInput(input))).history).toBe("old-two\n");
 
       yield* updateSecret("second-secret");
+      const beforeRestart = yield* manager.startupDiagnostics({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+      });
+      expect(beforeRestart.redactionValues).toContain("first-secret-arbitrary");
+      expect(beforeRestart.redactionValues).not.toContain("second-secret-arbitrary");
       const restarted = yield* manager.restart(restartInput(input));
 
       expect(firstProcess.killed).toBe(true);
@@ -2730,6 +2783,13 @@ it.layer(
       expect(restarted.status).toBe("running");
       expect(restarted).not.toHaveProperty("env");
       expect(restarted).not.toHaveProperty("providerInstanceId");
+      const afterRestart = yield* manager.startupDiagnostics({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+      });
+      expect(afterRestart.redactionValues).toContain("second-secret-arbitrary");
+      expect(afterRestart.redactionValues).not.toContain("first-secret-arbitrary");
+      expect(JSON.stringify(restarted)).not.toContain("second-secret-arbitrary");
       const logPath = yield* historyLogPath(logsDir);
       expect(yield* readFileString(logPath)).toBe("");
 

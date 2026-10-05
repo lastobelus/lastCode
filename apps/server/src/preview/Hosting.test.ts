@@ -19,6 +19,7 @@ import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 import {
   PreviewHostingLeaseId,
+  ProviderInstanceId,
   ThreadId,
   type DiscoveredLocalServer,
   type TerminalOpenInput,
@@ -65,6 +66,7 @@ interface TerminalHarness {
   }) => Effect.Effect<void>;
   readonly onClose?: () => Effect.Effect<void, TerminalManager.TerminalError>;
   readonly startupHistory?: string;
+  readonly startupRedactionValues?: ReadonlyArray<string> | null;
   readonly onHistory?: () => Effect.Effect<void, TerminalManager.TerminalHistoryError>;
 }
 
@@ -187,6 +189,14 @@ function terminalLayer(harness: TerminalHarness) {
     metadata: Effect.sync(() => harness.liveSummaries ?? harness.summaries),
     history: () =>
       (harness.onHistory?.() ?? Effect.void).pipe(Effect.as(harness.startupHistory ?? "")),
+    startupDiagnostics: () =>
+      (harness.onHistory?.() ?? Effect.void).pipe(
+        Effect.as({
+          history: harness.startupHistory ?? "",
+          redactionValues:
+            harness.startupRedactionValues === undefined ? [] : harness.startupRedactionValues,
+        }),
+      ),
     refreshMetadata: (harness.onRefreshMetadata?.() ?? Effect.void).pipe(
       Effect.as(harness.summaries),
     ),
@@ -1821,6 +1831,59 @@ describe("PreviewHosting", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each([false, true])(
+    "protects materialized provider credentials when launch coverage is unavailable: %s",
+    (unavailable) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-provider-env-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const harness = testTerminalHarness({
+          startupHistory: "config=materialized-private-value\nError: Cannot find module 'vite'",
+          startupRedactionValues: unavailable ? null : ["materialized-private-value"],
+          onRefreshMetadata: () =>
+            Effect.sync(() => {
+              const summary = harness.summaries[0];
+              if (summary)
+                harness.summaries[0] = {
+                  ...summary,
+                  status: "exited",
+                  hasRunningSubprocess: false,
+                };
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command: "pnpm dev",
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+                providerInstanceId: ProviderInstanceId.make("codex_work"),
+              }),
+            );
+            assert.equal(result._tag, "Failure");
+            if (result._tag === "Failure") {
+              assert.notInclude(result.failure.message, "materialized-private-value");
+              assert.include(result.failure.message, "Terminal: exited; running subprocess: no");
+              assert.include(
+                result.failure.message,
+                unavailable
+                  ? "[Startup output omitted: launch credential coverage unavailable.]"
+                  : "config=[redacted]\nError: Cannot find module 'vite'",
+              );
+            }
+            assert.equal(harness.historyDeletes.length, 1);
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("bounds redaction work for a full terminal history with many environment values", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -2065,7 +2128,10 @@ describe("PreviewHosting", () => {
               cwd: "/workspace",
               url: PREVIEW_URL,
               env: Object.fromEntries(
-                Array.from({ length: 16 }, (_, index) => [`CONFIG_${index}`, "a".repeat(index + 1)]),
+                Array.from({ length: 16 }, (_, index) => [
+                  `CONFIG_${index}`,
+                  "a".repeat(index + 1),
+                ]),
               ),
             }),
           );
