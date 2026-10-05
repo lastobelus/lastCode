@@ -19,6 +19,7 @@ import {
   parsePrePushUpdates,
   parseLocalCiOptions,
   prepareLocalCiRepository,
+  QUICK_CI_GATE_VERSION,
   readFullCiStamp,
   readQuickCiReceipt,
   resolveFullCiStampPath,
@@ -102,6 +103,13 @@ describe("lastcode-local-ci", () => {
       dryRun: false,
       prePush: true,
     });
+    expect(parseLocalCiOptions(["--quick", "--require-local"])).toEqual({
+      mode: "quick",
+      dryRun: false,
+      prePush: false,
+      requireLocal: true,
+    });
+    expect(() => parseLocalCiOptions(["--require-local"])).toThrow("only supported with --quick");
     expect(() => parseLocalCiOptions(["--full", "--pre-push"])).toThrow(
       "only supported with --quick",
     );
@@ -143,7 +151,6 @@ describe("lastcode-local-ci", () => {
         "--concurrency-limit",
         "1",
         "test",
-        "--",
         "--maxWorkers=1",
         "--maxConcurrency=1",
       ],
@@ -257,7 +264,7 @@ describe("lastcode-local-ci", () => {
     writeQuickCiReceipt(commonGitDir, receipt);
     expect(readQuickCiReceipt(commonGitDir, receipt.commit)).toEqual({
       schemaVersion: 1,
-      gateVersion: 1,
+      gateVersion: QUICK_CI_GATE_VERSION,
       ...receipt,
     });
     expect(
@@ -282,6 +289,16 @@ describe("lastcode-local-ci", () => {
       resolveQuickCiReceiptPath(commonGitDir, receipt.commit),
       `${JSON.stringify({ schemaVersion: 1, gateVersion: 0, ...receipt })}\n`,
     );
+    expect(readQuickCiReceipt(commonGitDir, receipt.commit)).toBeUndefined();
+    NodeFS.writeFileSync(
+      resolveQuickCiReceiptPath(commonGitDir, receipt.commit),
+      JSON.stringify({
+        schemaVersion: 1,
+        gateVersion: QUICK_CI_GATE_VERSION,
+        ...receipt,
+        baseCommit: null,
+      }),
+    );
     expect(() => readQuickCiReceipt(commonGitDir, receipt.commit)).toThrow(
       "Invalid Quick CI receipt",
     );
@@ -303,7 +320,7 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("rejects bare repositories and protected shared config changes during CI", () => {
+  it("rejects bare repositories and protected shared config changes during CI", async () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-test-"));
     const repository = NodePath.join(root, "repository");
     const bareRepository = NodePath.join(root, "bare.git");
@@ -315,18 +332,18 @@ describe("lastcode-local-ci", () => {
     });
 
     const snapshot = captureRepositoryIntegrity(repository);
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    await expect(assertRepositoryIntegrity(repository, snapshot)).resolves.toBeUndefined();
     NodeChildProcess.execFileSync("git", ["config", "test.integrity", "changed"], {
       cwd: repository,
     });
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+    await expect(assertRepositoryIntegrity(repository, snapshot)).rejects.toThrow(
       "Shared repository integrity",
     );
     expect(() => captureRepositoryIntegrity(bareRepository)).toThrow("core.bare=true");
     NodeFS.rmSync(root, { recursive: true, force: true });
   });
 
-  it("allows concurrent branch bookkeeping in the shared config", () => {
+  it("allows concurrent branch bookkeeping in the shared config", async () => {
     const repository = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-branch-test-"),
     );
@@ -339,11 +356,11 @@ describe("lastcode-local-ci", () => {
       { cwd: repository },
     );
 
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    await expect(assertRepositoryIntegrity(repository, snapshot)).resolves.toBeUndefined();
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
-  it("rejects changes to branch settings that existed when CI started", () => {
+  it("rejects changes to branch settings that existed when CI started", async () => {
     const repository = createIntegrityRepository();
     NodeChildProcess.execFileSync("git", ["branch", "lastcode/userland-build"], {
       cwd: repository,
@@ -361,7 +378,7 @@ describe("lastcode-local-ci", () => {
       { cwd: repository },
     );
 
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+    await expect(assertRepositoryIntegrity(repository, snapshot)).rejects.toThrow(
       "existing branch setting branch.lastcode/userland-build.remote",
     );
     NodeFS.rmSync(repository, { recursive: true, force: true });
@@ -369,7 +386,7 @@ describe("lastcode-local-ci", () => {
 
   it.each(["rename", "delete"] as const)(
     "allows sibling branch config removal after a real branch %s",
-    (operation) => {
+    async (operation) => {
       const repository = createIntegrityRepository();
       const branch = "feature/sibling.v1";
       NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
@@ -389,30 +406,33 @@ describe("lastcode-local-ci", () => {
         { cwd: repository },
       );
 
-      expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+      await expect(assertRepositoryIntegrity(repository, snapshot)).resolves.toBeUndefined();
       NodeFS.rmSync(repository, { recursive: true, force: true });
     },
   );
 
-  it.each(["existing", "orphan"] as const)("rejects removal of an %s branch config key", (kind) => {
-    const repository = createIntegrityRepository();
-    const branch = "feature/protected.v1";
-    if (kind === "existing") {
-      NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
-    }
-    const key = `branch.${branch}.gh-merge-base`;
-    NodeChildProcess.execFileSync("git", ["config", key, "main"], { cwd: repository });
-    const snapshot = captureRepositoryIntegrity(repository);
+  it.each(["existing", "orphan"] as const)(
+    "rejects removal of an %s branch config key",
+    async (kind) => {
+      const repository = createIntegrityRepository();
+      const branch = "feature/protected.v1";
+      if (kind === "existing") {
+        NodeChildProcess.execFileSync("git", ["branch", branch], { cwd: repository });
+      }
+      const key = `branch.${branch}.gh-merge-base`;
+      NodeChildProcess.execFileSync("git", ["config", key, "main"], { cwd: repository });
+      const snapshot = captureRepositoryIntegrity(repository);
 
-    NodeChildProcess.execFileSync("git", ["config", "--unset", key], { cwd: repository });
+      NodeChildProcess.execFileSync("git", ["config", "--unset", key], { cwd: repository });
 
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
-      `existing branch setting ${key}`,
-    );
-    NodeFS.rmSync(repository, { recursive: true, force: true });
-  });
+      await expect(assertRepositoryIntegrity(repository, snapshot)).rejects.toThrow(
+        `existing branch setting ${key}`,
+      );
+      NodeFS.rmSync(repository, { recursive: true, force: true });
+    },
+  );
 
-  it("rejects changed config values even after their local branch disappears", () => {
+  it("rejects changed config values even after their local branch disappears", async () => {
     const repository = createIntegrityRepository();
     const branch = "feature/removed.v1";
     const key = `branch.${branch}.gh-merge-base`;
@@ -423,16 +443,16 @@ describe("lastcode-local-ci", () => {
     NodeChildProcess.execFileSync("git", ["update-ref", "-d", `refs/heads/${branch}`], {
       cwd: repository,
     });
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).not.toThrow();
+    await expect(assertRepositoryIntegrity(repository, snapshot)).resolves.toBeUndefined();
     NodeChildProcess.execFileSync("git", ["config", key, "other-base"], { cwd: repository });
 
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow(
+    await expect(assertRepositoryIntegrity(repository, snapshot)).rejects.toThrow(
       `existing branch setting ${key}`,
     );
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
-  it("rejects reordering protected multivalue settings", () => {
+  it("rejects reordering protected multivalue settings", async () => {
     const repository = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-config-order-test-"),
     );
@@ -455,7 +475,9 @@ describe("lastcode-local-ci", () => {
       cwd: repository,
     });
 
-    expect(() => assertRepositoryIntegrity(repository, snapshot)).toThrow("protected settings");
+    await expect(assertRepositoryIntegrity(repository, snapshot)).rejects.toThrow(
+      "protected settings",
+    );
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
@@ -472,7 +494,7 @@ describe("lastcode-local-ci", () => {
     NodeFS.rmSync(repository, { recursive: true, force: true });
   });
 
-  it("does not write a success stamp after shared config mutation", () => {
+  it("does not write a success stamp after shared config mutation", async () => {
     const repository = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-integrity-stamp-test-"),
     );
@@ -491,17 +513,17 @@ describe("lastcode-local-ci", () => {
       cwd: repository,
     });
 
-    expect(() => writeVerifiedFullCiStamp(repository, snapshot, stamp)).toThrow(
+    await expect(writeVerifiedFullCiStamp(repository, snapshot, stamp)).rejects.toThrow(
       "Shared repository integrity",
     );
-    expect(() =>
+    await expect(
       writeVerifiedQuickCiReceipt(repository, snapshot, {
         commit: stamp.commit,
         baseCommit: stamp.context.baseCommit,
         baseRef: "refs/remotes/origin/lastcode/main",
         completedAt: stamp.completedAt,
       }),
-    ).toThrow("Shared repository integrity");
+    ).rejects.toThrow("Shared repository integrity");
     expect(NodeFS.existsSync(resolveFullCiStampPath(snapshot.commonGitDir, stamp.commit))).toBe(
       false,
     );

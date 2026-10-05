@@ -1,0 +1,187 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeProcess from "node:process";
+import { describe, expect, it } from "vite-plus/test";
+import { runCiProcess } from "./lastcode-ci-process.ts";
+
+describe("CI process ownership", () => {
+  it.skipIf(NodeProcess.platform === "win32")(
+    "finishes descendant cleanup after its controller dies",
+    async () => {
+      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-controller-"));
+      let workerPid: number | undefined;
+      let controller: NodeChildProcess.ChildProcess | undefined;
+      try {
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "descendant.mjs"),
+          "process.on('SIGTERM', () => {}); process.stdout.write('descendant-ready\\n'); setInterval(() => {}, 1000);",
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "launcher.mjs"),
+          "import { spawn } from 'node:child_process'; spawn(process.execPath, ['descendant.mjs'], { stdio: 'inherit' }); setInterval(() => {}, 1000);",
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "controller.mjs"),
+          [
+            `import { runCiProcess } from ${JSON.stringify(new URL("./lastcode-ci-process.ts", import.meta.url).href)};`,
+            "await runCiProcess({ cwd: process.cwd(), command: process.execPath, args: ['launcher.mjs'], signal: new AbortController().signal, onSpawn: pid => console.log('worker-pid:' + pid) });",
+          ].join("\n"),
+        );
+        controller = NodeChildProcess.spawn(process.execPath, ["controller.mjs"], {
+          cwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let output = "";
+        const ownedController = controller;
+        ownedController.stdout!.on("data", (data: Buffer) => {
+          output += data.toString();
+          const pid = /worker-pid:(\d+)/.exec(output)?.[1];
+          if (pid) workerPid = Number(pid);
+          if (output.includes("descendant-ready")) ownedController.kill("SIGKILL");
+        });
+        await new Promise<void>((resolve, reject) => {
+          ownedController.once("error", reject);
+          ownedController.once("close", () => resolve());
+        });
+        // All descendants inherit this pipe. close proves cleanup completed,
+        // even though the controller itself exited at the ready milestone.
+        expect(output).toContain("descendant-ready");
+        expect(workerPid).toBeDefined();
+        expect(() => process.kill(-workerPid!, 0)).toThrow();
+      } finally {
+        controller?.kill("SIGKILL");
+        if (workerPid !== undefined) {
+          try {
+            process.kill(-workerPid, "SIGKILL");
+          } catch {
+            // The captured worker's group has already been reaped.
+          }
+        }
+        NodeFS.rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("reports an unsuccessful command", async () => {
+    await expect(
+      runCiProcess({
+        cwd: process.cwd(),
+        command: process.execPath,
+        args: ["-e", "process.exit(7)"],
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("exit code 7");
+  });
+
+  it("does not spawn work after cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before launch"));
+    expect(() =>
+      runCiProcess({
+        cwd: process.cwd(),
+        command: process.execPath,
+        args: [],
+        signal: controller.signal,
+      }),
+    ).toThrow("cancelled before launch");
+  });
+
+  it("does not start the check before ownership has been recorded", async () => {
+    const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-start-"));
+    try {
+      const marker = NodePath.join(cwd, "started");
+      await expect(
+        runCiProcess({
+          cwd,
+          command: process.execPath,
+          args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`],
+          signal: new AbortController().signal,
+          terminationGraceMs: 50,
+          onSpawn: () => {
+            throw new Error("ownership recording failed");
+          },
+        }),
+      ).rejects.toThrow("ownership recording failed");
+      expect(NodeFS.existsSync(marker)).toBe(false);
+    } finally {
+      NodeFS.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(NodeProcess.platform === "win32")(
+    "rejects a successful launcher that leaves a descendant running",
+    async () => {
+      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-orphan-"));
+      try {
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "launcher.mjs"),
+          [
+            "import { spawn } from 'node:child_process';",
+            "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' });",
+            "child.once('spawn', () => process.exit(0));",
+          ].join("\n"),
+        );
+        await expect(
+          runCiProcess({
+            cwd,
+            command: process.execPath,
+            args: ["launcher.mjs"],
+            signal: new AbortController().signal,
+            terminationGraceMs: 50,
+          }),
+        ).rejects.toThrow("CI launcher exited before its owned descendants stopped");
+      } finally {
+        NodeFS.rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(NodeProcess.platform === "win32")(
+    "cancels resistant descendants before completing",
+    async () => {
+      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-process-"));
+      const controller = new AbortController();
+      try {
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "descendant.mjs"),
+          [
+            "process.on('SIGTERM', () => {});",
+            "process.stdout.write('descendant-ready\\n');",
+            "setInterval(() => {}, 1000);",
+          ].join("\n"),
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(cwd, "launcher.mjs"),
+          [
+            "import { spawn } from 'node:child_process';",
+            "spawn(process.execPath, ['descendant.mjs'], { stdio: ['ignore', process.stdout, process.stderr] });",
+            "setInterval(() => {}, 1000);",
+          ].join("\n"),
+        );
+        let output = "";
+        const command = runCiProcess({
+          cwd,
+          command: process.execPath,
+          args: ["launcher.mjs"],
+          signal: controller.signal,
+          terminationGraceMs: 50,
+          onOutput: (data) => {
+            output += data;
+            if (output.includes("descendant-ready"))
+              controller.abort(new Error("requested cancellation"));
+          },
+        });
+        // The descendant inherits the captured stdout pipe. Its close is the
+        // persisted milestone proving it is gone; no sleep or status polling.
+        await expect(command).rejects.toThrow("requested cancellation");
+        expect(output).toContain("descendant-ready");
+      } finally {
+        controller.abort();
+        NodeFS.rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+});

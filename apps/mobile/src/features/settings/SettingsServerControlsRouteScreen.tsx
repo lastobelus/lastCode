@@ -27,6 +27,7 @@ import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
@@ -207,6 +208,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  const supportsLocalCi =
+    hasConnectedSelection &&
+    targets.every(
+      (target) => target.environment.serverConfig.environment.capabilities.lastcodeLocalCi === true,
+    );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -447,6 +453,23 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       />
                     </View>
                   </SettingsSection>
+                  {!projectSelected ? (
+                    supportsLocalCi ? (
+                      <LocalCiSettingsSection
+                        settings={displayTargets.map((target) => target.settings.lastcodeLocalCi)}
+                        disabled={disabledFor("lastcodeLocalCi")}
+                        onChange={(lastcodeLocalCi) => {
+                          if (supportsLocalCi) write({ lastcodeLocalCi });
+                        }}
+                      />
+                    ) : (
+                      <SettingsSection title="Local CI">
+                        <Text className="p-4 text-sm text-foreground-muted">
+                          Update older servers to configure Local CI.
+                        </Text>
+                      </SettingsSection>
+                    )
+                  ) : null}
                 </>
               ) : null}
             </>

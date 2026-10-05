@@ -96,10 +96,11 @@ Treat every conflict resolution and downstream adaptation as first-party code.
 3. Complete dependency installation before starting checks. A partially
    completed install is not evidence; require its zero exit and terminal
    completion.
-4. Run focused behavior tests, targeted lint, the affected package typecheck,
-   and `git diff --check <destination-base> <port-head>` under the repository's
+4. Run focused behavior tests, targeted lint, and
+   `git diff --check <destination-base> <port-head>` under the repository's
    canonical toolchain. A bare `git diff --check` does not inspect an already
-   committed port. Record the toolchain command and versions with the receipt.
+   committed port. Route workspace typechecks through the Quick CI policy in
+   `lastcode-pr`. Record the toolchain command and versions with validation.
 5. Add focused regression tests for backend or automation behavior. Do not run
    repo-wide checks merely for intake.
 6. For user-visible behavior, obtain browser/computer-use approval and use the
@@ -116,15 +117,15 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 1. Immediately before delivery, fetch `origin/lastcode/main` again. If the port
    parent moved, rebase the imported commits and rerun affected validation.
-2. Before publishing, run the independent **Run Quick CI** Project Action from
-   the clean exact port head. After it resumes, verify its receipt still matches
-   the head and destination base, then decide whether and what to push. The
-   pre-push hook consumes that receipt; ordinary command-line use falls back to
-   synchronous Quick CI.
+2. Before publishing, follow the optional local Quick CI policy in `lastcode-pr`
+   from the clean exact port head. Automatic mode runs locally when capacity is
+   free and otherwise defers to required GitHub CI. Verify the head and
+   destination base on either a passing receipt or a GitHub deferral, then
+   decide whether and what to push. Keep the ordinary pre-push hook enabled.
 3. If transport fails after the hook accepts the receipt, verify the local head,
    worktree, destination base, and remote topic state before retrying. Reuse the
-   same receipt only for the unchanged commit and base; otherwise rerun the
-   action.
+   same receipt only for the unchanged commit and base; otherwise re-evaluate
+   the Quick CI policy.
 4. Open a PR targeting `lastcode/main` only when explicitly requested. Include
    the upstream PR and pinned head, observed state/date, import method,
    adaptations, rationale, validation, closure/review context, and published

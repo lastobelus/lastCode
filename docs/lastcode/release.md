@@ -1,6 +1,6 @@
 # LastCode Local Release Workflow
 
-LastCode uses a local waste-prevention gate, GitHub-hosted pull-request CI, and
+LastCode uses optional local checks, required GitHub-hosted pull-request CI, and
 ad-hoc macOS releases. The GitHub-hosted packaging path is manually dispatched
 for an exact Intel checkpoint or revision; releases have no schedule.
 
@@ -9,23 +9,49 @@ Nightly source tracking is documented separately in
 
 ## Pull Request CI
 
-Ordinary branch pushes run the quick gate through `.vite-hooks/pre-push`:
+Ordinary branch pushes apply the Quick CI policy through `.vite-hooks/pre-push`:
 
 ```bash
 pnpm lastcode:ci:quick
 ```
 
-Quick CI is a local waste-prevention gate, not merge authority. It checks the
-exact branch diff for whitespace errors, repository formatting and lint, and
-workspace types. The implementing agent runs focused tests for changed behavior;
+Quick CI catches problems locally when that reduces turnaround time. GitHub CI
+remains required for merging. When local checks run, Quick CI checks the
+exact branch diff for whitespace errors and checks formatting and lint on changed
+files. Typechecks cover changed workspaces and their consumers, including shared
+source and TypeScript configuration relationships. Documentation and inert asset
+changes do not start typecheckers. Workspace metadata, toolchain/configuration
+changes, or uncertain ownership retain the complete workspace gate. The
+implementing agent runs focused tests for changed behavior;
 GitHub CI retains comprehensive tests,
 Electron setup, builds, Rust, native analysis, and release smoke coverage.
 
-Agents run the independent **Run Quick CI** Project Action before a push. A
-successful action records the exact head and the selected workstream base ref and
+Automatic mode, the default, starts local checks immediately when the shared
+machine budget has capacity. Otherwise it defers to GitHub without queuing.
+Always local waits for capacity; GitHub only skips local checks. Set the mode in
+Settings → LastCode → Local CI, or use `pnpm lastcode:ci:quick -- --require-local`
+for an explicitly local run. Full CI always runs locally and waits for capacity.
+
+Agents can run the independent **Run Quick CI** Project Action before a push.
+A local pass records the exact head and the selected workstream base ref and
 commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
-receipt without rerunning validation.
+receipt without rerunning validation. Explicit Quick CI runs reuse the same
+receipt, including when another run finishes that validation while they queue
+in Always local mode. A deferral reports `validation: github-only` for the exact
+head and base without recording a passing receipt. Do not recreate deferred
+checks with direct parallel workspace typechecks.
+
+Local CI shares a resource budget across worktrees and independent clones on the
+same machine. Explicit local runs wait in their existing Action or terminal and
+can be cancelled. Settings → LastCode → Local CI controls each environment's run
+limit, package concurrency, native TypeScript compiler CPU limit, and background priority;
+mobile exposes the same controls in Maintenance. Defaults allow one CI run and
+one package check at a time, cap native TypeScript compiler CPU parallelism at two, and use
+lower CPU priority. A running check keeps its launch settings; changes apply to
+new runs. The strictest limit among active runs applies while environments with
+different settings share the machine. Cancelled runs keep their capacity until
+their owned subprocesses have stopped.
 
 LastCode setup reconciles non-setup Actions from `t3.json` through the
 event-sourced project command path. The checkpoint supervisor repeats the
@@ -53,8 +79,9 @@ Settings remain local user state.
 The action never pushes: after it resumes, the agent still decides whether and
 what to push. A changed head, changed base tracking ref, or dirty worktree makes
 the receipt unusable. Without a matching receipt, ordinary command-line pushes
-run Quick CI synchronously and record one for transport retries of the same
-commit.
+follow the selected mode synchronously: run locally, defer when capacity is
+busy, or skip local checks. Only a local pass records a receipt for transport
+retries of the same commit. Keep the pre-push hook enabled in every mode.
 
 The checkpoint runner is the narrow exception: after a checkpoint or revision
 candidate passes its dedicated smoke gate, its immutable tag and subsequent

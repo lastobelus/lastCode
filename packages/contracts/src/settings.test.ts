@@ -23,6 +23,62 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+describe("ServerSettings local CI limits", () => {
+  it("uses responsive defaults and fills omitted persisted limits", () => {
+    expect(decodeServerSettings({}).lastcodeLocalCi).toEqual({
+      quickCiMode: "auto",
+      maxConcurrentRuns: 1,
+      packageConcurrency: 1,
+      compilerThreads: 2,
+      backgroundPriority: true,
+    });
+    expect(
+      decodeServerSettings({ lastcodeLocalCi: { packageConcurrency: 3 } }).lastcodeLocalCi,
+    ).toEqual({ ...DEFAULT_SERVER_SETTINGS.lastcodeLocalCi, packageConcurrency: 3 });
+  });
+
+  it("preserves partial patches and round-trips the maximum limits", () => {
+    expect(decodeServerSettingsPatch({ lastcodeLocalCi: { compilerThreads: 4 } })).toEqual({
+      lastcodeLocalCi: { compilerThreads: 4 },
+    });
+    const input = {
+      lastcodeLocalCi: {
+        maxConcurrentRuns: 4,
+        packageConcurrency: 8,
+        compilerThreads: 16,
+        backgroundPriority: false,
+      },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["auto", "local", "github"])(
+    "round-trips Quick CI mode %s without filling partial writes",
+    (quickCiMode) => {
+      const input = { lastcodeLocalCi: { quickCiMode } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
+
+  it.each([
+    ["maxConcurrentRuns", 0],
+    ["maxConcurrentRuns", 5],
+    ["packageConcurrency", 0],
+    ["packageConcurrency", 9],
+    ["compilerThreads", 0],
+    ["compilerThreads", 17],
+    ["compilerThreads", 1.5],
+    ["backgroundPriority", "true"],
+    ["quickCiMode", "unsupported"],
+  ])("rejects invalid %s: %s", (key, value) => {
+    const input = { lastcodeLocalCi: { [key]: value } };
+    expect(() => decodeServerSettings(input)).toThrow();
+    expect(() => decodeServerSettingsPatch(input)).toThrow();
+  });
+});
+
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
