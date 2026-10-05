@@ -3952,7 +3952,7 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
               threadId: parentThreadId,
               providerSessionId: "recovery-json-session",
               providerInstanceId: codexInstanceId,
-              capabilities: new Set(["orchestration"]),
+              capabilities: new Set(["orchestration"] as const),
               issuedAt: 1,
             }),
             Effect.provideService(McpSchema.McpServerClient, client),
