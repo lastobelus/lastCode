@@ -754,6 +754,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const bounds = event.currentTarget.getBoundingClientRect();
+        // Route keyboard requests through the same cleanup and multiselect guards as a click.
+        event.currentTarget.dispatchEvent(
+          new MouseEvent("contextmenu", {
+            bubbles: true,
+            cancelable: true,
+            clientX: bounds.left + 16,
+            clientY: bounds.bottom,
+          }),
+        );
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       if (isCleanupFailed) {
