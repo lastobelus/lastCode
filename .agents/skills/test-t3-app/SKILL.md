@@ -20,39 +20,49 @@ terminal and lease. Follow `docs/lastcode/preview-handoffs.md` for the hosting
 contract. Use a foreground command; do not detach the process. Otherwise retain
 its terminal session. Use the worktree's ignored `.t3` state.
 
-Before managed launch, run `vp run dev --dry-run --home-dir "$PWD/.t3"`
-from the repository root and read `webPort` from its `[dev-runner]` output.
-Use `http://localhost:<webPort>` as the requested preview URL. Launch with the
-same working directory and environment, preserving startup output privately:
+Before managed launch, resolve the absolute path of this worktree's `.t3`
+directory. Substitute that literal path for `<isolated-home>` in these commands
+(the quoted argument works in POSIX shells, PowerShell, and cmd.exe):
 
-```sh
-mkdir -p "$PWD/.t3" && qa_startup_log=$(mktemp "$PWD/.t3/qa-startup.XXXXXX") && vp run dev --home-dir "$PWD/.t3" > "$qa_startup_log" 2>&1
+```text
+vp run dev --dry-run --home-dir "<isolated-home>"
+vp run dev --home-dir "<isolated-home>"
 ```
 
-`mktemp` creates a unique owner-only file; the dev command stays in the foreground.
-To choose a port range, supply `T3CODE_PORT_OFFSET` to both the
-dry run and the managed launch: the initial web port is `5733 + offset` and
-backend port is `13773 + offset`. The runner can shift occupied ports, so use
-the dry-run result, not the formula alone. `--port` selects the backend, not
-the browser-facing web listener. If a port is taken between resolution and
-launch, inspect the readiness failure and resolve a free pair again.
+Run the dry run first and read `webPort` from its `[dev-runner]` output. Use
+`http://localhost:<webPort>` as the requested preview URL, then give the second
+command to `preview_host` with the same working directory and environment.
+To choose a port range, supply `T3CODE_PORT_OFFSET` through the tool's environment
+overrides (and the dry-run process environment): the initial web port is
+`5733 + offset` and backend port is `13773 + offset`. The runner can shift
+occupied ports, so use the dry-run result, not the formula alone. `--port`
+selects the backend, not the browser-facing web listener. If a port is taken
+between resolution and launch, resolve a free pair again.
 
-`preview_host` does not expose startup output or a terminal handle. After a
-successful launch, read the new `.t3/qa-startup.*` file created by this attempt
-to obtain its complete startup pairing URL. That credential has administrative
-scope, including the access needed to test Connections settings. Retain the
-exact file path for this attempt; do not pick an older launch's log. Treat the
-file as secret-bearing: never commit it, upload it, or quote its contents in
-reports. Remove the file after extracting the URL.
+`preview_host` does not expose startup output or a terminal handle. For ordinary
+QA, mint a fresh standard-scope pairing URL after launch:
 
-If the startup token expires or has already been consumed, ordinary QA can use
-`node apps/server/src/bin.ts pair --base-dir "$PWD/.t3"` from the same root.
-That command grants only standard client scopes; it cannot replace an admin
-credential for Connections management. For administrative QA, reuse an already
-authenticated admin tab or the configured reusable dev credential described in
-`docs/operations/development.md#reusable-dev-credential`; otherwise relaunch only
-this task's isolated server with private startup capture to obtain a new admin
-URL. Never restart the user's running LastCode instance for this purpose.
+```text
+node apps/server/src/bin.ts pair --base-dir "<isolated-home>"
+```
+
+Administrative QA, such as Connections management, needs admin scopes that
+`pair` does not grant. Before launching, configure the reusable dev credential
+using `docs/operations/development.md#reusable-dev-credential`, including its
+trusted-hostname requirement. Reuse the configured value when present; otherwise
+generate one value once for this QA setup with
+`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`
+and retain it as `T3CODE_DEV_AUTH_TOKEN` in the managed launch's environment
+overrides. Never generate a new value inside the replayable launch command.
+Navigate the dedicated tab to `<web-origin>/pair#token=<credential>` once; the
+dev server seeds this credential with administrative scopes. Reuse the same
+credential on managed recovery, and pair again if the browser session expires.
+Do not replace a shared configured credential or restart the user's LastCode.
+
+Keep pairing URLs and credentials private: never commit them, include them in
+reports, or capture them in screenshots. Do not redirect startup output into
+files: a managed relaunch can create another secret-bearing file without an
+agent present to clean it up.
 Never run against `~/.t3/userdata` or set `VITE_HTTP_URL` or `VITE_WS_URL`.
 
 Test with meaningful project and thread data. Read
