@@ -176,7 +176,8 @@ export function LocalCiSettingsSection() {
         mixed={mixed("backgroundPriority")}
         control={
           <Switch
-            checked={settings.backgroundPriority}
+            mixed={mixed("backgroundPriority")}
+            checked={mixed("backgroundPriority") ? false : settings.backgroundPriority}
             onCheckedChange={(checked) => patch({ backgroundPriority: Boolean(checked) })}
             aria-label="Background CI priority"
           />
