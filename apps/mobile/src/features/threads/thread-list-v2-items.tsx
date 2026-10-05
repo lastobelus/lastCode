@@ -751,10 +751,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     });
     if (result._tag === "Success") {
       finishFeedback("success");
+    } else if (isAtomCommandInterrupted(result)) {
+      finishFeedback("interrupted");
     } else {
       finishFeedback("error");
-    }
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = Cause.squash(result.cause);
       Alert.alert(
         "Could not stop all previews and processes",

@@ -49,6 +49,28 @@ describe("stop thread processes feedback", () => {
     expect(feedback().phase).toBe("idle");
   });
 
+  it("clears interrupted feedback immediately without allowing late completion to restore it", () => {
+    const finish = beginStopThreadProcessesFeedback("Selected thread");
+    vi.advanceTimersByTime(500);
+    finish("interrupted");
+    expect(feedback()).toEqual({ phase: "idle", label: null, description: null });
+    finish("success");
+    vi.advanceTimersByTime(3_000);
+    expect(feedback().phase).toBe("idle");
+  });
+
+  it("keeps newer feedback and its dismissal when an older request is interrupted", () => {
+    const finishFirst = beginStopThreadProcessesFeedback("First thread");
+    vi.advanceTimersByTime(1_000);
+    const finishSecond = beginStopThreadProcessesFeedback("Second thread");
+    finishSecond("success");
+    finishFirst("interrupted");
+    vi.advanceTimersByTime(2_999);
+    expect(feedback()).toMatchObject({ phase: "success", description: "Second thread" });
+    vi.advanceTimersByTime(1);
+    expect(feedback().phase).toBe("idle");
+  });
+
   it("keeps a newer selected thread's feedback when an older request completes", () => {
     const finishFirst = beginStopThreadProcessesFeedback("First thread");
     finishFirst("success");

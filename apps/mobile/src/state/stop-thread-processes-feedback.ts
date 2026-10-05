@@ -23,8 +23,15 @@ export function beginStopThreadProcessesFeedback(threadTitle: string) {
     description: threadTitle,
   });
 
-  return (phase: "success" | "error") => {
+  return (phase: "success" | "error" | "interrupted") => {
     if (currentRequest !== request) return;
+    if (phase === "interrupted") {
+      if (dismissTimer !== null) clearTimeout(dismissTimer);
+      dismissTimer = null;
+      currentRequest = null;
+      appAtomRegistry.set(stopThreadProcessesFeedbackAtom, EMPTY_FEEDBACK);
+      return;
+    }
     appAtomRegistry.set(stopThreadProcessesFeedbackAtom, {
       phase,
       label:
