@@ -93,6 +93,7 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   PreviewHostingError as ContractPreviewHostingError,
+  type PreviewHostingLeaseMetadata,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -3627,6 +3628,42 @@ const makeWsRpcLayer = (
                     }),
                 ),
               ),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.previewHostingStopThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.previewHostingStopThread,
+            previewHosting.stopThread(input.threadId).pipe(
+              Effect.mapError(
+                () =>
+                  new ContractPreviewHostingError({
+                    reason: "unavailable",
+                    message: "Some previews or processes could not be stopped. Please try again.",
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.subscribePreviewHosting]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.subscribePreviewHosting,
+            Stream.callback<
+              ReadonlyArray<PreviewHostingLeaseMetadata>,
+              PreviewHosting.PreviewHostingError
+            >((queue) =>
+              Effect.acquireRelease(
+                previewHosting.subscribe((leases) => Queue.offer(queue, leases)),
+                (unsubscribe) => Effect.sync(unsubscribe),
+              ),
+            ).pipe(
+              Stream.mapError(
+                () =>
+                  new ContractPreviewHostingError({
+                    reason: "unavailable",
+                    message: "Preview hosting is unavailable on this server.",
+                  }),
+              ),
+            ),
             { "rpc.aggregate": "preview" },
           ),
         [WS_METHODS.previewReportStatus]: (input) =>

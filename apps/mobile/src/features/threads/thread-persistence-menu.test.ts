@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildThreadPersistenceMenuItems,
   persistenceIntentForMenuEvent,
+  withThreadMenuDividers,
 } from "./thread-persistence-menu.ts";
 
 describe("buildThreadPersistenceMenuItems", () => {
@@ -39,5 +40,43 @@ describe("buildThreadPersistenceMenuItems", () => {
     expect(persistenceIntentForMenuEvent("mark-persistent")).toBe(true);
     expect(persistenceIntentForMenuEvent("disable-persistence")).toBe(false);
     expect(persistenceIntentForMenuEvent("archive")).toBeNull();
+  });
+});
+
+describe("thread menu dividers", () => {
+  const actions = [
+    { id: "new-thread-on-branch", title: "New thread on feature" },
+    { id: "annotate", title: "Annotate thread" },
+    { id: "mark-persistent", title: "Mark as persistent thread" },
+    { id: "stop-thread-processes", title: "Stop all previews & processes" },
+    { id: "archive", title: "Archive" },
+  ];
+
+  it("keeps persistence and stop together between inline native dividers", () => {
+    const groups = withThreadMenuDividers(actions, true);
+    expect(groups.map((group) => group.subactions?.map((action) => action.id))).toEqual([
+      ["new-thread-on-branch"],
+      ["annotate"],
+      ["mark-persistent", "stop-thread-processes"],
+      ["archive"],
+    ]);
+    expect(groups.every((group) => group.displayInline === true)).toBe(true);
+  });
+
+  it("ends the persistence group when there is nothing to stop", () => {
+    const groups = withThreadMenuDividers(
+      actions.filter((action) => action.id !== "stop-thread-processes"),
+      true,
+    );
+    expect(groups.map((group) => group.subactions?.map((action) => action.id))).toEqual([
+      ["new-thread-on-branch"],
+      ["annotate"],
+      ["mark-persistent"],
+      ["archive"],
+    ]);
+  });
+
+  it("keeps commands directly accessible when inline groups are unsupported", () => {
+    expect(withThreadMenuDividers(actions, false)).toEqual(actions);
   });
 });

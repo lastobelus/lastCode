@@ -261,6 +261,11 @@ import {
   type ProviderInstanceEntry,
 } from "../providerInstances";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import {
+  usePreviewProcessControlsSupported,
+  useStopThreadProcesses,
+  useThreadPreviewLeases,
+} from "../state/previewHosting";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Button, InlineButton } from "./ui/button";
 import {
@@ -1005,7 +1010,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   onCancelRename: () => void;
   isRenaming: boolean;
   renamingTitle: string;
-  onContextMenu: (threadRef: ScopedThreadRef, position: { x: number; y: number }) => void;
+  onContextMenu: (
+    threadRef: ScopedThreadRef,
+    position: { x: number; y: number },
+    hasStoppableProcesses: boolean,
+  ) => void;
   onSettle: (threadRef: ScopedThreadRef) => void;
   onActionSweepStart: (
     threadRef: ScopedThreadRef,
@@ -1070,6 +1079,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
+  const previews = useThreadPreviewLeases(threadRef);
+  const supportsProcessControls = usePreviewProcessControlsSupported(thread.environmentId);
+  const hasStoppableProcesses =
+    supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   // Unsent composer text on this thread. The open thread shows its own
   // composer, so the marker only decorates rows you have navigated away from.
   const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isActive;
@@ -1303,9 +1316,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     (event: ReactMouseEvent) => {
       event.preventDefault();
       if (cleanup !== null) return;
-      onContextMenu(threadRef, { x: event.clientX, y: event.clientY });
+      onContextMenu(threadRef, { x: event.clientX, y: event.clientY }, hasStoppableProcesses);
     },
-    [cleanup, onContextMenu, threadRef],
+    [cleanup, hasStoppableProcesses, onContextMenu, threadRef],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
@@ -2414,6 +2427,7 @@ export default function Sidebar() {
     reportFailure: false,
   });
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
+  const stopThreadProcesses = useStopThreadProcesses();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -4566,7 +4580,11 @@ export default function Sidebar() {
   );
 
   const handleThreadContextMenu = useCallback(
-    (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+    (
+      threadRef: ScopedThreadRef,
+      position: { x: number; y: number },
+      hasStoppableProcesses: boolean,
+    ) => {
       void (async () => {
         const api = readLocalApi();
         if (!api) return;
@@ -4635,6 +4653,7 @@ export default function Sidebar() {
                 isRegeneratingTitle,
                 isRunning: !threadRuntimeCanArchive(thread.runtime),
                 hasRunningAction: thread.actionResume?.outcome === "running",
+                hasStoppableProcesses,
                 supports: {
                   settlement: supportsSettlement,
                   autoSettleOptOut: supportsAutoSettleOptOut,
@@ -4806,6 +4825,9 @@ export default function Sidebar() {
             });
             return;
           }
+          case "stop-thread-processes":
+            await stopThreadProcesses(threadRef);
+            return;
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
@@ -4893,6 +4915,7 @@ export default function Sidebar() {
     [
       archiveThread,
       closeTerminal,
+      stopThreadProcesses,
       attemptPin,
       attemptSettle,
       attemptSnooze,

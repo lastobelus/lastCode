@@ -26,6 +26,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "cancel-action"
+  | "stop-thread-processes"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -99,6 +100,7 @@ export interface ThreadActionMenuState {
   /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly hasRunningAction: boolean;
+  readonly hasStoppableProcesses: boolean;
   readonly supports: {
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
@@ -113,6 +115,32 @@ export interface ThreadActionMenuState {
   readonly handoffsOverflow?: boolean;
 }
 
+export function buildStopThreadProcessesMenuItem(hasStoppableProcesses: boolean) {
+  return hasStoppableProcesses
+    ? {
+        id: "stop-thread-processes" as const,
+        label: "Stop all previews & processes",
+        destructive: true,
+      }
+    : null;
+}
+
+/** The native bridge expresses each group divider on the following command. */
+export function withThreadActionMenuDividers<A extends string>(
+  items: ReadonlyArray<ContextMenuItem<A>>,
+): ReadonlyArray<ContextMenuItem<A>> {
+  return items.map((item, index) => {
+    const previousId = items[index - 1]?.id;
+    const startsGroup =
+      previousId === "new-thread-on-branch" ||
+      previousId === "annotate" ||
+      previousId === "stop-thread-processes" ||
+      ((previousId === "mark-persistent" || previousId === "disable-persistence") &&
+        item.id !== "stop-thread-processes");
+    return startsGroup ? { ...item, separatorBefore: true } : item;
+  });
+}
+
 /**
  * Single source for the per-thread action menu: the sidebar row's right-click
  * menu and the chat header menu share labels, ordering, and capability gating.
@@ -121,7 +149,8 @@ export interface ThreadActionMenuState {
 export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
-  return [
+  const stopProcesses = buildStopThreadProcessesMenuItem(state.hasStoppableProcesses);
+  const items: Array<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.branch
       ? [
           {
@@ -153,6 +182,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    ...(stopProcesses ? [stopProcesses] : []),
     // Both lifecycle actions stay available on pinned threads: settling
     // clears the pin ("done" beats "keep on top"), and snoozing hides the
     // card until wake with the pin intact.
@@ -278,4 +308,5 @@ export function buildThreadActionMenuItems(
       disabled: state.isPersistent,
     },
   ];
+  return withThreadActionMenuDividers(items);
 }

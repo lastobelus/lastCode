@@ -43,7 +43,7 @@ it("exports provider-compatible object schemas with described parameters", () =>
     if (tool.name === "preview_navigate") {
       expect(schemaHasMultipleAllOfDescriptions(schema)).toBe(false);
     }
-    if (tool.name !== "preview_host") {
+    if (tool.name !== "preview_host" && tool.name !== "preview_stop_thread") {
       expect(
         schema.properties?.tabId,
         `${tool.name} must allow an explicit collaborative browser tab target`,
