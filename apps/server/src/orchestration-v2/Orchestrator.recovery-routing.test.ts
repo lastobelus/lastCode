@@ -208,3 +208,100 @@ it.effect.each(["waiting", "completed"] as const)(
       assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.recovery);
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect.each(["waiting", "completed"] as const)(
+  "clears an obsolete recovery receipt when a queued successor starts and later becomes %s",
+  (status) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make(`recovery-queued-successor-${status}`);
+      yield* orchestrator.dispatch(
+        create(threadId, ProjectId.make(`queued-successor-project-${status}`)),
+      );
+      const send = (id: string) => ({
+        type: "message.dispatch" as const,
+        commandId: CommandId.make(id),
+        threadId,
+        messageId: MessageId.make(id),
+        text: id,
+        attachments: [],
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        dispatchMode: { type: "start_immediately" as const },
+      });
+      yield* orchestrator.dispatch(send(`queued-first-${status}`));
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const first = initial.runs[0]!;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`queued-first-running-${status}`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...first, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make(`queued-old-receipt-${status}`),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...initial.thread,
+              recovery: {
+                runId: first.id,
+                attemptId: first.activeAttemptId!,
+                status: "failed",
+                detail: "Old failure",
+                updatedAt: now,
+              },
+            },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch(send(`queued-next-${status}`));
+      const queued = yield* orchestrator.getThreadProjection(threadId);
+      const next = queued.runs.at(-1)!;
+      assert.equal(next.status, "queued");
+      assert.equal(
+        queued.thread.recovery?.runId,
+        first.id,
+        "merely queueing must preserve the current incident",
+      );
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`queued-first-ended-${status}`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...first, status: "cancelled", startedAt: now, completedAt: now },
+          },
+        ],
+      });
+      // Resuming the queue uses startNextQueuedRun's system events, not dispatchOnce's start plan.
+      yield* orchestrator.dispatch({
+        type: "queue.resume",
+        commandId: CommandId.make(`resume-recovery-queue-${status}`),
+        threadId,
+      });
+      const started = yield* orchestrator.getThreadProjection(threadId);
+      const successor = started.runs.find((run) => run.id === next.id)!;
+      assert.equal(successor.status, "starting");
+      assert.isUndefined(started.thread.recovery);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`queued-successor-ended-${status}`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...successor, status, startedAt: now },
+          },
+        ],
+      });
+      assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.recovery);
+    }).pipe(Effect.provide(testLayer)),
+);
