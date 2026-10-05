@@ -777,7 +777,7 @@ describe("DesktopUpdates", () => {
                   message: "Install preflight failed",
                 }),
               )
-            : Effect.succeed({ commit: () => Effect.void, cancel: Effect.void }),
+            : Effect.succeed({ commit: Effect.void, cancel: Effect.void }),
       });
       return Effect.scoped(
         Effect.gen(function* () {
@@ -790,8 +790,16 @@ describe("DesktopUpdates", () => {
           const requested = yield* updates.check("menu");
           assert.isTrue(requested.checkpointRequested);
           assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
-          assert.isTrue((yield* updates.install).accepted);
+          const retried = yield* updates.install;
+          assert.isTrue(retried.accepted);
           assert.equal(attempts, 2);
+          assert.deepEqual(harness.installEvents(), [
+            "prepare-install",
+            "prepare-install",
+            "stop-backend",
+            "destroy-windows",
+            "quit-app",
+          ]);
         }),
       ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
     },
