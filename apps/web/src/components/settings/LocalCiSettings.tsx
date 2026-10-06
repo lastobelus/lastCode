@@ -6,6 +6,7 @@ import {
 import { GaugeIcon } from "lucide-react";
 import { useState } from "react";
 
+import { useEnvironments } from "../../state/environments";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -16,7 +17,7 @@ import {
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { useSettingsScope } from "./SettingsScopeContext";
-import { SettingsScopeNotice } from "./SettingsScopeNotice";
+import { SettingsScopeNoticeContent } from "./SettingsScopeNotice";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
@@ -92,9 +93,25 @@ function LocalCiLimitField(props: {
 }
 
 export function LocalCiSettingsSection() {
+  return (
+    <SettingsSection title="Local CI" icon={<GaugeIcon className="size-5" />}>
+      <LocalCiSettingsContent />
+    </SettingsSection>
+  );
+}
+
+function LocalCiSettingsContent() {
   const settings = useScopedSettings((settings) => settings.lastcodeLocalCi);
   const updateSettings = useUpdateScopedSettings();
-  const { connectedEnvironments, targets } = useSettingsScope();
+  const { scope, connectedEnvironments, targets } = useSettingsScope();
+  const { environments } = useEnvironments();
+  const eligibleEnvironmentIds = environments
+    .filter(
+      (environment) =>
+        environment.connection.phase === "connected" &&
+        environment.serverConfig?.environment.capabilities.lastcodeLocalCi === true,
+    )
+    .map((environment) => environment.environmentId);
   const supportsLocalCi =
     targets.length > 0 &&
     connectedEnvironments.every(
@@ -106,25 +123,32 @@ export function LocalCiSettingsSection() {
     if (supportsLocalCi) updateSettings({ lastcodeLocalCi: value });
   };
 
+  if (scope.kind === "project" || scope.kind === "checkout") {
+    return (
+      <SettingsScopeNoticeContent
+        target="environment"
+        eligibleEnvironmentIds={eligibleEnvironmentIds}
+      >
+        Local CI settings apply to all projects on an environment. Choose a connected environment
+        that supports Local CI to configure them.
+      </SettingsScopeNoticeContent>
+    );
+  }
+
   if (!supportsLocalCi) {
     return (
-      <SettingsScopeNotice
+      <SettingsScopeNoticeContent
         target="environment"
-        eligibleEnvironmentIds={connectedEnvironments
-          .filter(
-            (environment) =>
-              environment.serverConfig?.environment.capabilities.lastcodeLocalCi === true,
-          )
-          .map((environment) => environment.environmentId)}
+        eligibleEnvironmentIds={eligibleEnvironmentIds}
       >
         Update the selected environments to configure Local CI, or choose a connected environment
         that supports it.
-      </SettingsScopeNotice>
+      </SettingsScopeNoticeContent>
     );
   }
 
   return (
-    <SettingsSection title="Local CI" icon={<GaugeIcon className="size-5" />}>
+    <>
       <SettingsRow
         {...searchableSetting("local-ci-quick-mode")}
         description="Automatic uses free local capacity, otherwise defers to GitHub. Always local waits for capacity. GitHub checks remain required to merge."
@@ -207,6 +231,6 @@ export function LocalCiSettingsSection() {
           />
         }
       />
-    </SettingsSection>
+    </>
   );
 }
