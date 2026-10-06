@@ -15,6 +15,7 @@ import {
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
@@ -1485,3 +1486,86 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect.each([false, true])(
+  "reconciles unfinished recovery receipts at startup (superseded=%s)",
+  (superseded) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:restart-recovery-receipt");
+      const runId = RunId.make("run:restart-recovery-receipt");
+      const attemptId = RunAttemptId.make("attempt:restart-recovery-receipt");
+      const projection = {
+        thread: {
+          id: threadId,
+          recovery: {
+            runId,
+            attemptId,
+            status: "recovering",
+            detail: "Reconciliation pending",
+            updatedAt: now,
+          },
+        },
+        runs: [
+          {
+            id: runId,
+            activeAttemptId: attemptId,
+            ordinal: 1,
+            startedAt: now,
+            status: "cancelled",
+          },
+          ...(superseded
+            ? [{ id: RunId.make("run:newer"), ordinal: 2, startedAt: now, status: "completed" }]
+            : []),
+        ],
+        runtimeRequests: [],
+        providerSessions: [],
+        providerThreads: [],
+        providerTurns: [],
+        attempts: [],
+        nodes: [],
+        subagents: [],
+        messages: [],
+        turnItems: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      let updated: OrchestrationV2ThreadProjection["thread"] | undefined;
+      const layer = ProviderRuntimeRecovery.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest(),
+            IdAllocator.layer,
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([threadId]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                const event = input.events.find(
+                  (event) => event.type === "thread.metadata-updated",
+                );
+                if (event?.type === "thread.metadata-updated") updated = event.payload;
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+            Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+              runRecoveryOnce: Effect.succeed(false),
+            }),
+          ),
+        ),
+      );
+      yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService.pipe(
+        Effect.flatMap((service) => service.reconcile("startup")),
+        Effect.provide(layer),
+      );
+      assert.isDefined(updated);
+      if (superseded) assert.isUndefined(updated?.recovery);
+      else {
+        assert.equal(updated?.recovery?.status, "failed");
+        assert.equal(updated?.recovery?.runId, runId);
+        assert.equal(updated?.recovery?.attemptId, attemptId);
+      }
+    }),
+);

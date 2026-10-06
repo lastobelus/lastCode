@@ -192,6 +192,42 @@ it.effect.each(["win32", "linux", "darwin"] as const)(
     }).pipe(Effect.provide(makeTestLayer(platform))),
 );
 
+it.effect.each(["win32", "linux", "darwin"] as const)(
+  "confirms exit only on the native event and replays it to late subscribers on %s",
+  (platform) =>
+    Effect.gen(function* () {
+      const adapter = yield* PtyAdapter.PtyAdapter;
+      const process = yield* adapter.spawn(spawnInput);
+      const nativeProcess = spawn.mock.results.at(-1)!.value;
+      const exits: PtyAdapter.PtyExitEvent[] = [];
+      const unsubscribedExits: PtyAdapter.PtyExitEvent[] = [];
+      const unsubscribe = process.onExit((event) => {
+        unsubscribedExits.push(event);
+      });
+      unsubscribe();
+      const unsubscribeExit = process.onExit((event) => {
+        exits.push(event);
+      });
+
+      process.kill("SIGKILL");
+      assert.deepEqual(exits, []);
+      assert.equal(nativeProcess.events.listenerCount("exit"), 1);
+
+      nativeProcess.events.emit("exit", { exitCode: 0, signal: 9 });
+      assert.deepEqual(exits, [{ exitCode: 0, signal: 9 }]);
+      assert.deepEqual(unsubscribedExits, []);
+      assert.equal(nativeProcess.events.listenerCount("exit"), 0);
+      unsubscribeExit();
+      const lateExits: PtyAdapter.PtyExitEvent[] = [];
+      const unsubscribeLate = process.onExit((event) => {
+        lateExits.push(event);
+      });
+      assert.deepEqual(lateExits, [{ exitCode: 0, signal: 9 }]);
+      unsubscribeLate();
+      assert.equal(nativeProcess.events.listenerCount("exit"), 0);
+    }).pipe(Effect.provide(makeTestLayer(platform))),
+);
+
 it.effect("spawns through the public adapter with the provided host references", () =>
   Effect.gen(function* () {
     spawn.mockClear();

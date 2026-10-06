@@ -255,6 +255,10 @@
       "types": "./src/state/terminal.ts",
       "default": "./src/state/terminal.ts"
     },
+    "./state/thread-recovery": {
+      "types": "./src/state/threadRecovery.ts",
+      "default": "./src/state/threadRecovery.ts"
+    },
     "./state/threads": {
       "types": "./src/state/threads.ts",
       "default": "./src/state/threads.ts"
@@ -351,6 +355,10 @@
       "types": "./src/filePreview.ts",
       "default": "./src/filePreview.ts"
     },
+    "./preview-hosting": {
+      "types": "./src/previewHosting.ts",
+      "default": "./src/previewHosting.ts"
+    },
     "./device/frame": {
       "types": "./src/device/frame.ts",
       "default": "./src/device/frame.ts"
@@ -382,6 +390,14 @@
     "./device/duo-control": {
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
+    },
+    "./state/subagent-promotion": {
+      "types": "./src/state/subagentPromotion.ts",
+      "default": "./src/state/subagentPromotion.ts"
+    },
+    "./state/dashboard": {
+      "types": "./src/state/dashboard.ts",
+      "default": "./src/state/dashboard.ts"
     }
   },
   "scripts": {

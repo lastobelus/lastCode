@@ -1,4 +1,10 @@
+// @effect-diagnostics nodeBuiltinImport:off - This fixture exercises a real self-signed Node TLS server and certificate files.
 import * as NodeNet from "node:net";
+import * as NodeHttps from "node:https";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 
 import { it as effectIt } from "@effect/vitest";
 import {
@@ -11,6 +17,7 @@ import * as Net from "@t3tools/shared/Net";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -19,8 +26,9 @@ import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { expect } from "vite-plus/test";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient } from "effect/http";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "./PortScanner.ts";
@@ -89,23 +97,65 @@ const LSOF_TEST_PORT = 43_123;
 
 const makeLsofScannerLayer = (input: {
   readonly pid: () => number;
+  readonly output?: () => string;
+  readonly run?: ProcessRunner.ProcessRunner["Service"]["run"];
+  readonly platform?: "linux" | "win32";
   readonly fetch: typeof globalThis.fetch;
 }) =>
   PortScanner.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: () =>
-            Effect.succeed({
-              stdout: `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
-              stderr: "",
-              code: null,
-              timedOut: false,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-              stdoutInvalidUtf8: false,
-              stderrInvalidUtf8: false,
-            }),
+          run:
+            input.run ??
+            (() =>
+              Effect.succeed({
+                stdout: input.output?.() ?? `p${input.pid()}\ncnode\nn*:${LSOF_TEST_PORT}\n`,
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              })),
+        }),
+        Layer.succeed(Net.NetService, {
+          canListenOnHost: () => Effect.succeed(true),
+          isPortAvailableOnLoopback: () => Effect.succeed(true),
+          hasListenerOnHost: () => Effect.succeed(false),
+          reserveLoopbackPort: () => Effect.succeed(40_000),
+          findAvailablePort: (preferred) => Effect.succeed(preferred),
+        }),
+        Layer.succeed(HostProcessPlatform, input.platform ?? "linux"),
+        FetchHttpClient.layer.pipe(
+          Layer.provide(Layer.succeed(FetchHttpClient.Fetch, input.fetch)),
+        ),
+      ),
+    ),
+  );
+
+const makeLinuxSsScannerLayer = (input: {
+  readonly ssOutput: string;
+  readonly fetch: typeof globalThis.fetch;
+}) =>
+  PortScanner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(ProcessRunner.ProcessRunner, {
+          run: (request) =>
+            request.command === "lsof"
+              ? processProbeFailure(request)
+              : Effect.succeed({
+                  stdout: input.ssOutput,
+                  stderr: "",
+                  code: null,
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                }),
         }),
         Layer.succeed(Net.NetService, {
           canListenOnHost: () => Effect.succeed(true),
@@ -199,6 +249,254 @@ const commonNonHttpServer = Effect.acquireRelease(
       ),
     ),
 );
+
+effectIt.effect("attributes an owned listener from ss when Linux has no lsof", () => {
+  const port = 63_123;
+  const threadId = "thread-owned-preview";
+  const terminalId = "terminal-owned-preview";
+  const processId = 51_321;
+  const url = `http://localhost:${port}/preview/index.html`;
+  const layer = makeLinuxSsScannerLayer({
+    ssOutput: `LISTEN 0 128 127.0.0.1:${port} 0.0.0.0:* users:(("node",pid=${processId},fd=18))\n`,
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({ threadId, terminalId, processIds: [processId] });
+    const found = yield* scanner.scan([url]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      port,
+      url,
+      pid: processId,
+      terminal: { threadId, terminalId },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("leaves foreign and unattributed ss listeners without terminal ownership", () => {
+  const foreignPort = 63_124;
+  const unattributedPort = 63_125;
+  const sharedPort = 63_126;
+  const foreignProcessId = 61_001;
+  const url = `http://localhost:${foreignPort}/preview`;
+  const layer = makeLinuxSsScannerLayer({
+    ssOutput: [
+      `LISTEN 0 128 127.0.0.1:${foreignPort} 0.0.0.0:* users:(("node",pid=${foreignProcessId},fd=9))`,
+      `LISTEN 0 128 127.0.0.1:${unattributedPort} 0.0.0.0:*`,
+      `LISTEN 0 128 127.0.0.1:${sharedPort} 0.0.0.0:* users:(("node",pid=61002,fd=10))`,
+      `LISTEN 0 128 127.0.0.1:${sharedPort} 0.0.0.0:* users:(("node",pid=61003,fd=11))`,
+    ].join("\n"),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [61_002],
+    });
+    const found = yield* scanner.scan([
+      url,
+      `http://localhost:${unattributedPort}/preview`,
+      `http://localhost:${sharedPort}/preview`,
+    ]);
+    expect(found).toHaveLength(3);
+    expect(found.find((server) => server.port === foreignPort)?.terminal).toBeNull();
+    expect(found.find((server) => server.port === unattributedPort)?.terminal).toBeNull();
+    expect(found.find((server) => server.port === sharedPort)?.terminal).toBeNull();
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("requires every lsof listener on a port to have the same terminal owner", () => {
+  const port = 63_127;
+  const ownedProcessId = 62_001;
+  const foreignProcessId = 62_002;
+  const layer = makeLsofScannerLayer({
+    pid: () => ownedProcessId,
+    output: () =>
+      [
+        `p${ownedProcessId}`,
+        "cnode",
+        `n*:${port}`,
+        `p${foreignProcessId}`,
+        "cpython",
+        `n[::1]:${port}`,
+      ].join("\n"),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [ownedProcessId],
+    });
+    const found = yield* scanner.scan([`http://localhost:${port}/preview`]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ port, pid: null, terminal: null });
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("requires every Windows listener on a port to have the same terminal owner", () => {
+  const port = 63_128;
+  const ownedProcessId = 62_011;
+  const foreignProcessId = 62_012;
+  const layer = makeLsofScannerLayer({
+    pid: () => ownedProcessId,
+    platform: "win32",
+    output: () =>
+      [`127.0.0.1|${port}|${ownedProcessId}|node`, `::1|${port}|${foreignProcessId}|python`].join(
+        "\n",
+      ),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [ownedProcessId],
+    });
+    const found = yield* scanner.scan([`http://localhost:${port}/preview`]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ port, pid: null, terminal: null });
+  }).pipe(Effect.provide(layer));
+});
+
+const windowsProbeResult = (stdout: string): ProcessRunner.ProcessRunOutput => ({
+  stdout,
+  stderr: "",
+  code: ChildProcessSpawner.ExitCode(0),
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+  stdoutInvalidUtf8: false,
+  stderrInvalidUtf8: false,
+});
+
+for (const failure of ["spawn", "exit", "timeout", "truncated", "invalid-utf8"] as const) {
+  effectIt.effect(
+    `attributes Windows netstat listeners after PowerShell ${failure} failure`,
+    () => {
+      const port = 63_129;
+      const processId = 62_021;
+      const url = `http://localhost:${port}/preview`;
+      const commands: string[] = [];
+      const layer = makeLsofScannerLayer({
+        pid: () => processId,
+        platform: "win32",
+        run: (request) => {
+          commands.push(request.command);
+          if (request.command === "powershell.exe") {
+            if (failure === "spawn") return processProbeFailure(request);
+            return Effect.succeed({
+              ...windowsProbeResult(""),
+              code: ChildProcessSpawner.ExitCode(failure === "exit" ? 1 : 0),
+              timedOut: failure === "timeout",
+              stdoutTruncated: failure === "truncated",
+              stdoutInvalidUtf8: failure === "invalid-utf8",
+            });
+          }
+          expect(request.command).toBe("netstat.exe");
+          expect(request.args).toEqual(["-ano"]);
+          return Effect.succeed(
+            windowsProbeResult(
+              [
+                "Active Connections",
+                "  Proto  Local Address  Foreign Address  State  PID",
+                `  TCP  0.0.0.0:${port}  0.0.0.0:0  LISTENING  ${processId}`,
+                `  TCP  [::]:${port}  [::]:0  LISTENING  ${processId}`,
+                `  TCP  127.0.0.1:63130  127.0.0.1:50000  ESTABLISHED  ${processId}`,
+                `  UDP  0.0.0.0:63131  *:*  ${processId}`,
+                `  TCP  192.0.2.1:63132  0.0.0.0:0  LISTENING  ${processId}`,
+                `  TCP  127.0.0.1:65536  0.0.0.0:0  LISTENING  ${processId}`,
+              ].join("\r\n"),
+            ),
+          );
+        },
+        fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+      });
+
+      return Effect.gen(function* () {
+        const scanner = yield* PortScanner.PortDiscovery;
+        const owner = { threadId: "thread-owned-preview", terminalId: "terminal-owned-preview" };
+        yield* scanner.registerTerminalProcesses({ ...owner, processIds: [processId] });
+        expect(yield* scanner.scan([url])).toEqual([
+          { host: "localhost", port, url, pid: processId, processName: null, terminal: owner },
+        ]);
+        expect(commands).toEqual(["powershell.exe", "netstat.exe"]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+}
+
+effectIt.effect("requires all Windows netstat listener processes to belong to the terminal", () => {
+  const layer = makeLsofScannerLayer({
+    pid: () => 62_031,
+    platform: "win32",
+    run: (request) =>
+      request.command === "powershell.exe"
+        ? processProbeFailure(request)
+        : Effect.succeed(
+            windowsProbeResult(
+              [
+                "TCP 127.0.0.1:63133 0.0.0.0:0 LISTENING 62031",
+                "TCP [::1]:63133 [::]:0 LISTENING 62032",
+                "TCP 127.0.0.1:63134 0.0.0.0:0 LISTENING 62031",
+                "TCP [::]:63134 [::]:0 LISTENING 62033",
+                "TCP 127.0.0.1:63135 0.0.0.0:0 LISTENING 62031",
+                "TCP [::]:63135 [::]:0 LISTENING 0",
+                "TCP [::1]:63136 [::]:0 LISTENING 62033",
+              ].join("\n"),
+            ),
+          ),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    const owner = { threadId: "thread-owned-preview", terminalId: "terminal-owned-preview" };
+    yield* scanner.registerTerminalProcesses({ ...owner, processIds: [62_031, 62_032] });
+    const found = yield* scanner.scan();
+    expect(found.map(({ port, pid, terminal }) => ({ port, pid, terminal }))).toEqual([
+      { port: 63_133, pid: null, terminal: owner },
+      { port: 63_134, pid: null, terminal: null },
+      { port: 63_135, pid: 62_031, terminal: null },
+      { port: 63_136, pid: 62_033, terminal: null },
+    ]);
+  }).pipe(Effect.provide(layer));
+});
+
+effectIt.effect("does not claim ownership from truncated Windows netstat output", () => {
+  const port = 63_137;
+  const layer = makeLsofScannerLayer({
+    pid: () => 62_041,
+    platform: "win32",
+    run: (request) =>
+      request.command === "powershell.exe"
+        ? processProbeFailure(request)
+        : Effect.succeed({
+            ...windowsProbeResult(`TCP 127.0.0.1:${port} 0.0.0.0:0 LISTENING 62041`),
+            stdoutTruncated: true,
+          }),
+    fetch: async () => new Response("preview", { headers: { "content-type": "text/html" } }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: "thread-owned-preview",
+      terminalId: "terminal-owned-preview",
+      processIds: [62_041],
+    });
+    const found = yield* scanner.scan([`http://localhost:${port}/preview`]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ port, pid: null, terminal: null });
+  }).pipe(Effect.provide(layer));
+});
 
 /**
  * Integration tests against a real TCP listener. We provide the Windows host
@@ -296,6 +594,60 @@ effectIt.effect("keeps a full configured URL when the discovered server root fai
     expect(servers).toHaveLength(1);
     expect(servers[0]?.url).toBe(configuredUrl);
     expect(requests).toContain(configuredUrl);
+  }).pipe(Effect.provide(layer));
+});
+
+for (const contentType of ["image/png", "application/pdf", "video/mp4"]) {
+  effectIt.effect(`publishes an owned configured ${contentType} resource as ready`, () => {
+    const configuredUrl = `http://localhost:${LSOF_TEST_PORT}/media`;
+    const layer = makeLsofScannerLayer({
+      pid: () => 1234,
+      fetch: async () => new Response("media", { headers: { "content-type": contentType } }),
+    });
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "media-thread",
+        terminalId: "media-terminal",
+        processIds: [1234],
+      });
+      const ready = yield* Deferred.make<ReadonlyArray<DiscoveredLocalServer>>();
+      yield* scanner.subscribe(
+        { configuredUrls: [configuredUrl], initialSnapshot: [] },
+        (servers) => Deferred.succeed(ready, servers).pipe(Effect.asVoid),
+      );
+      yield* scanner.retain;
+      expect(yield* Deferred.await(ready)).toMatchObject([
+        {
+          url: configuredUrl,
+          terminal: { threadId: "media-thread", terminalId: "media-terminal" },
+        },
+      ]);
+      // The same cached response does not turn a media server root into an automatically discovered document.
+      expect(yield* scanner.scan()).toEqual([]);
+      expect(yield* scanner.scan([configuredUrl])).toHaveLength(1);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+}
+
+effectIt.effect("rejects failed or empty configured resource responses", () => {
+  let status = 404;
+  let pid = 1234;
+  const layer = makeLsofScannerLayer({
+    pid: () => pid,
+    fetch: async () =>
+      new Response(status === 404 ? "missing" : null, {
+        status,
+        headers: { "content-type": "image/png" },
+      }),
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    for (const nextStatus of [404, 204, 205]) {
+      status = nextStatus;
+      pid++;
+      expect(yield* scanner.scan([`http://localhost:${LSOF_TEST_PORT}/media`])).toEqual([]);
+    }
   }).pipe(Effect.provide(layer));
 });
 
@@ -552,6 +904,50 @@ effectIt.effect("caches a failed web probe until its bounded cache entry expires
   }).pipe(Effect.provide(layer));
 });
 
+effectIt.effect(
+  "retries failed configured previews on the next scan without losing ownership",
+  () => {
+    let responds = false;
+    const requests: string[] = [];
+    const rootUrl = `http://localhost:${LSOF_TEST_PORT}/`;
+    const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+      requests.push(String(input));
+      return responds
+        ? Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } }))
+        : Promise.reject(new TypeError("starting up"));
+    }) as typeof globalThis.fetch;
+    const layer = makeLsofScannerLayer({ pid: () => 1234, fetch: fetchFn });
+
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "preview-thread",
+        terminalId: "preview-terminal",
+        processIds: [1234],
+      });
+      expect(yield* scanner.scan([rootUrl, rootUrl])).toHaveLength(0);
+      expect(requests).toEqual([rootUrl, `https://localhost:${LSOF_TEST_PORT}/`]);
+
+      responds = true;
+      yield* TestClock.adjust(Duration.seconds(3));
+      expect(yield* scanner.scan()).toHaveLength(0);
+      expect(requests).toHaveLength(2);
+
+      const servers = yield* scanner.scan([rootUrl]);
+      expect(servers).toHaveLength(1);
+      expect(servers[0]?.terminal).toEqual({
+        threadId: "preview-thread",
+        terminalId: "preview-terminal",
+      });
+      expect(requests).toEqual([rootUrl, `https://localhost:${LSOF_TEST_PORT}/`, rootUrl]);
+
+      expect(yield* scanner.scan([rootUrl])).toEqual(servers);
+      expect(yield* scanner.scan()).toHaveLength(1);
+      expect(requests).toHaveLength(3);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
 effectIt.effect("falls back to HTTPS and does not follow redirects while probing", () => {
   const redirects: Array<string | undefined> = [];
   const fetchFn = (async (
@@ -685,4 +1081,85 @@ effectIt.effect("does not swallow process probe interruption", () =>
       expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true);
     }
   }),
+);
+
+effectIt.effect("recognizes a self-signed HTTPS preview only through its loopback probe", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "preview-tls-test-"))),
+      (directory) => Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+    );
+    const key = NodePath.join(directory, "test.key");
+    const certificate = NodePath.join(directory, "test.crt");
+    yield* Effect.sync(() =>
+      NodeChildProcess.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+          "-keyout",
+          key,
+          "-out",
+          certificate,
+        ],
+        { stdio: "ignore" },
+      ),
+    );
+    const server = yield* Effect.acquireRelease(
+      Effect.callback<NodeHttps.Server>((resume) => {
+        const server = NodeHttps.createServer(
+          {
+            key: NodeFS.readFileSync(key),
+            cert: NodeFS.readFileSync(certificate),
+          },
+          (_request, response) => {
+            response.writeHead(200, { "content-type": "text/html", connection: "close" });
+            response.end("<html>local HTTPS QA</html>");
+          },
+        );
+        server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+        return Effect.sync(() => server.close());
+      }),
+      (server) =>
+        Effect.callback<void>((resume) => {
+          server.close(() => resume(Effect.void));
+        }),
+    );
+    const address = server.address();
+    if (address === null || typeof address === "string")
+      return yield* Effect.die("Missing TLS test address");
+    const url = `https://127.0.0.1:${address.port}/report`;
+    const trustedRequest = Effect.flatMap(HttpClient.HttpClient, (client) => client.get(url)).pipe(
+      Effect.scoped,
+      Effect.provide(FetchHttpClient.layer),
+    );
+    const trustedProbe = yield* Effect.result(trustedRequest);
+    expect(trustedProbe._tag).toBe("Failure");
+    const layer = makeLsofScannerLayer({
+      pid: () => process.pid,
+      output: () => `p${process.pid}\ncnode\nn127.0.0.1:${address.port}\n`,
+      fetch: globalThis.fetch,
+    });
+    yield* Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "tls-thread",
+        terminalId: "tls-terminal",
+        processIds: [process.pid],
+      });
+      const servers = yield* scanner.scan([url]);
+      expect(servers).toHaveLength(1);
+      expect(servers[0]?.url).toBe(url);
+      expect(servers[0]?.terminal).toEqual({ threadId: "tls-thread", terminalId: "tls-terminal" });
+    }).pipe(Effect.provide(layer));
+    // Probe-local trust must not change the certificate policy of other clients.
+    expect((yield* Effect.result(trustedRequest))._tag).toBe("Failure");
+  }).pipe(Effect.scoped),
 );

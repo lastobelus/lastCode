@@ -6,6 +6,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -1397,6 +1398,8 @@ export const layerWithOptions = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        publishEventsBarrier: ProviderAdapterV2SessionRuntime["publishEventsBarrier"],
+        driver: ProviderDriverKind,
       ): Effect.Effect<ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
@@ -1428,7 +1431,30 @@ export const layerWithOptions = (
             ),
             Stream.ensuring(close),
           );
-          return { events, close } satisfies ProviderAdapterV2EventSubscription;
+          return {
+            events,
+            close,
+            ...(publishEventsBarrier === undefined
+              ? {}
+              : {
+                  requestDrain: (input) =>
+                    publishEventsBarrier({
+                      observe: input.observe,
+                      after: (observation) =>
+                        Effect.gen(function* () {
+                          if (!(yield* Ref.get(subscribers)).has(subscriberId)) return;
+                          yield* Queue.offer(queue, {
+                            type: "event",
+                            event: {
+                              type: "events.barrier",
+                              driver,
+                              after: input.after(observation),
+                            },
+                          });
+                        }),
+                    }),
+                }),
+          } satisfies ProviderAdapterV2EventSubscription;
         });
 
       const decorateRuntime = (
@@ -1438,10 +1464,47 @@ export const layerWithOptions = (
         >,
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(
+          eventSubscribers,
+          runtime.publishEventsBarrier,
+          runtime.driver,
+        ).pipe(
+          Effect.tap((subscription) =>
+            Effect.gen(function* () {
+              // Register before checking residency: release either notifies this
+              // queue or has already removed this exact runtime, so close it here.
+              // A replacement with the same session id cannot revive its stream.
+              const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              if (current?.runtime !== runtime) yield* subscription.close;
+            }),
+          ),
+        );
+        const inspectTurn = runtime.inspectTurn;
         return {
           ...runtime,
+          ...(inspectTurn === undefined
+            ? {}
+            : {
+                inspectTurn: (input: Parameters<typeof inspectTurn>[0]) =>
+                  Effect.gen(function* () {
+                    const inspection = yield* inspectTurn(input);
+                    const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    // Cleanup can retain active references or clear them to unknown.
+                    // Lost ownership of this captured runtime is stronger evidence
+                    // than missing adapter state, but never proves native completion.
+                    if (current?.runtime === runtime) return inspection;
+                    if (inspection.status === "terminal")
+                      return { ...inspection, runtimeReleased: true as const };
+                    return {
+                      status: "released" as const,
+                      driver: runtime.driver,
+                      providerThreadId: input.providerThread.id,
+                      providerTurnId: input.providerTurnId,
+                    };
+                  }),
+              }),
           subscribeEvents,
+          isShuttingDown: Effect.sync(() => shutdownSignal.received),
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
           ),
@@ -1599,6 +1662,7 @@ export const layerWithOptions = (
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
+            if (event.type === "events.barrier") return event.after;
             if (
               event.type === "provider_session.updated" &&
               event.providerSession.status === "stopped"
@@ -1682,11 +1746,8 @@ export const layerWithOptions = (
                       cause: "Provider event stream ended unexpectedly.",
                     }),
                   );
-              yield* publishToSubscribers(entry.eventSubscribers, {
-                type: "failure",
-                cause,
-              });
-              yield* Ref.set(entry.eventSubscribers, new Map());
+              // Release removes this exact runtime before notifying subscribers.
+              // Their cleanup probes must already observe the lost ownership.
               yield* releaseEntry({
                 providerSessionId: entry.runtime.providerSessionId,
                 reason: "runtime_error",
@@ -1699,6 +1760,7 @@ export const layerWithOptions = (
       };
 
       const shutdown = Effect.gen(function* () {
+        shutdownSignal.received = true;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,
