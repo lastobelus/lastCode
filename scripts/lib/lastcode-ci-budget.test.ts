@@ -78,7 +78,7 @@ function worker(directory: string, maxConcurrentRuns: number, repoRoot = "worksp
             repoRoot: ${JSON.stringify(repoRoot)},
             directory: ${JSON.stringify(directory)},
             signal: controller.signal,
-            onWaiting: (summary) => send({type: "waiting", summary}),
+            onWaiting: (summary) => send({type: summary.includes("queue position ") ? "queued" : "waiting", summary}),
           });
           send({type: "acquired"});
         } catch (error) {
@@ -471,7 +471,7 @@ describe("machine-wide local CI admission", () => {
     await second.start();
     await second.next("acquired");
     await third.start();
-    expect((await third.next("waiting")).summary).toContain("limit 2");
+    expect((await third.next("queued")).summary).toContain("limit 2");
     third.send({ type: "status" });
     expect((await third.next("status")).acquired).toBe(false);
     await first.release();
@@ -487,7 +487,7 @@ describe("machine-wide local CI admission", () => {
     await owner.start();
     await owner.next("acquired");
     await queued.start();
-    await queued.next("waiting");
+    await queued.next("queued");
     queued.send({ type: "abort" });
     await queued.next("cancelled");
     await queued.closed;
@@ -508,12 +508,21 @@ describe("machine-wide local CI admission", () => {
     const first = worker(directory, 1, "first-waiter.example");
     const second = worker(directory, 1, "second-waiter.example");
     const third = worker(directory, 1, "third-waiter.example");
-    await first.start();
-    expect((await first.next("waiting")).summary).toContain("queue position 1");
+    const releaseAdmission = await acquireLocalCiAdmissionLock(directory);
+    try {
+      await first.start();
+      expect((await first.next("waiting")).summary).toContain("admission update");
+      expect(
+        NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
+      ).toHaveLength(0);
+    } finally {
+      releaseAdmission();
+    }
+    expect((await first.next("queued")).summary).toContain("queue position 1");
     await second.start();
-    expect((await second.next("waiting")).summary).toContain("queue position 2");
+    expect((await second.next("queued")).summary).toContain("queue position 2");
     await third.start();
-    expect((await third.next("waiting")).summary).toContain("queue position 3");
+    expect((await third.next("queued")).summary).toContain("queue position 3");
     expect(
       NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
     ).toHaveLength(3);
@@ -543,12 +552,12 @@ describe("machine-wide local CI admission", () => {
     await owner.next("acquired");
     const exited = worker(directory, 1);
     await exited.start();
-    await exited.next("waiting");
+    await exited.next("queued");
     exited.send({ type: "crash" });
     await exited.closed;
     const next = worker(directory, 1);
     await next.start();
-    expect((await next.next("waiting")).summary).toContain("queue position 1");
+    expect((await next.next("queued")).summary).toContain("queue position 1");
     expect(
       NodeFS.readdirSync(directory).filter((name) => name.endsWith(".waiter.json")),
     ).toHaveLength(1);
@@ -564,7 +573,7 @@ describe("machine-wide local CI admission", () => {
     await owner.start();
     await owner.next("acquired");
     await queued.start();
-    await queued.next("waiting");
+    await queued.next("queued");
     owner.send({ type: "crash" });
     await owner.closed;
     await queued.next("acquired");
@@ -677,7 +686,7 @@ describe("machine-wide local CI admission", () => {
       await owner.closed;
       const queued = worker(directory, 1);
       await queued.start();
-      await queued.next("waiting");
+      await queued.next("queued");
       queued.send({ type: "status" });
       expect((await queued.next("status")).acquired).toBe(false);
       await check.stop();
@@ -700,7 +709,7 @@ describe("machine-wide local CI admission", () => {
     await owner.closed;
     const queued = worker(directory, 1);
     await queued.start();
-    await queued.next("waiting");
+    await queued.next("queued");
     queued.send({ type: "status" });
     expect((await queued.next("status")).acquired).toBe(false);
     await check.stop();
