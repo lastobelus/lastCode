@@ -2364,11 +2364,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(foreignOrganizeCall.isError).toBe(false);
             expect((yield* orchestrator.getThreadShell(foreignThreadId))?.pinnedAt).not.toBeNull();
 
-            for (const tool of [
-              "t3_subagent_promote",
-              "t3_subagent_promotion_status",
-              "t3_subagent_promotion_cancel",
-            ]) {
+            for (const tool of ["t3_subagent_promote", "t3_subagent_promotion_cancel"]) {
               const foreignPromotion = yield* invoke(tool, {
                 threadId: foreignThreadId,
                 ...(tool === "t3_subagent_promotion_cancel"
@@ -2376,9 +2372,18 @@ describe("orchestrator MCP toolkit", () => {
                   : {}),
               });
               expect(foreignPromotion.structuredContent).toMatchObject({
-                code: "thread_not_found",
+                code: "orchestration_error",
               });
             }
+            const foreignPromotionStatus = yield* invoke("t3_subagent_promotion_status", {
+              threadId: foreignThreadId,
+            });
+            expect(foreignPromotionStatus.isError).toBe(false);
+            expect(foreignPromotionStatus.structuredContent).toEqual({ promotion: null });
+            expect(
+              (yield* orchestrator.getThreadProjection(foreignThreadId)).thread.subagentPromotion ??
+                null,
+            ).toBeNull();
 
             const foreignReadCall = yield* invoke("t3_thread_read", {
               threadId: foreignThreadId,

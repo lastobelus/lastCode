@@ -223,7 +223,7 @@ const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
 const SubagentPromoteTool = Tool.make("t3_subagent_promote", {
   ...commandTool,
   description:
-    "Request an interactive native fork of a provider-owned subagent in the calling project. A running subagent is allowed to finish first. Repeated requests reuse the existing promotion; a failed request retries it. Acceptance is not completion: use t3_subagent_promotion_status to read the destination and progress. The original subagent remains read-only, and its parent receives a handoff after the native fork succeeds.",
+    "Request an interactive native fork of a provider-owned subagent by threadId in this environment. A running subagent is allowed to finish first. Repeated requests reuse the existing promotion; a failed request retries it. Acceptance is not completion: use t3_subagent_promotion_status to read the destination and progress. The original subagent remains read-only, and its parent receives a handoff after the native fork succeeds.",
   parameters: Schema.Struct({ threadId: ThreadId }),
 }).annotate(Tool.Destructive, true);
 const SubagentPromotionCancelTool = Tool.make("t3_subagent_promotion_cancel", {
@@ -235,7 +235,7 @@ const SubagentPromotionCancelTool = Tool.make("t3_subagent_promotion_cancel", {
 const SubagentPromotionStatusTool = Tool.make("t3_subagent_promotion_status", {
   ...commandTool,
   description:
-    "Read durable subagent promotion progress in the calling project. Null means no promotion was requested. The destination is usable only when status is promoted; use t3_thread_send on that interactive thread for further work.",
+    "Read durable subagent promotion progress for threadId in this environment. Null means no promotion was requested. The destination is usable only when status is promoted; use t3_thread_send on that interactive thread for further work.",
   parameters: Schema.Struct({ threadId: ThreadId }),
   success: Schema.Struct({ promotion: Schema.NullOr(OrchestrationV2SubagentPromotion) }),
 })
