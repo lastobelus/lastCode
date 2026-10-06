@@ -1717,9 +1717,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         // path. Serialize the race so only one can publish terminal events.
         const turnTerminalizationPermit = yield* Semaphore.make(1);
 
-        // Keep the latest terminal for each provider thread for this runtime's
-        // lifetime. Unrelated completions must not evict evidence a failed
-        // persistence reader still needs to reconcile its exact turn.
+        // Keep each provider thread's latest terminal until durable root
+        // finalization acknowledges it or this runtime is garbage-collected.
+        // Unrelated completions and runtime release must preserve evidence a
+        // failed persistence reader still needs to reconcile its exact turn.
         const terminalEvidence = new Map<
           string,
           Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>
@@ -5406,6 +5407,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   turn.providerThread.id === providerThread.id,
               );
               return { status: active ? ("active" as const) : ("unknown" as const) };
+            }),
+          acknowledgeTurnTerminal: ({ providerThreadId, providerTurnId }) =>
+            Effect.sync(() => {
+              if (terminalEvidence.get(providerThreadId)?.providerTurnId === providerTurnId) {
+                terminalEvidence.delete(providerThreadId);
+              }
             }),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Known gap: a subagent that Codex resumes later reads as completed

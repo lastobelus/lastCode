@@ -1352,6 +1352,15 @@ export const layer: Layer.Layer<
                 yield* forgetSettledBackground;
               }
               yield* Ref.set(rootRunFinalized, true);
+              // Persistence (or confirmed supersession) now owns this outcome.
+              // Keep evidence when finalization fails, and acknowledge only this
+              // exact turn so an older reader cannot discard a newer terminal.
+              yield* (
+                input.session.acknowledgeTurnTerminal?.({
+                  providerThreadId: terminal.providerThreadId,
+                  providerTurnId: terminal.providerTurnId,
+                }) ?? Effect.void
+              );
               yield* recoveryService?.completed(recoveryIdentity) ?? Effect.void;
             });
           const trackChildLifecycle = (event: ProviderAdapterV2Event, deliverable: boolean) =>

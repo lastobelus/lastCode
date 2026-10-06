@@ -539,6 +539,15 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly providerTurnId: ProviderTurnId;
   }) => Effect.Effect<ProviderAdapterV2TurnInspection, ProviderAdapterV2Error>;
   /**
+   * Call after durable root finalization to discard matching cached terminal
+   * evidence. An acknowledgement for an older turn must preserve a newer
+   * terminal for the same provider thread.
+   */
+  readonly acknowledgeTurnTerminal?: (input: {
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerTurnId: ProviderTurnId;
+  }) => Effect.Effect<void>;
+  /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it
    * here so the session manager defers idle release while it is pending.

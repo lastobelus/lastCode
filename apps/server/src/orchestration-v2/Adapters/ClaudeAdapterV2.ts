@@ -3240,9 +3240,10 @@ export function makeClaudeAdapterV2(
         const runtimeContext = yield* Effect.context<never>();
         const runPromise = Effect.runPromiseWith(runtimeContext);
 
-        // Keep the latest terminal for each provider thread for this runtime's
-        // lifetime. Unrelated completions must not evict evidence a failed
-        // persistence reader still needs to reconcile its exact turn.
+        // Keep each provider thread's latest terminal until durable root
+        // finalization acknowledges it or this runtime is garbage-collected.
+        // Unrelated completions and runtime release must preserve evidence a
+        // failed persistence reader still needs to reconcile its exact turn.
         const terminalEvidence = new Map<
           string,
           Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
@@ -7515,6 +7516,12 @@ export function makeClaudeAdapterV2(
                 turn?.providerTurnId === providerTurnId &&
                 turn.input.providerThread.id === providerThread.id;
               return { status: active ? ("active" as const) : ("unknown" as const) };
+            }),
+          acknowledgeTurnTerminal: ({ providerThreadId, providerTurnId }) =>
+            Effect.sync(() => {
+              if (terminalEvidence.get(providerThreadId)?.providerTurnId === providerTurnId) {
+                terminalEvidence.delete(providerThreadId);
+              }
             }),
           hasPendingBackgroundWork: Effect.gen(function* () {
             // Session capability: any native thread with pending work pins idle.

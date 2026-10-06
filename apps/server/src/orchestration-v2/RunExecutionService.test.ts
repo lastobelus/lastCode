@@ -3408,6 +3408,7 @@ function captureRootRunTermination(input: {
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly recovery?: Partial<ThreadRecoveryService.ThreadRecoveryService["Service"]>;
   readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
+  readonly acknowledgeTurnTerminal?: ProviderAdapterV2SessionRuntime["acknowledgeTurnTerminal"];
   readonly isShuttingDown?: ProviderAdapterV2SessionRuntime["isShuttingDown"];
   readonly providerDriver?: ProviderDriverKind;
   readonly subscribeEvents?: ProviderAdapterV2SessionRuntime["subscribeEvents"];
@@ -3607,6 +3608,9 @@ function captureRootRunTermination(input: {
         session: {
           events: Stream.empty,
           ...(input.inspectTurn === undefined ? {} : { inspectTurn: input.inspectTurn }),
+          ...(input.acknowledgeTurnTerminal === undefined
+            ? {}
+            : { acknowledgeTurnTerminal: input.acknowledgeTurnTerminal }),
           ...(input.isShuttingDown === undefined ? {} : { isShuttingDown: input.isShuttingDown }),
           ...(input.hasPendingBackgroundWorkForThread === undefined
             ? {}
@@ -4314,6 +4318,78 @@ it.effect(
       assert.equal(starts, 1);
       assert.include(result.observed, "run:waiting");
     }),
+);
+
+it.effect("retains terminal evidence until failed finalization is durably recovered", () =>
+  Effect.gen(function* () {
+    let registration:
+      | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+      | undefined;
+    const ids = backgroundScenarioIds("recover-terminal-ack");
+    const terminal = rootTerminalEvent(ids, "completed");
+    let retained = true;
+    let committed = false;
+    let finalizationAttempts = 0;
+    let starts = 0;
+    const inspectTurn = () =>
+      Effect.sync(() =>
+        retained
+          ? { status: "terminal" as const, event: terminal }
+          : { status: "unknown" as const },
+      );
+    const result = yield* captureRootRunTermination({
+      key: "recover-terminal-ack",
+      shouldFinalizeRun: () =>
+        Effect.suspend(() => {
+          finalizationAttempts++;
+          return finalizationAttempts === 1
+            ? Effect.die("Finalization database read failed")
+            : Effect.succeed(true);
+        }),
+      events: () => Stream.make(terminal),
+      startTurn: () =>
+        Effect.sync(() => {
+          starts++;
+        }),
+      inspectTurn,
+      acknowledgeTurnTerminal: (input) =>
+        Effect.sync(() => {
+          assert.isTrue(committed);
+          if (
+            input.providerThreadId === terminal.providerThreadId &&
+            input.providerTurnId === terminal.providerTurnId
+          )
+            retained = false;
+        }),
+      refreshAfterTurn: Effect.sync(() => {
+        committed = true;
+      }),
+      recovery: {
+        register: (value) =>
+          Effect.sync(() => {
+            registration = value;
+          }),
+        suspect: () => Effect.void,
+        completed: () => Effect.void,
+      },
+      afterIngestion: Effect.gen(function* () {
+        assert.isFalse(committed);
+        assert.isDefined(registration);
+        const inspection = yield* registration!.inspect;
+        assert.deepEqual(inspection, { status: "terminal", event: terminal });
+        if (inspection.status !== "terminal") return yield* Effect.die("Missing terminal evidence");
+        yield* registration!.finalize(inspection.event, [], { runtimeReleased: false });
+        assert.deepEqual(yield* inspectTurn(), { status: "unknown" });
+      }),
+    });
+    assert.equal(starts, 1);
+    assert.equal(finalizationAttempts, 2);
+    assert.deepEqual(
+      result.observed.filter((event) => event.startsWith("run:")),
+      ["run:waiting"],
+    );
+    assert.equal(result.events.filter((event) => event.type === "run-attempt.updated").length, 1);
+  }),
 );
 
 it.effect("does not mark a finalized root suspect when its retained background reader fails", () =>

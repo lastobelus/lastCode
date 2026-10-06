@@ -2216,6 +2216,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }),
         );
         const terminal = yield* Queue.take(terminalReceipts);
+        // Wait for native finalization to release its active-turn state before
+        // asserting that acknowledgement leaves no remaining turn evidence.
+        yield* harness.runtime.publishEventsBarrier!({
+          observe: Effect.succeed("drained"),
+          after: () => Effect.void,
+        });
         assert.equal(terminal.status, "completed");
         assert.equal(terminal.providerThreadId, providerThread.id);
         assert.equal(
@@ -2225,6 +2231,26 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             nativeTurnId: round.nativeTurnId,
           }),
         );
+        assert.deepEqual(
+          yield* harness.runtime.inspectTurn!({
+            providerThread,
+            providerTurnId: terminal.providerTurnId,
+          }),
+          { status: "terminal", event: terminal },
+        );
+        if (index > 0) {
+          yield* harness.runtime.acknowledgeTurnTerminal!({
+            providerThreadId: providerThread.id,
+            providerTurnId: terminal.providerTurnId,
+          });
+          assert.deepEqual(
+            yield* harness.runtime.inspectTurn!({
+              providerThread,
+              providerTurnId: terminal.providerTurnId,
+            }),
+            { status: "unknown" },
+          );
+        }
       }
       const firstTerminal = harness.terminalEvents()[0]!;
       assert.equal(
@@ -2260,6 +2286,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       );
       yield* Deferred.succeed(allowLatestCompletion, undefined);
       const latestTerminal = yield* Queue.take(terminalReceipts);
+      yield* harness.runtime.publishEventsBarrier!({
+        observe: Effect.succeed("drained"),
+        after: () => Effect.void,
+      });
       assert.equal(latestTerminal.providerTurnId, latestProviderTurnId);
       assert.deepEqual(
         yield* harness.runtime.inspectTurn!({
@@ -2268,12 +2298,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         }),
         { status: "unknown" },
       );
+      yield* harness.runtime.acknowledgeTurnTerminal!({
+        providerThreadId: harness.providerThread.id,
+        providerTurnId: firstTerminal.providerTurnId,
+      });
       assert.deepEqual(
         yield* harness.runtime.inspectTurn!({
           providerThread: harness.providerThread,
           providerTurnId: latestProviderTurnId,
         }),
         { status: "terminal", event: latestTerminal },
+      );
+      yield* harness.runtime.acknowledgeTurnTerminal!({
+        providerThreadId: harness.providerThread.id,
+        providerTurnId: latestProviderTurnId,
+      });
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: latestProviderTurnId,
+        }),
+        { status: "unknown" },
       );
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
