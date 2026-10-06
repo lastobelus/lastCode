@@ -85,7 +85,16 @@ export function SettingsScopeNoticeContent({
               className="max-w-full break-all text-left"
               onClick={() => {
                 if (targetId)
-                  void navigate({ to: pathname, search: () => choice.search, hash: targetId });
+                  void navigate({
+                    to: pathname,
+                    // Explicit axes let an "all" choice clear the retained scope.
+                    search: () => ({
+                      project: choice.search.project,
+                      machine: choice.search.machine,
+                      checkout: choice.search.checkout,
+                    }),
+                    hash: targetId,
+                  });
                 else selectScope(choice.search);
               }}
             >
