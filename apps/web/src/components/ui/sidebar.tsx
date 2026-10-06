@@ -21,6 +21,7 @@ import { useIsMobile } from "~/hooks/useMediaQuery";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
 import { bindSidebarRailScroll } from "./sidebarRailScroll";
+import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 
 const SIDEBAR_WIDTH = "16rem";
@@ -587,12 +588,17 @@ function SidebarContent({
 }: React.ComponentProps<"div"> & {
   fixedHeader?: React.ReactNode;
 }) {
+  const scrollAreaRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (scrollAreaRef.current) return bindSidebarPageScroll(scrollAreaRef.current);
+  }, []);
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
       {/* Rows take focus on click. Scroll padding would make the browser nudge
           the list whenever a focused row sits under the fade. */}
       <ScrollArea
+        ref={scrollAreaRef}
         hideScrollbars
         scrollFade
         scrollFadePadding={false}
