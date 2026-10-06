@@ -2094,6 +2094,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly allocateSessionId?: Effect.Effect<string>;
+    readonly separateQueryMessages?: boolean;
   }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2117,6 +2119,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const systemNoticeReceipts =
         yield* Queue.unbounded<Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>>();
       let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
+      let openedMessages = sdkMessages;
       const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_CLAUDE_SETTINGS,
@@ -2132,12 +2135,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
         },
         queryRunner: {
-          allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+          allocateSessionId: options?.allocateSessionId ?? Effect.succeed(WAKE_NATIVE_SESSION),
           open: (input) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               openedOptions = input.options;
+              const queryMessages = options?.separateQueryMessages
+                ? yield* Queue.unbounded<SDKMessage>()
+                : sdkMessages;
+              openedMessages = queryMessages;
               return {
-                messages: Stream.fromQueue(sdkMessages).pipe(
+                messages: Stream.fromQueue(queryMessages).pipe(
                   Stream.flatMap((message) =>
                     Stream.make(message).pipe(
                       // The next pull happens after runForEach finishes handling this frame.
@@ -2164,7 +2171,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                     permissionModeChanges.push(mode);
                   }),
                 interrupt: options?.interrupt ?? Effect.void,
-                close: options?.close?.(sdkMessages) ?? Effect.void,
+                close: options?.close?.(queryMessages) ?? Effect.void,
               };
             }),
           forkSession: () => Effect.die("unused forkSession"),
@@ -2221,6 +2228,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         terminalReceipts,
         systemNoticeReceipts,
         getOpenedOptions: () => openedOptions,
+        getOpenedMessages: () => openedMessages,
         terminalEvents,
         hasPendingBackgroundWork,
       };
@@ -2268,6 +2276,128 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           providerThread: { ...input.providerThread, id: ProviderThreadId.make("another-thread") },
         }),
         { status: "unknown" },
+      );
+    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("retains exact terminals after more than 32 unrelated provider threads complete", () =>
+    Effect.gen(function* () {
+      let allocatedSessions = 0;
+      const harness = yield* makeWakeHarnessWithOptions({
+        allocateSessionId: Effect.sync(() => {
+          allocatedSessions++;
+          return `00000000-0000-4000-8000-${String(1000 + allocatedSessions).padStart(12, "0")}`;
+        }),
+        separateQueryMessages: true,
+        close: (messages) => Queue.shutdown(messages),
+      });
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      for (let index = 0; index < 34; index++) {
+        const threadId =
+          index === 0 ? harness.threadId : ThreadId.make(`thread-terminal-evidence-${index}`);
+        const providerThread =
+          index === 0
+            ? harness.providerThread
+            : yield* harness.runtime.ensureThread({
+                threadId,
+                modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+                runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+              });
+        const attemptId = RunAttemptId.make(`terminal-evidence-attempt-${index}`);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId,
+            text: `Complete request ${index}.`,
+            attachments: [],
+          }),
+        );
+        const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+        if (nativeThreadId === undefined || nativeThreadId === null)
+          return yield* Effect.die("Expected an allocated native Claude session");
+        yield* Queue.offer(
+          harness.getOpenedMessages(),
+          claudeSdkFrame({
+            ...makeResultFrame({
+              uuid: `00000000-0000-4000-8000-${String(7000 + index).padStart(12, "0")}`,
+              result: "Done.",
+            }),
+            session_id: nativeThreadId,
+          }),
+        );
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "completed");
+        assert.equal(terminal.providerThreadId, providerThread.id);
+        assert.equal(
+          terminal.providerTurnId,
+          idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+        );
+      }
+      const firstTerminal = harness.terminalEvents()[0]!;
+      assert.equal(
+        new Set(harness.terminalEvents().map((event) => event.providerThreadId)).size,
+        34,
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: firstTerminal.providerTurnId,
+        }),
+        { status: "terminal", event: firstTerminal },
+      );
+      const latestAttemptId = RunAttemptId.make("terminal-evidence-latest-attempt");
+      const latestProviderTurnId = idAllocator.derive.providerTurn({
+        driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+        nativeTurnId: `turn:${latestAttemptId}`,
+      });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: latestAttemptId,
+          providerTurnOrdinal: 2,
+          text: "Complete the newer request.",
+          attachments: [],
+        }),
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: latestProviderTurnId,
+        }),
+        { status: "active" },
+      );
+      yield* Queue.offer(
+        harness.getOpenedMessages(),
+        claudeSdkFrame({
+          ...makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000007100",
+            result: "Newer request complete.",
+          }),
+          session_id: harness.providerThread.nativeThreadRef!.nativeId!,
+        }),
+      );
+      const latestTerminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(latestTerminal.providerTurnId, latestProviderTurnId);
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: firstTerminal.providerTurnId,
+        }),
+        { status: "unknown" },
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: latestProviderTurnId,
+        }),
+        { status: "terminal", event: latestTerminal },
       );
     }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );

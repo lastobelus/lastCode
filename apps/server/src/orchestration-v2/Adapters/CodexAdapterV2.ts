@@ -1717,9 +1717,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         // path. Serialize the race so only one can publish terminal events.
         const turnTerminalizationPermit = yield* Semaphore.make(1);
 
-        // Keep terminal evidence independently of event consumers so a failed
-        // persistence reader can reconcile the exact turn. Bound both history
-        // (one terminal per thread) and the number of retained threads.
+        // Keep the latest terminal for each provider thread for this runtime's
+        // lifetime. Unrelated completions must not evict evidence a failed
+        // persistence reader still needs to reconcile its exact turn.
         const terminalEvidence = new Map<
           string,
           Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>
@@ -1727,12 +1727,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         const emitProviderEvent = (event: ProviderAdapterV2Event) =>
           Effect.suspend(() => {
             if (event.type === "turn.terminal") {
-              terminalEvidence.delete(event.providerThreadId);
               terminalEvidence.set(event.providerThreadId, event);
-              if (terminalEvidence.size > 32) {
-                const oldest = terminalEvidence.keys().next().value;
-                if (oldest !== undefined) terminalEvidence.delete(oldest);
-              }
             }
             return Queue.offer(events, event).pipe(Effect.asVoid);
           });

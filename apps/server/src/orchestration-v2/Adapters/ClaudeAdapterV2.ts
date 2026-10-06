@@ -3240,9 +3240,9 @@ export function makeClaudeAdapterV2(
         const runtimeContext = yield* Effect.context<never>();
         const runPromise = Effect.runPromiseWith(runtimeContext);
 
-        // Keep terminal evidence independently of event consumers so a failed
-        // persistence reader can reconcile the exact turn. Bound both history
-        // (one terminal per thread) and the number of retained threads.
+        // Keep the latest terminal for each provider thread for this runtime's
+        // lifetime. Unrelated completions must not evict evidence a failed
+        // persistence reader still needs to reconcile its exact turn.
         const terminalEvidence = new Map<
           string,
           Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
@@ -3250,12 +3250,7 @@ export function makeClaudeAdapterV2(
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Effect.suspend(() => {
             if (event.type === "turn.terminal") {
-              terminalEvidence.delete(event.providerThreadId);
               terminalEvidence.set(event.providerThreadId, event);
-              if (terminalEvidence.size > 32) {
-                const oldest = terminalEvidence.keys().next().value;
-                if (oldest !== undefined) terminalEvidence.delete(oldest);
-              }
             }
             return Queue.offer(events, event).pipe(Effect.asVoid);
           });

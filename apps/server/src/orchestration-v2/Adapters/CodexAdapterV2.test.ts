@@ -43,6 +43,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
@@ -2123,6 +2124,157 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       );
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("retains exact terminals after more than 32 unrelated provider threads complete", () =>
+    Effect.gen(function* () {
+      const rounds = Array.from({ length: 34 }, (_, index) => ({
+        nativeThreadId: `terminal-evidence-thread-${index}`,
+        nativeTurnId: `terminal-evidence-turn-${index}`,
+        prompt: `Complete request ${index}.`,
+      }));
+      const first = rounds[0]!;
+      const latestNativeTurnId = "terminal-evidence-latest-turn";
+      const latestPrompt = "Complete the newer request.";
+      const completedEntry = (
+        nativeThreadId: string,
+        nativeTurnId: string,
+        label: string,
+      ): CodexReplay.CodexAppServerReplayEntry => ({
+        type: "emit_inbound",
+        label,
+        frame: {
+          method: "turn/completed",
+          params: {
+            threadId: nativeThreadId,
+            turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+          },
+        },
+      });
+      const transcript = makeCodexReplayTranscript({
+        scenario: "terminal-evidence-across-provider-threads",
+        entries: [
+          ...rounds.flatMap((round, index) => {
+            const preamble = codexReplayPreamble(round);
+            return [
+              ...(index === 0 ? preamble : preamble.slice(3)).map((entry) =>
+                "frame" in entry &&
+                Predicate.isObject(entry.frame) &&
+                typeof entry.frame.id === "number"
+                  ? { ...entry, frame: { ...entry.frame, id: entry.frame.id + index * 2 } }
+                  : entry,
+              ),
+              completedEntry(round.nativeThreadId, round.nativeTurnId, `completed-${index}`),
+            ];
+          }),
+          ...codexReplayPreamble({
+            nativeThreadId: first.nativeThreadId,
+            nativeTurnId: latestNativeTurnId,
+            prompt: latestPrompt,
+          })
+            .slice(5)
+            .map((entry) =>
+              "frame" in entry && Predicate.isObject(entry.frame) && "id" in entry.frame
+                ? { ...entry, frame: { ...entry.frame, id: 70 } }
+                : entry,
+            ),
+          completedEntry(first.nativeThreadId, latestNativeTurnId, "completed-latest"),
+        ],
+      });
+      const terminalReceipts =
+        yield* Queue.unbounded<Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>>();
+      const allowLatestCompletion = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        (event) =>
+          event.type === "turn.terminal" ? Queue.offer(terminalReceipts, event) : Effect.void,
+        () => Effect.void,
+        undefined,
+        (entry) =>
+          entry.label === "completed-latest" ? Deferred.await(allowLatestCompletion) : Effect.void,
+      );
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      for (const [index, round] of rounds.entries()) {
+        const threadId =
+          index === 0 ? harness.threadId : ThreadId.make(`thread-terminal-evidence-${index}`);
+        const providerThread =
+          index === 0
+            ? harness.providerThread
+            : yield* harness.runtime.ensureThread({
+                threadId,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+              });
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`terminal-evidence-attempt-${index}`),
+            text: round.prompt,
+          }),
+        );
+        const terminal = yield* Queue.take(terminalReceipts);
+        assert.equal(terminal.status, "completed");
+        assert.equal(terminal.providerThreadId, providerThread.id);
+        assert.equal(
+          terminal.providerTurnId,
+          idAllocator.derive.providerTurn({
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeTurnId: round.nativeTurnId,
+          }),
+        );
+      }
+      const firstTerminal = harness.terminalEvents()[0]!;
+      assert.equal(
+        new Set(harness.terminalEvents().map((event) => event.providerThreadId)).size,
+        34,
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: firstTerminal.providerTurnId,
+        }),
+        { status: "terminal", event: firstTerminal },
+      );
+      const latestProviderTurnId = idAllocator.derive.providerTurn({
+        driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+        nativeTurnId: latestNativeTurnId,
+      });
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("terminal-evidence-latest-attempt"),
+          text: latestPrompt,
+        }),
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: latestProviderTurnId,
+        }),
+        { status: "active" },
+      );
+      yield* Deferred.succeed(allowLatestCompletion, undefined);
+      const latestTerminal = yield* Queue.take(terminalReceipts);
+      assert.equal(latestTerminal.providerTurnId, latestProviderTurnId);
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: firstTerminal.providerTurnId,
+        }),
+        { status: "unknown" },
+      );
+      assert.deepEqual(
+        yield* harness.runtime.inspectTurn!({
+          providerThread: harness.providerThread,
+          providerTurnId: latestProviderTurnId,
+        }),
+        { status: "terminal", event: latestTerminal },
+      );
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
