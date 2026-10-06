@@ -25,7 +25,6 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
@@ -912,10 +911,8 @@ function makePendingRuntimeRequestEvents(input: {
 
 it.effect("ProviderSessionManagerV2 opens sessions in different workspaces concurrently", () =>
   Effect.gen(function* () {
-    const secondCwd = yield* Path.Path.pipe(
-      Effect.map((path) => path.join(runtimePolicy.cwd, "apps", "server")),
-      Effect.provide(NodeServices.layer),
-    );
+    const fileSystem = yield* FileSystem.FileSystem;
+    const secondCwd = yield* fileSystem.makeTempDirectoryScoped();
     const state = yield* Ref.make(emptyState);
     const openStartedCount = yield* Ref.make(0);
     const firstOpenStarted = yield* Deferred.make<void>();
@@ -988,7 +985,7 @@ it.effect("ProviderSessionManagerV2 opens sessions in different workspaces concu
         }),
       ),
     );
-  }),
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("ProviderSessionManagerV2 closes every live session for a provider instance", () =>
