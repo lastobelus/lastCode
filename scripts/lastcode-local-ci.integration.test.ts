@@ -47,7 +47,7 @@ it.skipIf(NodeProcess.platform === "win32").each([0, 1])(
           HOMEBREW_NO_ANALYTICS: "0",
         },
         signal: new AbortController().signal,
-        failureHelp: step.failureHelp,
+        ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
         onOutput: (value) => {
           output += value;
         },
