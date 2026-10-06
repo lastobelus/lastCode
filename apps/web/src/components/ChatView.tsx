@@ -1,4 +1,7 @@
-import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import {
+  recoveryQueuesFollowUps,
+  recoverySuppressesWorking,
+} from "@t3tools/client-runtime/state/thread-recovery";
 import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
 import {
   parseThreadAnnotationSubmission,
@@ -509,7 +512,10 @@ import {
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
-import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  applyComposerQueueConstraint,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
@@ -7270,6 +7276,10 @@ export default function ChatView(props: ChatViewProps) {
     onOpenThread: onOpenRelatedThread,
   });
   const suppressStaleWorking = recoverySuppressesWorking(activeThreadShell?.recovery);
+  const forceQueueFollowUps = recoveryQueuesFollowUps(
+    activeThreadShell?.recovery,
+    activeRuntime?.activeRunId,
+  );
 
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
@@ -8701,7 +8711,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
-    dispatchMode: ComposerDispatchMode = "auto",
+    rawDispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
@@ -8709,6 +8719,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    const dispatchMode = applyComposerQueueConstraint(rawDispatchMode, forceQueueFollowUps);
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -9283,7 +9294,8 @@ export default function ChatView(props: ChatViewProps) {
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const shouldQueueBehindActiveRun = phase === "running" && dispatchMode === "queue";
+    const shouldQueueBehindActiveRun =
+      (phase === "running" || forceQueueFollowUps) && dispatchMode === "queue";
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
@@ -11629,6 +11641,7 @@ export default function ChatView(props: ChatViewProps) {
                                 isLocalDraftThread && activeProject === null
                               }
                               phase={phase}
+                              forceQueue={forceQueueFollowUps}
                               canInterrupt={canInterruptRunningThread}
                               isConnecting={isConnecting}
                               isSendBusy={isSendBusy || isSavingQueuedEdit || isResuming}

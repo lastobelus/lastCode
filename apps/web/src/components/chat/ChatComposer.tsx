@@ -1362,6 +1362,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isRunning: boolean;
   canInterrupt: boolean;
   followUpBehavior: "queue" | "steer";
+  forceQueue: boolean;
   alternateShortcutLabel: string | null;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -1401,6 +1402,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isRunning={props.isRunning}
         canInterrupt={props.canInterrupt}
         followUpBehavior={props.followUpBehavior}
+        forceQueue={props.forceQueue}
         alternateShortcutLabel={props.alternateShortcutLabel}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
@@ -1527,6 +1529,8 @@ export interface ChatComposerProps {
 
   // Session phase
   phase: SessionPhase;
+  /** The active recovery incident queues follow-ups regardless of visible phase. */
+  forceQueue?: boolean;
   /** Stop is offered: a run is preparing, starting, or running. */
   canInterrupt: boolean;
   isConnecting: boolean;
@@ -1707,6 +1711,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
+    forceQueue = false,
     canInterrupt,
     isConnecting,
     isSendBusy,
@@ -4216,6 +4221,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 running: phase === "running",
                 alternateModifier: false,
                 activeTurnDefault: settings.followUpBehavior,
+                forceQueue,
               }),
             submissionIntent,
           );
@@ -4233,6 +4239,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activePendingProgress,
       attachmentTargetKey,
       blurMobileComposerAfterSend,
+      forceQueue,
       isSendDisabled,
       noProviderAvailable,
       onSend,
@@ -4251,10 +4258,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           running: phase === "running",
           alternateModifier: event.metaKey || event.ctrlKey,
           activeTurnDefault: settings.followUpBehavior,
+          forceQueue,
         }),
       );
     },
-    [phase, settings.followUpBehavior, submitComposer],
+    [forceQueue, phase, settings.followUpBehavior, submitComposer],
   );
   const submitCitationAndSend = useCallback(() => {
     submitComposer(
@@ -4263,9 +4271,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         running: phase === "running",
         alternateModifier: false,
         activeTurnDefault: settings.followUpBehavior,
+        forceQueue,
       }),
     );
-  }, [phase, settings.followUpBehavior, submitComposer]);
+  }, [forceQueue, phase, settings.followUpBehavior, submitComposer]);
   const compactThreadContext = useCallback(() => {
     if (
       compactDisabled ||
@@ -4402,7 +4411,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       keybindings,
       isMobileViewport,
       isDraftThread: routeKind === "draft",
-      isRunning: phase === "running",
+      isRunning: phase === "running" || forceQueue,
       sendShortcut: settings.sendShortcut,
       prompt: promptRef.current,
     });
@@ -4445,6 +4454,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           running: phase === "running",
           alternateModifier: submissionIntent === "alternate",
           activeTurnDefault: settings.followUpBehavior,
+          forceQueue,
         }),
         submissionIntent,
       );
@@ -6748,6 +6758,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               compact
                               pendingAction={pendingPrimaryAction}
                               isRunning={false}
+                              forceQueue={forceQueue}
                               canInterrupt={false}
                               showPlanFollowUpPrompt={false}
                               promptHasText={false}
@@ -7433,6 +7444,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       compact
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
+                      forceQueue={forceQueue}
                       canInterrupt={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
@@ -7545,6 +7557,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
                     followUpBehavior={settings.followUpBehavior}
+                    forceQueue={forceQueue}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",

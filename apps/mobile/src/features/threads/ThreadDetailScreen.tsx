@@ -192,6 +192,7 @@ export interface ThreadDetailScreenProps {
   readonly composerDraftKey: string | null;
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
+  readonly forceQueue: boolean;
   readonly isSavingQueuedEdit: boolean;
   readonly onCancelQueuedRunEdit: () => void;
   readonly onRemoveQueuedEditAttachment: (attachmentId: string) => void;
@@ -1428,6 +1429,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       draftKey={props.composerDraftKey ?? undefined}
                       followUpBehavior={props.followUpBehavior}
                       canSteerActiveTurn={props.canSteerActiveTurn}
+                      forceQueue={props.forceQueue}
                       queuedEdit={
                         props.queuedRunEdit === null
                           ? null

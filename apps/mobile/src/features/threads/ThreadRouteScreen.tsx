@@ -1046,6 +1046,7 @@ function ThreadRouteContent(
           composerDraftKey={composer.composerDraftKey}
           followUpBehavior={composer.followUpBehavior}
           canSteerActiveTurn={composer.canSteerActiveTurn}
+          forceQueue={composer.forceQueue}
           isSavingQueuedEdit={composer.isSavingQueuedEdit}
           onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
           onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}

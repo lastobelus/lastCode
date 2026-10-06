@@ -1,4 +1,17 @@
-import type { OrchestrationV2ThreadRecovery } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadRecovery, RunId } from "@t3tools/contracts";
+
+/** Only the active incident blocks delivery; retained receipts must not block a new turn. */
+export function recoveryQueuesFollowUps(
+  recovery: OrchestrationV2ThreadRecovery | null | undefined,
+  activeRunId: RunId | null | undefined,
+) {
+  return (
+    activeRunId != null &&
+    recovery != null &&
+    recovery.runId === activeRunId &&
+    recovery.status !== "recovered"
+  );
+}
 
 /** Only provider-confirmed stale work replaces the ordinary working indicator. */
 export function recoverySuppressesWorking(

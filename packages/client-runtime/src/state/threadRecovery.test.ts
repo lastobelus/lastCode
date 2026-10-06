@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import {
   presentThreadRecovery,
+  recoveryQueuesFollowUps,
   recoverySuppressesWorking,
   threadRecoveryStatusLabel,
 } from "./threadRecovery.ts";
@@ -30,6 +31,22 @@ function recovery(status: OrchestrationV2ThreadRecovery["status"]): Orchestratio
 }
 
 describe("thread recovery presentation", () => {
+  it.each(["suspect", "stale", "recovering", "failed"] as const)(
+    "queues follow-ups for the active %s incident only",
+    (status) => {
+      const incident = recovery(status);
+      expect(recoveryQueuesFollowUps(incident, incident.runId)).toBe(true);
+      expect(recoveryQueuesFollowUps(incident, RunId.make("new-run"))).toBe(false);
+      expect(recoveryQueuesFollowUps(incident, null)).toBe(false);
+    },
+  );
+
+  it("allows ordinary delivery after recovery and without a recovery receipt", () => {
+    const receipt = recovery("recovered");
+    expect(recoveryQueuesFollowUps(receipt, receipt.runId)).toBe(false);
+    expect(recoveryQueuesFollowUps(null, receipt.runId)).toBe(false);
+  });
+
   it("preserves incident timestamps through persistence and shell transport", () => {
     const incident = recovery("failed");
     const shell = { ...v2ThreadShell, recovery: incident };
