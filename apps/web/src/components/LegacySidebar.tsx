@@ -162,7 +162,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { legacySidebarScaleStyle } from "../legacySidebarScale";
 import {
-  EnvironmentIcon,
+  ConnectedEnvironmentIcon,
   legacyThreadEnvironmentPresentation,
   projectEnvironmentIconEntries,
   resolveEnvironmentIconColor,
@@ -243,7 +243,6 @@ import {
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   resolveProjectStatusIndicator,
-  resolveThreadRowClassName,
   resolveThreadLastVisitedAt,
   resolveThreadStatusPill,
   orderItemsByPreferredIds,
@@ -273,6 +272,8 @@ import {
   legacySidebarCreatorDetails,
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
+  legacySidebarSubagentGroupKey,
+  type LegacySidebarFamilyItem,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
 import {
@@ -558,9 +559,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
     environmentLabel: remoteEnvLabel,
   });
-  const showsThreadEnvironmentIcon = environmentPresentation.showRowIcon;
-  const threadEnvironmentLabel = environmentPresentation.hoverLabel;
-  const threadEnvironmentIconKind = environmentPresentation.kind;
+  const showsThreadEnvironmentIcon =
+    environmentPresentation.showRowIcon &&
+    props.familyRow.parentKey === null &&
+    thread.lineage.relationshipToParent !== "subagent";
+  const threadEnvironmentLabel =
+    props.familyRow.parentKey !== null || thread.lineage.relationshipToParent === "subagent"
+      ? null
+      : environmentPresentation.hoverLabel;
   const environmentIconColor = resolveEnvironmentIconColor(
     props.configuredEnvironmentIconColor,
     environment !== null && !isDesktopLocalThread,
@@ -683,7 +689,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <SidebarThreadHoverContent
         branchMismatch={branchMismatch}
         environmentLabel={threadEnvironmentLabel}
-        environmentIconKind={threadEnvironmentIconKind}
         environmentIconColor={environmentIconColor}
         modelInstanceId={modelInstanceId}
         modelLabel={modelLabel}
@@ -1189,7 +1194,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             />
           ) : (
             <>
-              {thread.persistent ? (
+              {thread.persistent && family.parentKey === null && !subagentLabel ? (
                 <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
               ) : null}
               <span className="min-w-0 flex-1">
@@ -1200,7 +1205,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   >
                     {thread.title}
                   </span>
-                  {relationshipLabel ? (
+                  {isAgentCreated || relationshipUnavailableLabel ? (
                     <Tooltip>
                       <TooltipTrigger
                         render={
@@ -1216,14 +1221,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           />
                         }
                       >
+                        {isAgentCreated ? <SparklesIcon aria-hidden className="size-3" /> : null}
                         {isAgentCreated ? (
-                          <SparklesIcon aria-hidden className="size-3" />
-                        ) : (
-                          <BotIcon aria-hidden className="size-3" />
-                        )}
-                        <span className="hidden @sm/legacy-sidebar:inline">
-                          {isAgentCreated ? "Agent-created" : "Subagent"}
-                        </span>
+                          <span className="hidden @sm/legacy-sidebar:inline">Agent-created</span>
+                        ) : null}
                         {relationshipUnavailableLabel ? (
                           <TriangleAlertIcon
                             aria-hidden
@@ -1354,8 +1355,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           />
                         }
                       >
-                        <EnvironmentIcon
-                          kind={threadEnvironmentIconKind}
+                        <ConnectedEnvironmentIcon
+                          environmentId={thread.environmentId}
                           context="legacy-row"
                           color={environmentIconColor}
                           className="size-3"
@@ -1541,7 +1542,7 @@ interface SidebarProjectThreadListProps {
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
   orderedProjectThreadKeys: readonly string[];
-  renderedRows: readonly LegacySidebarFamilyRow[];
+  renderedItems: readonly LegacySidebarFamilyItem[];
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
@@ -1609,7 +1610,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     hasOverflowingThreads,
     hiddenThreadStatus,
     orderedProjectThreadKeys,
-    renderedRows,
+    renderedItems,
     showEmptyThreadState,
     shouldShowThreadPanel,
     isThreadListExpanded,
@@ -1645,6 +1646,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   } = props;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
+  const setFamilyCollapsed = useLegacySidebarFamiliesStore((state) => state.setCollapsed);
 
   return (
     <ul
@@ -1666,7 +1668,33 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         </SidebarMenuSubItem>
       ) : null}
       {shouldShowThreadPanel &&
-        renderedRows.map((familyRow) => {
+        renderedItems.map((item) => {
+          if (item.type === "subagents") {
+            return (
+              <SidebarMenuSubItem key={item.key} className="w-full" data-thread-selection-safe>
+                <LegacySidebarFamilyGuides depth={item.depth} />
+                <button
+                  type="button"
+                  aria-label={`${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}`}
+                  aria-expanded={item.expanded}
+                  className="flex h-8 w-full items-center gap-1 rounded-md pr-2 text-3xs text-sidebar-muted-foreground uppercase hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+                  style={{ paddingLeft: 12 + Math.min(item.depth, 6) * 12 }}
+                  onClick={() => {
+                    if (!item.selectedDescendant) setFamilyCollapsed(item.key, item.expanded);
+                  }}
+                >
+                  <ChevronRightIcon
+                    aria-hidden
+                    className={cn("size-3", item.expanded && "rotate-90")}
+                  />
+                  <BotIcon aria-hidden className="size-3" />
+                  <span>Subagents</span>
+                  <span className="text-secondary-label">{item.count}</span>
+                </button>
+              </SidebarMenuSubItem>
+            );
+          }
+          const familyRow = item.row;
           const thread = familyRow.thread;
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
@@ -1992,7 +2020,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return counts;
   }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
 
-  const projectThreadKeys = useMemo(() => [...sidebarThreadByKey.keys()], [sidebarThreadByKey]);
+  const projectThreadKeys = useMemo(
+    () =>
+      [...sidebarThreadByKey.keys()].flatMap((key) => [key, legacySidebarSubagentGroupKey(key)]),
+    [sidebarThreadByKey],
+  );
   const collapsedFamiliesByKey = useCollapsedLegacySidebarFamilies(projectThreadKeys);
   const { projectStatus, hiddenThreadStatus, familyProjection } = useMemo(() => {
     const lastVisitedAtByThreadKey = new Map(
@@ -2046,7 +2078,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   ]);
   const {
     hasOverflowingThreads,
-    renderedRows,
+    renderedItems,
     showEmptyThreadState,
     shouldShowThreadPanel,
     orderedThreadKeys: orderedProjectThreadKeys,
@@ -3377,7 +3409,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         {projectEnvironmentIcons.length > 0 && (
           <span
             aria-label={`Project environments: ${projectEnvironmentIcons.map((entry) => entry.label).join(", ")}`}
-            className="pointer-events-none absolute top-1 right-8 inline-flex h-5 items-center justify-center gap-1 rounded-md"
+            className="pointer-events-none absolute top-1 right-(--project-environment-inset) inline-flex h-5 translate-x-full items-center gap-(--thread-metadata-gap) rounded-md max-sm:right-[calc(var(--project-environment-inset)+1.5rem*var(--legacy-sidebar-content-zoom)+var(--thread-metadata-gap))]"
+            style={
+              {
+                "--project-environment-inset":
+                  "calc(0.5rem + 3.75rem * var(--legacy-sidebar-content-zoom) + var(--thread-metadata-gap))",
+                "--thread-metadata-gap":
+                  "calc(var(--spacing) * var(--legacy-sidebar-content-zoom))",
+              } as CSSProperties
+            }
           >
             {projectEnvironmentIcons.map((entry) => (
               <Tooltip key={entry.environmentId}>
@@ -3388,20 +3428,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                       tabIndex={0}
                       aria-label={entry.label}
                       className="pointer-events-auto inline-flex size-3 items-center justify-center"
+                      data-legacy-sidebar-unscaled-content
                     />
                   }
                 >
-                  <EnvironmentIcon
-                    kind={entry.kind}
+                  <ConnectedEnvironmentIcon
+                    environmentId={entry.environmentId}
                     context="project"
-                    color={
-                      entry.kind === "container"
-                        ? undefined
-                        : resolveEnvironmentIconColor(
-                            props.environmentIconColors[entry.environmentId],
-                            props.knownEnvironmentIds.has(entry.environmentId),
-                          )
-                    }
+                    color={resolveEnvironmentIconColor(
+                      props.environmentIconColors[entry.environmentId],
+                      props.knownEnvironmentIds.has(entry.environmentId),
+                    )}
                     className="size-3"
                   />
                 </TooltipTrigger>
@@ -3447,7 +3484,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
         orderedProjectThreadKeys={orderedProjectThreadKeys}
-        renderedRows={renderedRows}
+        renderedItems={renderedItems}
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
         isThreadListExpanded={isThreadListExpanded}

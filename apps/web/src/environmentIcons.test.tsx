@@ -4,7 +4,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   EnvironmentIcon,
-  environmentIconKind,
   formatLocalEnvironmentLabel,
   legacyThreadEnvironmentPresentation,
   normalizeEnvironmentIconColor,
@@ -29,12 +28,6 @@ describe("environment icon preferences", () => {
     expect(updateEnvironmentIconColors({ buildbox: "#2563eb" }, buildbox, "")).toEqual({});
   });
 
-  it("uses absolute Laptop and Server identity", () => {
-    expect(environmentIconKind(local, local)).toBe("laptop");
-    expect(environmentIconKind(buildbox, local)).toBe("server");
-    expect(environmentIconKind(local, buildbox)).toBe("server");
-  });
-
   it("falls back to Default for a deleted or unknown environment", () => {
     expect(resolveEnvironmentIconColor("#2563eb", true)).toBe("#2563eb");
     expect(resolveEnvironmentIconColor("#2563eb", false)).toBeUndefined();
@@ -48,7 +41,7 @@ describe("environment icon preferences", () => {
         showLocalEnvironmentIcon: false,
         environmentLabel: "Workstation",
       }),
-    ).toEqual({ kind: "laptop", showRowIcon: false, hoverLabel: null });
+    ).toEqual({ showRowIcon: false, hoverLabel: null });
     expect(
       legacyThreadEnvironmentPresentation({
         isPrimary: true,
@@ -56,7 +49,7 @@ describe("environment icon preferences", () => {
         showLocalEnvironmentIcon: true,
         environmentLabel: "Workstation",
       }),
-    ).toEqual({ kind: "laptop", showRowIcon: true, hoverLabel: "Workstation (local)" });
+    ).toEqual({ showRowIcon: true, hoverLabel: "Workstation (local)" });
     expect(
       legacyThreadEnvironmentPresentation({
         isPrimary: false,
@@ -64,7 +57,7 @@ describe("environment icon preferences", () => {
         showLocalEnvironmentIcon: false,
         environmentLabel: "Buildbox",
       }),
-    ).toEqual({ kind: "server", showRowIcon: true, hoverLabel: "Buildbox" });
+    ).toEqual({ showRowIcon: true, hoverLabel: "Buildbox" });
   });
 
   it("shows the V2 local card icon only after opt-in while always showing remotes", () => {
@@ -93,7 +86,7 @@ describe("project environment icons", () => {
     };
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: false })).toEqual([]);
     expect(projectEnvironmentIconEntries({ ...base, showLocalEnvironmentIcon: true })).toEqual([
-      { environmentId: local, kind: "laptop", label: "Workstation (local)" },
+      { environmentId: local, label: "Workstation (local)" },
     ]);
   });
 
@@ -112,10 +105,10 @@ describe("project environment icons", () => {
         showLocalEnvironmentIcon: false,
       }),
     ).toEqual([
-      { environmentId: local, kind: "laptop", label: "Workstation (local)" },
-      { environmentId: buildbox, kind: "server", label: "Buildbox" },
-      { environmentId: production, kind: "server", label: "Production" },
-      { environmentId: wsl, kind: "container", label: "Ubuntu" },
+      { environmentId: local, label: "Workstation (local)" },
+      { environmentId: buildbox, label: "Buildbox" },
+      { environmentId: production, label: "Production" },
+      { environmentId: wsl, label: "Ubuntu" },
     ]);
   });
 });

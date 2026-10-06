@@ -16,9 +16,24 @@ export interface LegacySidebarFamilyRow {
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
   creatorGroupingWarning: string | null;
-  groupHeading: "Subagents" | "Created by this thread" | null;
+  groupHeading: "Created by this thread" | null;
   projectExpanded: boolean;
 }
+
+export type LegacySidebarFamilyItem =
+  | { type: "thread"; row: LegacySidebarFamilyRow }
+  | {
+      type: "subagents";
+      key: string;
+      parentKey: string;
+      parentTitle: string;
+      depth: number;
+      expanded: boolean;
+      selectedDescendant: boolean;
+      count: number;
+    };
+
+export const legacySidebarSubagentGroupKey = (parentKey: string) => `${parentKey}:subagents`;
 
 export const legacySidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
@@ -187,7 +202,7 @@ export function projectLegacySidebarFamilies(input: {
       childrenByKey.set(parentKey, siblings);
     }
   }
-  const typedGroups = input.groupingStyle !== "minimal";
+  const typedGroups = input.groupingStyle === "typed-groups";
   // Keep delegated work together after ordinary conversations in both layouts.
   for (const [key, children] of childrenByKey) {
     childrenByKey.set(key, [
@@ -222,7 +237,7 @@ export function projectLegacySidebarFamilies(input: {
       unavailableParentLabel: unavailableByKey.get(key) ?? null,
       descendantCount: 0,
       descendantsStatus: null,
-      expanded: input.collapsedByKey[key] !== true || selectedDescendant,
+      expanded: input.collapsedByKey[key] === false || selectedDescendant,
       selectedDescendant,
       descendantStatusCounts: new Map(),
       createdThreadStatusCounts: new Map(),
@@ -266,6 +281,8 @@ export function projectLegacySidebarFamilies(input: {
   const renderedRootKeys = new Set(input.projectExpanded ? previewRoots : []);
   if (selectedRoot) renderedRootKeys.add(selectedRoot);
   const renderedRows: LegacySidebarFamilyRow[] = [];
+  const renderedItems: LegacySidebarFamilyItem[] = [];
+  const subagentGroups = new Map<string, Extract<LegacySidebarFamilyItem, { type: "subagents" }>>();
   const hiddenThreads: SidebarThreadSummary[] = [];
   let rootIsRendered = false;
   let collapsedDepth: number | null = null;
@@ -281,17 +298,41 @@ export function projectLegacySidebarFamilies(input: {
     if (!input.projectExpanded && !selectedPath.has(row.key)) continue;
     if (collapsedDepth !== null && row.depth > collapsedDepth) continue;
     collapsedDepth = null;
+    if (row.parentKey && row.thread.lineage.relationshipToParent === "subagent") {
+      const groupKey = legacySidebarSubagentGroupKey(row.parentKey);
+      let group = subagentGroups.get(groupKey);
+      if (!group) {
+        const subagents = (childrenByKey.get(row.parentKey) ?? []).filter(
+          (key) => byKey.get(key)!.lineage.relationshipToParent === "subagent",
+        );
+        const selectedDescendant = subagents.some((key) => selectedPath.has(key));
+        group = {
+          type: "subagents",
+          key: groupKey,
+          parentKey: row.parentKey,
+          parentTitle: byKey.get(row.parentKey)!.title,
+          depth: row.depth,
+          expanded: input.collapsedByKey[groupKey] === false || selectedDescendant,
+          selectedDescendant,
+          count: subagents.length,
+        };
+        renderedItems.push(group);
+        subagentGroups.set(groupKey, group);
+      }
+      if (!group.expanded) {
+        collapsedDepth = row.depth;
+        continue;
+      }
+    }
     renderedRows.push(row);
+    renderedItems.push({ type: "thread", row });
     if (!row.expanded) collapsedDepth = row.depth;
   }
   if (typedGroups) {
     const shownGroups = new Set<string>();
     for (const row of renderedRows) {
-      if (!row.parentKey) continue;
-      const heading =
-        row.thread.lineage.relationshipToParent === "subagent"
-          ? "Subagents"
-          : "Created by this thread";
+      if (!row.parentKey || row.thread.lineage.relationshipToParent === "subagent") continue;
+      const heading = "Created by this thread";
       const groupKey = `${row.parentKey}:${heading}`;
       if (!shownGroups.has(groupKey)) {
         row.groupHeading = heading;
@@ -302,6 +343,7 @@ export function projectLegacySidebarFamilies(input: {
   return {
     allRows,
     renderedRows,
+    renderedItems,
     hasOverflowingThreads,
     hiddenThreads,
     orderedThreadKeys: renderedRows

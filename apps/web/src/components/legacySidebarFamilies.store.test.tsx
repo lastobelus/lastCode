@@ -7,6 +7,7 @@ import {
   useCollapsedLegacySidebarFamilies,
   useLegacySidebarFamiliesStore,
 } from "./legacySidebarFamilies.store";
+import { legacySidebarSubagentGroupKey } from "./legacySidebarFamilies.logic";
 
 let renderer: ReactTestRenderer | null = null;
 
@@ -27,12 +28,13 @@ afterEach(async () => {
 it("only updates a project subscription for its scoped threads, including grouped environments", async () => {
   const firstKey = key("environment-one", "parent");
   const groupedKey = key("environment-two", "parent");
+  const subagentGroupKey = legacySidebarSubagentGroupKey(firstKey);
   const observed: Record<string, boolean>[] = [];
   function Probe({ threadKeys }: { threadKeys: string[] }) {
     observed.push(useCollapsedLegacySidebarFamilies(threadKeys));
     return null;
   }
-  const threadKeys = [firstKey, groupedKey];
+  const threadKeys = [firstKey, groupedKey, subagentGroupKey];
   await act(() => {
     renderer = create(<Probe threadKeys={threadKeys} />);
   });
@@ -53,8 +55,14 @@ it("only updates a project subscription for its scoped threads, including groupe
   await act(() => setCollapsed(groupedKey, true));
   expect(observed.at(-1)).toEqual({ [firstKey]: true, [groupedKey]: true });
   await act(() => setCollapsed(firstKey, false));
-  expect(observed.at(-1)).toEqual({ [groupedKey]: true });
+  expect(observed.at(-1)).toEqual({ [firstKey]: false, [groupedKey]: true });
+  await act(() => setCollapsed(subagentGroupKey, false));
+  expect(observed.at(-1)).toEqual({
+    [firstKey]: false,
+    [groupedKey]: true,
+    [subagentGroupKey]: false,
+  });
 
   await act(() => renderer?.update(<Probe threadKeys={[firstKey]} />));
-  expect(observed.at(-1)).toEqual({});
+  expect(observed.at(-1)).toEqual({ [firstKey]: false });
 });

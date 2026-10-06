@@ -251,7 +251,7 @@ import {
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
-  EnvironmentIcon,
+  ConnectedEnvironmentIcon,
   resolveEnvironmentIconColor,
   showV2ThreadCardEnvironmentIcon,
 } from "../environmentIcons";
@@ -1266,7 +1266,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     props.configuredEnvironmentIconColor,
     props.environmentKnown,
   );
-  const environmentIconKind = isRemote ? "server" : "laptop";
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
       ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
@@ -1282,7 +1281,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       projectIcon={props.project?.projectIcon ?? null}
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
-      environmentIconKind={environmentIconKind}
       environmentIconColor={environmentIconColor}
       providerEntry={providerEntry}
       providerEntryByInstanceId={props.providerEntryByInstanceId}
@@ -2186,11 +2184,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
-                {showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon) ? (
+                {thread.lineage.relationshipToParent !== "subagent" &&
+                showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon) ? (
                   <span className="inline-flex shrink-0 items-center">
-                    <EnvironmentIcon
+                    <ConnectedEnvironmentIcon
                       aria-hidden
-                      kind={environmentIconKind}
+                      environmentId={thread.environmentId}
                       context="v2-row"
                       color={environmentIconColor}
                       className="size-3.5"
@@ -2257,7 +2256,6 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(
     props.isHighlighted || props.isRouteActive,
   );
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentIconColor = resolveEnvironmentIconColor(
     props.configuredEnvironmentIconColor,
     props.environmentKnown,
@@ -2382,7 +2380,6 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           projectIcon={props.project?.projectIcon ?? null}
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
-          environmentIconKind={thread.environmentId === primaryEnvironmentId ? "laptop" : "server"}
           environmentIconColor={environmentIconColor}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}

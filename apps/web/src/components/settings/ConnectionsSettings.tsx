@@ -131,6 +131,7 @@ import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
 import { readHostedPairingRequest } from "../../hostedPairing";
@@ -1585,6 +1586,15 @@ function SavedBackendListRow({
   return (
     <EnvironmentRow
       kind={machineKind}
+      icon={
+        <ConnectedEnvironmentIcon
+          environmentId={environmentId}
+          fallbackDescriptor={lastDescriptor}
+          context="settings"
+          aria-hidden
+          className="size-4"
+        />
+      }
       label={environment.label}
       dimmed={!enabled}
       subtitle={
@@ -3466,15 +3476,24 @@ export function ConnectionsSettings() {
               primaryEnvironment?.label ?? (desktopBridge ? "This machine" : "Primary environment")
             }
             icon={
-              <EnvironmentMachineIcon
-                aria-hidden
-                kind={
-                  primaryServerConfig
-                    ? resolveEnvironmentMachineKind(primaryServerConfig)
-                    : "desktop"
-                }
-                className="size-4"
-              />
+              primaryEnvironmentId !== null ? (
+                <ConnectedEnvironmentIcon
+                  environmentId={primaryEnvironmentId}
+                  context="settings"
+                  aria-hidden
+                  className="size-4"
+                />
+              ) : (
+                <EnvironmentMachineIcon
+                  aria-hidden
+                  kind={
+                    primaryServerConfig
+                      ? resolveEnvironmentMachineKind(primaryServerConfig)
+                      : "desktop"
+                  }
+                  className="size-4"
+                />
+              )
             }
             headerAction={
               primaryEnvironmentId !== null ? (

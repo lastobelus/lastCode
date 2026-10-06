@@ -10,7 +10,7 @@ import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { EnvironmentIcon } from "../../environmentIcons";
+import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { ThreadPullRequestsMiniList } from "../ThreadStatusIndicators";
@@ -27,7 +27,6 @@ export interface SidebarThreadHoverContentProps {
   projectFaviconPath: string | null;
   projectIcon?: ProjectIconOverride | null;
   environmentLabel: string | null;
-  environmentIconKind?: "laptop" | "server";
   environmentIconColor?: EnvironmentIconColor | undefined;
   providerEntry: ProviderInstanceEntry | null;
   providerEntryByInstanceId?: ReadonlyMap<string, ProviderInstanceEntry> | undefined;
@@ -96,8 +95,8 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {props.environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            <EnvironmentIcon
-              kind={props.environmentIconKind ?? "server"}
+            <ConnectedEnvironmentIcon
+              environmentId={props.thread.environmentId}
               context="hover"
               color={props.environmentIconColor}
               className="size-3 shrink-0"

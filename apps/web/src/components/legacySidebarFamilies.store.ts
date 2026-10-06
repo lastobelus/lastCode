@@ -9,7 +9,7 @@ function readCollapsedFamilies(): Record<string, boolean> {
     const parsed: unknown = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(
-      Object.entries(parsed).filter(([key, value]) => key.length > 0 && value === true),
+      Object.entries(parsed).filter(([key, value]) => key.length > 0 && typeof value === "boolean"),
     );
   } catch {
     return {};
@@ -25,8 +25,7 @@ export const useLegacySidebarFamiliesStore = create<{
   setCollapsed: (key, collapsed) =>
     set((state) => {
       const collapsedByKey = { ...state.collapsedByKey };
-      if (collapsed) collapsedByKey[key] = true;
-      else delete collapsedByKey[key];
+      collapsedByKey[key] = collapsed;
       try {
         if (typeof window !== "undefined")
           window.localStorage.setItem(STORAGE_KEY, JSON.stringify(collapsedByKey));
@@ -43,7 +42,8 @@ export function useCollapsedLegacySidebarFamilies(threadKeys: readonly string[])
     useShallow((state) => {
       const collapsedByKey: Record<string, boolean> = {};
       for (const key of threadKeys) {
-        if (state.collapsedByKey[key]) collapsedByKey[key] = true;
+        if (state.collapsedByKey[key] !== undefined)
+          collapsedByKey[key] = state.collapsedByKey[key];
       }
       return collapsedByKey;
     }),

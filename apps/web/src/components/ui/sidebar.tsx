@@ -20,6 +20,7 @@ import { useResizeDrag } from "~/hooks/useResizeDrag";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
+import { bindSidebarRailScroll } from "./sidebarRailScroll";
 import * as Schema from "effect/Schema";
 
 const SIDEBAR_WIDTH = "16rem";
@@ -366,6 +367,11 @@ function SidebarRail({
   const canResize = resolvedResizable !== null && open;
   const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
   const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
+  React.useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !open || props.onWheel) return;
+    return bindSidebarRailScroll(rail);
+  }, [open, props.onWheel]);
   const resize = useResizeDrag<HTMLButtonElement>((event) => {
     if (!resolvedResizable || !open) return null;
     const rail = event.currentTarget;

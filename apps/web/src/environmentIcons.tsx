@@ -1,11 +1,18 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import {
+  resolveEnvironmentMachineKind,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+  type ExecutionEnvironmentDescriptor,
+} from "@t3tools/contracts";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
-import { ContainerIcon, LaptopIcon, ServerIcon } from "lucide-react";
-import type { CSSProperties } from "react";
+import type { ComponentProps, CSSProperties } from "react";
 
 import { cn } from "./lib/utils";
+import { EnvironmentMachineIcon } from "./components/EnvironmentMachineIcon";
+import { useEnvironment } from "./state/environments";
+import { useClientSettings } from "./hooks/useSettings";
 
-export type EnvironmentIconKind = "container" | "laptop" | "server";
+export type EnvironmentIconKind = EnvironmentMachineKind;
 export type EnvironmentIconContext = "hover" | "legacy-row" | "project" | "settings" | "v2-row";
 
 const DEFAULT_CONTEXT_CLASS: Record<EnvironmentIconContext, string> = {
@@ -41,13 +48,6 @@ export function formatLocalEnvironmentLabel(label: string | null | undefined): s
   return `${normalized && normalized.length > 0 ? normalized : "Local"} (local)`;
 }
 
-export function environmentIconKind(
-  environmentId: EnvironmentId,
-  primaryEnvironmentId: EnvironmentId | null,
-): "laptop" | "server" {
-  return environmentId === primaryEnvironmentId ? "laptop" : "server";
-}
-
 export function resolveEnvironmentIconColor(
   color: EnvironmentIconColor | undefined,
   isKnownEnvironment: boolean,
@@ -61,9 +61,7 @@ export function legacyThreadEnvironmentPresentation(input: {
   readonly showLocalEnvironmentIcon: boolean;
   readonly environmentLabel: string | null | undefined;
 }) {
-  const kind = input.isPrimary ? ("laptop" as const) : ("server" as const);
   return {
-    kind,
     showRowIcon: input.isPrimary ? input.showLocalEnvironmentIcon : !input.isDesktopLocal,
     hoverLabel: input.isPrimary
       ? input.showLocalEnvironmentIcon
@@ -82,7 +80,6 @@ export function showV2ThreadCardEnvironmentIcon(
 
 export interface ProjectEnvironmentIconEntry {
   readonly environmentId: EnvironmentId;
-  readonly kind: EnvironmentIconKind;
   readonly label: string;
 }
 
@@ -111,7 +108,6 @@ export function projectEnvironmentIconEntries(input: {
       return [
         {
           environmentId: member.environmentId,
-          kind: "laptop",
           label: formatLocalEnvironmentLabel(member.environmentLabel),
         },
       ];
@@ -120,7 +116,6 @@ export function projectEnvironmentIconEntries(input: {
       return [
         {
           environmentId: member.environmentId,
-          kind: "container",
           label: member.environmentLabel ?? "Local sandbox",
         },
       ];
@@ -128,7 +123,6 @@ export function projectEnvironmentIconEntries(input: {
     return [
       {
         environmentId: member.environmentId,
-        kind: "server",
         label: member.environmentLabel ?? "Remote",
       },
     ];
@@ -143,16 +137,38 @@ export function EnvironmentIcon(props: {
   readonly style?: CSSProperties | undefined;
   readonly "aria-hidden"?: boolean | undefined;
 }) {
-  const Icon =
-    props.kind === "laptop" ? LaptopIcon : props.kind === "server" ? ServerIcon : ContainerIcon;
   return (
-    <Icon
+    <EnvironmentMachineIcon
+      kind={props.kind}
       aria-hidden={props["aria-hidden"]}
       className={cn(
         props.color === undefined ? DEFAULT_CONTEXT_CLASS[props.context] : undefined,
         props.className,
       )}
       style={{ ...props.style, ...(props.color === undefined ? {} : { color: props.color }) }}
+    />
+  );
+}
+
+/** Uses the Connections icon setting; color remains a client preference. */
+export function ConnectedEnvironmentIcon({
+  environmentId,
+  fallbackDescriptor,
+  ...props
+}: Omit<ComponentProps<typeof EnvironmentIcon>, "kind"> & {
+  readonly environmentId: EnvironmentId;
+  readonly fallbackDescriptor?: ExecutionEnvironmentDescriptor | undefined;
+}) {
+  const environment = useEnvironment(environmentId);
+  const savedColor = useClientSettings((settings) => settings.environmentIconColors[environmentId]);
+  return (
+    <EnvironmentIcon
+      {...props}
+      color={props.color ?? resolveEnvironmentIconColor(savedColor, environment !== null)}
+      kind={resolveEnvironmentMachineKind(
+        environment?.serverConfig ??
+          (fallbackDescriptor === undefined ? null : { environment: fallbackDescriptor }),
+      )}
     />
   );
 }

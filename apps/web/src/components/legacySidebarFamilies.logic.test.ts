@@ -8,6 +8,7 @@ import {
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   legacySidebarThreadKey,
+  legacySidebarSubagentGroupKey,
   projectLegacySidebarFamilies,
 } from "./legacySidebarFamilies.logic";
 import { resolveThreadStatusPill } from "./Sidebar.logic";
@@ -31,11 +32,17 @@ function project(
 ) {
   return projectLegacySidebarFamilies({
     threads,
-    collapsedByKey: {},
+    collapsedByKey: Object.fromEntries(
+      threads.flatMap((value) => [
+        [legacySidebarThreadKey(value), false],
+        [legacySidebarSubagentGroupKey(legacySidebarThreadKey(value)), false],
+      ]),
+    ),
     activeThreadKey: null,
     projectExpanded: true,
     previewCount: 5,
     listExpanded: false,
+    groupingStyle: "typed-groups",
     statusForThread: (value) => resolveThreadStatusPill({ thread: value }),
     ...options,
   });
@@ -45,6 +52,50 @@ const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
 describe("legacy sidebar subagent families", () => {
+  it("collapses families by default and keeps the subagent section separately collapsed", () => {
+    const parent = thread("parent");
+    const helper = thread("helper", "parent");
+    const ordinary = thread("ordinary", undefined, {
+      source: { createdBy: "agent", creationSource: "mcp" },
+      creatorThreadId: parent.id,
+      creatorGrouping: "grouped",
+    });
+    const threads = [helper, parent, ordinary];
+    const parentKey = legacySidebarThreadKey(parent);
+    expect(keys(project(threads, { collapsedByKey: {} }))).toEqual(["parent"]);
+    const expanded = project(threads, {
+      collapsedByKey: { [parentKey]: false },
+      groupingStyle: "minimal",
+    });
+    expect(keys(expanded)).toEqual(["parent", "ordinary"]);
+    expect(expanded.renderedItems.map((item) => item.type)).toEqual([
+      "thread",
+      "thread",
+      "subagents",
+    ]);
+    expect(expanded.renderedItems.at(-1)).toMatchObject({ expanded: false, count: 1 });
+    expect(expanded.orderedThreadKeys).toEqual([parentKey, legacySidebarThreadKey(ordinary)]);
+    expect(
+      keys(
+        project(threads, {
+          collapsedByKey: {
+            [parentKey]: false,
+            [legacySidebarSubagentGroupKey(parentKey)]: false,
+          },
+        }),
+      ),
+    ).toEqual(["parent", "ordinary", "helper"]);
+    const selected = project(threads, {
+      collapsedByKey: {},
+      activeThreadKey: legacySidebarThreadKey(helper),
+    });
+    expect(keys(selected)).toEqual(["parent", "ordinary", "helper"]);
+    expect(selected.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
+      expanded: true,
+      selectedDescendant: true,
+    });
+  });
+
   it("preserves root sorting and nests children even when a child sorts first", () => {
     const result = project([
       thread("child", "parent"),
@@ -315,7 +366,7 @@ describe("legacy sidebar creator grouping", () => {
       null,
       "Created by this thread",
       null,
-      "Subagents",
+      null,
       null,
     ]);
     const minimal = project(threads, { groupingStyle: "minimal" });
