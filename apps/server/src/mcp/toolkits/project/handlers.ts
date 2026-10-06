@@ -125,6 +125,7 @@ export const ProjectHandlersLive = ProjectToolkit.toLayer({
             }),
         createdBy: "agent",
         creationSource: "mcp",
+        creatorThreadId: scope.threadId,
       }).pipe(
         Effect.mapError((error) =>
           error._tag === "AttachmentClaimError"
