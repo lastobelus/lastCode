@@ -1501,6 +1501,8 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
       "scripts/lastcode-nightly.test.ts",
       "scripts/lastcode-checkpoint.test.ts",
       "scripts/lastcode-local-ci.test.ts",
+      "scripts/lastcode-ci-workflow.test.ts",
+      "scripts/lastcode-daily-intel-package.test.ts",
       "scripts/build-desktop-artifact.test.ts",
       "apps/desktop/src/electron/ElectronProtocol.test.ts",
     ],
