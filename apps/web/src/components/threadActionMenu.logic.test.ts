@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
+  buildStopThreadProcessesMenuItem,
+  withThreadActionMenuDividers,
   type ThreadActionMenuState,
 } from "./threadActionMenu.logic";
 
@@ -10,6 +12,7 @@ const baseState: ThreadActionMenuState = {
   branch: null,
   projectFilter: null,
   isPinned: false,
+  isPersistent: false,
   isSettled: false,
   autoSettleEnabled: true,
   isSnoozed: false,
@@ -17,17 +20,29 @@ const baseState: ThreadActionMenuState = {
   isRegeneratingTitle: false,
   isRunning: false,
   hasRunningAction: false,
+  hasStoppableProcesses: false,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
     snooze: true,
     pinning: true,
+    persistence: true,
     titleRegeneration: true,
   },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
 };
+const handoff = {
+  entry: {
+    id: "file:/src/app.ts",
+    target: { kind: "file", path: "/src/app.ts" },
+    markdownLabel: "Open app",
+    lastOpenedAt: 1,
+    sequence: 1,
+  },
+  label: "Open app — /src/app.ts",
+} as const;
 
 function ids(state: ThreadActionMenuState): string[] {
   return buildThreadActionMenuItems(state).map((item) => item.id);
@@ -40,6 +55,54 @@ function allIds(state: ThreadActionMenuState): string[] {
 }
 
 describe("buildThreadActionMenuItems", () => {
+  it("offers stopping only when the thread owns a preview or running subprocess", () => {
+    expect(buildStopThreadProcessesMenuItem(false)).toBeNull();
+    expect(ids(baseState)).not.toContain("stop-thread-processes");
+    const items = buildThreadActionMenuItems({ ...baseState, hasStoppableProcesses: true });
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]).toEqual({
+      id: "stop-thread-processes",
+      label: "Stop all previews & processes",
+      destructive: true,
+    });
+    expect(items[persistenceIndex + 2]?.separatorBefore).toBe(true);
+  });
+
+  it("separates branch creation and persistence without separating persistence from stop", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, branch: "feature/preview" });
+    expect(items[1]?.separatorBefore).toBe(true);
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]?.separatorBefore).toBe(true);
+    const withoutPersistence = buildThreadActionMenuItems({
+      ...baseState,
+      hasStoppableProcesses: true,
+      supports: { ...baseState.supports, persistence: false },
+    });
+    const stopIndex = withoutPersistence.findIndex((item) => item.id === "stop-thread-processes");
+    expect(withoutPersistence[stopIndex + 1]?.separatorBefore).toBe(true);
+  });
+
+  it("groups legacy thread commands with dividers after creation, annotation, and stop", () => {
+    const commands = [
+      "new-thread-on-branch",
+      "rename",
+      "annotate",
+      "mark-unread",
+      "mark-persistent",
+      "stop-thread-processes",
+      "copy-path",
+    ];
+    const items = withThreadActionMenuDividers(commands.map((id) => ({ id, label: id })));
+    expect(items.filter((item) => item.separatorBefore).map((item) => item.id)).toEqual([
+      "rename",
+      "mark-unread",
+      "copy-path",
+    ]);
+    const withoutStop = withThreadActionMenuDividers(
+      commands.filter((id) => id !== "stop-thread-processes").map((id) => ({ id, label: id })),
+    );
+    expect(withoutStop.find((item) => item.id === "copy-path")?.separatorBefore).toBe(true);
+  });
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({
@@ -49,10 +112,20 @@ describe("buildThreadActionMenuItems", () => {
           autoSettleOptOut: false,
           snooze: false,
           pinning: false,
+          persistence: false,
           titleRegeneration: false,
         },
       }),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+    ).toEqual([
+      "rename",
+      "mark-unread",
+      "copy",
+      "project-settings",
+      "handoffs-heading",
+      "handoffs-empty",
+      "archive",
+      "delete",
+    ]);
   });
 
   it("groups project settings with utility actions before archive", () => {
@@ -63,7 +136,8 @@ describe("buildThreadActionMenuItems", () => {
       label: "Project settings",
       icon: "settings",
     });
-    expect(items[copyIndex + 2]?.id).toBe("archive");
+    expect(items[copyIndex + 2]?.id).toBe("handoffs-heading");
+    expect(items.at(-2)?.id).toBe("archive");
   });
 
   it("offers project filtering only for surfaces with a scoped thread list", () => {
@@ -155,6 +229,31 @@ describe("buildThreadActionMenuItems", () => {
     expect(items.at(-1)?.id).toBe("delete");
   });
 
+  it.each([
+    [0, 0, false],
+    [7, 1, false],
+    [8, 1, true],
+  ])("renders handoffs with the requested limit and overflow action", (count, shown, overflow) => {
+    const entries = Array.from({ length: count }, (_, index) => ({
+      ...handoff,
+      entry: { ...handoff.entry, id: `handoff-${index}` },
+      label: `Handoff ${index}`,
+    }));
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      handoffs: entries.slice(0, shown),
+      handoffsOverflow: overflow,
+    });
+    expect(items.find((item) => item.id === "handoffs-heading")).toMatchObject({
+      disabled: true,
+      separatorBefore: true,
+    });
+    expect(
+      items.filter((item) => item.id.startsWith("handoff:") && item.id !== "handoff-show-all"),
+    ).toHaveLength(shown);
+    expect(items.some((item) => item.id === "handoff-show-all")).toBe(overflow);
+  });
+
   it("keeps archive available even when the environment lacks every other capability", () => {
     expect(
       ids({
@@ -164,6 +263,7 @@ describe("buildThreadActionMenuItems", () => {
           autoSettleOptOut: false,
           snooze: false,
           pinning: false,
+          persistence: false,
           titleRegeneration: false,
         },
       }),
@@ -175,6 +275,17 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("replaces the mark action and blocks archive and delete for the persistent thread", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, isPersistent: true });
+    expect(items).toContainEqual(
+      expect.objectContaining({ id: "disable-persistence", label: "Disable persistent thread" }),
+    );
+    expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "archive")?.label).toContain("disable persistence");
+    expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "delete")?.label).toContain("disable persistence");
   });
 });
 

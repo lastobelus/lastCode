@@ -20,8 +20,8 @@ import * as NetService from "@t3tools/shared/Net";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { deriveServerPaths } from "../config.ts";
-import { resolveServerConfig } from "./config.ts";
+import { DEFAULT_PORT, deriveServerPaths } from "../config.ts";
+import { resolveServerConfig, resolveThreadInspectionConfig } from "./config.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
@@ -229,7 +229,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           host: Option.none(),
           baseDir: Option.none(),
           cwd: Option.none(),
-          devUrl: Option.none(),
+          devUrl: Option.some(new URL("http://127.0.0.1:5173")),
           noBrowser: Option.none(),
           bootstrapFd: Option.none(),
           autoBootstrapProjectFromCwd: Option.none(),
@@ -1258,4 +1258,36 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("derives thread inspection config without probing ports or provisioning paths", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { join } = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "thread-config-read-only-" });
+      const baseDir = join(root, "missing-home");
+      let portProbeCount = 0;
+      const netLayer = Layer.succeed(NetService.NetService, {
+        canListenOnHost: () => Effect.die("unexpected port probe"),
+        isPortAvailableOnLoopback: () => Effect.die("unexpected port probe"),
+        hasListenerOnHost: () => Effect.die("unexpected port probe"),
+        reserveLoopbackPort: () => Effect.die("unexpected port probe"),
+        findAvailablePort: () => {
+          portProbeCount += 1;
+          return Effect.die("unexpected port probe");
+        },
+      });
+      const resolved = yield* resolveThreadInspectionConfig(
+        { baseDir: Option.some(baseDir) },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), netLayer),
+        ),
+      );
+
+      assert.equal(resolved.port, DEFAULT_PORT);
+      assert.equal(resolved.baseDir, baseDir);
+      assert.equal(portProbeCount, 0);
+      assert.isFalse(yield* fs.exists(baseDir));
+    }).pipe(Effect.scoped),
+  );
 });

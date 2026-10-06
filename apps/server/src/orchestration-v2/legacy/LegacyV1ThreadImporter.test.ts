@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { EventId, ThreadId } from "@t3tools/contracts";
+import { EventId, MessageId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -528,5 +528,82 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
       `;
       assert.deepStrictEqual(eventsAfterRestart, eventsBeforeRetry);
     }),
+  );
+  it.effect(
+    "imports and repairs LastCode metadata without resurrecting deliberately cleared state",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("legacy:lastcode-metadata");
+        const annotation = {
+          body: "Resolved note",
+          anchorMessageId: MessageId.make("legacy:source-message"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-02T00:00:00.000Z",
+          resolvedAt: "2026-01-02T00:00:00.000Z",
+        };
+        const attention = { kind: "question", raisedAt: "2026-01-02T00:00:00.000Z" };
+        yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at) VALUES ('legacy:metadata-project','Legacy metadata','/example/project','[]','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`;
+        yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at, annotation_json, persistent, attention_json)
+        VALUES (${threadId},'legacy:metadata-project','Legacy metadata','{"instanceId":"codex","model":"gpt-6"}','full-access','default','2026-01-01T00:00:00.000Z','2026-01-02T00:00:00.000Z',${'{"body":"Resolved note","anchorMessageId":"legacy:source-message","createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-02T00:00:00.000Z","resolvedAt":"2026-01-02T00:00:00.000Z"}'},1,${'{"kind":"question","raisedAt":"2026-01-02T00:00:00.000Z"}'})`;
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at,source_thread_id)
+        VALUES ('legacy:source-message',${threadId},'user','Cross-thread message',0,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','legacy:sender')`;
+        yield* importer.reconcileShells;
+        yield* importer.ensureTranscript(threadId);
+        const imported = yield* projections.getThreadProjection(threadId);
+        assert.deepStrictEqual(imported.thread.annotation, annotation);
+        assert.deepStrictEqual(imported.thread.attention, attention);
+        assert.isTrue(imported.thread.persistent);
+        assert.equal(imported.messages[0]?.senderThreadId, "legacy:sender");
+        yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json=json_remove(payload_json,'$.annotation','$.persistent','$.attention','$.worktreeCleanup') WHERE thread_id=${threadId}`;
+        yield* sql`UPDATE orchestration_v2_projection_messages SET payload_json=json_remove(payload_json,'$.senderThreadId') WHERE thread_id=${threadId}`;
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET payload_json=json_remove(payload_json,'$.senderThreadId') WHERE thread_id=${threadId}`;
+        assert.deepStrictEqual(yield* importer.reconcileShells, {
+          importedThreadCount: 1,
+          importedMessageCount: 1,
+        });
+        const repaired = yield* projections.getThreadProjection(threadId);
+        assert.deepStrictEqual(repaired.thread.updatedAt, imported.thread.updatedAt);
+        assert.deepStrictEqual(repaired.thread.annotation, annotation);
+        assert.deepStrictEqual(repaired.thread.attention, attention);
+        assert.isTrue(repaired.thread.persistent);
+        assert.equal(repaired.messages[0]?.senderThreadId, "legacy:sender");
+        const item = repaired.turnItems[0];
+        assert.ok(item?.type === "user_message");
+        assert.equal(item.senderThreadId, "legacy:sender");
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("legacy:metadata-clear"),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: yield* DateTime.now,
+              payload: {
+                ...repaired.thread,
+                annotation: null,
+                attention: null,
+                persistent: false,
+                worktreeCleanup: null,
+              },
+            },
+          ],
+        });
+        yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json=json_remove(payload_json,'$.branchPullRequest') WHERE thread_id=${threadId}`;
+        yield* importer.reconcileShells;
+        const cleared = yield* projections.getThread(threadId);
+        assert.isNull(cleared.annotation);
+        assert.isNull(cleared.attention);
+        assert.isFalse(cleared.persistent);
+        assert.deepStrictEqual(yield* importer.reconcileShells, {
+          importedThreadCount: 0,
+          importedMessageCount: 0,
+        });
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        assert.deepStrictEqual(yield* projections.getThread(threadId), cleared);
+      }),
   );
 });

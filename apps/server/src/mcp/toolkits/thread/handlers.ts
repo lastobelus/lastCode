@@ -1,3 +1,5 @@
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -76,6 +78,36 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (
   return { ...context, request, item };
 });
 export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
+  t3_thread_recover: (input) =>
+    Effect.gen(function* () {
+      yield* readWritableThread(input.threadId);
+      const service = yield* ThreadRecovery.ThreadRecoveryService;
+      yield* service
+        .recover(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+      return { ok: true as const };
+    }),
+  t3_thread_repair: (input) =>
+    Effect.gen(function* () {
+      yield* readFullAccessCaller(
+        "Starting a repair agent requires a live full-access/default thread or a full-access client.",
+      );
+      yield* readWritableThread(input.threadId);
+      const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+      return yield* service
+        .launch(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+    }),
   run_scheduled_task_now: (input) =>
     Effect.gen(function* () {
       yield* readFullAccessCaller(
@@ -150,6 +182,27 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
         })
         .pipe(Effect.mapError(unavailable));
       return { sequence: result.sequence, targetThreadId: input.targetThreadId };
+    }),
+  t3_subagent_promote: (input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.request",
+      commandId,
+      threadId,
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "agent",
+      creationSource: "mcp",
+    })),
+  t3_subagent_promotion_cancel: (input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.cancel",
+      commandId,
+      threadId,
+      requestId: input.requestId,
+    })),
+  t3_subagent_promotion_status: (input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return { promotion: projection.thread.subagentPromotion ?? null };
     }),
   t3_thread_transfers: (input) =>
     Effect.gen(function* () {

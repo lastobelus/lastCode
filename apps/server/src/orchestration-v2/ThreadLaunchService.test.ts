@@ -23,6 +23,8 @@ import {
   ProviderInstanceId,
   OrchestrationV2ThreadProjectionJson,
   ScheduledTaskId,
+  RunId,
+  RunAttemptId,
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
@@ -57,6 +59,9 @@ import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
@@ -152,6 +157,7 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
+      reconcileScripts: () => Effect.die("unused reconcileScripts"),
       getById: (id) =>
         Effect.succeed(
           id === projectId
@@ -223,7 +229,9 @@ function makeHarness(options: HarnessOptions = {}) {
       launch,
       threadManagement,
       titleRegeneration,
+      projectedProjects,
       outbox,
+      receipts,
       database,
       externalServices,
     ),
@@ -2295,6 +2303,96 @@ it.effect(
         (yield* threads.getThreadShell(launched.threadId))?.creatorThreadId,
         creator.threadId,
       );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "launches a user-requested repair through real orchestration and retains its incident link",
+  () => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const source = yield* launches.launch(
+        launchInput({ command: "repair-source-create", thread: "repair-source" }),
+      );
+      const incident = {
+        threadId: source.threadId,
+        runId: RunId.make("failed-run"),
+        attemptId: RunAttemptId.make("failed-attempt"),
+      };
+      let repairThreadId: ThreadId | undefined;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const repair = ThreadRecoveryRepair.layer.pipe(
+        Layer.provide(ProjectionStore.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            dispatch: threads.dispatch,
+            getThreadShell: (id) =>
+              threads.getThreadShell(id).pipe(
+                Effect.map((shell) =>
+                  shell === null || id !== source.threadId
+                    ? shell
+                    : {
+                        ...shell,
+                        recovery: {
+                          runId: incident.runId,
+                          attemptId: incident.attemptId,
+                          status: "failed" as const,
+                          detail: "The provider completion could not be saved.",
+                          updatedAt: shell.updatedAt,
+                          ...(repairThreadId === undefined ? {} : { repairThreadId }),
+                        },
+                      },
+                ),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ThreadRecovery.ThreadRecoveryService)({
+            withRepairableIncident: (identity, effect) =>
+              effect((id) =>
+                Effect.gen(function* () {
+                  repairThreadId = id;
+                  yield* receipts.insertIfAbsent({
+                    commandId: ThreadRecovery.repairAcceptanceCommandId(id),
+                    threadId: id,
+                    commandType: "thread.recovery-repair.accept",
+                    acceptedAt: source.projection.thread.createdAt,
+                    resultSequence: 1,
+                    status: "accepted",
+                    error: null,
+                  });
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ThreadRecovery.ThreadRecoveryError({
+                        threadId: identity.threadId,
+                        cause,
+                      }),
+                  ),
+                ),
+              ),
+          }),
+        ),
+      );
+      const result = yield* Effect.gen(function* () {
+        const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+        const first = yield* service.launch(incident);
+        assert.deepStrictEqual(yield* service.launch(incident), first);
+        return first;
+      }).pipe(Effect.provide(repair));
+      const projection = yield* threads.getThreadProjection(result.threadId);
+      assert.equal(projection.thread.createdBy, "user");
+      assert.isUndefined(projection.thread.creatorThreadId);
+      assert.isNull(projection.thread.lineage.parentThreadId);
+      assert.equal(repairThreadId, result.threadId);
+      assert.lengthOf(projection.messages, 1);
+      assert.include(projection.messages[0]!.text, `Target thread: ${source.threadId}`);
+      assert.include(projection.messages[0]!.text, `Target run: ${incident.runId}`);
+      assert.include(projection.messages[0]!.text, `Target attempt: ${incident.attemptId}`);
+      assert.lengthOf(projection.runs, 1);
     }).pipe(Effect.provide(harness.layer));
   },
 );
