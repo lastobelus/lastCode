@@ -26,8 +26,13 @@ const project = {
 it.effect("preserves every project mutation field", () =>
   Effect.gen(function* () {
     const calls = yield* Ref.make<ReadonlyArray<unknown>>([]);
-    const projects: Pick<ProjectService["Service"], "create" | "delete" | "update"> = {
+    const projects: Pick<
+      ProjectService["Service"],
+      "create" | "delete" | "update" | "reconcileScripts"
+    > = {
       create: (input) =>
+        Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
+      reconcileScripts: (input) =>
         Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
       update: (input) =>
         Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
