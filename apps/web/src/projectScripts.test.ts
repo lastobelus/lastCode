@@ -26,6 +26,7 @@ describe("projectScripts helpers", () => {
         waitForSetup: false,
         previewUrl: "http://localhost:5733",
         autoOpenPreview: true,
+        allowAgentResume: true,
       }),
     ).toEqual({
       id: "dev",
@@ -35,6 +36,7 @@ describe("projectScripts helpers", () => {
       runOnWorktreeCreate: false,
       previewUrl: "http://localhost:5733",
       autoOpenPreview: true,
+      allowAgentResume: true,
     });
   });
 
@@ -48,6 +50,7 @@ describe("projectScripts helpers", () => {
         waitForSetup: false,
         previewUrl: null,
         autoOpenPreview: false,
+        allowAgentResume: false,
       }),
     ).toEqual({
       id: "test",

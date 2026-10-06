@@ -65,6 +65,8 @@ import {
   HtmlRenderToolkitHandlersLive,
 } from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import { ActionResumeToolkitHandlersLive } from "./toolkits/actionResume/handlers.ts";
+import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -753,6 +755,10 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
   DeviceScreenshotRegistrationLive,
 );
 
+export const ActionResumeToolkitRegistrationLive = McpServer.toolkit(ActionResumeToolkit).pipe(
+  Layer.provide(ActionResumeToolkitHandlersLive),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -772,4 +778,5 @@ export const layer = Layer.mergeAll(
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
   HtmlToolkitRegistrationLive,
+  ActionResumeToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));
