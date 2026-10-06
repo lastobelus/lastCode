@@ -1,8 +1,15 @@
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
-import { buildProjectGroups, type ProjectGroupingSettings } from "./logicalProject";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import {
+  buildProjectGroups,
+  derivePhysicalProjectKey,
+  type ProjectGroup,
+  type ProjectGroupingSettings,
+} from "./logicalProject";
 import type { Project } from "./types";
 
 export type EnvironmentPresence = "local-only" | "remote-only" | "mixed";
+export const NO_PROJECT_GROUP_KEY = "builtin:no-project";
 
 export interface SidebarProjectGroupMember extends Project {
   physicalProjectKey: string;
@@ -45,17 +52,59 @@ export interface SidebarProjectPickerEntry {
   isPreferred: boolean;
 }
 
-export function buildPhysicalToLogicalProjectKeyMap(input: {
+interface SidebarProjectGroupingInput {
   projects: ReadonlyArray<Project>;
   settings: ProjectGroupingSettings;
   primaryEnvironmentId: EnvironmentId | null;
-}): Map<string, string> {
-  const mapping = new Map<string, string>();
-  const groups = buildProjectGroups({
-    projects: input.projects,
+  scratchWorkspaceRootsByEnvironmentId?: ReadonlyMap<EnvironmentId, string>;
+}
+
+function buildSidebarProjectGroups(
+  input: SidebarProjectGroupingInput,
+): ReadonlyArray<ProjectGroup<Project>> {
+  const scratchProjects: Project[] = [];
+  const ordinaryProjects: Project[] = [];
+  const projectOrder = new Map<string, number>();
+  for (const [index, project] of input.projects.entries()) {
+    const physicalKey = derivePhysicalProjectKey(project);
+    if (!projectOrder.has(physicalKey)) projectOrder.set(physicalKey, index);
+    const scratchRoot = input.scratchWorkspaceRootsByEnvironmentId?.get(project.environmentId);
+    (isScratchProject(project, scratchRoot) ? scratchProjects : ordinaryProjects).push(project);
+  }
+  const grouping = {
     settings: input.settings,
     preferredEnvironmentId: input.primaryEnvironmentId,
-  });
+  };
+  const groups = buildProjectGroups({ ...grouping, projects: ordinaryProjects });
+  if (scratchProjects.length === 0) return groups;
+
+  // Only the sidebar shares this group. Physical project refs and draft keys
+  // stay environment-local, so creating or opening a thread keeps its machine.
+  const scratchGroups = buildProjectGroups({ ...grouping, projects: scratchProjects });
+  const members = scratchGroups.flatMap((group) => group.members);
+  const representative =
+    members.find((member) => member.project.environmentId === input.primaryEnvironmentId)
+      ?.project ?? members[0]!.project;
+  const noProjectGroup: ProjectGroup<Project> = {
+    key: NO_PROJECT_GROUP_KEY,
+    label: "No project",
+    representative,
+    members,
+    memberProjectRefs: scratchGroups.flatMap((group) => group.memberProjectRefs),
+  };
+  const scratchOrder = projectOrder.get(derivePhysicalProjectKey(scratchProjects[0]!))!;
+  const insertionIndex = groups.findIndex(
+    (group) => projectOrder.get(group.members[0]!.physicalProjectKey)! > scratchOrder,
+  );
+  const index = insertionIndex === -1 ? groups.length : insertionIndex;
+  return [...groups.slice(0, index), noProjectGroup, ...groups.slice(index)];
+}
+
+export function buildPhysicalToLogicalProjectKeyMap(
+  input: SidebarProjectGroupingInput,
+): Map<string, string> {
+  const mapping = new Map<string, string>();
+  const groups = buildSidebarProjectGroups(input);
   for (const group of groups) {
     for (const member of group.members) {
       mapping.set(member.physicalProjectKey, group.key);
@@ -64,23 +113,18 @@ export function buildPhysicalToLogicalProjectKeyMap(input: {
   return mapping;
 }
 
-export function buildSidebarProjectSnapshots(input: {
-  projects: ReadonlyArray<Project>;
-  settings: ProjectGroupingSettings;
-  primaryEnvironmentId: EnvironmentId | null;
-  resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
-  // Returns true when an env id maps to a desktop-local saved-env
-  // record. Defaults to "false for every
-  // env" so callers that don't care about the distinction get the
-  // legacy behavior.
-  isDesktopLocalEnvironment?: (environmentId: EnvironmentId) => boolean;
-  isWslEnvironment?: (environmentId: EnvironmentId) => boolean;
-}): SidebarProjectSnapshot[] {
-  return buildProjectGroups({
-    projects: input.projects,
-    settings: input.settings,
-    preferredEnvironmentId: input.primaryEnvironmentId,
-  }).map((group): SidebarProjectSnapshot => {
+export function buildSidebarProjectSnapshots(
+  input: SidebarProjectGroupingInput & {
+    resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
+    // Returns true when an env id maps to a desktop-local saved-env
+    // record. Defaults to "false for every
+    // env" so callers that don't care about the distinction get the
+    // legacy behavior.
+    isDesktopLocalEnvironment?: (environmentId: EnvironmentId) => boolean;
+    isWslEnvironment?: (environmentId: EnvironmentId) => boolean;
+  },
+): SidebarProjectSnapshot[] {
+  return buildSidebarProjectGroups(input).map((group): SidebarProjectSnapshot => {
     const members = group.members.map(
       ({ physicalProjectKey, project }): SidebarProjectGroupMember => ({
         ...project,
