@@ -980,10 +980,17 @@
           </div>
           <p>
             A separate, unmerged change implements that narrower rule:
-            <strong>proposed only, off by default</strong>. It targets only ignored npm/pnpm
-            installs that it positively recognizes. It is not a switch in the version checked here.
-            Build output, vendored source, <code>tmp/</code> and research are outside its initial
-            scope. Treat its final controls and guarantees as unconfirmed until it ships.
+            <strong>proposed only, off by default</strong>. It targets only ignored npm/pnpm root
+            <code>node_modules</code> installs that it positively recognizes. It is not a switch in
+            the version checked here. Build output, vendored source, <code>tmp/</code> and research
+            are outside its initial scope. Treat its final controls and guarantees as unconfirmed
+            until it ships.
+          </p>
+          <p>
+            Broader cleanup for archived work and older unarchived checkouts is a separate proposal
+            for a new PR. It would cover positively recognized build outputs and installed
+            dependencies across stacks, while preserving reference source, local state, research and
+            retained release files. That proposal does not expand or block the narrower change.
           </p>
           <h3>Screenshot settings will not save much disk</h3>
           <p>
@@ -996,9 +1003,10 @@
           <div class="answer">
             <strong>Recommendation:</strong> keep the broad inactive and merged rules off while
             uncommitted research matters. Keep sensible browser and log retention, and save lasting
-            evidence somewhere that does not expire. For space, start with measured, inactive
-            dependency installs, removed in a separately approved cleanup. Build and vendor folders
-            need case-by-case evidence; their names alone are not permission to delete.
+            evidence somewhere that does not expire. For space, measure build output and installed
+            dependencies, including hidden folders, before ranking cleanup targets. Reclaim only
+            recognized, inactive files in a separately approved cleanup. Folder names alone are not
+            permission to delete.
           </div>
           <p>
             Your actual switch settings, measured space users and ranked next steps are in the
