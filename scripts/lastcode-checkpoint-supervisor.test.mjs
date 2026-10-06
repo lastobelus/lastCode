@@ -6,19 +6,26 @@ import * as NodePath from "node:path";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  checkpointServiceRunNowPaths,
+  requestCheckpointServiceRunNow,
+} from "./lib/lastcode-checkpoint-service-run-now.mjs";
+import {
   boundedCommandDiagnostic,
   checkpointEnvironment,
   checkpointSchedulerPid,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
   changedGitlink,
+  consumeCheckpointIntervalRequest,
   latestFailedCheckpointRun,
   projectActionTrustAllowlist,
   reconcilePrimaryProjectActions,
   refreshPrimaryCheckout,
   refreshInstalledSupervisor,
   runCheckpointSupervisor,
+  runCheckpointSupervisorEntrypoint,
   selectPrimaryWorktree,
+  supervisorPaths,
 } from "./lastcode-checkpoint-supervisor.mjs";
 import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
 
@@ -59,6 +66,296 @@ function fixture(overrides = {}) {
     states,
   };
 }
+
+function withIntervalRequest(test) {
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-interval-request-"));
+  const paths = supervisorPaths(home);
+  const producerRequestPath = checkpointServiceRunNowPaths(home).serviceRequestPath;
+  NodeFS.mkdirSync(NodePath.dirname(paths.requestPath), { recursive: true });
+  const request = () => {
+    const temporaryPath = `${producerRequestPath}.tmp`;
+    NodeFS.writeFileSync(temporaryPath, "run now\n");
+    NodeFS.renameSync(temporaryPath, producerRequestPath);
+  };
+  try {
+    test({ home, paths, request });
+  } finally {
+    NodeFS.rmSync(home, { recursive: true });
+  }
+}
+
+describe("LastCode interval checkpoint requests", () => {
+  it("consumes a pending interval request before the initial attempt", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      request();
+      const state = { status: "success" };
+      const runAttempt = vi.fn(() => {
+        expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+        return state;
+      });
+
+      expect(runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt })).toBe(
+        state,
+      );
+      expect(runAttempt).toHaveBeenCalledOnce();
+      expect(NodeFS.readdirSync(NodePath.dirname(paths.requestPath))).toEqual([]);
+    });
+  });
+
+  it("runs once when the scheduled interval has no pending request", () => {
+    withIntervalRequest(({ home }) => {
+      const runAttempt = vi.fn(() => ({ status: "success" }));
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("runs a follow-up for a request received during the attempt", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let attempts = 0;
+      const runAttempt = vi.fn(() => {
+        expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+        attempts += 1;
+        if (attempts === 1) request();
+        return { status: "success", attempts };
+      });
+
+      expect(runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt })).toEqual({
+        status: "success",
+        attempts: 2,
+      });
+      expect(runAttempt).toHaveBeenCalledTimes(2);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("drains an interval request written by the shared service request helper", () => {
+    withIntervalRequest(({ home, paths }) => {
+      const producerPaths = checkpointServiceRunNowPaths(home);
+      NodeFS.mkdirSync(NodePath.dirname(producerPaths.plistPath), { recursive: true });
+      NodeFS.writeFileSync(producerPaths.plistPath, "lastcode-checkpoint-supervisor.mjs run\n");
+      let attempts = 0;
+      const runLaunchctl = vi.fn();
+      const runAttempt = vi.fn(() => {
+        attempts += 1;
+        if (attempts === 1) {
+          expect(
+            requestCheckpointServiceRunNow({ homeDirectory: home, uid: 501 }, { runLaunchctl }),
+          ).toEqual({ status: "requested" });
+        }
+        return { status: "success" };
+      });
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledTimes(2);
+      expect(runLaunchctl).toHaveBeenCalledOnce();
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+      expect(NodeFS.existsSync(producerPaths.requestPath)).toBe(false);
+    });
+  });
+
+  it("coalesces many pending requests into one follow-up", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let attempts = 0;
+      const runAttempt = vi.fn(() => {
+        attempts += 1;
+        if (attempts === 1) {
+          for (let index = 0; index < 20; index += 1) request();
+        }
+        return { status: "success" };
+      });
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledTimes(2);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("drains requests received during follow-up attempts", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let attempts = 0;
+      const runAttempt = vi.fn(() => {
+        expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+        attempts += 1;
+        if (attempts < 3) request();
+        return { status: "success", attempts };
+      });
+
+      expect(runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt })).toEqual({
+        status: "success",
+        attempts: 3,
+      });
+      expect(runAttempt).toHaveBeenCalledTimes(3);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("preserves a request published after the startup marker was claimed", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      request();
+      let claims = 0;
+      const consumeRequest = () => {
+        const consumed = consumeCheckpointIntervalRequest(paths.requestPath);
+        claims += 1;
+        if (claims === 1 && consumed) request();
+        return consumed;
+      };
+      const runAttempt = vi.fn(() => ({ status: "success" }));
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { consumeRequest, runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledTimes(2);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("keeps per-attempt incidents and retries a failure only for a queued request", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let attempts = 0;
+      const test = fixture({
+        dependencies: {
+          runPhase: vi.fn((phase) => {
+            if (phase !== "fetch") return;
+            expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+            attempts += 1;
+            if (attempts === 1) {
+              request();
+              throw new Error("first fetch failed");
+            }
+          }),
+        },
+      });
+
+      expect(
+        runCheckpointSupervisorEntrypoint({ home, environment: {} }, test.dependencies),
+      ).toMatchObject({ status: "success", incident: { resolutionDelivery: "sent" } });
+      expect(attempts).toBe(2);
+      expect(test.states.some((state) => state.status === "failed")).toBe(true);
+      expect(test.messages).toHaveLength(2);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("surfaces a failure immediately when no queued request exists", () => {
+    withIntervalRequest(({ home }) => {
+      const test = fixture({
+        dependencies: {
+          runPhase: vi.fn(() => {
+            throw new Error("fetch failed");
+          }),
+        },
+      });
+
+      expect(() =>
+        runCheckpointSupervisorEntrypoint({ home, environment: {} }, test.dependencies),
+      ).toThrow("fetch failed");
+      expect(test.dependencies.runPhase).toHaveBeenCalledOnce();
+      expect(test.state).toMatchObject({ status: "failed", phase: "fetch" });
+      expect(test.messages).toHaveLength(1);
+    });
+  });
+
+  it("surfaces the final queued failure without an automatic retry", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let attempts = 0;
+      const test = fixture({
+        dependencies: {
+          runPhase: vi.fn(() => {
+            attempts += 1;
+            if (attempts === 1) request();
+            throw new Error(`fetch failed ${attempts}`);
+          }),
+        },
+      });
+
+      expect(() =>
+        runCheckpointSupervisorEntrypoint({ home, environment: {} }, test.dependencies),
+      ).toThrow("fetch failed 2");
+      expect(test.dependencies.runPhase).toHaveBeenCalledTimes(2);
+      expect(test.state).toMatchObject({
+        status: "failed",
+        incident: { failure: { error: "fetch failed 2" } },
+      });
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+
+  it("keeps daily scheduler runs isolated from interval requests", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      request();
+      const dailyRequestPath = NodePath.join(
+        NodePath.dirname(paths.requestPath),
+        "checkpoint-schedule-run-now.request",
+      );
+      NodeFS.writeFileSync(dailyRequestPath, "daily request\n");
+      const runAttempt = vi.fn(() => {
+        expect(NodeFS.existsSync(paths.requestPath)).toBe(true);
+        request();
+        return { status: "success" };
+      });
+      const consumeRequest = vi.fn(() => consumeCheckpointIntervalRequest(paths.requestPath));
+
+      runCheckpointSupervisorEntrypoint(
+        {
+          home,
+          environment: { LASTCODE_CHECKPOINT_SCHEDULER_PID: String(process.ppid) },
+        },
+        { consumeRequest, runAttempt },
+      );
+
+      expect(runAttempt).toHaveBeenCalledOnce();
+      expect(consumeRequest).not.toHaveBeenCalled();
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(true);
+      expect(NodeFS.readFileSync(dailyRequestPath, "utf8")).toBe("daily request\n");
+    });
+  });
+
+  it("rejects a forged daily scheduler identity before consuming requests", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      request();
+      const runAttempt = vi.fn();
+
+      expect(() =>
+        runCheckpointSupervisorEntrypoint(
+          {
+            home,
+            environment: { LASTCODE_CHECKPOINT_SCHEDULER_PID: String(process.ppid + 1) },
+          },
+          { runAttempt },
+        ),
+      ).toThrow("parent process");
+      expect(runAttempt).not.toHaveBeenCalled();
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(true);
+    });
+  });
+
+  it("leaves a request arriving after the final empty check durable for the next launch", () => {
+    withIntervalRequest(({ home, paths, request }) => {
+      let claims = 0;
+      const consumeRequest = () => {
+        const consumed = consumeCheckpointIntervalRequest(paths.requestPath);
+        claims += 1;
+        if (claims === 2 && !consumed) request();
+        return consumed;
+      };
+      const runAttempt = vi.fn(() => ({ status: "success" }));
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { consumeRequest, runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledOnce();
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(true);
+
+      runCheckpointSupervisorEntrypoint({ home, environment: {} }, { runAttempt });
+
+      expect(runAttempt).toHaveBeenCalledTimes(2);
+      expect(NodeFS.existsSync(paths.requestPath)).toBe(false);
+    });
+  });
+});
 
 describe("LastCode checkpoint supervisor", () => {
   it("only accepts the actual scheduler parent identity", () => {

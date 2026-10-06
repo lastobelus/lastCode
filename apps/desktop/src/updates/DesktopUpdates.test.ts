@@ -22,10 +22,334 @@ import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
+  it.effect("keeps an available local build actionable during a menu checkpoint request", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed({
+          schemaVersion: 2,
+          checkpointRequested: requestCheckpoint ?? false,
+          status: "available",
+          checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
+          availableVersion: "1.2.4-nightly.20260814.1090",
+          releaseNotes: {
+            lastCode: { status: "known", items: ["An available change"], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const available = yield* updates.getState;
+        const requested = yield* updates.check("menu");
+        assert.equal(requested.state.status, "available");
+        assert.equal(requested.state.availableVersion, available.availableVersion);
+        assert.deepEqual(requested.state.releaseNotes, available.releaseNotes);
+        assert.include(requested.state.message ?? "", "Checkpoint requested");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+  it.effect("keeps requested checkpoints pending until a later inspection", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed(
+          requestCheckpoint
+            ? { schemaVersion: 2, status: "checkpoint-requested" }
+            : {
+                schemaVersion: 2,
+                checkpointRequested: false,
+                status: "up-to-date",
+                checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+                availableVersion: "1.2.3-nightly.20260814.1089",
+              },
+        ),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const requested = yield* updates.check("menu");
+        assert.equal(requested.state.status, "idle");
+        assert.include(requested.state.message ?? "", "Checkpoint requested");
+        const inspected = yield* updates.check("poll");
+        assert.equal(inspected.state.status, "up-to-date");
+        assert.isNull(inspected.state.message);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+  it.effect(
+    "finds a fresh release on repeated manual checks and clears a stale check error",
+    () => {
+      let inspectionAttempt = 0;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) => {
+          inspectionAttempt += 1;
+          if (inspectionAttempt === 1) {
+            return Effect.fail(
+              new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "inspect",
+                message: "Checkpoint service unavailable",
+              }),
+            );
+          }
+          return Effect.succeed(
+            inspectionAttempt === 2
+              ? {
+                  schemaVersion: 2 as const,
+                  status: "up-to-date" as const,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+                  availableVersion: "1.2.3-nightly.20260814.1089",
+                }
+              : {
+                  schemaVersion: 2 as const,
+                  status: "available" as const,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  checkpointTag: "lastcode/revision/v1.2.3-nightly.20260814.1089.1",
+                  availableVersion: "1.2.3-nightly.20260814.1089.1",
+                  releaseNotes: {
+                    lastCode: { status: "known" as const, items: [], omittedItems: 0 },
+                    upstream: { groups: [], omittedGroups: 0 },
+                  },
+                },
+          );
+        },
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.equal((yield* updates.getState).errorContext, "check");
+          const recovered = yield* updates.check("menu");
+          assert.isTrue(recovered.checkpointRequested);
+          assert.equal(recovered.state.status, "idle");
+          assert.isNull(recovered.state.errorContext);
+          assert.include(recovered.state.message ?? "", "Checkpoint requested");
+          const discovered = yield* updates.check("menu");
+          assert.isTrue(discovered.checkpointRequested);
+          assert.equal(discovered.state.status, "available");
+          assert.equal(discovered.state.availableVersion, "1.2.3-nightly.20260814.1089.1");
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
+  it.effect("requests checkpoints only for explicit local checks", () => {
+    const requests: boolean[] = [];
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.sync(() => {
+          requests.push(requestCheckpoint ?? false);
+          return {
+            schemaVersion: 2 as const,
+            checkpointRequested: false,
+            status: "up-to-date" as const,
+            checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+            availableVersion: "1.2.3-nightly.20260814.1089",
+          };
+        }),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.ok(requests.length > 0);
+        assert.isTrue(requests.every((requested) => !requested));
+        requests.length = 0;
+        for (const reason of [
+          "web-ui",
+          "menu",
+          "poll",
+          "startup",
+          "remote-update",
+          "channel-change",
+        ]) {
+          const result = yield* updates.check(reason);
+          assert.isTrue(result.checked);
+        }
+        assert.deepEqual(requests, [true, true, false, false, false, false]);
+        yield* updates.setShowAndInstallLocalNightlies(false);
+        requests.length = 0;
+        yield* updates.check("web-ui");
+        assert.deepEqual(requests, []);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("reports checkpoint request failures as retryable check errors", () => {
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        requestCheckpoint
+          ? Effect.fail(
+              new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "inspect",
+                message: "Could not request checkpoint.",
+              }),
+            )
+          : Effect.succeed({
+              schemaVersion: 2,
+              checkpointRequested: false,
+              status: "up-to-date",
+              checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
+              availableVersion: "1.2.3-nightly.20260814.1089",
+            }),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const result = yield* updates.check("web-ui");
+        assert.equal(result.error, "Could not request checkpoint.");
+        assert.equal(result.state.status, "error");
+        assert.equal(result.state.errorContext, "check");
+        assert.include(result.state.message ?? "", "Could not request checkpoint.");
+        const retry = yield* updates.check("poll");
+        assert.notEqual(retry.state.status, "error");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect.each(["available", "downloaded", "failed-build", "failed-install"] as const)(
+    "preserves update actions after a checkpoint request fails (%s)",
+    (priorKind) => {
+      const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+      const availableVersion = "1.2.4-nightly.20260814.1089.1";
+      const build = {
+        schemaVersion: 1 as const,
+        status: "built" as const,
+        checkpointTag,
+        outputDir: "/tmp/local-package",
+        manifestPath: "/tmp/local-package/build-manifest.json",
+        dmgPath: "/tmp/local-package/LastCode.dmg",
+        dmgSha256: "a".repeat(64),
+      };
+      let buildAttempts = 0;
+      let installAttempts = 0;
+      let handoffCommitted = false;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) =>
+          requestCheckpoint
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "inspect",
+                  message: "Could not request checkpoint.",
+                }),
+              )
+            : Effect.succeed({
+                schemaVersion: 2,
+                status: "available",
+                checkpointRequested: false,
+                checkpointTag,
+                availableVersion,
+                releaseNotes: {
+                  lastCode: { status: "known", items: ["Test fix"], omittedItems: 0 },
+                  upstream: { groups: [], omittedGroups: 0 },
+                },
+              }),
+        localBuildEffect: (_checkpointTag, onProgress) =>
+          Effect.gen(function* () {
+            buildAttempts += 1;
+            if (priorKind === "failed-build" && buildAttempts === 1) {
+              if (onProgress) {
+                yield* onProgress({ phase: "Building DMG", percent: 94, errorKind: "packaging" });
+              }
+              return yield* new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                operation: "build",
+                message: "Packaging failed",
+              });
+            }
+            return build;
+          }),
+        localPrepareInstall: () => {
+          installAttempts += 1;
+          return priorKind === "failed-install" && installAttempts === 1
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "install",
+                  message: "Install preflight failed",
+                }),
+              )
+            : Effect.succeed({
+                commit: Effect.sync(() => {
+                  handoffCommitted = true;
+                }),
+                cancel: Effect.void,
+              });
+        },
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.equal((yield* updates.getState).status, "available");
+          if (priorKind !== "available") {
+            const downloaded = yield* updates.download;
+            assert.isTrue(downloaded.accepted);
+            assert.equal(downloaded.completed, priorKind !== "failed-build");
+          }
+          if (priorKind === "failed-install") {
+            yield* updates.install;
+          }
+          const prior = yield* updates.getState;
+          assert.equal(prior.availableVersion, availableVersion);
+          assert.deepEqual(prior.releaseNotes[0]?.items, ["Test fix"]);
+          if (priorKind === "failed-build") {
+            assert.equal(prior.status, "error");
+            assert.equal(prior.errorContext, "download");
+            assert.equal(prior.localBuildFailure?.errorKind, "packaging");
+            assert.equal(prior.message, "Packaging failed");
+          } else if (priorKind === "failed-install") {
+            assert.equal(prior.status, "downloaded");
+            assert.equal(prior.errorContext, "install");
+            assert.equal(prior.message, "Install preflight failed");
+          } else {
+            assert.equal(prior.status, priorKind);
+          }
+          yield* TestClock.adjust(Duration.millis(1));
+          const requested = yield* updates.check("menu");
+          assert.isTrue(requested.checked);
+          assert.isFalse(requested.checkpointRequested);
+          assert.equal(requested.error, "Could not request checkpoint.");
+          assert.notEqual(requested.state.checkedAt, prior.checkedAt);
+          assert.deepEqual({ ...requested.state, checkedAt: prior.checkedAt }, prior);
+          assert.deepEqual(yield* updates.getState, requested.state);
+
+          if (priorKind === "available" || priorKind === "failed-build") {
+            const downloaded = yield* updates.download;
+            assert.isTrue(downloaded.completed);
+          }
+          assert.equal(buildAttempts, priorKind === "failed-build" ? 2 : 1);
+          yield* updates.install;
+          assert.isTrue(handoffCommitted);
+          assert.deepEqual(harness.localInstallArgs().at(-1), {
+            dmgPath: build.dmgPath,
+            dmgSha256: build.dmgSha256,
+            expectedVersion: availableVersion,
+          });
+          assert.deepEqual(harness.installEvents(), [
+            ...(priorKind === "failed-install" ? ["prepare-install"] : []),
+            "prepare-install",
+            "stop-backend",
+            "destroy-windows",
+            "quit-app",
+          ]);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
   it("maps local sections, unavailable provenance, and overflow summaries", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
         availableVersion: "1.2.4-nightly.20260814.1090",
@@ -81,6 +405,7 @@ describe("DesktopUpdates", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/revision/v1.2.4-nightly.20260814.1090.1",
         availableVersion: "1.2.4-nightly.20260814.1090.1",
@@ -94,6 +419,7 @@ describe("DesktopUpdates", () => {
     assert.deepEqual(
       DesktopUpdates.mapLastCodeLocalReleaseNotes({
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090",
         availableVersion: "1.2.4-nightly.20260814.1090",
@@ -248,6 +574,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -310,6 +637,7 @@ describe("DesktopUpdates", () => {
       localInspect: () =>
         Effect.succeed({
           schemaVersion: 2,
+          checkpointRequested: false,
           status: "available",
           checkpointTag,
           availableVersion: version,
@@ -367,16 +695,18 @@ describe("DesktopUpdates", () => {
     let buildAttempts = 0;
     const harness = makeHarness({
       localNightliesEnabled: true,
-      localInspection: {
-        schemaVersion: 2,
-        status: "available",
-        checkpointTag,
-        availableVersion: targetVersion,
-        releaseNotes: {
-          lastCode: { status: "known", items: [], omittedItems: 0 },
-          upstream: { groups: [], omittedGroups: 0 },
-        },
-      },
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed({
+          schemaVersion: 2,
+          checkpointRequested: requestCheckpoint ?? false,
+          status: "available",
+          checkpointTag,
+          availableVersion: targetVersion,
+          releaseNotes: {
+            lastCode: { status: "known", items: [], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
       localBuildEffect: (_checkpointTag, onProgress) =>
         Effect.gen(function* () {
           buildAttempts += 1;
@@ -416,10 +746,68 @@ describe("DesktopUpdates", () => {
         assert.equal(failed.localBuildProgress?.phase, "Building DMG");
         assert.equal(failed.localBuildFailure?.errorKind, "packaging");
 
+        const requested = yield* updates.check("menu");
+        assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
+
         const retry = yield* updates.download;
         assert.isTrue(retry.accepted);
         assert.isTrue(retry.completed);
         assert.equal(buildAttempts, 2);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("offers a completed external package after an in-app build fails", () => {
+    const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+    const availableVersion = "1.2.4-nightly.20260814.1089.1";
+    const build = {
+      schemaVersion: 1 as const,
+      status: "built" as const,
+      checkpointTag,
+      outputDir: "/tmp/completed-external-package",
+      manifestPath: "/tmp/completed-external-package/build-manifest.json",
+      dmgPath: "/tmp/completed-external-package/LastCode.dmg",
+      dmgSha256: "a".repeat(64),
+    };
+    let completedExternally = false;
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspect: (_version, requestCheckpoint) =>
+        Effect.succeed({
+          schemaVersion: 2,
+          status: "available",
+          checkpointTag,
+          availableVersion,
+          checkpointRequested: requestCheckpoint ?? false,
+          ...(completedExternally ? { build } : {}),
+          releaseNotes: {
+            lastCode: { status: "known", items: [], omittedItems: 0 },
+            upstream: { groups: [], omittedGroups: 0 },
+          },
+        }),
+      localBuildEffect: () =>
+        Effect.fail(
+          new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+            operation: "build",
+            message: "In-app build failed",
+          }),
+        ),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.isFalse((yield* updates.download).completed);
+        assert.equal((yield* updates.getState).errorContext, "download");
+        completedExternally = true;
+        const inspected = yield* updates.check("poll");
+        assert.isFalse(inspected.checkpointRequested);
+        assert.equal(inspected.state.status, "downloaded");
+        assert.equal(inspected.state.downloadedVersion, availableVersion);
+        assert.isNull(inspected.state.localBuildFailure);
+        const installed = yield* updates.install;
+        assert.isTrue(installed.accepted);
+        assert.equal(harness.localInstallArgs()[0]?.dmgPath, build.dmgPath);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
@@ -432,6 +820,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -477,12 +866,83 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect.each(["available", "no-tags"] as const)(
+    "preserves install diagnostics and retry after a checkpoint request (%s)",
+    (inspectionKind) => {
+      const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
+      const availableVersion = "1.2.4-nightly.20260814.1089.1";
+      const build = {
+        schemaVersion: 1 as const,
+        status: "built" as const,
+        checkpointTag,
+        outputDir: "/tmp/local-package",
+        manifestPath: "/tmp/local-package/build-manifest.json",
+        dmgPath: "/tmp/local-package/LastCode.dmg",
+        dmgSha256: "a".repeat(64),
+      };
+      let attempts = 0;
+      const harness = makeHarness({
+        localNightliesEnabled: true,
+        localInspect: (_version, requestCheckpoint) =>
+          Effect.succeed(
+            requestCheckpoint && inspectionKind === "no-tags"
+              ? { schemaVersion: 2, status: "checkpoint-requested" }
+              : {
+                  schemaVersion: 2,
+                  status: "available",
+                  checkpointTag,
+                  availableVersion,
+                  build,
+                  checkpointRequested: requestCheckpoint ?? false,
+                  releaseNotes: {
+                    lastCode: { status: "known", items: [], omittedItems: 0 },
+                    upstream: { groups: [], omittedGroups: 0 },
+                  },
+                },
+          ),
+        localPrepareInstall: () =>
+          ++attempts === 1
+            ? Effect.fail(
+                new LastCodeLocalUpdates.LastCodeLocalUpdateError({
+                  operation: "install",
+                  message: "Install preflight failed",
+                }),
+              )
+            : Effect.succeed({ commit: Effect.void, cancel: Effect.void }),
+      });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          assert.isFalse((yield* updates.install).completed);
+          const failed = yield* updates.getState;
+          assert.equal(failed.status, "downloaded");
+          assert.equal(failed.errorContext, "install");
+          const requested = yield* updates.check("menu");
+          assert.isTrue(requested.checkpointRequested);
+          assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
+          const retried = yield* updates.install;
+          assert.isTrue(retried.accepted);
+          assert.equal(attempts, 2);
+          assert.deepEqual(harness.installEvents(), [
+            "prepare-install",
+            "prepare-install",
+            "stop-backend",
+            "destroy-windows",
+            "quit-app",
+          ]);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
+
   it.effect("keeps the current app usable when local install preflight fails", () => {
     const checkpointTag = "lastcode/revision/v1.2.4-nightly.20260814.1089.1";
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -535,6 +995,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -590,6 +1051,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "available",
         checkpointTag,
         availableVersion: "1.2.4-nightly.20260814.1089.1",
@@ -660,6 +1122,7 @@ describe("DesktopUpdates", () => {
       localNightliesEnabled: true,
       localInspection: {
         schemaVersion: 2,
+        checkpointRequested: false,
         status: "up-to-date",
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",
@@ -699,6 +1162,7 @@ describe("DesktopUpdates", () => {
       let blockInspection = false;
       const inspection = {
         schemaVersion: 2 as const,
+        checkpointRequested: false,
         status: "up-to-date" as const,
         checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260814.1089",
         availableVersion: "1.2.3-nightly.20260814.1089",

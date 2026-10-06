@@ -239,7 +239,9 @@ function SidebarUpdateControl() {
       : "Update available"
     : showCheckIcon
       ? "Checking for updates…"
-      : "Check for updates";
+      : state?.source === "lastcode-local" && state.status === "idle" && state.message
+        ? getDesktopUpdateButtonTooltip(state)
+        : "Check for updates";
   const disabled = showCheckIcon
     ? true
     : showUpdateDetails
@@ -366,13 +368,15 @@ function SidebarUpdateControl() {
     void bridge
       .checkForUpdate()
       .then((result) => {
-        if (result.checked) return;
+        if (result.checked && !result.error) return;
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: "Could not check for updates",
             description:
-              result.state.message ?? "Automatic updates are not available in this build.",
+              result.error ??
+              result.state.message ??
+              "Automatic updates are not available in this build.",
           }),
         );
       })

@@ -458,11 +458,15 @@ export const DesktopUpdateActionResultSchema = Schema.Struct({
 
 export interface DesktopUpdateCheckResult {
   checked: boolean;
+  checkpointRequested: boolean;
+  error: string | null;
   state: DesktopUpdateState;
 }
 
 export const DesktopUpdateCheckResultSchema = Schema.Struct({
   checked: Schema.Boolean,
+  checkpointRequested: Schema.Boolean,
+  error: Schema.NullOr(Schema.String),
   state: DesktopUpdateStateSchema,
 });
 

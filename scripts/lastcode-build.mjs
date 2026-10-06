@@ -21,6 +21,7 @@ const LOG_POLL_INTERVAL_MS = 400;
 const BUILD_MANAGED_MARKER = "LastCode managed command: lastcode-build";
 const UPDATE_HELPER_MANAGED_MARKER = "LastCode managed helper: lastcode-local-update";
 const PROGRESS_MODEL_MANAGED_MARKER = "LastCode managed module: local-build-progress";
+const CHECKPOINT_RUN_NOW_MANAGED_MARKER = "LastCode managed module: checkpoint-service-run-now";
 
 const ansiEnabled =
   process.stdout.isTTY && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb";
@@ -329,6 +330,10 @@ export function installCommandAssets(automationWorktree, home) {
   const moduleTarget = NodePath.join(binDirectory, "lastcode-build.mjs");
   const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const progressModelTarget = NodePath.join(libDirectory, "lastcode-build-progress.ts");
+  const checkpointRunNowTarget = NodePath.join(
+    libDirectory,
+    "lastcode-checkpoint-service-run-now.mjs",
+  );
   const target = NodePath.join(binDirectory, "lastcode-build");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-build");
@@ -339,6 +344,7 @@ export function installCommandAssets(automationWorktree, home) {
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
+  assertManagedFile(checkpointRunNowTarget, CHECKPOINT_RUN_NOW_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
   assertManagedSymlink(exposed, target);
 
@@ -361,6 +367,14 @@ export function installCommandAssets(automationWorktree, home) {
       "lastcode-build-progress.ts",
     ),
     progressModelTarget,
+  );
+  NodeFS.copyFileSync(
+    NodePath.join(
+      NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+      "lib",
+      "lastcode-checkpoint-service-run-now.mjs",
+    ),
+    checkpointRunNowTarget,
   );
   NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
@@ -400,6 +414,10 @@ export function uninstallCommand(home) {
   const helperTarget = NodePath.join(binDirectory, "lastcode-local-update.mjs");
   const installerModuleTarget = NodePath.join(binDirectory, "lastcode-install.mjs");
   const progressModelTarget = NodePath.join(libDirectory, "lastcode-build-progress.ts");
+  const checkpointRunNowTarget = NodePath.join(
+    libDirectory,
+    "lastcode-checkpoint-service-run-now.mjs",
+  );
   const target = NodePath.join(binDirectory, "lastcode-build");
   const exposed = NodePath.join(home, ".local", "bin", "lastcode-build");
   const exposedEntry = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
@@ -411,10 +429,17 @@ export function uninstallCommand(home) {
   assertManagedFile(moduleTarget, BUILD_MANAGED_MARKER);
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
+  assertManagedFile(checkpointRunNowTarget, CHECKPOINT_RUN_NOW_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
-  for (const path of [moduleTarget, helperTarget, progressModelTarget, target]) {
+  for (const path of [
+    moduleTarget,
+    helperTarget,
+    progressModelTarget,
+    checkpointRunNowTarget,
+    target,
+  ]) {
     NodeFS.rmSync(path, { force: true });
   }
   if (!NodeFS.existsSync(installerModuleTarget)) NodeFS.rmSync(lockModuleTarget, { force: true });

@@ -11,6 +11,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import { requestCheckpointServiceRunNow } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
@@ -263,9 +265,14 @@ export function parseOptions(argv) {
   let currentVersion;
   let checkpointTag;
   let releaseNotesFormat;
+  let requestCheckpoint = false;
   let home = NodeOS.homedir();
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === "--request-checkpoint") {
+      requestCheckpoint = true;
+      continue;
+    }
     if (
       !["--repo", "--current-version", "--checkpoint", "--home", "--release-notes-format"].includes(
         arg,
@@ -285,13 +292,24 @@ export function parseOptions(argv) {
   if (!repoRoot) throw new Error("Missing --repo.");
   if (command === "inspect" && !currentVersion) throw new Error("Missing --current-version.");
   if (command === "build" && !checkpointTag) throw new Error("Missing --checkpoint.");
+  if (command === "build" && requestCheckpoint) {
+    throw new Error("--request-checkpoint is only valid for inspect.");
+  }
   if (command === "build" && releaseNotesFormat !== undefined) {
     throw new Error("--release-notes-format is only valid for inspect.");
   }
   if (releaseNotesFormat !== undefined && releaseNotesFormat !== GROUPED_RELEASE_NOTES_FORMAT) {
     throw new Error(`Unsupported release notes format '${releaseNotesFormat}'.`);
   }
-  return { command, repoRoot, home, currentVersion, checkpointTag, releaseNotesFormat };
+  return {
+    command,
+    repoRoot,
+    home,
+    currentVersion,
+    checkpointTag,
+    releaseNotesFormat,
+    requestCheckpoint,
+  };
 }
 
 export function resolveExistingBuild({
@@ -628,9 +646,18 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
   };
 }
 
-function inspect(options) {
+export function inspect(options, overrides = {}) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
+  }
+  let checkpointRequested = false;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- This dependency-free helper runs in Electron bundled Node and cannot import workspace services.
+  if (options.requestCheckpoint && (overrides.platform ?? process.platform) === "darwin") {
+    const request = requestCheckpointServiceRunNow(
+      { homeDirectory: options.home, uid: overrides.uid ?? process.getuid() },
+      overrides.runLaunchctl ? { runLaunchctl: overrides.runLaunchctl } : {},
+    );
+    checkpointRequested = request.status === "requested";
   }
   const installableTags = splitLines(
     git(options.repoRoot, [
@@ -641,12 +668,16 @@ function inspect(options) {
     ]),
   );
   const checkpointTag = resolveLatestInstallableTag(installableTags);
-  if (!checkpointTag) throw new Error("No local LastCode installable tags were found.");
+  if (!checkpointTag) {
+    if (checkpointRequested) return { schemaVersion: 2, status: "checkpoint-requested" };
+    throw new Error("No local LastCode installable tags were found.");
+  }
   const availableVersion = versionFromInstallableTag(checkpointTag);
   if (compareNightlyVersions(availableVersion, options.currentVersion) <= 0) {
     return {
       schemaVersion: options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT ? 2 : 1,
       status: "up-to-date",
+      checkpointRequested,
       checkpointTag,
       availableVersion,
     };
@@ -655,7 +686,10 @@ function inspect(options) {
   const current = parseNightlyVersion(options.currentVersion);
   if (!current) throw new Error(`Installed version '${options.currentVersion}' is invalid.`);
   if (options.releaseNotesFormat === GROUPED_RELEASE_NOTES_FORMAT) {
-    return inspectGrouped(options, installableTags, checkpointTag, availableVersion, current);
+    return {
+      ...inspectGrouped(options, installableTags, checkpointTag, availableVersion, current),
+      checkpointRequested,
+    };
   }
   const currentInstallable =
     current.revision === 0
@@ -670,6 +704,7 @@ function inspect(options) {
   return {
     schemaVersion: 1,
     status: "available",
+    checkpointRequested,
     checkpointTag,
     availableVersion,
     releaseNotes,
