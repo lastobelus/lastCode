@@ -158,7 +158,7 @@ worktree and its source, notes, and research files. Active agents, sessions, ter
 previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
 the project's dependencies before continuing work. This rule is off by default and follows
 the project's Inherit, Off, or Custom policy. Dependency cleanup is available on macOS and
-Linux and skips a worktree when it cannot verify that no processes are using it.
+Linux and skips a worktree when process activity cannot be checked reliably.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.

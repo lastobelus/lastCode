@@ -107,7 +107,7 @@ describe("V2 storage cleanup eligibility", () => {
   it("uses deletion and later durable events as the deleted-thread inactivity boundary", () => {
     const thread = { deletedAt: at(-10 * DAY_MS), updatedAt: at(-12 * DAY_MS) };
     expect(storageCleanupDeletedActivityAt(thread, null)).toBe(NOW_MS - 10 * DAY_MS);
-    expect(storageCleanupDeletedActivityAt(thread, new Date(NOW_MS - DAY_MS).toISOString())).toBe(
+    expect(storageCleanupDeletedActivityAt(thread, DateTime.formatIso(at(-DAY_MS)))).toBe(
       NOW_MS - DAY_MS,
     );
     expect(storageCleanupDeletedActivityAt({ ...thread, deletedAt: null }, null)).toBeNull();

@@ -1,5 +1,4 @@
 import * as NetAddress from "effect/net/NetAddress";
-import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -26,6 +25,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
@@ -616,7 +616,7 @@ function makeTestLayer(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>;
-  readonly eventSinkLayer?: Layer.Layer<EventSink.EventSinkV2>;
+  readonly eventSinkLayer?: typeof TestEventSinkLayer;
   readonly configureMcp?: boolean;
 }) {
   const configuredEventSinkLayer =
@@ -912,6 +912,10 @@ function makePendingRuntimeRequestEvents(input: {
 
 it.effect("ProviderSessionManagerV2 opens sessions in different workspaces concurrently", () =>
   Effect.gen(function* () {
+    const secondCwd = yield* Path.Path.pipe(
+      Effect.map((path) => path.join(runtimePolicy.cwd, "apps", "server")),
+      Effect.provide(NodeServices.layer),
+    );
     const state = yield* Ref.make(emptyState);
     const openStartedCount = yield* Ref.make(0);
     const firstOpenStarted = yield* Deferred.make<void>();
@@ -960,7 +964,7 @@ it.effect("ProviderSessionManagerV2 opens sessions in different workspaces concu
           threadId: secondThreadId,
           providerSessionId: secondProviderSessionId,
           modelSelection,
-          runtimePolicy: { ...runtimePolicy, cwd: NodePath.join(process.cwd(), "apps", "server") },
+          runtimePolicy: { ...runtimePolicy, cwd: secondCwd },
         })
         .pipe(Effect.forkScoped);
 
@@ -1099,7 +1103,7 @@ it.effect("provider startup waits for workspace cleanup to release its lease", (
           state,
           idleTimeoutMs: 60_000,
           configureMcp: false,
-          fileSystemLayer: Layer.mock(FileSystem.FileSystem)({
+          fileSystemLayer: FileSystem.layerNoop({
             stat: () => Effect.succeed(directoryInfo),
           }),
           beforeOpen: () =>

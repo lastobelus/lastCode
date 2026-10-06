@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - These tests mock the native APIs
+// used by the external-process inventory adapter.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeChildProcess from "node:child_process";
 import type * as NodeFS from "node:fs";

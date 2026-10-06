@@ -1,5 +1,4 @@
-import * as NodeFSP from "node:fs/promises";
-import * as NodePath from "node:path";
+import * as Path from "effect/Path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,6 +13,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   OrchestrationV2ThreadShell,
   OrchestrationV2AppThreadJson,
+  OrchestrationV2ProviderSessionJson,
   ProjectId,
   ThreadId,
   type ServerSettings,
@@ -22,6 +22,7 @@ import {
 import { assert, it } from "@effect/vitest";
 
 import * as ServerConfig from "../config.ts";
+import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
@@ -36,6 +37,8 @@ import * as PreviewHosting from "../preview/Hosting.ts";
 import * as GitManager from "../git/GitManager.ts";
 import * as ServerActivation from "../serverActivation.ts";
 
+const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
+
 const testLayer = (processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([])) =>
   GeneratedDependencies.layer.pipe(
     Layer.provideMerge(GitVcsDriver.layer),
@@ -47,14 +50,15 @@ const testLayer = (processCwds: Effect.Effect<ReadonlyArray<string> | null> = Ef
 
 const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const cleanup = yield* GeneratedDependencies.GeneratedDependencies;
   const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dependencies-" });
   // /tmp is itself a symlink on macOS; candidates must use the actual path.
   const root = yield* fs.realPath(temporary);
-  const repository = NodePath.join(root, "repository");
-  const managedWorktreesRoot = NodePath.join(root, "worktrees");
-  const worktreePath = NodePath.join(managedWorktreesRoot, "feature");
+  const repository = path.join(root, "repository");
+  const managedWorktreesRoot = path.join(root, "worktrees");
+  const worktreePath = path.join(managedWorktreesRoot, "feature");
   yield* fs.makeDirectory(repository);
   yield* fs.makeDirectory(managedWorktreesRoot);
   const runGit = (cwd: string, args: ReadonlyArray<string>) =>
@@ -65,20 +69,20 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
     });
   yield* runGit(repository, ["init"]);
   yield* fs.writeFileString(
-    NodePath.join(repository, "package.json"),
+    path.join(repository, "package.json"),
     '{"name":"fixture","private":true}\n',
   );
   const lock = manager === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json";
   const marker = manager === "pnpm" ? ".modules.yaml" : ".package-lock.json";
   yield* fs.writeFileString(
-    NodePath.join(repository, lock),
+    path.join(repository, lock),
     manager === "pnpm" ? "lockfileVersion: 9\n" : "{}\n",
   );
   yield* fs.writeFileString(
-    NodePath.join(repository, ".gitignore"),
+    path.join(repository, ".gitignore"),
     "node_modules/\ntmp/\nresearch/\n.repos/\nbuild/\ndist/\nvendor/\n",
   );
-  yield* fs.writeFileString(NodePath.join(repository, "source.ts"), "export const value = 1;\n");
+  yield* fs.writeFileString(path.join(repository, "source.ts"), "export const value = 1;\n");
   yield* runGit(repository, ["add", "."]);
   yield* runGit(repository, [
     "-c",
@@ -90,25 +94,25 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
     "fixture",
   ]);
   yield* runGit(repository, ["worktree", "add", "-b", "feature", worktreePath]);
-  const dependencyPath = NodePath.join(worktreePath, "node_modules");
-  yield* fs.makeDirectory(NodePath.join(dependencyPath, "package"), { recursive: true });
+  const dependencyPath = path.join(worktreePath, "node_modules");
+  yield* fs.makeDirectory(path.join(dependencyPath, "package"), { recursive: true });
   yield* fs.writeFileString(
-    NodePath.join(dependencyPath, marker),
+    path.join(dependencyPath, marker),
     manager === "pnpm" ? "layoutVersion: 5\n" : "{}\n",
   );
   yield* fs.writeFileString(
-    NodePath.join(dependencyPath, "package", "index.js"),
+    path.join(dependencyPath, "package", "index.js"),
     "module.exports = 1;\n",
   );
   const input = { managedWorktreesRoot, worktreePath };
-  return { fs, cleanup, root, repository, input, dependencyPath, marker, lock, runGit };
+  return { fs, path, cleanup, root, repository, input, dependencyPath, marker, lock, runGit };
 });
 
 it.effect.each(["pnpm", "npm"] as const)(
   "removes a recognized %s install while preserving dirty source and unrelated ignored files",
   (manager) =>
     Effect.gen(function* () {
-      const { fs, cleanup, input, dependencyPath } = yield* fixture(manager);
+      const { path, fs, cleanup, input, dependencyPath } = yield* fixture(manager);
       const protectedFiles = [
         "source.ts",
         "tmp/notes.md",
@@ -120,8 +124,8 @@ it.effect.each(["pnpm", "npm"] as const)(
         "nested/node_modules/user.txt",
       ];
       for (const relative of protectedFiles) {
-        const target = NodePath.join(input.worktreePath, relative);
-        yield* fs.makeDirectory(NodePath.dirname(target), { recursive: true });
+        const target = path.join(input.worktreePath, relative);
+        yield* fs.makeDirectory(path.dirname(target), { recursive: true });
         yield* fs.writeFileString(target, `preserve ${relative}`);
       }
       const inspected = yield* cleanup.inspect(input);
@@ -133,28 +137,25 @@ it.effect.each(["pnpm", "npm"] as const)(
       assert.isFalse(yield* fs.exists(dependencyPath));
       for (const relative of protectedFiles)
         assert.equal(
-          yield* fs.readFileString(NodePath.join(input.worktreePath, relative)),
+          yield* fs.readFileString(path.join(input.worktreePath, relative)),
           `preserve ${relative}`,
         );
-      assert.isTrue(yield* fs.exists(NodePath.join(input.worktreePath, ".git")));
+      assert.isTrue(yield* fs.exists(path.join(input.worktreePath, ".git")));
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("never follows dependency links into outside files or a pnpm store", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, root, input, dependencyPath } = yield* fixture();
-    const outside = NodePath.join(root, "store");
+    const { path, fs, cleanup, root, input, dependencyPath } = yield* fixture();
+    const outside = path.join(root, "store");
     yield* fs.makeDirectory(outside);
-    yield* fs.writeFileString(NodePath.join(outside, "data"), "user data");
-    yield* fs.symlink(outside, NodePath.join(dependencyPath, "linked-package"));
-    yield* fs.symlink(
-      NodePath.join(outside, "missing"),
-      NodePath.join(dependencyPath, "broken-link"),
-    );
+    yield* fs.writeFileString(path.join(outside, "data"), "user data");
+    yield* fs.symlink(outside, path.join(dependencyPath, "linked-package"));
+    yield* fs.symlink(path.join(outside, "missing"), path.join(dependencyPath, "broken-link"));
     const inspected = yield* cleanup.inspect(input);
     assert.isNotNull(inspected);
     assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
-    assert.equal(yield* fs.readFileString(NodePath.join(outside, "data")), "user data");
+    assert.equal(yield* fs.readFileString(path.join(outside, "data")), "user data");
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
@@ -178,73 +179,73 @@ it.effect("retains tracked content within an otherwise ignored dependency instal
 
 it.effect("retains unrecognized and unignored directories", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, input, dependencyPath, marker } = yield* fixture();
-    yield* fs.remove(NodePath.join(dependencyPath, marker));
+    const { path, fs, cleanup, input, dependencyPath, marker } = yield* fixture();
+    yield* fs.remove(path.join(dependencyPath, marker));
     assert.isNull(yield* cleanup.inspect(input));
-    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
-    yield* fs.writeFileString(NodePath.join(input.worktreePath, ".gitignore"), "!node_modules/\n");
+    yield* fs.writeFileString(path.join(dependencyPath, marker), "layoutVersion: 5\n");
+    yield* fs.writeFileString(path.join(input.worktreePath, ".gitignore"), "!node_modules/\n");
     assert.isNull(yield* cleanup.inspect(input));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("requires a tracked regular manifest and lockfile", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, input, runGit, lock } = yield* fixture();
+    const { path, fs, cleanup, input, runGit, lock } = yield* fixture();
     yield* runGit(input.worktreePath, ["rm", "--cached", lock]);
     assert.isNull(yield* cleanup.inspect(input));
     yield* runGit(input.worktreePath, ["add", lock]);
-    yield* fs.remove(NodePath.join(input.worktreePath, "package.json"));
-    yield* fs.symlink(lock, NodePath.join(input.worktreePath, "package.json"));
+    yield* fs.remove(path.join(input.worktreePath, "package.json"));
+    yield* fs.symlink(lock, path.join(input.worktreePath, "package.json"));
     assert.isNull(yield* cleanup.inspect(input));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("rejects a symlinked marker or dependency root", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, root, input, dependencyPath, marker } = yield* fixture();
-    const markerPath = NodePath.join(dependencyPath, marker);
+    const { path, fs, cleanup, root, input, dependencyPath, marker } = yield* fixture();
+    const markerPath = path.join(dependencyPath, marker);
     yield* fs.remove(markerPath);
-    yield* fs.symlink(NodePath.join(input.worktreePath, "pnpm-lock.yaml"), markerPath);
+    yield* fs.symlink(path.join(input.worktreePath, "pnpm-lock.yaml"), markerPath);
     assert.isNull(yield* cleanup.inspect(input));
     yield* fs.remove(markerPath);
     yield* fs.writeFileString(markerPath, "layoutVersion: 5\n");
-    const moved = NodePath.join(root, "moved-install");
+    const moved = path.join(root, "moved-install");
     yield* fs.rename(dependencyPath, moved);
     yield* fs.symlink(moved, dependencyPath);
     assert.isNull(yield* cleanup.inspect(input));
-    assert.isTrue(yield* fs.exists(NodePath.join(moved, "package/index.js")));
+    assert.isTrue(yield* fs.exists(path.join(moved, "package/index.js")));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("rejects symlinked ancestors and checkout paths outside the managed root", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, root, input } = yield* fixture();
-    const alias = NodePath.join(root, "alias");
+    const { path, fs, cleanup, root, input } = yield* fixture();
+    const alias = path.join(root, "alias");
     yield* fs.symlink(input.managedWorktreesRoot, alias);
     assert.isNull(
       yield* cleanup.inspect({
         managedWorktreesRoot: alias,
-        worktreePath: NodePath.join(alias, "feature"),
+        worktreePath: path.join(alias, "feature"),
       }),
     );
     assert.isNull(
-      yield* cleanup.inspect({ ...input, managedWorktreesRoot: NodePath.join(root, "elsewhere") }),
+      yield* cleanup.inspect({ ...input, managedWorktreesRoot: path.join(root, "elsewhere") }),
     );
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("revalidates markers and directory identity after inspection", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, input, dependencyPath, marker } = yield* fixture();
+    const { path, fs, cleanup, input, dependencyPath, marker } = yield* fixture();
     const inspected = yield* cleanup.inspect(input);
     assert.isNotNull(inspected);
-    yield* fs.remove(NodePath.join(dependencyPath, marker));
+    yield* fs.remove(path.join(dependencyPath, marker));
     assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
-    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
+    yield* fs.writeFileString(path.join(dependencyPath, marker), "layoutVersion: 5\n");
     const displaced = `${dependencyPath}-displaced`;
     yield* fs.rename(dependencyPath, displaced);
     yield* fs.makeDirectory(dependencyPath);
-    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
+    yield* fs.writeFileString(path.join(dependencyPath, marker), "layoutVersion: 5\n");
     assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
     assert.isTrue(yield* fs.exists(displaced));
     assert.isTrue(yield* fs.exists(dependencyPath));
@@ -253,24 +254,22 @@ it.effect("revalidates markers and directory identity after inspection", () =>
 
 it.effect("fails closed when dependency measurement exceeds its traversal bound", () =>
   Effect.gen(function* () {
-    const { cleanup, input, dependencyPath } = yield* fixture();
-    yield* Effect.promise(async () => {
-      const deep = NodePath.join(dependencyPath, ...Array.from({ length: 66 }, () => "d"));
-      await NodeFSP.mkdir(deep, { recursive: true });
-      await NodeFSP.writeFile(NodePath.join(deep, "data"), "preserve");
-    });
+    const { fs, path, cleanup, input, dependencyPath } = yield* fixture();
+    const deep = path.join(dependencyPath, ...Array.from({ length: 66 }, () => "d"));
+    yield* fs.makeDirectory(deep, { recursive: true });
+    yield* fs.writeFileString(path.join(deep, "data"), "preserve");
     assert.isNull(yield* cleanup.inspect(input));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("preserves a worktree's live dev runtime even when its process cwd is elsewhere", () =>
   Effect.gen(function* () {
-    const { fs, cleanup, input, dependencyPath } = yield* fixture();
-    const stateDir = NodePath.join(input.worktreePath, ".t3", "userdata");
+    const { path, fs, cleanup, input, dependencyPath } = yield* fixture();
+    const stateDir = path.join(input.worktreePath, ".t3", "userdata");
     yield* fs.makeDirectory(stateDir, { recursive: true });
     yield* fs.writeFileString(
-      NodePath.join(stateDir, "server-runtime.json"),
-      JSON.stringify({
+      path.join(stateDir, "server-runtime.json"),
+      encodeRuntimeState({
         version: 1,
         pid: process.pid,
         port: 12345,
@@ -289,12 +288,10 @@ it.effect(
   "preserves shared pnpm store hardlinks and excludes them from estimated reclaimed bytes",
   () =>
     Effect.gen(function* () {
-      const { fs, cleanup, root, input, dependencyPath } = yield* fixture();
-      const storeFile = NodePath.join(root, "store-file");
+      const { path, fs, cleanup, root, input, dependencyPath } = yield* fixture();
+      const storeFile = path.join(root, "store-file");
       yield* fs.writeFileString(storeFile, "x".repeat(128 * 1024));
-      yield* Effect.promise(() =>
-        NodeFSP.link(storeFile, NodePath.join(dependencyPath, "shared-file")),
-      );
+      yield* fs.link(storeFile, path.join(dependencyPath, "shared-file"));
       const inspected = yield* cleanup.inspect(input);
       assert.isNotNull(inspected);
       assert.isBelow(inspected!.estimatedReclaimedBytes, 128 * 1024);
@@ -312,6 +309,8 @@ const threadId = ThreadId.make("cleanup-thread");
 const decodeShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShell);
 const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
 const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+const decodeSession = Schema.decodeUnknownSync(OrchestrationV2ProviderSessionJson);
+const encodeSession = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2ProviderSessionJson));
 const makeShell = (worktreePath: string) =>
   decodeShell({
     id: threadId,
@@ -421,22 +420,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "deleted-pending")
       yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${threadId}, 'running')`;
     if (mode === "deleted-event")
-      yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${new Date(NOW - day).toISOString()})`;
+      yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${DateTime.formatIso(at(1))})`;
   }
   if (mode === "session") {
-    const payload = JSON.stringify({
-      id: "session",
-      driver: "codex",
-      providerInstanceId: "codex",
-      status: "ready",
-      cwd: f.input.worktreePath,
-      model: null,
-      capabilities: CodexProviderCapabilitiesV2,
-      settings: {},
-      createdAt: new Date(NOW - 30 * day).toISOString(),
-      updatedAt: new Date(NOW - 20 * day).toISOString(),
-      lastError: null,
-    });
+    const payload = encodeSession(
+      decodeSession({
+        id: "session",
+        driver: "codex",
+        providerInstanceId: "codex",
+        status: "ready",
+        cwd: f.input.worktreePath,
+        model: null,
+        capabilities: CodexProviderCapabilitiesV2,
+        settings: {},
+        createdAt: DateTime.formatIso(at(30)),
+        updatedAt: DateTime.formatIso(at(20)),
+        lastError: null,
+      }),
+    );
     yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('ready', ${payload})`;
   }
   const project = {
@@ -454,7 +455,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     processReads++;
     if (mode === "process-unknown") return null;
     return mode === "process" || (mode === "process-started" && processReads > 1)
-      ? [NodePath.join(f.dependencyPath, "package")]
+      ? [f.path.join(f.dependencyPath, "package")]
       : [];
   });
   const terminals: TerminalSummary[] =
@@ -527,26 +528,23 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     .start()
     .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
   // The worktree has ignored research and modified source, with no integration requirement.
-  yield* f.fs.makeDirectory(NodePath.join(f.input.worktreePath, "research"));
+  yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "research"));
   yield* f.fs.writeFileString(
-    NodePath.join(f.input.worktreePath, "research", "notes.md"),
+    f.path.join(f.input.worktreePath, "research", "notes.md"),
     "private research",
   );
   const source = mode === "whole-policy" ? "export const value = 1;\n" : "unfinished source";
   if (mode !== "whole-policy")
-    yield* f.fs.writeFileString(NodePath.join(f.input.worktreePath, "source.ts"), source);
+    yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
   yield* worker.sweep();
   const expectedRemoval = mode === "eligible" || mode === "deleted" || mode === "whole-policy";
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   assert.equal(
-    yield* f.fs.readFileString(NodePath.join(f.input.worktreePath, "research", "notes.md")),
+    yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research", "notes.md")),
     "private research",
   );
-  assert.equal(
-    yield* f.fs.readFileString(NodePath.join(f.input.worktreePath, "source.ts")),
-    source,
-  );
-  assert.isTrue(yield* f.fs.exists(NodePath.join(f.input.worktreePath, ".git")));
+  assert.equal(yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")), source);
+  assert.isTrue(yield* f.fs.exists(f.path.join(f.input.worktreePath, ".git")));
 });
 
 it.effect.each([
