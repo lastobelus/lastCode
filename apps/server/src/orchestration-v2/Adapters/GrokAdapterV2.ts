@@ -376,7 +376,11 @@ export const GrokAdapterV2Driver: ProviderAdapterDriver<GrokSettings, GrokAdapte
       return makeGrokAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         hostPlatform,
         childProcessSpawner,
         crypto,
@@ -435,7 +439,11 @@ const layer: Layer.Layer<
     return makeGrokAdapterV2({
       instanceId: GROK_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_GROK_SETTINGS,
-      environment: hostEnvironment,
+      environment: mergeProviderInstanceEnvironment(
+        undefined,
+        hostEnvironment,
+        serverConfig.settingsPath,
+      ),
       hostPlatform,
       childProcessSpawner,
       crypto,
