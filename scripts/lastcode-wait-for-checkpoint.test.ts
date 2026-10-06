@@ -199,6 +199,15 @@ describe("wait for checkpoint", () => {
     ).rejects.toThrow("Could not observe");
     await expect(
       waitForCheckpoint(
+        harness(
+          [success(), success(), success(newerFinishedAt)],
+          [{ state: "unavailable" }, { state: "running", pid: 42 }, { state: "idle" }],
+        ).deps,
+        30_000,
+      ),
+    ).resolves.toMatchObject({ finishedAt: newerFinishedAt });
+    await expect(
+      waitForCheckpoint(
         harness([success(), success()], [{ state: "running", pid: 42 }, { state: "unavailable" }])
           .deps,
         30_000,
