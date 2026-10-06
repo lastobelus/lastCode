@@ -106,11 +106,11 @@ function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2Thr
   };
 }
 
-const planFork = (sourceRun: OrchestrationV2Run) =>
+const planFork = (sourceRun: OrchestrationV2Run, sourceThread = makeSourceThread()) =>
   Effect.gen(function* () {
     const service = yield* ThreadForkService.ThreadForkServiceV2;
     return yield* service.plan({
-      sourceProjection: makeSourceProjection(sourceRun),
+      sourceProjection: { ...makeSourceProjection(sourceRun), thread: sourceThread },
       sourceRun,
       sourceProviderThread: undefined,
       canonicalSourcePoint: {
@@ -176,6 +176,28 @@ it.effect("forks from a usage-limited failed run", () =>
       threadId: sourceThreadId,
       runId: sourceRunId,
     });
+  }),
+);
+
+it.effect("does not inherit an ordinary source conversation's creator or placement", () =>
+  Effect.gen(function* () {
+    for (const creatorGrouping of ["grouped", "independent"] as const) {
+      const sourceThread = {
+        ...makeSourceThread(),
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        creatorThreadId: ThreadId.make("thread:ordinary-creator"),
+        creatorGrouping,
+      };
+      const { targetThread } = yield* planFork(makeSourceRun("completed"), sourceThread);
+      assert.isFalse("creatorThreadId" in targetThread);
+      assert.isFalse("creatorGrouping" in targetThread);
+      assert.equal(targetThread.createdBy, "user");
+      assert.equal(targetThread.lineage.parentThreadId, sourceThread.id);
+      assert.equal(targetThread.lineage.relationshipToParent, "fork");
+      assert.equal(sourceThread.creatorThreadId, "thread:ordinary-creator");
+      assert.equal(sourceThread.creatorGrouping, creatorGrouping);
+    }
   }),
 );
 

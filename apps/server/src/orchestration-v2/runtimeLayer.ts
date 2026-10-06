@@ -341,6 +341,7 @@ const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
 );
 
 export const OrchestrationV2LayerLive = Layer.mergeAll(
+  eventSinkProvided,
   orchestratorProvided,
   threadManagementProvided,
   effectWorkerProvided,
