@@ -2361,7 +2361,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
           ],
         });
-        const harness = yield* makeCodexReplayHarness(transcript);
+        const eventsAtRequest = yield* Deferred.make<ReadonlyArray<ProviderAdapterV2Event>>();
+        const publishedEvents: Array<ProviderAdapterV2Event> = [];
+        const harness = yield* makeCodexReplayHarness(transcript, (event) =>
+          Effect.gen(function* () {
+            publishedEvents.push(event);
+            if (event.type === "runtime_request.updated") {
+              yield* Deferred.succeed(eventsAtRequest, [...publishedEvents]);
+            }
+          }),
+        );
         yield* harness.runtime.startTurn(
           makeCodexTestTurnInput({
             threadId: harness.threadId,
@@ -2378,7 +2387,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(requests, 1);
         assert.equal(requests[0]?.status, "pending");
         assert.deepEqual(requests[0]?.responseCapability, { type: "message" });
-        const questionItem = harness.events.find(
+        const questionItem = (yield* Deferred.await(eventsAtRequest)).find(
           (event) =>
             event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
         );
@@ -2387,6 +2396,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           questionItem?.type === "turn_item.updated" &&
           questionItem.turnItem.type === "user_input_request"
         ) {
+          assert.equal(questionItem.turnItem.requestId, requests[0]?.id);
+          assert.equal(questionItem.turnItem.nodeId, requests[0]?.nodeId);
           assert.deepEqual(
             questionItem.turnItem.questions[0]?.options.map((option) => option.label),
             ["main", "dev"],
