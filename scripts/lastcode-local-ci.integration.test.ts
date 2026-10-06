@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
+import { ACTION_EVENT_TOKEN_ENV, ACTION_RUN_ID_ENV } from "@t3tools/shared/actionResumeProtocol";
 import { expect, it } from "vite-plus/test";
 import { getCurrentProcessStartIdentity } from "./lib/lastcode-ci-process-identity.ts";
 import {
@@ -109,9 +110,9 @@ function fixtureNodeExecutable(): string {
   throw new Error("The CI integration fixture requires the supported project Node on PATH.");
 }
 
-it.skipIf(NodeProcess.platform === "win32")(
-  "checks docs once and reuses the exact receipt from both Action and pre-push entrypoints",
-  () => {
+it.skipIf(NodeProcess.platform === "win32").each(["standalone", "enclosing Action"] as const)(
+  "checks docs once and reuses the exact receipt from both entrypoints under %s",
+  (context) => {
     const directory = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-quick-entrypoints-"),
     );
@@ -168,6 +169,15 @@ it.skipIf(NodeProcess.platform === "win32")(
         settingsPath,
         JSON.stringify({ lastcodeLocalCi: { backgroundPriority: false } }),
       );
+      const inheritedEnv = {
+        ...process.env,
+        ...(context === "enclosing Action"
+          ? {
+              [ACTION_RUN_ID_ENV]: "fixture-enclosing-run",
+              [ACTION_EVENT_TOKEN_ENV]: "fixture-enclosing-token",
+            }
+          : {}),
+      };
       // Full CI already holds the real host's admission slot while running
       // this test. Isolate homedir in this subprocess so its CLI fixture cannot
       // wait for its enclosing run or touch the operator's admission files.
@@ -208,7 +218,14 @@ it.skipIf(NodeProcess.platform === "win32")(
           {
             cwd: repoRoot,
             encoding: "utf8",
-            env: { ...process.env, T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath },
+            // The fixture invokes a standalone CLI, not the enclosing build's
+            // Action. Keep its reports readable and owned by this subprocess.
+            env: {
+              ...inheritedEnv,
+              [ACTION_RUN_ID_ENV]: undefined,
+              [ACTION_EVENT_TOKEN_ENV]: undefined,
+              T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
+            },
             timeout: 60_000,
             input: prePush
               ? `refs/heads/lastcode/fixture-docs ${git("rev-parse", "HEAD")} refs/heads/lastcode/fixture-docs ${"0".repeat(40)}\n`
@@ -230,6 +247,7 @@ it.skipIf(NodeProcess.platform === "win32")(
       expect(repeatedAction.status, repeatedAction.stderr).toBe(0);
       expect(repeatedAction.stdout).toContain("Reusing Quick CI receipt");
       expect(repeatedAction.stdout).toContain('"outcome":"success"');
+      expect(repeatedAction.stdout).not.toContain("\u001b]777;T3ActionEvent;");
       const push = command(true);
       expect(push.status, push.stderr).toBe(0);
       expect(push.stdout).toContain("Reusing Quick CI receipt");
@@ -429,7 +447,12 @@ for (const { signal, milestone } of [
           {
             cwd: repoRoot,
             encoding: "utf8",
-            env: { ...process.env, T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath },
+            env: {
+              ...process.env,
+              [ACTION_RUN_ID_ENV]: undefined,
+              [ACTION_EVENT_TOKEN_ENV]: undefined,
+              T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
+            },
             timeout: 60_000,
           },
         );
