@@ -962,7 +962,7 @@
           </p>
           <div
             class="diagram"
-            aria-label="Research-bearing worktree is retained by current whole-worktree cleanup; proposed dependency-only cleanup would preserve research and remove recognized dependencies"
+            aria-label="Current whole-worktree cleanup retains research-bearing checkouts; reviewing individual generated directories is a separate decision"
           >
             <div class="box">
               <strong>A kept checkout</strong><br />Source + research + dependencies
@@ -974,23 +974,20 @@
             </div>
             <span class="arrow" aria-hidden="true">→</span>
             <div class="box">
-              <strong>Proposed narrower rule</strong><br />Keep the checkout and notes; remove only
-              recognized, idle dependencies.
+              <strong>A separate decision</strong><br />Review individual generated directories
+              before approving any removal.
             </div>
           </div>
           <p>
-            A separate, unmerged change implements that narrower rule:
-            <strong>proposed only, off by default</strong>. It targets only ignored npm/pnpm root
-            <code>node_modules</code> installs that it positively recognizes. It is not a switch in
-            the version checked here. Build output, vendored source, <code>tmp/</code> and research
-            are outside its initial scope. Treat its final controls and guarantees as unconfirmed
-            until it ships.
+            The cleanup controls checked here remove eligible whole worktrees. They do not clear
+            individual generated directories from a retained checkout. Keeping the checkout while
+            reclaiming generated files needs a separate, explicitly approved cleanup.
           </p>
           <p>
-            Broader cleanup for archived work and older unarchived checkouts is a separate proposal
-            for a new PR. It would cover positively recognized build outputs and installed
-            dependencies across stacks, while preserving reference source, local state, research and
-            retained release files. That proposal does not expand or block the narrower change.
+            Check exactly what a cleanup covers. Removing a root <code>node_modules</code> install
+            does not reclaim compiler output or another stack's dependencies. Conversely, a folder
+            named <code>vendor</code> may contain source you must keep. Preserve reference source,
+            local state, research and retained release files; measure hidden folders too.
           </p>
           <h3>Screenshot settings will not save much disk</h3>
           <p>
@@ -1009,9 +1006,9 @@
             permission to delete.
           </div>
           <p>
-            Your actual switch settings, measured space users and ranked next steps are in the
-            private companion. This guide does not enable rules, remove files, or repeat the storage
-            owner's disk audit.
+            Your actual switch settings, measurements, cleanup proposal details and personalized
+            next steps are in the private companion below. This guide does not enable rules, remove
+            files, or repeat the storage owner's disk audit.
           </p>
           <details>
             <summary>Where these answers come from</summary>
