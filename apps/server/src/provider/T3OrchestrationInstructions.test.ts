@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   t3AcpPromptWithInstructions,
   t3OrchestrationPromptForFirstRun,
   t3OrchestrationSystemPrompt,
@@ -35,6 +36,8 @@ describe("T3 orchestration provider instructions", () => {
     });
 
     assert.include(injected, "<t3_code_orchestration_instructions>");
+    assert.include(injected, T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim());
+    assert.include(injected, T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim());
     assert.include(injected, `<user_request>\n${prompt}\n</user_request>`);
     assert.equal(
       t3OrchestrationPromptForFirstRun({ prompt, runOrdinal: 2, hasT3Mcp: true }),
@@ -48,7 +51,9 @@ describe("T3 orchestration provider instructions", () => {
 
   it("only exposes the system prompt when the T3 MCP server is attached", () => {
     assert.equal(t3OrchestrationSystemPrompt(false), undefined);
-    assert.equal(t3OrchestrationSystemPrompt(true), T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    const instructions = t3OrchestrationSystemPrompt(true)!;
+    assert.include(instructions, T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim());
+    assert.include(instructions, T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim());
   });
 
   it("gives ACP sessions provider-neutral mode, browser, and orchestration guidance", () => {
