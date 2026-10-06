@@ -198,8 +198,17 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
   {
     kind: "command",
     label: "Mobile native tool prerequisites",
-    command: "brew",
-    args: ["bundle", "check", "--file", "apps/mobile/Brewfile"],
+    command: "env",
+    // A prerequisite check must not update Homebrew or leave analytics children running.
+    args: [
+      "HOMEBREW_NO_AUTO_UPDATE=1",
+      "HOMEBREW_NO_ANALYTICS=1",
+      "brew",
+      "bundle",
+      "check",
+      "--file",
+      "apps/mobile/Brewfile",
+    ],
     failureHelp: "Install missing tools with: brew bundle install --file apps/mobile/Brewfile",
   },
   {

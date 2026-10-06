@@ -7,11 +7,63 @@ import * as NodeProcess from "node:process";
 import { ACTION_EVENT_TOKEN_ENV, ACTION_RUN_ID_ENV } from "@t3tools/shared/actionResumeProtocol";
 import { expect, it } from "vite-plus/test";
 import { getCurrentProcessStartIdentity } from "./lib/lastcode-ci-process-identity.ts";
+import { runCiProcess } from "./lib/lastcode-ci-process.ts";
 import {
   assertSupportedNodeVersion,
   resolveLocalCiSteps,
   resolveQuickCiReceiptPath,
 } from "./lastcode-local-ci.ts";
+
+it.skipIf(NodeProcess.platform === "win32").each([0, 1])(
+  "checks Homebrew prerequisites without background work and preserves exit code %i",
+  async (exitCode) => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-brew-check-"));
+    try {
+      const brew = NodePath.join(directory, "brew");
+      NodeFS.writeFileSync(
+        brew,
+        [
+          `#!${fixtureNodeExecutable()}`,
+          "if (process.env.HOMEBREW_NO_AUTO_UPDATE !== '1' || process.env.HOMEBREW_NO_ANALYTICS !== '1') process.exit(9);",
+          "if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(['bundle', 'check', '--file', 'apps/mobile/Brewfile'])) process.exit(8);",
+          `process.stdout.write(${JSON.stringify(exitCode === 0 ? "Tools available\n" : "Missing tool\n")});`,
+          `process.exit(${exitCode});`,
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const step = resolveLocalCiSteps("full").find(
+        ({ label }) => label === "Mobile native tool prerequisites",
+      );
+      if (step?.kind !== "command") throw new Error("Missing Homebrew prerequisite check.");
+      let output = "";
+      const result = runCiProcess({
+        cwd: directory,
+        command: step.command,
+        args: step.args,
+        env: {
+          ...process.env,
+          PATH: `${directory}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+          HOMEBREW_NO_AUTO_UPDATE: "0",
+          HOMEBREW_NO_ANALYTICS: "0",
+        },
+        signal: new AbortController().signal,
+        ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
+        onOutput: (value) => {
+          output += value;
+        },
+      });
+      if (exitCode === 0) {
+        await result;
+        expect(output).toBe("Tools available\n");
+      } else {
+        await expect(result).rejects.toThrow("failed with exit code 1");
+        expect(output).toBe("Missing tool\n");
+      }
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it.skipIf(NodeProcess.platform === "win32")(
   "runs the affected-workspace command through the installed task runner",
