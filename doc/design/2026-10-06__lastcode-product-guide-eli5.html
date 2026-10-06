@@ -1668,12 +1668,7 @@
         <label for="private-file">Choose your private HTML companion</label>
         <input type="file" id="private-file" accept=".html,text/html" />
         <p id="private-status" role="status"></p>
-        <iframe
-          id="private-frame"
-          title="Private service and storage inventory"
-          sandbox=""
-          hidden
-        ></iframe>
+        <div id="private-container"></div>
       </aside>
       <footer>
         <p>
@@ -1755,7 +1750,6 @@
         const file = event.target.files[0];
         if (!file) return;
         const status = document.getElementById("private-status");
-        const frame = document.getElementById("private-frame");
         if (file.size > 2 * 1024 * 1024) {
           status.textContent = "Choose the small HTML companion (under 2 MiB).";
           return;
@@ -1764,8 +1758,17 @@
           const content = await file.text();
           const policy =
             "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'\">";
-          frame.srcdoc = content.replace(/<head(?:\s[^>]*)?>/i, (match) => match + policy);
-          frame.hidden = false;
+          const protectedContent = content.replace(
+            /<head(?:\s[^>]*)?>/i,
+            (match) => match + policy,
+          );
+          if (protectedContent === content) throw new Error("The companion needs an HTML head.");
+          const frame = document.createElement("iframe");
+          frame.id = "private-frame";
+          frame.title = "Private service and storage inventory";
+          frame.setAttribute("sandbox", "");
+          frame.srcdoc = protectedContent;
+          document.getElementById("private-container").replaceChildren(frame);
           status.textContent = "Private companion loaded locally. Nothing was uploaded.";
         } catch {
           status.textContent = "This file could not be read. Open the companion directly instead.";
