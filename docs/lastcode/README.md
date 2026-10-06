@@ -19,6 +19,9 @@ directories.
 
 ## Documents
 
+- [Documentation-site research archive](documentation-site-research/README.md):
+  preserved design proposals, prototypes, delivery history, and issue ownership
+  for the unfinished public site release.
 - [Glossary](glossary.md): preferred LastCode fork-maintenance terms and their
   relationship to the current workflow.
 - [Set up alongside T3 Code](setup.md): prerequisites, guarded bootstrap,
