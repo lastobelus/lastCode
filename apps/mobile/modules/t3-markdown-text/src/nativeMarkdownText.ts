@@ -1,5 +1,6 @@
-import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 import { isMarkdownFileLinkLabel } from "@t3tools/client-runtime/markdown-links";
+import { characterEntities } from "character-entities";
+import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
 import { imageMimeType } from "@t3tools/shared/image";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
@@ -223,46 +224,24 @@ function decodeCodePoint(codePoint: number, entity: string): string {
   return String.fromCodePoint(codePoint);
 }
 
-function decodeHtmlEntitiesOnce(value: string): string {
+function decodeHtmlEntities(value: string): string {
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|amp|apos|gt|lt|nbsp|quot);/gi,
-    (entity, decimal: string | undefined, hexadecimal: string | undefined) => {
+    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]+));/g,
+    (
+      entity,
+      decimal: string | undefined,
+      hexadecimal: string | undefined,
+      named: string | undefined,
+    ) => {
       if (decimal) {
         return decodeCodePoint(Number.parseInt(decimal, 10), entity);
       }
       if (hexadecimal) {
         return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
       }
-      switch (entity.toLowerCase()) {
-        case "&amp;":
-          return "&";
-        case "&apos;":
-          return "'";
-        case "&gt;":
-          return ">";
-        case "&lt;":
-          return "<";
-        case "&nbsp;":
-          return "\u00a0";
-        case "&quot;":
-          return '"';
-        default:
-          return entity;
-      }
+      return named && Object.hasOwn(characterEntities, named) ? characterEntities[named]! : entity;
     },
   );
-}
-
-function decodeHtmlEntities(value: string): string {
-  let decoded = value;
-  for (let pass = 0; pass < 2; pass += 1) {
-    const next = decodeHtmlEntitiesOnce(decoded);
-    if (next === decoded) {
-      break;
-    }
-    decoded = next;
-  }
-  return decoded;
 }
 
 function textNodeContent(value: string): string {
@@ -444,7 +423,7 @@ function appendChildren(
   return runs;
 }
 
-function nodeTextContent(node: MarkdownNode): string {
+export function nodeTextContent(node: MarkdownNode): string {
   if (node.content !== undefined) {
     return node.content;
   }
@@ -478,6 +457,54 @@ function fileLinkLabelMarkdown(node: MarkdownNode): string {
       return `![${(node.alt ?? "").replace(/[\\[\]]/g, "\\$&")}](<${node.href ?? ""}>)`;
     default:
       return node.content ?? children;
+  }
+}
+
+export function nativeMarkdownInlineGroups(nodes: ReadonlyArray<MarkdownNode>): MarkdownNode[] {
+  const groups: MarkdownNode[] = [];
+  let inline: MarkdownNode[] = [];
+  const flush = () => {
+    if (inline.length === 0) {
+      return;
+    }
+    groups.push({ type: "paragraph", children: inline });
+    inline = [];
+  };
+
+  for (const node of nodes) {
+    if (markdownLinkHasImage(node)) {
+      flush();
+      groups.push(node);
+    } else {
+      inline.push(node);
+    }
+  }
+  flush();
+  return groups;
+}
+
+export function markdownLinkHasImage(node: MarkdownNode): boolean {
+  return node.type === "image" || (node.children ?? []).some(markdownLinkHasImage);
+}
+
+/** Visible link-label text, with prose entities decoded and code kept literal. */
+export function markdownLinkLabelText(node: MarkdownNode): string {
+  switch (node.type) {
+    case "text":
+    case "math_inline":
+      return textNodeContent(nodeTextContent(node));
+    case "html_inline":
+      return inlineHtmlText(nodeTextContent(node));
+    case "image":
+      return node.alt || node.title || "";
+    case "code_inline":
+      return nodeTextContent(node);
+    case "soft_break":
+      return " ";
+    case "line_break":
+      return "\n";
+    default:
+      return (node.children ?? []).map(markdownLinkLabelText).join("");
   }
 }
 
@@ -531,8 +558,10 @@ function appendNode(
       }
       const presentation = resolveMarkdownLinkPresentation(node.href ?? "");
       if (presentation.kind === "file") {
-        const label = textNodeContent(nodeTextContent(node));
-        if (!isMarkdownFileLinkLabel(label, presentation.href)) {
+        const descriptive =
+          markdownLinkHasImage(node) ||
+          !isMarkdownFileLinkLabel(markdownLinkLabelText(node), presentation.href);
+        if (descriptive) {
           const fileRuns: NativeMarkdownTextRun[] = [];
           const fileContext = {
             ...context,
@@ -540,8 +569,7 @@ function appendNode(
             sourceText: `[${fileLinkLabelMarkdown(node)}](<${presentation.href}>)`,
           };
           appendChildren(fileRuns, node, fileContext);
-          appendRun(fileRuns, " ", fileContext);
-          appendRun(fileRuns, presentation.label, {
+          appendRun(fileRuns, ` (${presentation.label})`, {
             ...fileContext,
             fileIcon: presentation.icon,
           });
@@ -571,6 +599,35 @@ function appendNode(
     default:
       return appendChildren(runs, node, context);
   }
+}
+
+export type MarkdownInlineStyle = "bold" | "italic" | "strikethrough";
+
+export function nativeMarkdownWithInlineStyles(
+  node: MarkdownNode,
+  styles: ReadonlyArray<MarkdownInlineStyle>,
+): MarkdownNode {
+  return {
+    ...node,
+    children: styles.reduceRight<MarkdownNode[]>(
+      (children, type) => [{ type, children }],
+      node.children ?? [],
+    ),
+  };
+}
+
+/** Text beside an image remains part of the enclosing link, without another destination chip. */
+export function nativeMarkdownImageLabelRuns(
+  node: MarkdownNode,
+  href: string,
+  headingLevel?: number,
+): ReadonlyArray<NativeMarkdownTextRun> {
+  return appendChildren([], node, {
+    ...EMPTY_CONTEXT,
+    href,
+    role: headingLevel === undefined ? "body" : "heading",
+    ...(headingLevel === undefined ? {} : { headingLevel }),
+  });
 }
 
 export function nativeMarkdownTextRuns(node: MarkdownNode): ReadonlyArray<NativeMarkdownTextRun> {
