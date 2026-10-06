@@ -1,4 +1,8 @@
-[submodule ".repos/alchemy-effect/.vendor/alchemy"]
-	path = .repos/alchemy-effect/.vendor/alchemy
-	url = https://github.com/alchemy-run/alchemy.git
+[submodule ".repos/alchemy-effect/submodules/distilled"]
+	path = .repos/alchemy-effect/submodules/distilled
+	url = https://github.com/alchemy-run/distilled.git
+	update = none
+[submodule ".repos/alchemy-effect/submodules/floci"]
+	path = .repos/alchemy-effect/submodules/floci
+	url = https://github.com/alchemy-run/floci.git
 	update = none

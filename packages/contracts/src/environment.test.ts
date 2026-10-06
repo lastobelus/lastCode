@@ -43,6 +43,18 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
+  it("requires advertised Local CI policy support", () => {
+    expect(decodeDescriptor(descriptor).capabilities.lastcodeLocalCi).toBeUndefined();
+    for (const supported of [false, true]) {
+      expect(
+        decodeDescriptor({
+          ...descriptor,
+          capabilities: { ...descriptor.capabilities, lastcodeLocalCi: supported },
+        }).capabilities.lastcodeLocalCi,
+      ).toBe(supported);
+    }
+  });
+
   it("treats a missing pull-request capability as unsupported under version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
   });
