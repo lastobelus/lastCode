@@ -7,7 +7,11 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { storageCleanupActivityAt, storageCleanupThreadIdle } from "./storageCleanup.ts";
+import {
+  storageCleanupActivityAt,
+  storageCleanupDeletedActivityAt,
+  storageCleanupThreadIdle,
+} from "./storageCleanup.ts";
 
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -98,6 +102,16 @@ describe("V2 storage cleanup eligibility", () => {
     expect(
       storageCleanupActivityAt({ ...thread, latestRunCompletedAt: runTime, updatedAt: at(0) }),
     ).toBe(DateTime.toEpochMillis(runTime));
+  });
+
+  it("uses deletion and later durable events as the deleted-thread inactivity boundary", () => {
+    const thread = { deletedAt: at(-10 * DAY_MS), updatedAt: at(-12 * DAY_MS) };
+    expect(storageCleanupDeletedActivityAt(thread, null)).toBe(NOW_MS - 10 * DAY_MS);
+    expect(storageCleanupDeletedActivityAt(thread, new Date(NOW_MS - DAY_MS).toISOString())).toBe(
+      NOW_MS - DAY_MS,
+    );
+    expect(storageCleanupDeletedActivityAt({ ...thread, deletedAt: null }, null)).toBeNull();
+    expect(storageCleanupDeletedActivityAt(thread, "invalid")).toBeNull();
   });
 
   function candidateWithStatus(status: OrchestrationV2ThreadShell["status"]) {

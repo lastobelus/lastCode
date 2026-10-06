@@ -115,6 +115,7 @@ describe("storage cleanup settings", () => {
       worktreeAfterDays: null,
       worktreeOnMerge: false,
       worktreeOnDelete: false,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
@@ -128,6 +129,25 @@ describe("storage cleanup settings", () => {
     expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: null } })).toEqual({
       storageCleanup: { worktreeAfterDays: null },
     });
+  });
+
+  it("accepts dependency retention and keeps it off in saved older custom rules", () => {
+    expect(
+      decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: 14 } }),
+    ).toEqual({ storageCleanup: { worktreeDependenciesAfterDays: 14 } });
+    expect(
+      decodeServerSettings({
+        worktreeCleanup: {
+          mode: "custom",
+          rules: {
+            worktreeAfterDays: null,
+            worktreeOnMerge: false,
+            worktreeOnDelete: false,
+            worktreeUnchanged: false,
+          },
+        },
+      }).worktreeCleanup,
+    ).toMatchObject({ mode: "custom", rules: { worktreeDependenciesAfterDays: null } });
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {
@@ -148,6 +168,9 @@ describe("storage cleanup settings", () => {
   it.each([0, -1, 1.5, 3651])("rejects invalid retention %s", (days) => {
     expect(() =>
       decodeServerSettingsPatch({ storageCleanup: { browserArtifactsAfterDays: days } }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: days } }),
     ).toThrow();
   });
 });

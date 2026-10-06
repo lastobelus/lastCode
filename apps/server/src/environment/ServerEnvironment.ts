@@ -230,6 +230,7 @@ export const make = Effect.gen(function* () {
       lastcodeLocalCi: true,
       storageCleanup: true,
       projectWorktreeCleanup: true,
+      worktreeDependencyCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
       threadSnooze: true,

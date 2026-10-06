@@ -1,0 +1,588 @@
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as DateTime from "effect/DateTime";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as TestClock from "effect/testing/TestClock";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  OrchestrationV2ThreadShell,
+  OrchestrationV2AppThreadJson,
+  ProjectId,
+  ThreadId,
+  type ServerSettings,
+  type TerminalSummary,
+} from "@t3tools/contracts";
+import { assert, it } from "@effect/vitest";
+
+import * as ServerConfig from "../config.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as GeneratedDependencies from "./GeneratedDependencies.ts";
+import * as StorageCleanup from "../storageCleanup.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as Settings from "../serverSettings.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
+import * as GitManager from "../git/GitManager.ts";
+import * as ServerActivation from "../serverActivation.ts";
+
+const testLayer = (processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([])) =>
+  GeneratedDependencies.layer.pipe(
+    Layer.provideMerge(GitVcsDriver.layer),
+    Layer.provide(VcsProcess.layer),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
+  );
+
+const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
+  const fs = yield* FileSystem.FileSystem;
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const cleanup = yield* GeneratedDependencies.GeneratedDependencies;
+  const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dependencies-" });
+  // /tmp is itself a symlink on macOS; candidates must use the actual path.
+  const root = yield* fs.realPath(temporary);
+  const repository = NodePath.join(root, "repository");
+  const managedWorktreesRoot = NodePath.join(root, "worktrees");
+  const worktreePath = NodePath.join(managedWorktreesRoot, "feature");
+  yield* fs.makeDirectory(repository);
+  yield* fs.makeDirectory(managedWorktreesRoot);
+  const runGit = (cwd: string, args: ReadonlyArray<string>) =>
+    git.execute({
+      operation: "test.GeneratedDependencies",
+      cwd,
+      args,
+    });
+  yield* runGit(repository, ["init"]);
+  yield* fs.writeFileString(
+    NodePath.join(repository, "package.json"),
+    '{"name":"fixture","private":true}\n',
+  );
+  const lock = manager === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json";
+  const marker = manager === "pnpm" ? ".modules.yaml" : ".package-lock.json";
+  yield* fs.writeFileString(
+    NodePath.join(repository, lock),
+    manager === "pnpm" ? "lockfileVersion: 9\n" : "{}\n",
+  );
+  yield* fs.writeFileString(
+    NodePath.join(repository, ".gitignore"),
+    "node_modules/\ntmp/\nresearch/\n.repos/\nbuild/\ndist/\nvendor/\n",
+  );
+  yield* fs.writeFileString(NodePath.join(repository, "source.ts"), "export const value = 1;\n");
+  yield* runGit(repository, ["add", "."]);
+  yield* runGit(repository, [
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-m",
+    "fixture",
+  ]);
+  yield* runGit(repository, ["worktree", "add", "-b", "feature", worktreePath]);
+  const dependencyPath = NodePath.join(worktreePath, "node_modules");
+  yield* fs.makeDirectory(NodePath.join(dependencyPath, "package"), { recursive: true });
+  yield* fs.writeFileString(
+    NodePath.join(dependencyPath, marker),
+    manager === "pnpm" ? "layoutVersion: 5\n" : "{}\n",
+  );
+  yield* fs.writeFileString(
+    NodePath.join(dependencyPath, "package", "index.js"),
+    "module.exports = 1;\n",
+  );
+  const input = { managedWorktreesRoot, worktreePath };
+  return { fs, cleanup, root, repository, input, dependencyPath, marker, lock, runGit };
+});
+
+it.effect.each(["pnpm", "npm"] as const)(
+  "removes a recognized %s install while preserving dirty source and unrelated ignored files",
+  (manager) =>
+    Effect.gen(function* () {
+      const { fs, cleanup, input, dependencyPath } = yield* fixture(manager);
+      const protectedFiles = [
+        "source.ts",
+        "tmp/notes.md",
+        "research/data.txt",
+        ".repos/vendor.txt",
+        "vendor/local.txt",
+        "build/output.txt",
+        "dist/output.txt",
+        "nested/node_modules/user.txt",
+      ];
+      for (const relative of protectedFiles) {
+        const target = NodePath.join(input.worktreePath, relative);
+        yield* fs.makeDirectory(NodePath.dirname(target), { recursive: true });
+        yield* fs.writeFileString(target, `preserve ${relative}`);
+      }
+      const inspected = yield* cleanup.inspect(input);
+      assert.isNotNull(inspected);
+      assert.equal(inspected!.packageManager, manager);
+      assert.isAbove(inspected!.estimatedReclaimedBytes, 0);
+      assert.isTrue(yield* fs.exists(dependencyPath));
+      assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isFalse(yield* fs.exists(dependencyPath));
+      for (const relative of protectedFiles)
+        assert.equal(
+          yield* fs.readFileString(NodePath.join(input.worktreePath, relative)),
+          `preserve ${relative}`,
+        );
+      assert.isTrue(yield* fs.exists(NodePath.join(input.worktreePath, ".git")));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("never follows dependency links into outside files or a pnpm store", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, root, input, dependencyPath } = yield* fixture();
+    const outside = NodePath.join(root, "store");
+    yield* fs.makeDirectory(outside);
+    yield* fs.writeFileString(NodePath.join(outside, "data"), "user data");
+    yield* fs.symlink(outside, NodePath.join(dependencyPath, "linked-package"));
+    yield* fs.symlink(
+      NodePath.join(outside, "missing"),
+      NodePath.join(dependencyPath, "broken-link"),
+    );
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.equal(yield* fs.readFileString(NodePath.join(outside, "data")), "user data");
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("retains an install when the latest activity/policy guard changes", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(false)));
+    assert.isTrue(yield* fs.exists(dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("retains tracked content within an otherwise ignored dependency install", () =>
+  Effect.gen(function* () {
+    const { cleanup, input, runGit } = yield* fixture();
+    yield* runGit(input.worktreePath, ["add", "-f", "node_modules/package/index.js"]);
+    assert.isNull(yield* cleanup.inspect(input));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("retains unrecognized and unignored directories", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath, marker } = yield* fixture();
+    yield* fs.remove(NodePath.join(dependencyPath, marker));
+    assert.isNull(yield* cleanup.inspect(input));
+    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
+    yield* fs.writeFileString(NodePath.join(input.worktreePath, ".gitignore"), "!node_modules/\n");
+    assert.isNull(yield* cleanup.inspect(input));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("requires a tracked regular manifest and lockfile", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, runGit, lock } = yield* fixture();
+    yield* runGit(input.worktreePath, ["rm", "--cached", lock]);
+    assert.isNull(yield* cleanup.inspect(input));
+    yield* runGit(input.worktreePath, ["add", lock]);
+    yield* fs.remove(NodePath.join(input.worktreePath, "package.json"));
+    yield* fs.symlink(lock, NodePath.join(input.worktreePath, "package.json"));
+    assert.isNull(yield* cleanup.inspect(input));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("rejects a symlinked marker or dependency root", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, root, input, dependencyPath, marker } = yield* fixture();
+    const markerPath = NodePath.join(dependencyPath, marker);
+    yield* fs.remove(markerPath);
+    yield* fs.symlink(NodePath.join(input.worktreePath, "pnpm-lock.yaml"), markerPath);
+    assert.isNull(yield* cleanup.inspect(input));
+    yield* fs.remove(markerPath);
+    yield* fs.writeFileString(markerPath, "layoutVersion: 5\n");
+    const moved = NodePath.join(root, "moved-install");
+    yield* fs.rename(dependencyPath, moved);
+    yield* fs.symlink(moved, dependencyPath);
+    assert.isNull(yield* cleanup.inspect(input));
+    assert.isTrue(yield* fs.exists(NodePath.join(moved, "package/index.js")));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("rejects symlinked ancestors and checkout paths outside the managed root", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, root, input } = yield* fixture();
+    const alias = NodePath.join(root, "alias");
+    yield* fs.symlink(input.managedWorktreesRoot, alias);
+    assert.isNull(
+      yield* cleanup.inspect({
+        managedWorktreesRoot: alias,
+        worktreePath: NodePath.join(alias, "feature"),
+      }),
+    );
+    assert.isNull(
+      yield* cleanup.inspect({ ...input, managedWorktreesRoot: NodePath.join(root, "elsewhere") }),
+    );
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("revalidates markers and directory identity after inspection", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath, marker } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    yield* fs.remove(NodePath.join(dependencyPath, marker));
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
+    const displaced = `${dependencyPath}-displaced`;
+    yield* fs.rename(dependencyPath, displaced);
+    yield* fs.makeDirectory(dependencyPath);
+    yield* fs.writeFileString(NodePath.join(dependencyPath, marker), "layoutVersion: 5\n");
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isTrue(yield* fs.exists(displaced));
+    assert.isTrue(yield* fs.exists(dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("fails closed when dependency measurement exceeds its traversal bound", () =>
+  Effect.gen(function* () {
+    const { cleanup, input, dependencyPath } = yield* fixture();
+    yield* Effect.promise(async () => {
+      const deep = NodePath.join(dependencyPath, ...Array.from({ length: 66 }, () => "d"));
+      await NodeFSP.mkdir(deep, { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(deep, "data"), "preserve");
+    });
+    assert.isNull(yield* cleanup.inspect(input));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("preserves a worktree's live dev runtime even when its process cwd is elsewhere", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath } = yield* fixture();
+    const stateDir = NodePath.join(input.worktreePath, ".t3", "userdata");
+    yield* fs.makeDirectory(stateDir, { recursive: true });
+    yield* fs.writeFileString(
+      NodePath.join(stateDir, "server-runtime.json"),
+      JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        port: 12345,
+        origin: "http://localhost:12345",
+        startedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    );
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isTrue(yield* fs.exists(dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect(
+  "preserves shared pnpm store hardlinks and excludes them from estimated reclaimed bytes",
+  () =>
+    Effect.gen(function* () {
+      const { fs, cleanup, root, input, dependencyPath } = yield* fixture();
+      const storeFile = NodePath.join(root, "store-file");
+      yield* fs.writeFileString(storeFile, "x".repeat(128 * 1024));
+      yield* Effect.promise(() =>
+        NodeFSP.link(storeFile, NodePath.join(dependencyPath, "shared-file")),
+      );
+      const inspected = yield* cleanup.inspect(input);
+      assert.isNotNull(inspected);
+      assert.isBelow(inspected!.estimatedReclaimedBytes, 128 * 1024);
+      assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.equal((yield* fs.readFileString(storeFile)).length, 128 * 1024);
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+const NOW = Date.parse("2026-06-10T12:00:00.000Z");
+const day = 86_400_000;
+const at = (daysAgo: number) => DateTime.makeUnsafe(NOW - daysAgo * day);
+const projectId = ProjectId.make("cleanup-project");
+const threadId = ThreadId.make("cleanup-thread");
+
+const decodeShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShell);
+const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+const makeShell = (worktreePath: string) =>
+  decodeShell({
+    id: threadId,
+    projectId,
+    title: "Fixture",
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "fixture" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    worktreePath,
+    branch: "feature",
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "web",
+    activeRunId: null,
+    latestVisibleMessage: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+    latestRunId: null,
+    status: "idle",
+    pendingRuntimeRequest: null,
+    pendingBackgroundTasks: [],
+    latestUserMessageAt: null,
+    createdAt: at(30),
+    updatedAt: at(20),
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+  });
+
+type SweepCase =
+  | "eligible"
+  | "whole-policy"
+  | "disabled"
+  | "recent"
+  | "queued"
+  | "background"
+  | "delegated"
+  | "shared"
+  | "terminal"
+  | "preview"
+  | "project-root"
+  | "policy-changed"
+  | "activity-changed"
+  | "session"
+  | "deleted"
+  | "deleted-recent"
+  | "deleted-pending"
+  | "deleted-event"
+  | "process"
+  | "process-unknown"
+  | "process-started";
+
+const integrationFixture = Effect.fn("test.dependencySweep")(function* (
+  mode: SweepCase,
+  setProcessReader: (reader: () => ReadonlyArray<string> | null) => void,
+) {
+  yield* TestClock.setTime(NOW);
+  const f = yield* fixture();
+  const sql = yield* SqlClient.SqlClient;
+  const config = yield* ServerConfig.ServerConfig;
+  for (const query of [
+    "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT)",
+    "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, payload_json TEXT, deleted_at TEXT)",
+    "CREATE TABLE orchestration_v2_events (thread_id TEXT, occurred_at TEXT)",
+    "CREATE TABLE orchestration_v2_projection_runs (thread_id TEXT, status TEXT)",
+    "CREATE TABLE orchestration_v2_projection_subagents (thread_id TEXT, child_thread_id TEXT, status TEXT)",
+    "CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id TEXT, status TEXT)",
+    "CREATE TABLE orchestration_v2_projection_provider_threads (thread_id TEXT, status TEXT, payload_json TEXT)",
+    "CREATE TABLE orchestration_v2_projection_provider_sessions (status TEXT, payload_json TEXT)",
+    "CREATE TABLE orchestration_v2_effect_outbox (thread_id TEXT, status TEXT)",
+  ])
+    yield* sql.unsafe(query);
+  let thread = makeShell(f.input.worktreePath);
+  let settings: ServerSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    storageCleanup: {
+      ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+      worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
+      worktreeAfterDays: mode === "whole-policy" ? 1 : null,
+      worktreeOnDelete: false,
+      worktreeOnMerge: false,
+      worktreeUnchanged: false,
+    },
+  };
+  if (mode === "recent") thread = { ...thread, latestRunCompletedAt: at(1) };
+  if (mode === "queued") thread = { ...thread, status: "queued" };
+  if (mode === "background")
+    thread = { ...thread, pendingBackgroundTasks: [{ taskId: "dev", kind: "command" }] };
+  if (mode === "delegated")
+    yield* sql`INSERT INTO orchestration_v2_projection_subagents VALUES (${threadId}, NULL, 'running')`;
+  const deleted = mode.startsWith("deleted");
+  if (deleted) {
+    const full = decodeFullThread({
+      ...thread,
+      createdAt: DateTime.formatIso(at(30)),
+      updatedAt: DateTime.formatIso(at(20)),
+      deletedAt: DateTime.formatIso(at(mode === "deleted-recent" ? 1 : 15)),
+    });
+    const payload = encodeFullThread(full);
+    yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
+    yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${threadId}, ${projectId}, ${payload}, 'deleted')`;
+    if (mode === "deleted-pending")
+      yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${threadId}, 'running')`;
+    if (mode === "deleted-event")
+      yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${new Date(NOW - day).toISOString()})`;
+  }
+  if (mode === "session") {
+    const payload = JSON.stringify({
+      id: "session",
+      driver: "codex",
+      providerInstanceId: "codex",
+      status: "ready",
+      cwd: f.input.worktreePath,
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      settings: {},
+      createdAt: new Date(NOW - 30 * day).toISOString(),
+      updatedAt: new Date(NOW - 20 * day).toISOString(),
+      lastError: null,
+    });
+    yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('ready', ${payload})`;
+  }
+  const project = {
+    id: projectId,
+    workspaceRoot: mode === "project-root" ? f.input.worktreePath : f.repository,
+    title: "Fixture",
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:00:00.000Z",
+  };
+  let reads = 0;
+  let processReads = 0;
+  setProcessReader(() => {
+    processReads++;
+    if (mode === "process-unknown") return null;
+    return mode === "process" || (mode === "process-started" && processReads > 1)
+      ? [NodePath.join(f.dependencyPath, "package")]
+      : [];
+  });
+  const terminals: TerminalSummary[] =
+    mode === "terminal"
+      ? [
+          {
+            threadId,
+            terminalId: "terminal",
+            cwd: f.input.worktreePath,
+            worktreePath: f.input.worktreePath,
+            status: "running",
+            pid: 123,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: false,
+            label: "fixture",
+            updatedAt: "2026-06-01T00:00:00.000Z",
+          },
+        ]
+      : [];
+  const dependencies = Layer.mergeAll(
+    Layer.succeed(ServerConfig.ServerConfig, {
+      ...config,
+      worktreesDir: f.input.managedWorktreesRoot,
+    }),
+    Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([project]) }),
+    Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getShellSnapshot: (options) =>
+        Effect.sync(() => {
+          reads++;
+          if (reads > 2 && mode === "policy-changed")
+            settings = {
+              ...settings,
+              storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: null },
+            };
+          if (reads > 2 && mode === "activity-changed")
+            thread = { ...thread, latestRunCompletedAt: at(0) };
+          const threads =
+            options?.location === "archive" || deleted
+              ? []
+              : mode === "shared"
+                ? [thread, { ...thread, id: ThreadId.make("other") }]
+                : [thread];
+          return {
+            schemaVersion: 1 as const,
+            snapshotSequence: 0,
+            projects: [project],
+            threads,
+            archivedThreads: [],
+          };
+        }),
+    }),
+    Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
+    Layer.mock(Settings.ServerSettingsService)({
+      getSettings: Effect.sync(() => settings),
+      subscribeChanges: Effect.succeed(Stream.empty),
+    }),
+    Layer.mock(GitManager.GitManager)({ invalidateStatus: () => Effect.void }),
+    Layer.mock(TerminalManager.TerminalManager)({
+      subscribeMetadata: (listener) =>
+        listener({ type: "snapshot", terminals }).pipe(Effect.as(() => undefined)),
+    }),
+    Layer.mock(PreviewHosting.PreviewHosting)({
+      protectedWorkspacePaths: () =>
+        Effect.succeed(mode === "preview" ? [f.input.worktreePath] : []),
+    }),
+  );
+  const worker = yield* StorageCleanup.make.pipe(Effect.provide(dependencies));
+  yield* worker
+    .start()
+    .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
+  // The worktree has ignored research and modified source, with no integration requirement.
+  yield* f.fs.makeDirectory(NodePath.join(f.input.worktreePath, "research"));
+  yield* f.fs.writeFileString(
+    NodePath.join(f.input.worktreePath, "research", "notes.md"),
+    "private research",
+  );
+  const source = mode === "whole-policy" ? "export const value = 1;\n" : "unfinished source";
+  if (mode !== "whole-policy")
+    yield* f.fs.writeFileString(NodePath.join(f.input.worktreePath, "source.ts"), source);
+  yield* worker.sweep();
+  const expectedRemoval = mode === "eligible" || mode === "deleted" || mode === "whole-policy";
+  assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
+  assert.equal(
+    yield* f.fs.readFileString(NodePath.join(f.input.worktreePath, "research", "notes.md")),
+    "private research",
+  );
+  assert.equal(
+    yield* f.fs.readFileString(NodePath.join(f.input.worktreePath, "source.ts")),
+    source,
+  );
+  assert.isTrue(yield* f.fs.exists(NodePath.join(f.input.worktreePath, ".git")));
+});
+
+it.effect.each([
+  "eligible",
+  "whole-policy",
+  "disabled",
+  "recent",
+  "queued",
+  "background",
+  "delegated",
+  "shared",
+  "terminal",
+  "preview",
+  "project-root",
+  "policy-changed",
+  "activity-changed",
+  "session",
+  "deleted",
+  "deleted-recent",
+  "deleted-pending",
+  "deleted-event",
+  "process",
+  "process-unknown",
+  "process-started",
+] as const)("sweep preserves source and research while respecting %s", (mode) => {
+  let readProcesses: () => ReadonlyArray<string> | null = () => [];
+  const processes = Effect.sync(() => readProcesses());
+  return integrationFixture(mode, (reader) => {
+    readProcesses = reader;
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.merge(
+        testLayer(processes),
+        NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
+      ),
+    ),
+  );
+});

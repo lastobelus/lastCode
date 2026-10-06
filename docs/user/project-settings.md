@@ -152,6 +152,14 @@ thread is deleted, including archived threads and worktrees left by earlier dele
 server waits for sessions and terminals to stop and retries skipped worktrees after restart.
 Existing prompts for deleting a worktree manually remain available when this policy is off.
 
+Enable **Remove inactive worktree dependencies** to reclaim recognized npm or pnpm
+`node_modules` installations after a chosen number of inactive days, while keeping the
+worktree and its source, notes, and research files. Active agents, sessions, terminals, and
+previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
+the project's dependencies before continuing work. This rule is off by default and follows
+the project's Inherit, Off, or Custom policy. Dependency cleanup is available on macOS and
+Linux and skips a worktree when it cannot verify that no processes are using it.
+
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
 
