@@ -86,11 +86,7 @@ describe("legacy sidebar subagent families", () => {
   it("collapses families by default and keeps the subagent section separately collapsed", () => {
     const parent = thread("parent");
     const helper = thread("helper", "parent");
-    const ordinary = thread("ordinary", undefined, {
-      source: { createdBy: "agent", creationSource: "mcp" },
-      creatorThreadId: parent.id,
-      creatorGrouping: "grouped",
-    });
+    const ordinary = created("ordinary", parent.id);
     const threads = [helper, parent, ordinary];
     const parentKey = legacySidebarThreadKey(parent);
     expect(keys(project(threads, { collapsedByKey: {} }))).toEqual(["parent"]);

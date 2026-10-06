@@ -1212,7 +1212,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       <TooltipTrigger
                         render={
                           <span
-                            aria-label={relationshipDescription ?? relationshipLabel}
+                            aria-label={relationshipDescription ?? relationshipLabel ?? undefined}
                             className={cn(
                               "inline-flex shrink-0 items-center gap-0.5 text-3xs",
                               typedGroups
