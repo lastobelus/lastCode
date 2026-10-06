@@ -663,11 +663,12 @@ export const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const now = yield* Clock.currentTimeMillis;
-    yield* cleanDependencies(serverSettings, now).pipe(
-      Effect.catch((error) => Effect.logWarning("dependency cleanup failed", { error })),
-    );
+    // Avoid measuring installs in worktrees that whole-worktree cleanup can remove.
     yield* cleanWorktrees(serverSettings, now).pipe(
       Effect.catch((error) => Effect.logWarning("worktree cleanup failed", { error })),
+    );
+    yield* cleanDependencies(serverSettings, now).pipe(
+      Effect.catch((error) => Effect.logWarning("dependency cleanup failed", { error })),
     );
     yield* cleanFiles(
       config.browserArtifactsDir,

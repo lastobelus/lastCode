@@ -39,14 +39,32 @@ import * as ServerActivation from "../serverActivation.ts";
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
 
-const testLayer = (processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([])) =>
-  GeneratedDependencies.layer.pipe(
-    Layer.provideMerge(GitVcsDriver.layer),
+const testLayer = (
+  processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
+  onDependencyInspection: () => void = () => undefined,
+) => {
+  const gitLayer = Layer.effect(
+    GitVcsDriver.GitVcsDriver,
+    Effect.gen(function* () {
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      return {
+        ...git,
+        execute: (request: Parameters<typeof git.execute>[0]) =>
+          Effect.gen(function* () {
+            if (request.operation === "GeneratedDependencies.inspect") onDependencyInspection();
+            return yield* git.execute(request);
+          }),
+      };
+    }),
+  ).pipe(Layer.provide(GitVcsDriver.layer));
+  return GeneratedDependencies.layer.pipe(
+    Layer.provideMerge(gitLayer),
     Layer.provide(VcsProcess.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
   );
+};
 
 const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
   const fs = yield* FileSystem.FileSystem;
@@ -348,6 +366,7 @@ const makeShell = (worktreePath: string) =>
 type SweepCase =
   | "eligible"
   | "whole-policy"
+  | "whole-removal"
   | "disabled"
   | "recent"
   | "queued"
@@ -371,6 +390,7 @@ type SweepCase =
 const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   mode: SweepCase,
   setProcessReader: (reader: () => ReadonlyArray<string> | null) => void,
+  dependencyInspections: () => number,
 ) {
   yield* TestClock.setTime(NOW);
   const f = yield* fixture();
@@ -394,7 +414,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     storageCleanup: {
       ...DEFAULT_SERVER_SETTINGS.storageCleanup,
       worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
-      worktreeAfterDays: mode === "whole-policy" ? 1 : null,
+      worktreeAfterDays: mode === "whole-policy" || mode === "whole-removal" ? 1 : null,
       worktreeOnDelete: false,
       worktreeOnMerge: false,
       worktreeUnchanged: false,
@@ -527,16 +547,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   yield* worker
     .start()
     .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
-  // The worktree has ignored research and modified source, with no integration requirement.
-  yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "research"));
-  yield* f.fs.writeFileString(
-    f.path.join(f.input.worktreePath, "research", "notes.md"),
-    "private research",
-  );
-  const source = mode === "whole-policy" ? "export const value = 1;\n" : "unfinished source";
-  if (mode !== "whole-policy")
+  // Only the whole-removal case has no research or source changes to preserve.
+  if (mode !== "whole-removal") {
+    yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "research"));
+    yield* f.fs.writeFileString(
+      f.path.join(f.input.worktreePath, "research", "notes.md"),
+      "private research",
+    );
+  }
+  const cleanSource = mode === "whole-policy" || mode === "whole-removal";
+  const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
+  if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
   yield* worker.sweep();
+  if (mode === "whole-removal") {
+    assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
+    assert.equal(dependencyInspections(), 0);
+    return;
+  }
   const expectedRemoval = mode === "eligible" || mode === "deleted" || mode === "whole-policy";
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   assert.equal(
@@ -550,6 +578,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
 it.effect.each([
   "eligible",
   "whole-policy",
+  "whole-removal",
   "disabled",
   "recent",
   "queued",
@@ -569,16 +598,21 @@ it.effect.each([
   "process",
   "process-unknown",
   "process-started",
-] as const)("sweep preserves source and research while respecting %s", (mode) => {
+] as const)("sweep respects %s retention and protection rules", (mode) => {
   let readProcesses: () => ReadonlyArray<string> | null = () => [];
+  let dependencyInspections = 0;
   const processes = Effect.sync(() => readProcesses());
-  return integrationFixture(mode, (reader) => {
-    readProcesses = reader;
-  }).pipe(
+  return integrationFixture(
+    mode,
+    (reader) => {
+      readProcesses = reader;
+    },
+    () => dependencyInspections,
+  ).pipe(
     Effect.scoped,
     Effect.provide(
       Layer.merge(
-        testLayer(processes),
+        testLayer(processes, () => dependencyInspections++),
         NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
