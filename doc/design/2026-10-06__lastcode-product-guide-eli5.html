@@ -1,0 +1,1633 @@
+<!doctype html>
+<html lang="en" data-repo-doc-path="doc/design/2026-10-06__lastcode-product-guide-eli5.html">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>LastCode, explained simply — six useful decisions</title>
+    <style>
+      :root {
+        --paper: #f3f0e9;
+        --card: #fffefa;
+        --ink: #17212b;
+        --muted: #596571;
+        --line: #d8d2c7;
+        --accent: #0f766e;
+        --soft: #e4f3ef;
+        --warm: #faeade;
+        --link: #255b84;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          17px/1.7 ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+      main {
+        max-width: 1040px;
+        margin: auto;
+        padding: 36px 24px 72px;
+      }
+      header {
+        padding: 32px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--card);
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+      }
+      h1 {
+        font-size: clamp(2.1rem, 5vw, 3.3rem);
+        margin: 10px 0 18px;
+        max-width: 760px;
+      }
+      h2 {
+        font-size: clamp(1.6rem, 3vw, 2.2rem);
+        margin: 0 0 16px;
+        max-width: 30ch;
+      }
+      h3 {
+        font-size: 1.22rem;
+        margin: 40px 0 12px;
+      }
+      p {
+        margin: 12px 0;
+      }
+      .tabpanel > p,
+      .tabpanel > ul,
+      .tabpanel > ol,
+      .lede,
+      .answer,
+      .example {
+        max-width: 72ch;
+      }
+      .lede {
+        font-size: 1.15rem;
+      }
+      .muted,
+      small {
+        color: var(--muted);
+      }
+      a {
+        color: var(--link);
+        text-underline-offset: 0.18em;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      :focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 4px;
+      }
+      .overview {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
+        gap: 4px 28px;
+        margin: 20px 0 8px;
+        padding-left: 22px;
+        font-size: 0.95rem;
+      }
+      .overview li {
+        margin: 4px 0;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 18px 2px;
+      }
+      .tabs button {
+        flex: 0 0 auto;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 16px;
+        background: var(--card);
+        color: var(--ink);
+        font-size: 0.94rem;
+        font-weight: 650;
+      }
+      .tabs button[aria-selected="true"] {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+      }
+      .tabpanel {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 36px;
+        background: var(--card);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .answer {
+        padding: 16px 20px;
+        margin: 22px 0;
+        border-left: 4px solid var(--accent);
+        background: var(--soft);
+        border-radius: 0 12px 12px 0;
+      }
+      .answer > :first-child,
+      .example > :first-child {
+        margin-top: 0;
+      }
+      .answer > :last-child,
+      .example > :last-child {
+        margin-bottom: 0;
+      }
+      .caution {
+        border-color: #b94d1d;
+        background: var(--warm);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+        gap: 16px;
+        margin: 22px 0;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 1.08rem;
+      }
+      .card p {
+        margin: 0;
+      }
+      .table-wrap {
+        overflow-x: auto;
+        margin: 20px 0;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.95rem;
+        line-height: 1.55;
+      }
+      th,
+      td {
+        padding: 12px 14px;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        background: var(--soft);
+        font-weight: 750;
+      }
+      td:first-child {
+        font-weight: 600;
+      }
+      ul,
+      ol {
+        padding-left: 24px;
+      }
+      li {
+        margin: 8px 0;
+      }
+      code {
+        background: var(--paper);
+        padding: 0.12em 0.35em;
+        border-radius: 5px;
+        font-size: 0.88em;
+        overflow-wrap: anywhere;
+      }
+      .example {
+        padding: 16px 20px;
+        margin: 22px 0;
+        background: var(--paper);
+        border-radius: 12px;
+      }
+      details {
+        margin: 32px 0 0;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 18px;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+      details ul {
+        font-size: 0.9rem;
+      }
+      .diagram {
+        display: flex;
+        align-items: stretch;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 24px 0;
+      }
+      .diagram .box {
+        flex: 1 1 180px;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--paper);
+        line-height: 1.5;
+      }
+      .diagram .arrow {
+        align-self: center;
+        font-size: 1.4rem;
+        color: var(--accent);
+      }
+      .experiment {
+        margin: 22px 0;
+        padding: 16px 20px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        max-width: 72ch;
+      }
+      .experiment p {
+        margin-top: 0;
+      }
+      .experiment label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 22px 10px 0;
+      }
+      .experiment input {
+        width: 20px;
+        height: 20px;
+        accent-color: var(--accent);
+      }
+      output {
+        display: block;
+        font-weight: 650;
+      }
+      .private {
+        margin-top: 24px;
+        padding: 20px;
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+      }
+      .private p {
+        max-width: 72ch;
+      }
+      .private input {
+        display: block;
+        max-width: 100%;
+        margin: 14px 0;
+      }
+      iframe {
+        width: 100%;
+        min-height: 650px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+      }
+      footer {
+        margin: 24px 0;
+        font-size: 0.9rem;
+        color: var(--muted);
+        max-width: 72ch;
+      }
+      .skip {
+        position: absolute;
+        left: 12px;
+        top: -100px;
+        padding: 10px;
+        background: var(--card);
+      }
+      .skip:focus {
+        top: 12px;
+      }
+      @media (max-width: 600px) {
+        body {
+          font-size: 16px;
+        }
+        main {
+          padding: 16px 12px 40px;
+        }
+        header,
+        .tabpanel {
+          padding: 22px 18px;
+        }
+        th,
+        td {
+          padding: 10px;
+        }
+        .diagram .arrow {
+          display: none;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #17212b;
+          --card: #202c37;
+          --ink: #edf1f4;
+          --muted: #bac5ce;
+          --line: #45535f;
+          --accent: #146e67;
+          --soft: #233f3d;
+          --warm: #49352b;
+          --link: #9ecbff;
+        }
+        .eyebrow,
+        .diagram .arrow {
+          color: #87d8cb;
+        }
+      }
+      @media print {
+        body {
+          background: white;
+          color: black;
+        }
+        main {
+          max-width: none;
+          padding: 0;
+        }
+        .tabs,
+        .overview,
+        .private,
+        .experiment,
+        .skip {
+          display: none;
+        }
+        .tabpanel[hidden] {
+          display: block !important;
+        }
+        .tabpanel {
+          break-before: page;
+          border: 0;
+        }
+        a {
+          color: inherit;
+        }
+        details {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip" href="#guide">Skip to the guide</a>
+    <main>
+      <header>
+        <div class="eyebrow">LastCode · explained simply</div>
+        <h1>Six decisions that make your workspace easier to live with.</h1>
+        <p class="lede">
+          Each tab gives a short answer first, then an example, then the details that can change
+          your decision.
+        </p>
+        <ol class="overview">
+          <li>
+            <a href="#schedules">Scheduled tasks</a>: use them for jobs that need an agent's
+            judgment.
+          </li>
+          <li>
+            <a href="#limits">Usage limits</a>: snooze hides the wait; auto-resume continues the
+            work.
+          </li>
+          <li>
+            <a href="#storage">Storage</a>: automatic cleanup is careful; explicit deletion is not.
+          </li>
+          <li><a href="#dashboards">Dashboards</a>: the project Dashboard is LastCode's own.</li>
+          <li>
+            <a href="#environments">Environments</a>: the work lives where the server runs, not
+            where you look at it.
+          </li>
+          <li>
+            <a href="#browser">Browser & captures</a>: profiles keep logins; captures keep evidence.
+          </li>
+        </ol>
+        <p class="muted">
+          Checked against the LastCode source on 6 October 2026. This page only explains; nothing on
+          it changes LastCode. Personal service names and disk measurements are kept in the private
+          companion at the bottom.
+        </p>
+      </header>
+      <nav class="tabs" role="tablist" aria-label="Guide topics">
+        <button
+          type="button"
+          id="tab-schedules"
+          role="tab"
+          aria-controls="schedules"
+          aria-selected="true"
+        >
+          1 · Scheduled tasks
+        </button>
+        <button
+          type="button"
+          id="tab-limits"
+          role="tab"
+          aria-controls="limits"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          2 · Usage limits
+        </button>
+        <button
+          type="button"
+          id="tab-storage"
+          role="tab"
+          aria-controls="storage"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          3 · Storage
+        </button>
+        <button
+          type="button"
+          id="tab-dashboards"
+          role="tab"
+          aria-controls="dashboards"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          4 · Dashboards
+        </button>
+        <button
+          type="button"
+          id="tab-environments"
+          role="tab"
+          aria-controls="environments"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          5 · Environments
+        </button>
+        <button
+          type="button"
+          id="tab-browser"
+          role="tab"
+          aria-controls="browser"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          6 · Browser & captures
+        </button>
+      </nav>
+      <div id="guide">
+        <section
+          class="tabpanel"
+          id="schedules"
+          role="tabpanel"
+          aria-labelledby="tab-schedules"
+          tabindex="0"
+        >
+          <h2>A scheduled task is a recurring message to an agent.</h2>
+          <p>
+            At the time you choose, LastCode sends a saved prompt to an agent, which does the work
+            in a thread. The environment that owns the task must be running. Your browser can be
+            closed.
+          </p>
+          <div class="answer">
+            <strong>Use it when the job needs judgment</strong>, such as “Read this week's changes
+            and suggest what needs attention.” Exact commands and always-on services have better
+            homes; see the table below.
+          </div>
+          <div
+            class="diagram"
+            aria-label="A timer sends a saved prompt to an agent, which produces work in a thread"
+          >
+            <div class="box"><strong>Timer or webhook</strong><br />When should this happen?</div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Saved prompt + model</strong><br />What should the agent decide?
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box"><strong>Thread</strong><br />The work and its answer live here.</div>
+          </div>
+          <h3>Choose the right kind of automation</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tool</th>
+                  <th>Good example</th>
+                  <th>Why it fits</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Scheduled task</td>
+                  <td>Summarize new issues every weekday.</td>
+                  <td>The result needs reading, reasoning or prioritizing. Uses model quota.</td>
+                </tr>
+                <tr>
+                  <td>Project Action</td>
+                  <td>Run an exact test command, Quick CI, a package build, or wait for a PR.</td>
+                  <td>
+                    A saved command does predictable work. An opted-in Action can send its result
+                    back to the same agent when it finishes.
+                  </td>
+                </tr>
+                <tr>
+                  <td>OS service or timer</td>
+                  <td>Keep LastCode or a database running; perform a staged app update.</td>
+                  <td>
+                    It must keep working while LastCode is stopped, starting or being replaced.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>Set one up</h3>
+          <ol>
+            <li>
+              Open <strong>Settings → Scheduled tasks</strong>. Select the environment and project
+              that own the work.
+            </li>
+            <li>
+              Choose <strong>New task</strong>, then a prompt, model, workspace and permission mode.
+              Say clearly what the output should be and what the agent must not do.
+            </li>
+            <li>
+              Choose <strong>At a time</strong>, an interval, or <strong>On webhook</strong>. Fixed
+              times use the environment's time zone, which may differ from your laptop's or phone's.
+              The shortest interval is one minute.
+            </li>
+            <li>
+              Save. From the list you can edit, pause, resume, run now or delete. Webhook tasks run
+              when a request arrives, so they have no Run now. Tasks bound to a thread also appear
+              in that thread's automations panel.
+            </li>
+          </ol>
+          <h3>Where the results go</h3>
+          <ul>
+            <li>
+              <strong>A new thread for each run</strong> — the default in the settings form. Good
+              for independent reports, such as a daily summary.
+            </li>
+            <li>
+              <strong>An existing thread</strong> — the default for tasks an agent creates (they
+              bind to the calling thread). Good for a continuing investigation. The prompt waits
+              behind work already running there; it does not interrupt a tool.
+            </li>
+          </ul>
+          <div class="example">
+            <strong>A good first prompt</strong>
+            <p>
+              “Review new issues since your last report. Give me the three most useful decisions,
+              with links and reasons. Do not change files, contact anyone, or close issues.” Start
+              daily or weekly, and adjust after reading a few results.
+            </p>
+          </div>
+          <h3>What the clock does and does not promise</h3>
+          <ul>
+            <li>
+              After downtime, an overdue interval task runs once to catch up. It does not replay
+              every missed run.
+            </li>
+            <li>
+              A fixed-time run that is more than ten minutes late is skipped until its next slot.
+            </li>
+            <li>
+              <strong
+                >“Succeeded” means the prompt was dispatched, not that the agent finished the work
+                successfully.</strong
+              >
+              Read the thread for the real outcome.
+            </li>
+            <li>A frequent schedule can queue work faster than the agent finishes it.</li>
+          </ul>
+          <p>
+            A webhook can react to events such as a CI failure or a new PR. A public webhook URL
+            uses T3 Connect; request signatures and optional offline holding are separate settings.
+            Read the existing webhook guide before connecting an outside sender.
+          </p>
+          <div class="answer">
+            <strong>Recommendation:</strong> keep whatever runs or updates LastCode outside
+            LastCode. Move an existing timer into a scheduled task only if its real job is to ask an
+            agent for judgment and it already depends on LastCode being online. For scripts that do
+            the same thing every time, keep their OS timer or use an Action; an agent should not be
+            paid to act as a clock. Your actual inventory and candidates are in the private
+            companion.
+          </div>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="docs/user/project-settings.md"
+                  >Scheduled tasks, webhooks and Action setup</a
+                >
+              </li>
+              <li>
+                <a data-source="apps/server/src/scheduledTasks/Schedule.ts"
+                  >Time calculation and ten-minute grace window</a
+                >
+              </li>
+              <li>
+                <a data-source="apps/server/src/scheduledTasks/ScheduledTaskService.ts"
+                  >Queueing, fresh threads and dispatch status</a
+                >
+              </li>
+              <li>
+                <a data-source="docs/user/resumable-project-actions.md"
+                  >Actions that return to the agent</a
+                >
+              </li>
+            </ul>
+          </details>
+        </section>
+        <section
+          class="tabpanel"
+          id="limits"
+          role="tabpanel"
+          aria-labelledby="tab-limits"
+          tabindex="0"
+          hidden
+        >
+          <h2>Snooze hides the wait. Auto-resume continues the work.</h2>
+          <p>
+            <strong>Limited</strong> means the provider stopped the turn because a usage or rate
+            limit was reached. That is different from an agent waiting for your answer or approval,
+            or a tool that broke.
+          </p>
+          <div class="answer">
+            When the provider reports a valid reset time, LastCode can hide the thread until then,
+            send “Continue where you left off.” at the reset, or both.
+            <strong>Both are off by default.</strong>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Auto-resume</th>
+                  <th>Snooze</th>
+                  <th>What happens at the reset</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Off</td>
+                  <td>Off</td>
+                  <td>The thread stays visible. You decide when to resume.</td>
+                </tr>
+                <tr>
+                  <td>Off</td>
+                  <td>On</td>
+                  <td>The thread reappears. No prompt is sent.</td>
+                </tr>
+                <tr>
+                  <td>On</td>
+                  <td>Off</td>
+                  <td>The thread stays visible and is told to continue.</td>
+                </tr>
+                <tr>
+                  <td>On</td>
+                  <td>On</td>
+                  <td>The thread reappears and is told to continue.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="experiment">
+            <p><strong>Try the two switches</strong> (illustration only):</p>
+            <label><input type="checkbox" id="demo-resume" />Auto-resume</label
+            ><label><input type="checkbox" id="demo-snooze" />Snooze</label
+            ><output id="limit-result" aria-live="polite"
+              >Visible while waiting. At reset: waits for you.</output
+            >
+          </div>
+          <h3>Set the defaults</h3>
+          <p>
+            On web or desktop, open <strong>Settings → General</strong> and find
+            <strong>Auto-resume limited threads</strong> and
+            <strong>Snooze limited threads</strong>. On mobile, use
+            <strong>Settings → Thread behavior</strong>. These belong to an environment, so select
+            the right one first. Projects cannot override them.
+          </p>
+          <h3>Choose for one thread</h3>
+          <ul>
+            <li>
+              In a limited thread, choose <strong>Resume at reset</strong> or
+              <strong>Snooze until reset</strong> for that stop.
+            </li>
+            <li>
+              <strong>Cancel auto-resume</strong> removes the continuation.
+              <strong>Wake now</strong> removes the snooze. They are independent: waking early does
+              not cancel auto-resume, and canceling auto-resume does not wake a snoozed thread.
+            </li>
+            <li>
+              Changing a default does not undo choices already saved on a thread. Undo those in the
+              thread itself.
+            </li>
+            <li>To continue by hand, use <strong>Resume</strong> in an empty composer.</li>
+          </ul>
+          <h3>When auto-resume can work</h3>
+          <ul>
+            <li>
+              The most recent turn stopped on a usage limit LastCode recognizes, and the reset time
+              is later than that stop. Without a reset time, you retry by hand or use an ordinary
+              snooze.
+            </li>
+            <li>
+              The owning environment is running. Saved choices survive a restart, and an overdue
+              continuation can run when the server comes back. Timing follows the server's
+              scheduler, not an exact alarm on your phone.
+            </li>
+            <li>
+              Nothing has changed the situation. A new turn, a different provider, archiving,
+              deleting, settling, or a pending approval or question can prevent the continuation
+              from starting. A longer manual snooze delays it.
+            </li>
+            <li>
+              Queued messages stay saved. The limited turn continues first, and the queue follows
+              once the continuation finishes. A queue that was held separately may still need a
+              manual resume.
+            </li>
+          </ul>
+          <p>
+            Today only the Codex and Claude adapters add reset times to limit stops, when available;
+            the other adapters checked do not. Even then, the allowance may not actually be usable
+            at that moment. LastCode never guesses a reset time and never switches providers for
+            you.
+          </p>
+          <div class="example">
+            <strong>Example</strong>
+            <p>
+              A research turn hits its weekly limit at 10:00, with a reset reported for 14:00.
+              Snooze keeps your inbox quieter for four hours. Auto-resume asks the agent to continue
+              around 14:00. Turn on both to get both. Neither one answers a question the agent was
+              waiting on.
+            </p>
+          </div>
+          <div class="answer">
+            <strong>Recommendation:</strong> turn on both for work you are happy to let continue
+            unattended. Use snooze alone when you want to rethink cost or direction before
+            restarting. For one important thread, keep it visible and choose Resume at reset
+            yourself.
+          </div>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="docs/user/thread-sidebar.md">Limited threads and manual controls</a>
+              </li>
+              <li>
+                <a data-source="apps/server/src/orchestration-v2/UsageLimitRecoveryWorker.ts"
+                  >Arming, stored choices and continuation text</a
+                >
+              </li>
+              <li>
+                <a data-source="apps/server/src/orchestration-v2/Orchestrator.ts"
+                  >Final checks before dispatch</a
+                >
+              </li>
+              <li>
+                <a data-source="packages/contracts/src/settings.ts">Off-by-default settings</a>
+              </li>
+            </ul>
+          </details>
+        </section>
+        <section
+          class="tabpanel"
+          id="storage"
+          role="tabpanel"
+          aria-labelledby="tab-storage"
+          tabindex="0"
+          hidden
+        >
+          <h2>Keep the research. Reclaim what you can reinstall.</h2>
+          <p>
+            A worktree is another checkout of your project. One worktree can hold irreplaceable
+            notes and replaceable dependency installs side by side. Deleting the whole checkout and
+            deleting only its dependencies are very different decisions.
+          </p>
+          <div class="answer caution">
+            <strong>Automatic and explicit deletion are not equally careful.</strong>
+            <ul>
+              <li>
+                <strong>Automatic</strong> whole-worktree cleanup first checks for local work and
+                for anything still using the worktree.
+              </li>
+              <li>
+                <strong>Explicit</strong> worktree deletion currently force-removes the checkout,
+                without those Git and ignored-file checks.
+              </li>
+            </ul>
+            A confirmation dialog is not a backup of your research.
+          </div>
+          <h3>What the current storage switches do</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Setting in Settings → Storage</th>
+                  <th>What it removes</th>
+                  <th>Keep in mind</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Delete worktrees with deleted threads</td>
+                  <td>A managed worktree after its last thread is deleted.</td>
+                  <td>
+                    The automatic safety checks still apply. Deleting a thread does not mean
+                    force-deleting its files.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Delete unchanged worktrees</td>
+                  <td>Managed worktrees with no commits beyond the default branch.</td>
+                  <td>
+                    The safety checks for local files still apply. “Unchanged” does not mean
+                    “unimportant.”
+                  </td>
+                </tr>
+                <tr>
+                  <td>Delete inactive worktrees</td>
+                  <td>Managed worktrees after the number of inactive days you choose.</td>
+                  <td>
+                    Branches and conversations stay. Being inactive does not make research
+                    disposable.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Delete merged worktrees</td>
+                  <td>
+                    A worktree whose PR is merged and whose commits are in the default branch.
+                  </td>
+                  <td>Squash merges can fail that commit-history check, so the checkout stays.</td>
+                </tr>
+                <tr>
+                  <td>Delete old browser artifacts</td>
+                  <td>Saved captures in the environment's browser-artifact folder, by age.</td>
+                  <td>
+                    Old capture links stop working. Browser profiles, message attachments and other
+                    copies of desktop captures are not touched.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Delete old rotated logs</td>
+                  <td>Old rotated log files.</td>
+                  <td>Current logs are kept. This is not a general log-folder cleanup.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <ul>
+            <li>Every rule is off by default.</li>
+            <li>Cleanup runs at startup, after a setting changes, and every hour.</li>
+            <li>
+              Worktree rules can be <strong>Inherit</strong>, <strong>Off</strong> or
+              <strong>Custom</strong> for each project or checkout. Browser and log retention apply
+              to the whole environment.
+            </li>
+            <li>
+              Choosing <strong>All environments</strong> changes connected servers only, not offline
+              ones.
+            </li>
+          </ul>
+          <h3>Does an ignored tmp/ folder protect my work?</h3>
+          <p>
+            <strong
+              >Yes, from automatic whole-worktree cleanup — if tmp/ really is ignored there.</strong
+            >
+          </p>
+          <ul>
+            <li>
+              The only ignored folder automatic cleanup will delete is <code>node_modules/</code>.
+              Any other ignored content, such as research in <code>tmp/</code>, blocks removal.
+              Tracked changes and untracked files block it too.
+            </li>
+            <li>
+              Whether <code>tmp/</code> is ignored depends on the checkout. The current repository's
+              root ignore file does not ignore it. Older worktrees, local exclude rules and your
+              global ignore file may. Check the real rules instead of trusting the folder name.
+            </li>
+            <li>
+              None of this protects against explicit deletion, which force-removes the checkout.
+            </li>
+          </ul>
+          <p>
+            Automatic removal is also blocked by active or queued work, live provider sessions,
+            terminals, preview leases, shared worktrees and project roots. If many worktrees are
+            kept, the safeguards may be working as intended.
+          </p>
+          <div
+            class="diagram"
+            aria-label="Research-bearing worktree is retained by current whole-worktree cleanup; proposed dependency-only cleanup would preserve research and remove recognized dependencies"
+          >
+            <div class="box">
+              <strong>A kept checkout</strong><br />Source + research + dependencies
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Today's automatic rule</strong><br />Research or active use? Keep the whole
+              checkout.
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Proposed narrower rule</strong><br />Keep the checkout and notes; remove only
+              recognized, idle dependencies.
+            </div>
+          </div>
+          <p>
+            A separate, unmerged change implements that narrower rule:
+            <strong>proposed only, off by default</strong>. It targets only ignored npm/pnpm
+            installs that it positively recognizes. It is not a switch in the version checked here.
+            Build output, vendored source, <code>tmp/</code> and research are outside its initial
+            scope. Treat its final controls and guarantees as unconfirmed until it ships.
+          </p>
+          <h3>Screenshot settings will not save much disk</h3>
+          <p>
+            <strong>Settings → SnapShots</strong> controls desktop capture, app text, the shortcut,
+            sound, flash and animation. There is no format, quality or maximum-size setting for
+            screenshots. Captures start as PNG, and oversized attachments are compressed
+            automatically. Turning off app text avoids some extra data, but it will not fix a large
+            dependency folder. Browser-artifact retention does not remove attached screenshots.
+          </p>
+          <div class="answer">
+            <strong>Recommendation:</strong> keep the broad inactive and merged rules off while
+            uncommitted research matters. Keep sensible browser and log retention, and save lasting
+            evidence somewhere that does not expire. For space, start with measured, inactive
+            dependency installs, removed in a separately approved cleanup. Build and vendor folders
+            need case-by-case evidence; their names alone are not permission to delete.
+          </div>
+          <p>
+            Your actual switch settings, measured space users and ranked next steps are in the
+            private companion. This guide does not enable rules, remove files, or repeat the storage
+            owner's disk audit.
+          </p>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="docs/user/project-settings.md">Storage policy and inheritance</a>
+              </li>
+              <li>
+                <a data-source="apps/server/src/storageCleanup.ts"
+                  >Automatic cleanup and artifact retention</a
+                >
+              </li>
+              <li>
+                <a data-source="apps/server/src/orchestration-v2/WorktreeCleanupService.ts"
+                  >Explicit worktree deletion</a
+                >
+              </li>
+              <li><a data-source="docs/user/snap-shot.md">SnapShot controls</a></li>
+            </ul>
+          </details>
+        </section>
+        <section
+          class="tabpanel"
+          id="dashboards"
+          role="tabpanel"
+          aria-labelledby="tab-dashboards"
+          tabindex="0"
+          hidden
+        >
+          <h2>The project Dashboard shows what needs your attention.</h2>
+          <div class="answer">
+            <strong>LastCode built it.</strong> In LastCode's history, “Open dashboard” comes from
+            LastCode's live-project-dashboard contribution. The upstream branch we checked has
+            neither the route nor the menu entry, so there is no upstream dashboard to rebuild our
+            reports on.
+          </div>
+          <h3>How to open it</h3>
+          <ul>
+            <li>
+              A project's context menu → <strong>Open dashboard</strong>, or the dashboard icon in
+              the project heading.
+            </li>
+            <li>The command palette → <strong>Open project dashboard</strong>.</li>
+            <li>A thread's context menu, which opens that thread's project dashboard.</li>
+          </ul>
+          <p>All of these open the same view.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Needs your attention</h3>
+              <p>Questions, approvals, input requests, plans and failures you can act on.</p>
+            </div>
+            <div class="card">
+              <h3>Work in motion</h3>
+              <p>Threads that are working right now.</p>
+            </div>
+            <div class="card">
+              <h3>Progress & updates</h3>
+              <p>Progress and results reported by agents.</p>
+            </div>
+            <div class="card">
+              <h3>Parked contexts</h3>
+              <p>Threads set aside for later.</p>
+            </div>
+          </div>
+          <p>
+            It shows one project on one environment. The sidebar can group matching projects from
+            several machines, but the dashboard does not combine their work. Subagents, archived
+            threads and deleted threads are left out. The mobile app has no equivalent dashboard in
+            the checked code.
+          </p>
+          <h3>Where the other status views are</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>What you want</th>
+                  <th>Where to go</th>
+                  <th>What it answers</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Project attention</td>
+                  <td>Project → Open dashboard</td>
+                  <td>Which conversations need me?</td>
+                </tr>
+                <tr>
+                  <td>Checkpoint history</td>
+                  <td>
+                    Run <code>lastcode-checkpoints</code> in a terminal; add <code>-n 20</code> or
+                    <code>--verbose</code>.
+                  </td>
+                  <td>Which checkpoints and revisions exist?</td>
+                </tr>
+                <tr>
+                  <td>CI or package runs</td>
+                  <td>Run the relevant Project Action; open its terminal for details.</td>
+                  <td>Did this command finish, and if not, why?</td>
+                </tr>
+                <tr>
+                  <td>Local nightly or build progress</td>
+                  <td>
+                    Settings → LastCode → Show and install local nightlies; also the sidebar
+                    updater.
+                  </td>
+                  <td>Which version or build is available or in progress?</td>
+                </tr>
+                <tr>
+                  <td>A saved HTML report</td>
+                  <td>Open its file link; choose Open file in preview browser if needed.</td>
+                  <td>What did the report say when it was written?</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The repository has no separate shipped HTML dashboard for CI, builds or nightlies. You
+            may have a personally saved report elsewhere, but it can't be identified here without
+            its file or link. The checkpoint terminal view and the updater are confirmed features.
+          </p>
+          <h3>Should these share code?</h3>
+          <p>
+            They look alike — status, progress, links, actions — but their data comes from different
+            places. Thread questions come from conversation state. Package progress comes from build
+            state. Checkpoint history comes from tags and records. A saved HTML report may be a
+            fixed snapshot.
+          </p>
+          <div class="answer">
+            <strong>Recommendation:</strong> start by adding links to the existing status views, and
+            use the existing file preview for saved HTML. If two live views really show the same
+            status, share that one small data helper or component. Nothing here justifies a shared
+            dashboard framework or a broad refactor.
+          </div>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="apps/web/src/components/dashboard/ProjectDashboard.tsx"
+                  >Project dashboard layout and selected scope</a
+                >
+              </li>
+              <li>
+                <a data-source="packages/client-runtime/src/state/dashboard.ts"
+                  >Attention/progress data and exclusions</a
+                >
+              </li>
+              <li>
+                <a data-source="docs/lastcode/nightly-workflow.md">Checkpoint terminal dashboard</a>
+              </li>
+              <li>
+                <a data-source="docs/lastcode/local-nightly-updates.md"
+                  >Updater and build progress</a
+                >
+              </li>
+              <li>
+                <a
+                  href="https://github.com/lastobelus/lastCode/commit/c69c2b80886c093fe1870cb5649ddd254f51f22b"
+                  >Carry history attributing the live dashboard contribution</a
+                >
+              </li>
+            </ul>
+          </details>
+        </section>
+        <section
+          class="tabpanel"
+          id="environments"
+          role="tabpanel"
+          aria-labelledby="tab-environments"
+          tabindex="0"
+          hidden
+        >
+          <h2>An environment is the place that owns the work.</h2>
+          <p>
+            It holds the running server, the files, provider credentials and conversation history. A
+            laptop, a remote workstation and a build server can each be a separate environment. Your
+            phone or browser is only the control panel: opening it there does not move the work onto
+            that device.
+          </p>
+          <div
+            class="diagram"
+            aria-label="Client reaches an environment through a route; environment owns project and agent; device hub reaches separate device hosts"
+          >
+            <div class="box"><strong>Your client</strong><br />Desktop, browser or phone</div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box"><strong>A route</strong><br />How you reach the server</div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Environment</strong><br />Project files + agent + history<br />Device hub →
+              local/SSH devices
+            </div>
+          </div>
+          <h3>Routes are different doors into the same place</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Use it when</th>
+                  <th>What stays the same</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>This device / loopback</td>
+                  <td>The server is on this desktop.</td>
+                  <td rowspan="5">
+                    The environment, its files and its conversations. Adding a route does not copy
+                    or move them.
+                  </td>
+                </tr>
+                <tr>
+                  <td>LAN</td>
+                  <td>Both devices are on the same reachable network.</td>
+                </tr>
+                <tr>
+                  <td>Tailscale</td>
+                  <td>Both devices can use the same private tailnet.</td>
+                </tr>
+                <tr>
+                  <td>T3 Connect</td>
+                  <td>You want managed remote access without router port forwarding.</td>
+                </tr>
+                <tr>
+                  <td>Public URL / SSH</td>
+                  <td>
+                    You already have a reachable server URL, or desktop can set up an SSH-forwarded
+                    connection.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <ul>
+            <li>
+              <strong>Tunnel</strong> means the remote-access path through T3 Connect.
+              <strong>Relay</strong> means the go-between that carries that connection. Neither is a
+              second environment.
+            </li>
+            <li>
+              A direct connection uses the server's own address. SSH is a different, forwarded path
+              with its own setup.
+            </li>
+          </ul>
+          <p>
+            Manage routes in <strong>Settings → Connections</strong> on web or desktop, and
+            <strong>Settings → Environments</strong> on mobile. A saved machine can have several
+            routes. LastCode tries them in order, falls back when one fails, and can return to an
+            earlier route once it works again. Pairing the same machine at another address adds a
+            route, not another machine. The hosted HTTPS web client needs a secure route the browser
+            can reach.
+          </p>
+          <h3>A device hub connects test devices</h3>
+          <p>
+            Open <strong>Settings → Integrations → Devices</strong>. The environment's device hub
+            finds simulators and emulators and streams them. By default they run beside its server.
+            Under <strong>Device hosts</strong>, an SSH-connected machine can supply devices without
+            owning your project or agent.
+          </p>
+          <div class="example">
+            <strong>Example: Linux work, iOS testing</strong>
+            <p>
+              Your source and agent live on <code>managed-server</code>. An iOS simulator lives on a
+              Mac called <code>device-host</code>. Add that Mac as an SSH device host to the Linux
+              environment, and keep the Linux environment selected for agent work. Pick the Mac as
+              the environment instead only if the project and provider themselves should run there.
+            </p>
+          </div>
+          <ul>
+            <li>SSH aliases and keys are looked up on the owning environment's server.</li>
+            <li>
+              <strong>Test connection</strong> checks for tools without installing anything. The
+              first device listing installs the pinned device tools.
+            </li>
+            <li>
+              Builds, app installs and a reachable development server still need setting up. A
+              remote simulator cannot use another machine's localhost without a reachable address or
+              port forwarding.
+            </li>
+          </ul>
+          <h3>Can a child thread live somewhere else?</h3>
+          <div class="answer">
+            <strong
+              >No. Grouped child threads and delegated subagents stay in their parent's
+              environment.</strong
+            >
+            A child is grouped under its creator only when its environment and project match the
+            parent's. The current create-threads operation makes threads in the caller's own
+            project. Work on another machine is a separate thread owned by that environment, not a
+            child that crosses environments.
+          </div>
+          <p>
+            The sidebar can group matching repositories from several environments. That changes what
+            you see together, not who owns each thread. Auto balance can pick an environment for a
+            <em>new</em> thread; existing threads stay where they started. On mobile you pick the
+            environment yourself.
+          </p>
+          <div class="example">
+            <strong>Why an agent may not open a thread ID from another environment</strong>
+            <p>
+              Your client can connect to several environments, but the agent's thread-read and
+              thread-send tools only look in their own environment. They take a thread ID with no
+              way to name an environment or route, so a bare ID from elsewhere is not enough.
+              Instead, open that environment in the client and ask an agent there, or paste the
+              relevant text into this conversation. Cross-environment links do not yet work with
+              these tools.
+            </p>
+          </div>
+          <p>
+            <strong>A naming trap:</strong> a thread's <strong>Local</strong> workspace means the
+            project's current checkout rather than a new worktree. It does not mean “on the device I
+            am looking at.” Desktop's <strong>Local environment</strong> setting, by contrast,
+            really is about the server on that desktop.
+          </p>
+          <div class="answer">
+            <strong>Recommendation:</strong> choose the environment by where the files, tools and
+            credentials should live. Choose routes by how reliably you can reach it. Add a device
+            host only when testing needs another machine's simulator or emulator.
+          </div>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="docs/user/remote-access.md"
+                  >Routes, tunnels, SSH and auto balance</a
+                >
+              </li>
+              <li><a data-source="docs/user/devices.md">Device hub and SSH hosts</a></li>
+              <li>
+                <a data-source="apps/web/src/components/LegacySidebar.tsx"
+                  >Ordinary creator ownership</a
+                >
+              </li>
+              <li>
+                <a data-source="apps/web/src/components/legacySidebarFamilies.logic.ts"
+                  >Grouping within environment/project</a
+                >
+              </li>
+              <li>
+                <a data-source="docs/internals/glossary.md"
+                  >Environment, project and thread definitions</a
+                >
+              </li>
+            </ul>
+          </details>
+        </section>
+        <section
+          class="tabpanel"
+          id="browser"
+          role="tabpanel"
+          aria-labelledby="tab-browser"
+          tabindex="0"
+          hidden
+        >
+          <h2>A profile keeps a login. A capture keeps evidence.</h2>
+          <p>
+            The built-in Browser panel can sign in as different identities, capture a page, or
+            record a short walkthrough. Desktop SnapShots capture another app into your draft. The
+            names sound alike, but the jobs differ.
+          </p>
+          <div class="answer">
+            <strong>The short version:</strong> a profile is a reusable browser identity. A
+            screenshot shows one moment. A recording shows what changed. An agent snapshot also
+            describes the page's controls. None of these is a Git checkpoint.
+          </div>
+          <h3>Browser profiles: separate accounts without signing out</h3>
+          <p>
+            Go to
+            <strong>Settings → Integrations → Browser profiles → Add profile → Blank profile</strong
+            >. Make one called Work and one called Personal, then pick a profile when you open a
+            Browser tab. A tab keeps its profile for life; changing the default only affects new
+            tabs.
+          </p>
+          <ul>
+            <li>
+              <strong>Logins are shared per device, environment and profile.</strong> Tabs using the
+              same profile on the same desktop and environment share cookies, logins and site
+              storage. Another desktop or another environment has separate login data, even with the
+              same profile name.
+            </li>
+            <li>
+              Default and custom profiles survive a restart.
+              <strong>Incognito lasts until the desktop app process quits</strong>; closing one tab
+              does not clear it.
+            </li>
+            <li>
+              You can create up to 24 custom profiles, with names up to 48 characters. Default and
+              Incognito cannot be renamed or removed.
+            </li>
+            <li>
+              <strong>Clear cookies and cache</strong> also clears site storage, IndexedDB and
+              service workers, so expect to sign in again.
+              <strong>Remove profile and data</strong> deletes that profile's data across the
+              environments it knows about, where possible.
+            </li>
+            <li>
+              Importing cookies copies them once. It does not keep syncing logins from another
+              browser.
+            </li>
+          </ul>
+          <h3>Pick the right kind of evidence</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Capture</th>
+                  <th>How to make it</th>
+                  <th>Where it goes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Browser screenshot</td>
+                  <td>Click the camera button in the Browser panel.</td>
+                  <td>
+                    A local PNG. The toast offers Copy image, Copy path and Reveal. It is not
+                    attached to the composer automatically.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Browser recording</td>
+                  <td>Shift-click the camera to start; click again to stop.</td>
+                  <td>
+                    A local video, with Reveal and Copy path. Attach it yourself if you want it in a
+                    conversation.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Agent preview snapshot</td>
+                  <td>An agent calls <code>preview_snapshot</code>.</td>
+                  <td>
+                    Page text, controls, diagnostics and an image, returned to the agent. A saved
+                    PNG path needs <code>save: true</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Desktop SnapShot</td>
+                  <td>
+                    Turn on Settings → SnapShots, then press the capture shortcut with another
+                    window in front.
+                  </td>
+                  <td>
+                    The image, and optionally the app's text, attach to your draft. Nothing is sent
+                    automatically.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Git checkpoint</td>
+                  <td>LastCode records it so you can diff and restore.</td>
+                  <td>A hidden Git reference to file and staging state. No image or video.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>Recordings: keep them short</h3>
+          <ul>
+            <li>
+              A recording captures the <strong>preview browser tab</strong> only, with no audio.
+            </li>
+            <li>
+              <strong>Settings → Integrations → Browser</strong> sets a maximum frame rate of 30 fps
+              (the default) or 60 fps, and optional key and mouse overlays. Password fields never
+              appear in the key overlay. Changes apply to new recordings.
+            </li>
+            <li>
+              The format is picked automatically: MP4 (H.264) when supported, otherwise WebM.
+              Resolution follows the tab. There is no quality setting.
+            </li>
+            <li>
+              There is no fixed length limit, but agents can only transfer recordings up to 50 MiB.
+              A short reproduction is easier to share than a long session.
+            </li>
+          </ul>
+          <h3>Desktop SnapShots: show the agent what you see</h3>
+          <ul>
+            <li>
+              Off by default. Available on macOS, Windows and Linux Wayland; X11 is not supported.
+            </li>
+            <li>
+              The default shortcut on macOS and Windows is both Shift keys together. On Linux, setup
+              depends on the desktop.
+            </li>
+            <li>
+              macOS needs Screen Recording permission, plus Accessibility when
+              <strong>Include app text</strong> is on.
+            </li>
+            <li>
+              The target draft is fixed when the capture starts, even if focus moves. With no thread
+              open, the capture starts a draft in the current project. Captures not yet saved to a
+              draft survive an app restart.
+            </li>
+            <li>Sound, flash and animation only change the feedback, not the saved image.</li>
+          </ul>
+          <p>
+            <strong>There are no format, quality or size controls.</strong> Captures start as PNG.
+            Images within the 10 MiB attachment limit are kept as they are. Larger ones are
+            automatically shrunk and compressed to WebP or JPEG, with the longest edge at most 2048
+            pixels. Anything over 50 MiB is rejected.
+          </p>
+          <h3>Agent snapshots</h3>
+          <p>
+            An agent snapshot helps the agent find buttons and understand the page, not just see
+            pixels. Its image is at most 1280 pixels wide; text is capped near 20 KB, and the
+            snapshot says what was left out. <code>includeImage: false</code> asks for text only;
+            <code>save: true</code> saves a PNG; using both returns the saved path or URL without
+            the full page description.
+          </p>
+          <h3>Which apps can do this</h3>
+          <p>
+            Browser profiles, the camera and recording are provided by the desktop app. Web and
+            mobile can control an agent whose environment has a connected desktop browser host, but
+            they do not provide Electron capture themselves. Without such a host, the agent's
+            browser tools are unavailable.
+          </p>
+          <h3>What retention deletes</h3>
+          <p>
+            Browser-artifact retention deletes expiring captures in its environment's artifact
+            folder. It does not erase browser profiles, attached screenshots, recordings copied
+            elsewhere, or Git checkpoints. A saved screenshot path and a conversation attachment
+            last for different lengths of time.
+          </p>
+          <div class="answer">
+            <strong>Recommendation:</strong> use persistent Work and Personal profiles for accounts,
+            and Incognito for temporary tests. Use a screenshot for a layout problem and a short 30
+            fps recording for a sequence of steps. Use a SnapShot when the problem is in another
+            desktop app. Before capture retention expires, keep lasting evidence as a deliberate
+            attachment or saved file.
+          </div>
+          <details>
+            <summary>Where these answers come from</summary>
+            <ul>
+              <li>
+                <a data-source="packages/contracts/src/browserProfile.ts"
+                  >Profile limits and persistence</a
+                >
+              </li>
+              <li><a data-source="docs/user/browser-import.md">Cookie import limitations</a></li>
+              <li>
+                <a data-source="apps/web/src/browser/browserRecording.ts"
+                  >Recording format and rate</a
+                >
+              </li>
+              <li><a data-source="docs/user/snap-shot.md">SnapShot setup and draft behavior</a></li>
+              <li>
+                <a data-source="apps/server/src/mcp/toolkits/preview/tools.ts"
+                  >Agent snapshot/save and recording transfer</a
+                >
+              </li>
+            </ul>
+          </details>
+        </section>
+      </div>
+      <aside class="private" aria-labelledby="private-title">
+        <h3 id="private-title" style="margin-top: 0">Your private companion</h3>
+        <p>
+          Personal service names, paths, current settings and disk measurements live in a separate
+          file, <strong>private-inventory.html</strong>, not in this public guide. Open it directly,
+          or choose it below to read it here. The file is read inside this page and is never
+          uploaded.
+        </p>
+        <label for="private-file">Choose your private HTML companion</label>
+        <input type="file" id="private-file" accept=".html,text/html" />
+        <p id="private-status" role="status"></p>
+        <iframe
+          id="private-frame"
+          title="Private service and storage inventory"
+          sandbox=""
+          hidden
+        ></iframe>
+      </aside>
+      <footer>
+        <p>
+          Simple explanations first, sources on request, no external fonts or libraries. The
+          recommendations are suggestions only: this page does not migrate, schedule, restart,
+          delete or change any setting.
+        </p>
+      </footer>
+    </main>
+    <script>
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+      function activate(id, focus = false) {
+        const selected = tabs.find((tab) => tab.getAttribute("aria-controls") === id) || tabs[0];
+        for (const tab of tabs) {
+          const active = tab === selected;
+          tab.setAttribute("aria-selected", String(active));
+          tab.tabIndex = active ? 0 : -1;
+        }
+        for (const panel of panels)
+          panel.hidden = panel.id !== selected.getAttribute("aria-controls");
+        if (focus) selected.focus();
+      }
+      for (const [index, tab] of tabs.entries()) {
+        tab.addEventListener("click", () => {
+          activate(tab.getAttribute("aria-controls"));
+          history.replaceState(null, "", "#" + tab.getAttribute("aria-controls"));
+        });
+        tab.addEventListener("keydown", (event) => {
+          let next;
+          if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+          if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+          if (event.key === "Home") next = 0;
+          if (event.key === "End") next = tabs.length - 1;
+          if (next === undefined) return;
+          event.preventDefault();
+          tabs[next].click();
+          tabs[next].focus();
+        });
+      }
+      for (const link of document.querySelectorAll(".overview a")) {
+        link.addEventListener("click", (event) => {
+          const id = link.getAttribute("href").slice(1);
+          event.preventDefault();
+          activate(id, true);
+          history.replaceState(null, "", "#" + id);
+          document.querySelector(".tabs").scrollIntoView({ block: "start" });
+        });
+      }
+      window.addEventListener("hashchange", () => activate(location.hash.slice(1)));
+      activate(location.hash.slice(1));
+      function updateLimitExample() {
+        const resume = document.getElementById("demo-resume").checked;
+        const snooze = document.getElementById("demo-snooze").checked;
+        document.getElementById("limit-result").textContent =
+          (snooze
+            ? "Hidden while waiting. At reset: reappears"
+            : "Visible while waiting. At reset:") +
+          (resume
+            ? snooze
+              ? " and continues."
+              : " continues."
+            : snooze
+              ? " and waits for you."
+              : " waits for you.");
+      }
+      document.getElementById("demo-resume").addEventListener("change", updateLimitExample);
+      document.getElementById("demo-snooze").addEventListener("change", updateLimitExample);
+      const sourceBase =
+        "https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/";
+      for (const link of document.querySelectorAll("[data-source]"))
+        link.href = sourceBase + link.dataset.source;
+      document.getElementById("private-file").addEventListener("change", async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        const status = document.getElementById("private-status");
+        const frame = document.getElementById("private-frame");
+        if (file.size > 2 * 1024 * 1024) {
+          status.textContent = "Choose the small HTML companion (under 2 MiB).";
+          return;
+        }
+        try {
+          const content = await file.text();
+          const policy =
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'\">";
+          frame.srcdoc = content.replace(/<head(?:\s[^>]*)?>/i, (match) => match + policy);
+          frame.hidden = false;
+          status.textContent = "Private companion loaded locally. Nothing was uploaded.";
+        } catch {
+          status.textContent = "This file could not be read. Open the companion directly instead.";
+        }
+      });
+    </script>
+  </body>
+</html>

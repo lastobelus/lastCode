@@ -19,6 +19,9 @@ directories.
 
 ## Documents
 
+- [Plain-language product guide](../../doc/design/2026-10-06__lastcode-product-guide-eli5.html):
+  one tabbed ELI5 page covering scheduled tasks, usage limits, storage, dashboards,
+  environments, and browser profiles/captures.
 - [Documentation-site research archive](documentation-site-research/README.md):
   preserved design proposals, prototypes, delivery history, and issue ownership
   for the unfinished public site release.
