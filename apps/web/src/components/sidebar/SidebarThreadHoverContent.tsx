@@ -77,6 +77,11 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
       <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
         {props.thread.title}
       </div>
+      {props.thread.persistent ? (
+        <div className="text-xs text-muted-foreground">
+          Persistent thread · protected from archive and deletion
+        </div>
+      ) : null}
       <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">

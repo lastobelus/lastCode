@@ -1026,7 +1026,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         data-active={isActive}
         aria-label={
           relationshipLabel
-            ? `${thread.title}, ${relationshipLabel}${creatorDescription ? `, ${creatorDescription}` : ""}${!family.expanded && family.descendantCount ? `, ${legacySidebarFamilySummary(family)}` : ""}`
+            ? `${thread.title}, ${relationshipLabel}${creatorDescription ? `, ${creatorDescription}` : ""}${thread.persistent ? ", protected from archive and deletion" : ""}${!family.expanded && family.descendantCount ? `, ${legacySidebarFamilySummary(family)}` : ""}`
             : undefined
         }
         data-slot="sidebar-menu-sub-button"
@@ -1207,6 +1207,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   >
                     {thread.title}
                   </span>
+                  {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
+                    <span className="shrink-0 text-3xs text-sidebar-muted-foreground">
+                      Protected
+                    </span>
+                  ) : null}
                   {isAgentCreated || relationshipUnavailableLabel ? (
                     <Tooltip>
                       <TooltipTrigger
