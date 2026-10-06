@@ -203,7 +203,7 @@ const measure = async (root: string): Promise<number | null> => {
 const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const processCwds = yield* ProcessWorkingDirectories;
-  const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
+  const validate = Effect.fn("GeneratedDependencies.validate")(function* (input: DependencyInput) {
     const worktreePath = NodePath.resolve(input.worktreePath);
     const managedWorktreesRoot = NodePath.resolve(input.managedWorktreesRoot);
     const dependencyPath = NodePath.join(worktreePath, "node_modules");
@@ -279,35 +279,47 @@ const make = Effect.gen(function* () {
       return null;
     const ignored = yield* runGit(["check-ignore", "--quiet", "--", "node_modules/"]);
     if (ignored.exitCode !== 0 || ignored.stdoutTruncated || ignored.stdout !== "") return null;
-    const measured = yield* io(async () => {
-      const before = await NodeFSP.lstat(dependencyPath);
-      const estimatedReclaimedBytes = await measure(dependencyPath);
-      const after = await NodeFSP.lstat(dependencyPath);
-      if (
-        estimatedReclaimedBytes === null ||
-        !after.isDirectory() ||
-        before.dev !== after.dev ||
-        before.ino !== after.ino
-      )
-        return null;
-      return { estimatedReclaimedBytes, device: after.dev, inode: after.ino };
+    const identity = yield* io(async () => {
+      const stat = await NodeFSP.lstat(dependencyPath);
+      return stat.isDirectory() ? { device: stat.dev, inode: stat.ino } : null;
     });
-    return measured === null
+    return identity === null
       ? null
       : ({
           managedWorktreesRoot,
           worktreePath,
           dependencyPath,
           packageManager: candidate.packageManager,
-          ...measured,
-        } satisfies DependencyInspection);
+          ...identity,
+        } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">);
+  });
+
+  const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
+    const current = yield* validate(input);
+    if (current === null) return null;
+    const estimatedReclaimedBytes = yield* Effect.tryPromise({
+      try: async () => {
+        const bytes = await measure(current.dependencyPath);
+        const after = await NodeFSP.lstat(current.dependencyPath);
+        return bytes !== null &&
+          after.isDirectory() &&
+          after.dev === current.device &&
+          after.ino === current.inode
+          ? bytes
+          : null;
+      },
+      catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+    });
+    return estimatedReclaimedBytes === null
+      ? null
+      : ({ ...current, estimatedReclaimedBytes } satisfies DependencyInspection);
   });
 
   const remove = Effect.fn("GeneratedDependencies.remove")(function* (
     inspection: DependencyInspection,
     canRemove: Effect.Effect<boolean>,
   ) {
-    const current = yield* inspect(inspection);
+    const current = yield* validate(inspection);
     if (
       current === null ||
       current.dependencyPath !== inspection.dependencyPath ||
@@ -335,7 +347,8 @@ const make = Effect.gen(function* () {
         if (stat.dev !== current.device || stat.ino !== current.inode) return null;
         // fs.rm unlinks internal symlinks; it does not traverse their targets.
         await NodeFSP.rm(current.dependencyPath, { recursive: true });
-        return current;
+        // Reuse the inspection's estimate; safety revalidation needs no second traversal.
+        return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };
       },
       catch: (cause) => new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
     });

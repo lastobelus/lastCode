@@ -20,6 +20,9 @@ import {
   type TerminalSummary,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Observe native measurement reads without exposing a test-only service API.
+import * as NodeFSP from "node:fs/promises";
 
 import * as ServerConfig from "../config.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
@@ -36,6 +39,11 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as PreviewHosting from "../preview/Hosting.ts";
 import * as GitManager from "../git/GitManager.ts";
 import * as ServerActivation from "../serverActivation.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof NodeFSP>();
+  return { ...original, opendir: vi.fn(original.opendir) };
+});
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
 
@@ -175,6 +183,41 @@ it.effect("never follows dependency links into outside files or a pnpm store", (
     assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
     assert.equal(yield* fs.readFileString(path.join(outside, "data")), "user data");
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("measures an install once across inspection and removal", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath } = yield* fixture();
+    const opendir = vi.mocked(NodeFSP.opendir);
+    const rootReads = () =>
+      opendir.mock.calls.filter(([target]) => target === dependencyPath).length;
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    assert.equal(rootReads(), 1);
+    const removed = yield* cleanup.remove(inspected!, Effect.succeed(true));
+    assert.isNotNull(removed);
+    assert.equal(removed!.estimatedReclaimedBytes, inspected!.estimatedReclaimedBytes);
+    assert.equal(rootReads(), 1);
+    assert.isFalse(yield* fs.exists(dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect.each(["tracked-content", "untracked-lock", "unignored"] as const)(
+  "retains an install when Git ownership changes after inspection (%s)",
+  (change) =>
+    Effect.gen(function* () {
+      const { path, fs, cleanup, input, dependencyPath, runGit, lock } = yield* fixture();
+      const inspected = yield* cleanup.inspect(input);
+      assert.isNotNull(inspected);
+      if (change === "tracked-content")
+        yield* runGit(input.worktreePath, ["add", "-f", "node_modules/package/index.js"]);
+      else if (change === "untracked-lock")
+        yield* runGit(input.worktreePath, ["rm", "--cached", lock]);
+      else
+        yield* fs.writeFileString(path.join(input.worktreePath, ".gitignore"), "!node_modules/\n");
+      assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* fs.exists(path.join(dependencyPath, "package/index.js")));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("retains an install when the latest activity/policy guard changes", () =>
