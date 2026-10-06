@@ -2,4 +2,4 @@
 git_local_env=$(git rev-parse --local-env-vars) || exit 1
 unset $git_local_env
 unset git_local_env
-vp run --workspace-root lastcode:ci:quick
+vp run --workspace-root lastcode:ci:quick -- --pre-push

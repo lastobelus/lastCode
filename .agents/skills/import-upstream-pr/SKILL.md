@@ -132,8 +132,9 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
    evidence.
 5. For review and merge, follow `lastcode-pr` and
    `.agents/skills/_references/external-review-mechanics.md`: require a terminal
-   clean Codex result for the exact head, zero unresolved threads, and a full
-   `pnpm lastcode:ci` stamp for the exact head/current base. Merge only through
+   clean Codex result for the exact head, zero unresolved threads, and a
+   successful exact-head/base GitHub CI run and aggregate `CI Gate`. Use **Wait
+   for PR** during passive review or CI waits, and merge only through
    `pnpm lastcode:merge`.
 6. Verify the merged commit on `origin/lastcode/main`. For a squash merge,
    compare stable patch IDs so provenance verification does not depend on the
@@ -154,5 +155,5 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
 
 Report the source PR state and pinned head, destination base and port head,
 import method and adaptations, validation and real-client evidence, PR/merge
-state, exact-head review result, unresolved-thread count, full-CI stamp, and the
+state, exact-head review result, unresolved-thread count, GitHub CI run, and the
 merged commit or remaining blocker.
