@@ -656,6 +656,14 @@ function threadDetail(
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
+    ...(projection.thread.recovery === undefined
+      ? {}
+      : {
+          recovery: {
+            ...projection.thread.recovery,
+            updatedAt: DateTime.formatIso(projection.thread.recovery.updatedAt),
+          },
+        }),
     titleRegeneration:
       projection.thread.titleRegeneration === undefined ||
       projection.thread.titleRegeneration === null
@@ -2002,7 +2010,7 @@ const make = Effect.gen(function* () {
                   type: "thread.create",
                   createdBy: "agent",
                   creationSource: "mcp",
-                  creatorThreadId: scope.threadId,
+                  creatorThreadId: scope.thread.threadId,
                   commandId: stableCommandId({
                     scope,
                     requestKey: key,

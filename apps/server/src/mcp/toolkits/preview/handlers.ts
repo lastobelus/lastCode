@@ -7,6 +7,7 @@ import {
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingArtifact,
+  PreviewHostingError as ContractPreviewHostingError,
   type ToolActivityIcon,
   type ThreadId,
   type PreviewAutomationOperation,
@@ -27,6 +28,7 @@ import {
 } from "../../../attachmentStore.ts";
 import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
@@ -187,7 +189,61 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
   return { ...recording, id: finalId, path: finalPath };
 });
 
+const isPreviewHostingError = Schema.is(PreviewHosting.PreviewHostingError);
+
 const handlers = {
+  preview_stop_thread: () =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      return yield* hosting.stopThread(scope.thread.threadId).pipe(
+        Effect.as({}),
+        Effect.mapError(
+          () =>
+            new ContractPreviewHostingError({
+              reason: "unavailable",
+              message: "Some previews or processes could not be stopped. Please try again.",
+            }),
+        ),
+      );
+    }),
+  preview_host: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      return yield* hosting
+        .launch({
+          command: input.command,
+          cwd: input.cwd,
+          url: input.url,
+          threadId: scope.thread.threadId,
+          providerInstanceId: scope.thread.providerInstanceId,
+          ...(input.worktreePath === undefined ? {} : { worktreePath: input.worktreePath }),
+          ...(input.env === undefined ? {} : { env: input.env }),
+        })
+        .pipe(
+          Effect.map(PreviewHosting.toPreviewHostingLeaseSummary),
+          Effect.mapError((error) => {
+            if (isPreviewHostingError(error)) {
+              const reason =
+                error.operation === "validate" && error.detail?.includes("already served")
+                  ? "url_in_use"
+                  : error.operation === "validate"
+                    ? "invalid_request"
+                    : "unavailable";
+              const message =
+                error.operation === "validate" || error.operation === "ready"
+                  ? error.message
+                  : "Preview hosting is unavailable on this server.";
+              return new ContractPreviewHostingError({ reason, message });
+            }
+            return new ContractPreviewHostingError({
+              reason: "unavailable",
+              message: "The preview terminal could not be started.",
+            });
+          }),
+        );
+    }),
   preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   preview_open: (input) =>
     invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),

@@ -29,6 +29,7 @@ import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
@@ -84,6 +85,7 @@ function makeExecutorLayer(input: {
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const dependencies = Layer.mergeAll(
+    Layer.mock(SubagentPromotionService.SubagentPromotionService)({ execute: () => Effect.void }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
@@ -105,6 +107,7 @@ function makeExecutorLayer(input: {
         get: () => Effect.succeed(Option.none()),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
+        teardownThread: () => Effect.die("unused teardownThread"),
         release: () => record("release"),
         detach: () => record("detach"),
       }),
@@ -659,6 +662,40 @@ it.effect("uses durable deadlines, notifications, and a slow liveness poll", () 
 
     yield* TestClock.adjust("1 millis");
     yield* awaitAttempts(4);
+  }).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect("shares thread health checks across worker lanes without blocking effect work", () =>
+  Effect.gen(function* () {
+    const checks = yield* Ref.make(0);
+    const attempts = yield* Ref.make(0);
+    const checkStarted = yield* Deferred.make<void>();
+    const releaseCheck = yield* Deferred.make<void>();
+    const worker = EffectWorker.OrchestrationEffectWorkerV2.of({
+      awaitWork: Effect.never,
+      runRecoveryOnce: Effect.succeed(false),
+      runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
+      nextClaimableAt: Effect.succeed(Option.none()),
+      drain: () => Effect.succeed(0),
+    });
+    yield* EffectWorker.runDaemonWithOptions({
+      concurrency: 4,
+      livenessPollIntervalMs: 1_000,
+      reconcileThreadHealth: Ref.update(checks, (count) => count + 1).pipe(
+        Effect.andThen(Deferred.succeed(checkStarted, undefined)),
+        Effect.andThen(Deferred.await(releaseCheck)),
+      ),
+    }).pipe(
+      Effect.provideService(EffectWorker.OrchestrationEffectWorkerV2, worker),
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(checkStarted);
+    yield* TestClock.adjust("2 seconds");
+    assert.equal(yield* Ref.get(checks), 1);
+    assert.isAtLeast(yield* Ref.get(attempts), 8);
+    yield* Deferred.succeed(releaseCheck, undefined);
+    yield* TestClock.adjust("1 second");
+    assert.equal(yield* Ref.get(checks), 2);
   }).pipe(Effect.provide(TestClock.layer())),
 );
 

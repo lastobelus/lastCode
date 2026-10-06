@@ -26,6 +26,7 @@ import * as LegacyImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Projection from "./ProjectionStore.ts";
 import * as Project from "./ProjectStore.ts";
 import * as Sessions from "./ProviderSessionManager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as Threads from "./ThreadManagementService.ts";
 import * as Cleanup from "./WorktreeCleanupService.ts";
 import { OrchestratorDispatchError, type OrchestratorV2Error } from "./Orchestrator.ts";
@@ -54,6 +55,11 @@ const makeHarness = Effect.fn(function* (
   remove?: (path: string) => Effect.Effect<void, GitCommandError>,
   beforeUpdate?: (command: CleanupUpdate) => Effect.Effect<void, OrchestratorV2Error>,
   resolve?: (cwd: string) => Effect.Effect<Vcs.VcsDriverHandle, VcsError>,
+  removePreviews?: (
+    threadId: ThreadId,
+    append: (value: string) => Effect.Effect<void>,
+  ) => Effect.Effect<void, PreviewHosting.PreviewHostingError | Terminal.TerminalError>,
+  protectedPreviewPaths: ReadonlyArray<string> = [],
 ) {
   const state = yield* Ref.make(initial);
   const timeline = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -106,6 +112,17 @@ const makeHarness = Effect.fn(function* (
         }),
         Layer.mock(Sessions.ProviderSessionManagerV2)({
           teardownThread: ({ threadId }) => append(`detach:${threadId}`),
+        }),
+        Layer.mock(PreviewHosting.PreviewHosting)({
+          launch: () => Effect.die("Unexpected preview launch"),
+          recover: () => Effect.die("Unexpected preview recovery"),
+          list: () => Effect.succeed([]),
+          ownsTerminal: () => Effect.succeed(false),
+          removeThread: (threadId) =>
+            removePreviews === undefined
+              ? Effect.void
+              : removePreviews(ThreadId.make(threadId), append),
+          protectedWorkspacePaths: () => Effect.succeed(protectedPreviewPaths),
         }),
         Layer.mock(Terminal.TerminalManager)({
           close: ({ threadId }) => append(`terminal:${threadId}`),
@@ -201,6 +218,88 @@ it.effect("resumes tombstones and persists completion after provider teardown an
         "import",
       ]);
       assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup, null);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("removes preview leases before closing terminals and deleting a worktree", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness(
+      [pending("preview-order")],
+      undefined,
+      undefined,
+      undefined,
+      (threadId, append) => append(`preview:${threadId}`),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      assert.deepStrictEqual(yield* Ref.get(harness.timeline), [
+        "import",
+        "preview:preview-order",
+        "detach:preview-order",
+        "terminal:preview-order",
+        "remove:/work/preview-order",
+        "persist:preview-order:complete",
+      ]);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("does not close terminals or remove a worktree when preview cleanup fails", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness(
+      [pending("preview-stop-failed")],
+      undefined,
+      undefined,
+      undefined,
+      (threadId, append) =>
+        append(`preview:${threadId}`).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new PreviewHosting.PreviewHostingError({
+                operation: "persist",
+                statePath: "/state/preview-hosting.json",
+                cause: new Error("preview terminal did not stop"),
+              }),
+            ),
+          ),
+        ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      assert.deepStrictEqual(yield* Ref.get(harness.timeline), [
+        "import",
+        "preview:preview-stop-failed",
+        "persist:preview-stop-failed:failed",
+      ]);
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("retains a worktree that still contains another thread's preview", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness(
+      [pending("preview-shared-worktree")],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ["/work/preview-shared-worktree/src"],
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      const entries = yield* Ref.get(harness.timeline);
+      assert.isTrue(entries.includes("detach:preview-shared-worktree"));
+      assert.isTrue(entries.includes("terminal:preview-shared-worktree"));
+      assert.isFalse(entries.includes("remove:/work/preview-shared-worktree"));
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
     }).pipe(Effect.provide(harness.layer));
   }).pipe(Effect.scoped),
 );

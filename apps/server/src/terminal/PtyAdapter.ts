@@ -38,8 +38,10 @@ export interface PtyProcess {
   readonly pid: number;
   write(data: string): void;
   resize(cols: number, rows: number): void;
+  /** Requests termination; returning does not confirm that the process exited. */
   kill(signal?: string): void;
   onData(callback: (data: string) => void): () => void;
+  /** Reports actual exit, replaying it immediately for a late subscriber. */
   onExit(callback: (event: PtyExitEvent) => void): () => void;
 }
 

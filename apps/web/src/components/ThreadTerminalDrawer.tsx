@@ -789,8 +789,8 @@ export function TerminalViewport({
             writeSystemMessage(latestTerminal, "Opening links is unavailable in this browser.");
             return;
           }
-          const fallbackToBrowser = () => {
-            void localApi.shell.openExternal(text).catch((error: unknown) => {
+          const fallbackToBrowser = (url: string) => {
+            void localApi.shell.openExternal(url).catch((error: unknown) => {
               writeSystemMessage(
                 latestTerminal,
                 error instanceof Error ? error.message : "Unable to open link",

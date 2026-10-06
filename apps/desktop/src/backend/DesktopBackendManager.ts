@@ -295,6 +295,8 @@ export interface BackendInstanceSpec {
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
+  // Report an unexpected exit before the first successful startup, once per instance.
+  readonly onStartupFailure?: (reason: string) => Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
@@ -654,6 +656,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const state = yield* Ref.make(initialState);
+  const startupSettled = yield* Ref.make(false);
   const mutex = yield* Semaphore.make(1);
 
   const { logWarning: logInstanceWarning, logError: logInstanceError } =
@@ -894,6 +897,13 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                 }
                 if (wasReady) {
                   yield* spec.onShutdown?.() ?? Effect.void;
+                } else if (
+                  exitObserved &&
+                  !stopRequested &&
+                  nextState.desiredRunning &&
+                  !(yield* Ref.getAndSet(startupSettled, true))
+                ) {
+                  yield* spec.onStartupFailure?.(reason) ?? Effect.void;
                 }
               }
 
@@ -943,6 +953,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               return;
             }
 
+            yield* Ref.set(startupSettled, true);
             yield* spec.onReady?.(config.value.httpBaseUrl) ?? Effect.void;
             if (
               config.value.runningDistro !== undefined &&

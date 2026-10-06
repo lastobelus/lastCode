@@ -33,7 +33,7 @@ export const ManagedProjectActionState = Schema.Struct({
 });
 export type ManagedProjectActionState = typeof ManagedProjectActionState.Type;
 
-export class ProjectActionReconciliationError extends Schema.TaggedErrorClass<ProjectActionReconciliationError>()(
+export class ProjectActionReconciliationError extends Schema.TaggedError<ProjectActionReconciliationError>()(
   "ProjectActionReconciliationError",
   {
     reason: Schema.Literals([

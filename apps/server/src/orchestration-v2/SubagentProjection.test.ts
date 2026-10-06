@@ -145,6 +145,39 @@ it("does not inherit the parent's ordinary creator history or placement for eith
   }
 });
 
+it("keeps dashboard requests on their parent for both subagent kinds", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const request = {
+      id: "parent-qa",
+      title: "Check the parent result",
+      body: "Verify the parent thread's work.",
+      kind: "qa" as const,
+      status: "open" as const,
+      priority: "normal" as const,
+      effort: "focused" as const,
+      requiresComputer: true,
+      createdAt: DateTime.formatIso(parentCreatedAt),
+      updatedAt: DateTime.formatIso(snoozedAt),
+    };
+    const parentThread = { ...makeParentThread(), dashboardItems: [request] };
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+
+    assert.deepEqual(childThread.dashboardItems, []);
+    assert.deepEqual(parentThread.dashboardItems, [request]);
+  }
+});
+
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {
     const artifacts = makeSubagentConversationArtifacts({

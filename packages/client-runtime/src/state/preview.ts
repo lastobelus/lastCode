@@ -7,7 +7,9 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
+  createEnvironmentSubscriptionAtomFamily,
 } from "./runtime.ts";
+import { subscribe } from "../rpc/client.ts";
 
 export const previewAutomationHostFocusConcurrencyKey = (value: {
   readonly environmentId: string;
@@ -23,12 +25,40 @@ export function createPreviewEnvironmentAtoms<R, E>(
   const lifecycleScheduler = createAtomCommandScheduler();
   const statusScheduler = createAtomCommandScheduler();
   const automationScheduler = createAtomCommandScheduler();
+  const hostingScheduler = createAtomCommandScheduler();
   const lifecycleConcurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    hostingLeases: createEnvironmentSubscriptionAtomFamily(runtime, {
+      label: "environment-data:preview:hosting-leases",
+      subscribe: (input: {}) =>
+        subscribe(WS_METHODS.subscribePreviewHosting, input, {
+          capability: {
+            supports: (config) =>
+              config.environment.capabilities.previewHostingProcessControl === true,
+            unsupportedValue: [],
+          },
+        }),
+    }),
+    hostingStopThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-stop-thread",
+      tag: WS_METHODS.previewHostingStopThread,
+      scheduler: hostingScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
+    hostingList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-list",
+      tag: WS_METHODS.previewHostingList,
+      scheduler: hostingScheduler,
+    }),
+    hostingRecover: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-recover",
+      tag: WS_METHODS.previewHostingRecover,
+      scheduler: hostingScheduler,
+    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",
       tag: WS_METHODS.previewList,
@@ -92,6 +122,10 @@ export function createPreviewEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) =>
           JSON.stringify([environmentId, input.threadId, input.tabId]),
       },
+    }),
+    claimRecovery: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:claim-recovery",
+      tag: WS_METHODS.previewClaimRecovery,
     }),
     respondToAutomation: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:automation-respond",

@@ -18,6 +18,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -27,6 +28,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
 type CleanupJob = { readonly threadId: ThreadId; readonly cleanup: PendingCleanup };
@@ -57,6 +59,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
+  const previews = yield* PreviewHosting.PreviewHosting;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
   const events = yield* OrchestrationEventStore.OrchestrationEventStore;
@@ -78,6 +81,13 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => value),
       Effect.map(normalizeProjectPathForComparison),
     );
+  const containsPath = (directory: string, candidate: string) => {
+    const relative = path.relative(directory, candidate);
+    return (
+      relative === "" ||
+      (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+    );
+  };
 
   const update = Effect.fn("WorktreeCleanupService.update")(function* (
     threadId: ThreadId,
@@ -116,6 +126,7 @@ const make = Effect.gen(function* () {
       cleanup = projection.thread.worktreeCleanup;
       if (projection.thread.deletedAt === null || cleanup == null || cleanup.status === "failed")
         return;
+      yield* previews.removeThread(job.threadId);
       // Outbox detach receipts can lag the tombstone. Explicit idempotent teardown
       // makes removal wait for the actual provider and terminal handles to close.
       yield* Effect.forEach(
@@ -140,34 +151,48 @@ const make = Effect.gen(function* () {
         yield* update(job.threadId, cleanup, deleting);
         cleanup = deleting;
       }
-      const normalized = yield* canonical(cleanup.worktreePath);
-      const projectOwners = yield* Effect.forEach(
-        yield* projects.listShells(),
-        (project) =>
-          canonical(project.workspaceRoot).pipe(Effect.map((root) => ({ project, root }))),
-        { concurrency: 8 },
+      const currentCleanup = cleanup;
+      yield* withWorkspaceLease(
+        path.resolve(currentCleanup.worktreePath),
+        Effect.gen(function* () {
+          const normalized = yield* canonical(currentCleanup.worktreePath);
+          const retainedPreviewPaths = yield* Effect.forEach(
+            yield* previews.protectedWorkspacePaths(),
+            canonical,
+            { concurrency: 8 },
+          );
+          if (retainedPreviewPaths.some((protectedPath) => containsPath(normalized, protectedPath)))
+            return yield* Effect.fail("The worktree is retained by another active preview.");
+          const projectOwners = yield* Effect.forEach(
+            yield* projects.listShells(),
+            (project) =>
+              canonical(project.workspaceRoot).pipe(Effect.map((root) => ({ project, root }))),
+            { concurrency: 8 },
+          );
+          if (projectOwners.some(({ root }) => root === normalized))
+            return yield* Effect.fail("The worktree is now an active project root.");
+          const shell = yield* projections.getShellSnapshot();
+          const threadOwners = yield* Effect.forEach(
+            [...shell.threads, ...shell.archivedThreads].filter(
+              (thread) => thread.id !== job.threadId && thread.worktreePath !== null,
+            ),
+            (thread) =>
+              canonical(thread.worktreePath!).pipe(Effect.map((root) => ({ thread, root }))),
+            { concurrency: 8 },
+          );
+          if (threadOwners.some(({ root }) => root === normalized))
+            return yield* Effect.fail("The worktree is now owned by another thread.");
+          yield* git.removeWorktree({
+            cwd: currentCleanup.repositoryRoot,
+            path: currentCleanup.worktreePath,
+            force: true,
+            allowMissing: true,
+          });
+          // Persist completion before the queue advances. A restart after physical
+          // removal is safe because allowMissing turns replay into the same success.
+          yield* update(job.threadId, currentCleanup, null);
+        }),
       );
-      if (projectOwners.some(({ root }) => root === normalized))
-        return yield* Effect.fail("The worktree is now an active project root.");
-      const shell = yield* projections.getShellSnapshot();
-      const threadOwners = yield* Effect.forEach(
-        [...shell.threads, ...shell.archivedThreads].filter(
-          (thread) => thread.id !== job.threadId && thread.worktreePath !== null,
-        ),
-        (thread) => canonical(thread.worktreePath!).pipe(Effect.map((root) => ({ thread, root }))),
-        { concurrency: 8 },
-      );
-      if (threadOwners.some(({ root }) => root === normalized))
-        return yield* Effect.fail("The worktree is now owned by another thread.");
-      yield* git.removeWorktree({
-        cwd: cleanup.repositoryRoot,
-        path: cleanup.worktreePath,
-        force: true,
-        allowMissing: true,
-      });
-      // Persist completion before the queue advances. A restart after physical
-      // removal is safe because allowMissing turns replay into the same success.
-      yield* update(job.threadId, cleanup, null);
     });
     yield* execute.pipe(
       Effect.catchCauseIf(
