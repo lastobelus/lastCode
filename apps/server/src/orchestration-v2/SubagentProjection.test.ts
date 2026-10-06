@@ -122,11 +122,11 @@ it("starts native and app-owned subagents without the parent's protection or ann
       annotation: {
         body: "Parent note",
         anchorMessageId: MessageId.make("message:parent-note"),
-        createdAt: parentCreatedAt,
-        updatedAt: parentCreatedAt,
+        createdAt: DateTime.formatIso(parentCreatedAt),
+        updatedAt: DateTime.formatIso(parentCreatedAt),
         resolvedAt: null,
       },
-    };
+    } satisfies OrchestrationV2AppThread;
     const childThread = makeSubagentChildThread({
       parentThread,
       childThreadId,
