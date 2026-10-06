@@ -128,6 +128,146 @@ describe("LastCode Intel staging", () => {
     expect(result).toMatchObject({ status: "up-to-date", pending: undefined });
   });
 
+  it.each([
+    { name: "missing", releaseVersion: null, immutable: true, availableVersion: null },
+    {
+      name: "older",
+      releaseVersion: "1.2.3-nightly.20260819.1",
+      immutable: true,
+      availableVersion: "1.2.3-nightly.20260819.1",
+    },
+    {
+      name: "already installed",
+      releaseVersion: "1.2.3-nightly.20260820.1",
+      immutable: true,
+      availableVersion: "1.2.3-nightly.20260820.1",
+    },
+    {
+      name: "above the ceiling",
+      releaseVersion: "1.2.3-nightly.20260822.1",
+      immutable: true,
+      availableVersion: null,
+    },
+    {
+      name: "mutable",
+      releaseVersion: "1.2.3-nightly.20260821.7",
+      immutable: false,
+      availableVersion: null,
+    },
+  ])("waits when the newer desired package is $name", async (testCase) => {
+    const currentVersion = "1.2.3-nightly.20260820.1";
+    const maximumVersion = "1.2.3-nightly.20260821.7";
+    const result = await stageIntelUpdate(
+      {
+        currentVersion,
+        homeDirectory: temporaryDirectory(),
+        maximumVersionHost: "version-source.example",
+      },
+      dependencies(`lastcode/checkpoint/v${maximumVersion}`, "a".repeat(40), {
+        readRemoteInstalledVersion: async () => maximumVersion,
+        listReleases: async () =>
+          testCase.releaseVersion === null
+            ? []
+            : [
+                {
+                  tagName: `lastcode/checkpoint/v${testCase.releaseVersion}`,
+                  isDraft: false,
+                  isImmutable: testCase.immutable,
+                  isPrerelease: true,
+                },
+              ],
+        downloadRelease: async () => {
+          throw new Error("unusable release must not download");
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      schemaVersion: 1,
+      status: "waiting-for-release",
+      currentVersion,
+      maximumVersion,
+      availableVersion: testCase.availableVersion,
+      pending: undefined,
+    });
+  });
+
+  it.each([false, true])(
+    "reports up to date at the desired version (release listed: %s)",
+    async (listed) => {
+      const version = "1.2.3-nightly.20260821.7";
+      const result = await stageIntelUpdate(
+        {
+          currentVersion: version,
+          homeDirectory: temporaryDirectory(),
+          maximumVersionHost: "version-source.example",
+        },
+        dependencies(`lastcode/checkpoint/v${version}`, "a".repeat(40), {
+          readRemoteInstalledVersion: async () => version,
+          ...(listed ? {} : { listReleases: async () => [] }),
+        }),
+      );
+      expect(result).toEqual({
+        schemaVersion: 1,
+        status: "up-to-date",
+        currentVersion: version,
+        maximumVersion: version,
+        availableVersion: listed ? version : null,
+        pending: undefined,
+      });
+    },
+  );
+
+  it("stages and retains an intermediate update while reporting the newer desired version", async () => {
+    const root = temporaryDirectory();
+    const currentVersion = "1.2.3-nightly.20260820.1";
+    const availableVersion = "1.2.3-nightly.20260821.7";
+    const maximumVersion = "1.2.3-nightly.20260822.1";
+    const options = {
+      currentVersion,
+      homeDirectory: root,
+      maximumVersionHost: "version-source.example",
+    };
+    const deps = dependencies(`lastcode/checkpoint/v${availableVersion}`, "a".repeat(40), {
+      readRemoteInstalledVersion: async () => maximumVersion,
+    });
+    const staged = await stageIntelUpdate(options, deps);
+    expect(staged).toMatchObject({
+      status: "staged",
+      currentVersion,
+      maximumVersion,
+      availableVersion,
+      pending: { version: availableVersion },
+    });
+
+    for (const releases of [
+      [
+        {
+          tagName: `lastcode/checkpoint/v${availableVersion}`,
+          isDraft: false,
+          isImmutable: true,
+          isPrerelease: true,
+        },
+      ],
+      [],
+    ]) {
+      const retained = await stageIntelUpdate(options, {
+        ...deps,
+        listReleases: async () => releases,
+        downloadRelease: async () => {
+          throw new Error("retained candidate must not download again");
+        },
+      });
+      expect(retained).toMatchObject({
+        status: "pending",
+        currentVersion,
+        maximumVersion,
+        availableVersion: releases.length ? availableVersion : null,
+        pending: { candidateId: staged.pending.candidateId, version: availableVersion },
+      });
+    }
+  });
+
   it("discovers eligible releases beyond the first GitHub API page", () => {
     const tag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
     let invocation;
@@ -168,6 +308,11 @@ describe("LastCode Intel staging", () => {
     );
 
     expect(result.status).toBe("staged");
+    expect(result).toMatchObject({
+      currentVersion: "1.2.3-nightly.20260820.1",
+      maximumVersion: null,
+      availableVersion: "1.2.3-nightly.20260821.7.2",
+    });
     expect(result.pending).toMatchObject({ commit, tag, version: "1.2.3-nightly.20260821.7.2" });
     expect(NodeFS.existsSync(result.pending.dmgPath)).toBe(true);
     expect(readPending(root)).toMatchObject({ commit, tag });
