@@ -2,6 +2,7 @@ import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import {
   buildProjectGroups,
+  deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKey,
   type ProjectGroup,
   type ProjectGroupingSettings,
@@ -50,6 +51,16 @@ export interface SidebarProjectPickerEntry {
   group: SidebarProjectSnapshot;
   targetProject: SidebarProjectGroupMember;
   isPreferred: boolean;
+}
+
+export function resolveSidebarProjectSettingsKey(input: {
+  sidebarProjectKey: string;
+  targetProject: Project;
+  settings: ProjectGroupingSettings;
+}): string {
+  return input.sidebarProjectKey === NO_PROJECT_GROUP_KEY
+    ? deriveLogicalProjectKeyFromSettings(input.targetProject, input.settings)
+    : input.sidebarProjectKey;
 }
 
 interface SidebarProjectGroupingInput {

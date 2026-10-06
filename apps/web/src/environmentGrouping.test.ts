@@ -14,6 +14,7 @@ import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
+  resolveSidebarProjectSettingsKey,
 } from "./sidebarProjectGrouping";
 import { orderItemsByPreferredIds, sortProjectsForSidebar } from "./components/Sidebar.logic";
 import { legacyProjectCwdPreferenceKey } from "./uiStateStore";
@@ -601,6 +602,43 @@ describe("No project sidebar group", () => {
     });
     expect(entry?.targetProject.environmentId).toBe(remoteEnvironmentId);
     expect(entry?.targetProject.id).toBe(remoteScratch.id);
+  });
+
+  it("opens scratch settings for the selected machine, including retained project aliases", () => {
+    const staleScratch = {
+      ...remoteScratch,
+      id: ProjectId.make("scratch-remote-stale"),
+      updatedAt: "2025-12-31T00:00:00.000Z",
+    };
+    const [group] = buildSidebarProjectSnapshots({
+      ...groupingInput,
+      projects: [staleScratch, ...groupingInput.projects],
+      resolveEnvironmentLabel,
+    });
+    expect(group?.environmentId).toBe(primaryEnvironmentId);
+    for (const targetProject of [primaryScratch, remoteScratch, staleScratch]) {
+      const key = resolveSidebarProjectSettingsKey({
+        sidebarProjectKey: group!.projectKey,
+        targetProject,
+        settings: defaultGroupingSettings,
+      });
+      expect(key).toBe(derivePhysicalProjectKey(targetProject));
+      expect(key).not.toBe(NO_PROJECT_GROUP_KEY);
+    }
+  });
+
+  it("keeps repository settings scoped to the existing logical group", () => {
+    const targetProject = makeProject({ repositoryIdentity });
+    expect(
+      resolveSidebarProjectSettingsKey({
+        sidebarProjectKey: repositoryIdentity.canonicalKey,
+        targetProject,
+        settings: {
+          sidebarProjectGroupingMode: "separate",
+          sidebarProjectGroupingOverrides: {},
+        },
+      }),
+    ).toBe(repositoryIdentity.canonicalKey);
   });
 
   it("keeps the consolidated group at its first physical project's manual position", () => {
