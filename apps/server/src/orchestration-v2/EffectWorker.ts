@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import {
@@ -26,6 +27,7 @@ import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
@@ -89,6 +91,7 @@ export const executorLayer: Layer.Layer<
   | RuntimeRequestService.RuntimeRequestServiceV2
   | ThreadTitleRegenerationService.ThreadTitleRegenerationService
   | ThreadManagementService.ThreadManagementService
+  | SubagentPromotionService.SubagentPromotionService
   | ServerSettings.ServerSettingsService
 > = Layer.effect(
   OrchestrationEffectExecutorV2,
@@ -103,11 +106,29 @@ export const executorLayer: Layer.Layer<
     const threadTitleRegeneration =
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
+    const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "subagent.promote":
+            return subagentPromotion
+              .execute({
+                threadId: effect.threadId,
+                requestId: effect.request.requestId,
+                willRetry,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
@@ -422,6 +443,17 @@ export const executorLayer: Layer.Layer<
               );
           case "terminal.cleanup":
             return resourceCleanup.cleanupTerminals(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
+          case "terminal.archive-cleanup":
+            return resourceCleanup.cleanupArchivedTerminals(effect.threadId).pipe(
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -768,6 +800,8 @@ export const layer = layerWithOptions();
 export interface OrchestrationEffectDaemonOptions {
   readonly concurrency?: number;
   readonly livenessPollIntervalMs?: number;
+  /** Shares the existing wake-up cadence; runs once across all worker lanes. */
+  readonly reconcileThreadHealth?: Effect.Effect<void>;
 }
 
 const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
@@ -786,11 +820,27 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       const livenessPollIntervalMs = Number.isFinite(requestedLivenessPollIntervalMs)
         ? Math.max(1, Math.floor(requestedLivenessPollIntervalMs))
         : DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS;
+      const nextHealthCheck = yield* Ref.make(0);
+      const healthCheckRunning = yield* Ref.make(false);
+      const reconcileThreadHealth = Effect.gen(function* () {
+        if (options.reconcileThreadHealth === undefined) return;
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const due = yield* Ref.modify(nextHealthCheck, (next) =>
+          now < next ? [false, next] : [true, now + livenessPollIntervalMs],
+        );
+        if (!due || (yield* Ref.getAndSet(healthCheckRunning, true))) return;
+        yield* options.reconcileThreadHealth.pipe(
+          Effect.catchCause((cause) => Effect.logWarning("Thread health check failed", cause)),
+          Effect.ensuring(Ref.set(healthCheckRunning, false)),
+          Effect.forkScoped,
+        );
+      });
       // Post-commit notifications are the low-latency path. `availableAt` is the
       // durable retry schedule, and the long liveness poll only recovers from a
       // missed in-process notification or work inserted by another process.
       const runWorker = Effect.gen(function* () {
         while (true) {
+          yield* reconcileThreadHealth;
           const outcome = yield* worker.runOnce.pipe(
             Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
             Effect.catchCause((cause) =>

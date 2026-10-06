@@ -818,7 +818,9 @@ export function ThreadStatusLabel({
   status,
   compact = false,
 }: {
-  status: ThreadStatusPill;
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "marker" | "pulse"> & {
+    label: string;
+  };
   compact?: boolean;
 }) {
   if (compact) {
@@ -833,12 +835,21 @@ export function ThreadStatusLabel({
             />
           }
         >
-          <span
-            data-legacy-sidebar-unscaled-content
-            className={`size-1.5 rounded-full ${status.dotClass} ${
-              status.pulse ? "animate-status-pulse" : ""
-            }`}
-          />
+          {status.marker ? (
+            <span
+              data-legacy-sidebar-unscaled-content
+              className="inline-flex h-3.5 w-2.5 items-center justify-center text-sm font-semibold leading-none"
+            >
+              {status.marker}
+            </span>
+          ) : (
+            <span
+              data-legacy-sidebar-unscaled-content
+              className={`size-1.5 rounded-full ${status.dotClass} ${
+                status.pulse ? "animate-status-pulse" : ""
+              }`}
+            />
+          )}
         </TooltipTrigger>
         <TooltipPopup side="top">{status.label}</TooltipPopup>
       </Tooltip>
@@ -856,12 +867,21 @@ export function ThreadStatusLabel({
           />
         }
       >
-        <span
-          data-legacy-sidebar-unscaled-content
-          className={`size-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "animate-status-pulse" : ""
-          }`}
-        />
+        {status.marker ? (
+          <span
+            data-legacy-sidebar-unscaled-content
+            className="inline-flex h-3.5 w-2.5 items-center justify-center text-sm font-semibold leading-none"
+          >
+            {status.marker}
+          </span>
+        ) : (
+          <span
+            data-legacy-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "animate-status-pulse" : ""
+            }`}
+          />
+        )}
         <span className="hidden md:inline">{status.label}</span>
       </TooltipTrigger>
       <TooltipPopup side="top">{status.label}</TooltipPopup>

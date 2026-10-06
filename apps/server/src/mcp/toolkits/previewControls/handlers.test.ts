@@ -7,15 +7,21 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import * as Preview from "../../../preview/Manager.ts";
+import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { PreviewControlsHandlersLive } from "./handlers.ts";
 import { PreviewControlsToolkit } from "./tools.ts";
+
+const PreviewDependencies = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3-preview-controls-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.effect.each([
   { name: "project opt-in", globalAccess: false, projectAccess: true },
@@ -78,5 +84,5 @@ it.effect.each([
         expect((yield* manager.list({ threadId })).sessions).toEqual([tab]);
       }
     }),
-  ),
+  ).pipe(Effect.provide(PreviewDependencies)),
 );

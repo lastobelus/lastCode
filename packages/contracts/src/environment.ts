@@ -150,6 +150,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread.pin / thread.unpin commands. Same
       version-skew contract as threadSettlement. */
   threadPinning: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.persistence.set and enforces archive/delete protection. */
+  threadPersistence: Schema.optionalKey(Schema.Boolean),
+  /** Server streams hosted preview lifetimes and can stop a thread's previews and terminals. */
+  previewHostingProcessControl: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).
       Same version-skew contract as threadSettlement. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),
@@ -176,6 +180,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread.pull-request.watch and wakes agents on pull request changes. */
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread annotation create/edit/resolve/reopen commands
+      and exposes annotation state in thread shell/detail snapshots. */
+  threadAnnotations: Schema.optionalKey(Schema.Boolean),
   /** Server durably owns thread worktree cleanup after deletion and understands
       deleteWorktree plus cleanup retry/abandon commands. */
   threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),

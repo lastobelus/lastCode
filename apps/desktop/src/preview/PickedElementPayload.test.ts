@@ -2,6 +2,23 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { isPickedElementPayload, isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
 
+it("validates the document path carried by iframe selections", () => {
+  expect(
+    isPickedElementPayload(
+      validPayload({ framePath: [{ pageUrl: "https://example.com/", selector: "iframe" }] }),
+    ),
+  ).toBe(true);
+  for (const framePath of [
+    null,
+    "iframe",
+    [null],
+    [{ selector: "iframe" }],
+    [{ pageUrl: 12, selector: "iframe" }],
+  ]) {
+    expect(isPickedElementPayload(validPayload({ framePath }))).toBe(false);
+  }
+});
+
 function validPayload(overrides?: Record<string, unknown>): Record<string, unknown> {
   return {
     pageUrl: "https://example.com/",

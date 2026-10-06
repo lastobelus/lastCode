@@ -6,6 +6,8 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
+import { lastcodeMigrationManifest } from "./LastCodeMigrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
@@ -33,14 +35,23 @@ describe("V2 preview upgrade", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* seedPreview;
       const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
-      assert.deepStrictEqual(yield* runMigrations(), [
+      assert.deepStrictEqual(yield* runDatabaseMigrations(), [
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [56, "RemoveRedundantProjectionIndexes"],
         [57, "ScheduledTaskWebhooks"],
         [58, "WebhookRelayDeliveries"],
+        ...lastcodeMigrationManifest,
       ]);
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations WHERE migration_id = 12`,
+        [{ migration_id: 12, name: "ThreadCreatorEvidenceIndex" }],
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'orchestration_events_v2_thread_created_target_idx'`,
+        [{ name: "orchestration_events_v2_thread_created_target_idx" }],
+      );
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
       const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id

@@ -201,6 +201,29 @@ it.effect("does not inherit an ordinary source conversation's creator or placeme
   }),
 );
 
+it.effect("keeps dashboard requests on their source instead of copying them to a fork", () =>
+  Effect.gen(function* () {
+    const sourceRun = makeSourceRun("completed");
+    const request = {
+      id: "source-qa",
+      title: "Check the source result",
+      body: "Verify the source thread's work.",
+      kind: "qa" as const,
+      status: "open" as const,
+      priority: "normal" as const,
+      effort: "focused" as const,
+      requiresComputer: true,
+      createdAt: DateTime.formatIso(sourceCreatedAt),
+      updatedAt: DateTime.formatIso(snoozedAt),
+    };
+    const sourceThread = { ...makeSourceThread(), dashboardItems: [request] };
+    const result = yield* planFork(sourceRun, sourceThread);
+
+    assert.deepEqual(result.targetThread.dashboardItems, []);
+    assert.deepEqual(sourceThread.dashboardItems, [request]);
+  }),
+);
+
 it.effect("rejects in-progress and rolled-back fork sources", () =>
   Effect.gen(function* () {
     for (const status of ["running", "rolled_back"] as const) {
