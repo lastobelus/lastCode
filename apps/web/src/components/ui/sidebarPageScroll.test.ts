@@ -26,7 +26,7 @@ function sidebar() {
     clientHeight: { value: 600 },
   });
   vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 700 } as DOMRect);
-  viewport.scrollBy = (options: ScrollToOptions | number, y?: number) => {
+  viewport.scrollBy = (options: ScrollToOptions | number = {}, y?: number) => {
     const delta = typeof options === "number" ? (y ?? 0) : (options.top ?? 0);
     viewport.scrollTop = Math.max(0, Math.min(1400, viewport.scrollTop + delta));
   };
