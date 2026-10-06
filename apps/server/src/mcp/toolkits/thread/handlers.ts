@@ -94,13 +94,10 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
     }),
   t3_thread_repair: (input) =>
     Effect.gen(function* () {
-      const { caller } = yield* readWritableThread(input.threadId);
-      if (caller.runtimeMode !== "full-access" || caller.interactionMode !== "default") {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message: "Starting a repair agent requires a live full-access/default thread.",
-        });
-      }
+      yield* readFullAccessCaller(
+        "Starting a repair agent requires a live full-access/default thread or a full-access client.",
+      );
+      yield* readWritableThread(input.threadId);
       const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       return yield* service
         .launch(input)

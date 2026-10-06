@@ -3924,6 +3924,7 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
         ]),
       ),
       Layer.provide(unusedScheduledTaskStubLayer),
+      Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(NodeServices.layer),
     );
     yield* Effect.gen(function* () {
@@ -3949,9 +3950,13 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
           .pipe(
             Effect.provideService(McpInvocationContext.McpInvocationContext, {
               environmentId: EnvironmentId.make("recovery-json-environment"),
-              threadId: parentThreadId,
-              providerSessionId: "recovery-json-session",
-              providerInstanceId: codexInstanceId,
+              requestNamespace: "recovery-json-session",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "recovery-json-session",
+                providerInstanceId: codexInstanceId,
+              },
+              client: undefined,
               capabilities: new Set(["orchestration"] as const),
               issuedAt: 1,
             }),
