@@ -70,7 +70,8 @@ export function selectPrimaryWorktree(worktreeList) {
   return primaryWorktree;
 }
 
-export function changedGitlink(rawDiff) {
+export function changedGitlinks(rawDiff) {
+  const gitlinks = [];
   const fields = rawDiff.split("\0");
   for (let index = 0; index < fields.length;) {
     const metadata = fields[index++];
@@ -82,9 +83,32 @@ export function changedGitlink(rawDiff) {
     const destinationPath = match[3] === "R" || match[3] === "C" ? fields[index++] : sourcePath;
     if (!destinationPath)
       throw new Error("Primary checkout reported a renamed diff without a path.");
-    if (match[1] === "160000" || match[2] === "160000") return sourcePath;
+    if (match[1] === "160000") gitlinks.push(sourcePath);
+    if (match[2] === "160000" && destinationPath !== gitlinks.at(-1)) {
+      gitlinks.push(destinationPath);
+    }
   }
-  return null;
+  return gitlinks;
+}
+
+/**
+ * Returns the first changed gitlink whose submodule has local content in the primary checkout.
+ * The refresh checks out without recursing into submodules, so moving the pointer of an
+ * uninitialized (empty) submodule changes nothing on disk, while an initialized one would be
+ * left silently stale. Finder's `.DS_Store` does not count as content.
+ */
+export function initializedGitlink(primaryWorktree, rawDiff) {
+  return (
+    changedGitlinks(rawDiff).find((gitlink) => {
+      try {
+        return NodeFS.readdirSync(NodePath.join(primaryWorktree, gitlink)).some(
+          (entry) => entry !== ".DS_Store",
+        );
+      } catch {
+        return false;
+      }
+    }) ?? null
+  );
 }
 
 function assertPrimaryCheckoutReady(primaryWorktree, environment, execute) {
@@ -178,9 +202,11 @@ export function refreshPrimaryCheckout(repoRoot, environment, execute = runComma
     environment,
     { capture: true, maxBuffer: GIT_MAX_BUFFER },
   );
-  const gitlink = changedGitlink(rawDiff);
+  const gitlink = initializedGitlink(primaryWorktree, rawDiff);
   if (gitlink) {
-    throw new Error(`Primary LastCode checkout target changes submodule gitlink '${gitlink}'.`);
+    throw new Error(
+      `Primary LastCode checkout target changes initialized submodule gitlink '${gitlink}'.`,
+    );
   }
   execute(
     "checkout-refresh",
