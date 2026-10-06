@@ -1758,16 +1758,13 @@
           const content = await file.text();
           const policy =
             "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'\">";
-          const protectedContent = content.replace(
-            /<head(?:\s[^>]*)?>/i,
-            (match) => match + policy,
-          );
-          if (protectedContent === content) throw new Error("The companion needs an HTML head.");
           const frame = document.createElement("iframe");
           frame.id = "private-frame";
           frame.title = "Private service and storage inventory";
           frame.setAttribute("sandbox", "");
-          frame.srcdoc = protectedContent;
+          // Establish the policy before parsing any imported markup, including comments.
+          frame.srcdoc =
+            "<!doctype html><html><head>" + policy + "</head><body>" + content + "</body></html>";
           document.getElementById("private-container").replaceChildren(frame);
           status.textContent = "Private companion loaded locally. Nothing was uploaded.";
         } catch {
