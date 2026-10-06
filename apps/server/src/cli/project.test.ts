@@ -104,7 +104,7 @@ it("keeps reconciliation JSON on stdout and migration diagnostics on stderr", ()
     NodeFS.writeFileSync(sourceFile, "invalid JSON");
     const failed = NodeChildProcess.spawnSync(process.execPath, args, { encoding: "utf8" });
     assert.strictEqual(failed.status, 1);
-    assert.include(failed.stderr || failed.stdout, "Failed to decode source");
+    assert.include(failed.stderr + failed.stdout, "Failed to decode source");
     assert.deepEqual(JSON.parse(NodeFS.readFileSync(stateFile, "utf8")), state);
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
