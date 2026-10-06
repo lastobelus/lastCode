@@ -33,12 +33,19 @@ and should be proposed upstream, switch to `upstream-fix`.
 
 1. Implement the smallest complete change, including focused regression tests
    for backend or automation behavior.
-2. Run the smallest relevant tests, lint, and typecheck required by `AGENTS.md`.
+2. Run the smallest relevant tests and lint required by `AGENTS.md`. Use the
+   Quick CI policy below for workspace typechecks; do not recreate a deferred
+   local gate with parallel TypeScript processes.
 3. Rebase onto the latest `origin/lastcode/main` before publishing.
-4. Run the independent **Run Quick CI** Project Action. After it resumes with a
-   receipt for the exact clean head and workstream base, decide whether and what
-   to push. The pre-push hook consumes that receipt; ordinary command-line use
-   falls back to synchronous `pnpm lastcode:ci:quick`.
+4. Local Quick CI is optional; GitHub CI remains required. In the default
+   Automatic mode, run the independent **Run Quick CI** Project Action. It uses
+   free local capacity immediately or defers to GitHub without queuing. After
+   resume, verify the exact clean head and workstream base. A local pass records
+   a reusable receipt; a `validation: github-only` result permits publishing but
+   is not a local pass. In GitHub-only mode, publish without requiring the local
+   Action. The ordinary pre-push hook follows the same policy; keep it enabled.
+   Always local mode waits for capacity, and `--require-local` explicitly forces
+   local Quick CI. Settings → LastCode → Local CI selects the mode.
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
 For an explicitly requested stack, a child may instead branch from and target
