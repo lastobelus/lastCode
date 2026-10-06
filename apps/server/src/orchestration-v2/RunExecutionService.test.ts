@@ -40,6 +40,7 @@ import * as Ref from "effect/Ref";
 import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -3415,8 +3416,15 @@ function captureRootRunTermination(input: {
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
   readonly persistedBackgroundEvents?: ReadonlyArray<ProviderAdapterV2Event>;
   readonly failRecordingEvent?: (event: ProviderAdapterV2Event) => boolean;
+  readonly wrapWriteIfProviderThreadOwner?: (
+    write: EventSink.EventSinkV2Shape["writeIfProviderThreadOwner"],
+  ) => EventSink.EventSinkV2Shape["writeIfProviderThreadOwner"];
   readonly onIngested?: (event: ProviderAdapterV2Event) => Effect.Effect<void>;
-  readonly afterIngestion?: Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>;
+  readonly afterIngestion?:
+    | Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>
+    | ((
+        persist: (events: ReadonlyArray<ProviderAdapterV2Event>) => Effect.Effect<void>,
+      ) => Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>);
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -3483,6 +3491,9 @@ function captureRootRunTermination(input: {
           }
         }
       });
+    const writeIfProviderThreadOwner: EventSink.EventSinkV2Shape["writeIfProviderThreadOwner"] = (
+      payload,
+    ) => captureFinalEvents(payload.events).pipe(Effect.as({ committed: true, storedEvents: [] }));
     const testLayer = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -3566,10 +3577,9 @@ function captureRootRunTermination(input: {
                 ),
                 Effect.as({ committed: true, storedEvents: [] }),
               ),
-            writeIfProviderThreadOwner: (payload) =>
-              captureFinalEvents(payload.events).pipe(
-                Effect.as({ committed: true, storedEvents: [] }),
-              ),
+            writeIfProviderThreadOwner:
+              input.wrapWriteIfProviderThreadOwner?.(writeIfProviderThreadOwner) ??
+              writeIfProviderThreadOwner,
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
@@ -3705,12 +3715,15 @@ function captureRootRunTermination(input: {
     }).pipe(Effect.provide(testLayer));
 
     yield* Deferred.await(ingestionDone);
-    yield* input.afterIngestion ?? Effect.void;
+    yield* typeof input.afterIngestion === "function"
+      ? input.afterIngestion((events) => Ref.update(durable, (current) => [...current, ...events]))
+      : (input.afterIngestion ?? Effect.void);
     return {
       written: yield* Ref.get(writtenItems),
       events: yield* Ref.get(writtenEvents),
       effects: yield* Ref.get(writtenEffects),
       ingested: yield* Ref.get(ingested),
+      durable: yield* Ref.get(durable),
       observed: yield* Ref.get(observed),
     };
   });
@@ -4908,15 +4921,23 @@ it.effect.each(["node_first", "queued_before_reader", "after_pending_marker"] as
     }),
 );
 
-it.effect.each(
-  (["failed", "interrupted", "cancelled"] as const).flatMap((status) => [
+it.effect.each([
+  ...(["failed", "interrupted", "cancelled"] as const).flatMap((status) => [
     { status, outcome: "completion_lost" as const },
     { status, outcome: "queued_completions" as const },
     { status, outcome: "unknown_probe" as const },
   ]),
-)("drains retained $status roots after recording fails ($outcome)", ({ status, outcome }) =>
+  { status: "failed" as const, outcome: "settlement_retry" as const },
+  { status: "failed" as const, outcome: "settlement_owner_lost" as const },
+  { status: "failed" as const, outcome: "settlement_shutdown" as const },
+])("drains retained $status roots after recording fails ($outcome)", ({ status, outcome }) =>
   Effect.gen(function* () {
     const key = `recover-retained-terminal:${status}:${outcome}`;
+    const retriesSettlement =
+      outcome === "settlement_retry" ||
+      outcome === "settlement_owner_lost" ||
+      outcome === "settlement_shutdown";
+    const completionWasLost = outcome === "completion_lost" || retriesSettlement;
     const ids = backgroundScenarioIds(key);
     const providerInstanceId = ProviderInstanceId.make("codex");
     const now = yield* DateTime.now;
@@ -4996,6 +5017,12 @@ it.effect.each(
       providerThreadId: childProvider.id,
       providerTurnId: null,
     };
+    const completedDuringBackoff = {
+      ...toolItem,
+      status: "completed",
+      completedAt: now,
+      output: "Tool output saved during settlement retry",
+    } satisfies OrchestrationV2TurnItem;
     const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
     const publication = yield* Semaphore.make(1);
     const probe = yield* Ref.make<"pending" | "unknown" | "drained">(
@@ -5003,7 +5030,16 @@ it.effect.each(
     );
     const commandPersisted = yield* Deferred.make<void>();
     const firstMarkerConsumed = yield* Deferred.make<void>();
+    const drainedMarkerConsumed = yield* Deferred.make<void>();
+    const firstWriteFailed = yield* Deferred.make<void>();
+    const secondWriteFailed = yield* Deferred.make<void>();
+    const settlementCommitted = yield* Deferred.make<void>();
     const closed = yield* Deferred.make<void>();
+    let settlementWrites = 0;
+    const attemptedSettlementItemIds: TurnItemId[][] = [];
+    let starts = 0;
+    let ownerRevoked = false;
+    let shuttingDown = false;
     let firstMarker = true;
     let subscriptions = 0;
     let registration:
@@ -5084,6 +5120,45 @@ it.effect.each(
     const result = yield* captureRootRunTermination({
       key,
       shouldFinalizeRun: () => Effect.succeed(true),
+      startTurn: () =>
+        Effect.sync(() => {
+          starts++;
+        }),
+      isShuttingDown: Effect.sync(() => shuttingDown),
+      ...(retriesSettlement
+        ? {
+            wrapWriteIfProviderThreadOwner:
+              (write: EventSink.EventSinkV2Shape["writeIfProviderThreadOwner"]) =>
+              (payload: Parameters<EventSink.EventSinkV2Shape["writeIfProviderThreadOwner"]>[0]) =>
+                Effect.gen(function* () {
+                  if (payload.guardRecoveredBackground === undefined) return yield* write(payload);
+                  settlementWrites++;
+                  attemptedSettlementItemIds.push(
+                    payload.events.flatMap((event) =>
+                      event.type === "turn-item.updated" ? [event.payload.id] : [],
+                    ),
+                  );
+                  assert.isTrue(yield* Deferred.isDone(drainedMarkerConsumed));
+                  if (settlementWrites === 1) {
+                    yield* Deferred.succeed(firstWriteFailed, undefined);
+                    return yield* Effect.fail(
+                      new EventSink.EventSinkWriteError({
+                        eventCount: payload.events.length,
+                        cause: "Settlement commit unavailable",
+                      }),
+                    );
+                  }
+                  if (settlementWrites === 2 && outcome === "settlement_retry") {
+                    yield* Deferred.succeed(secondWriteFailed, undefined);
+                    return yield* Effect.die("SQL settlement commit failed");
+                  }
+                  if (ownerRevoked) return { committed: false, storedEvents: [] };
+                  const committed = yield* write(payload);
+                  yield* Deferred.succeed(settlementCommitted, undefined);
+                  return committed;
+                }),
+          }
+        : {}),
       // The tool and native child were saved without reaching the failed
       // reader's tracker or routing state. No child-created event is replayed.
       persistedBackgroundEvents: [
@@ -5136,6 +5211,11 @@ it.effect.each(
                       Effect.andThen(
                         first ? Deferred.succeed(firstMarkerConsumed, undefined) : Effect.void,
                       ),
+                      Effect.andThen(
+                        captured === "drained"
+                          ? Deferred.succeed(drainedMarkerConsumed, undefined)
+                          : Effect.void,
+                      ),
                       Effect.asVoid,
                     ),
                 });
@@ -5160,38 +5240,88 @@ it.effect.each(
         suspect: () => Effect.void,
         completed: () => Effect.void,
       },
-      afterIngestion: Effect.gen(function* () {
-        yield* Deferred.await(commandPersisted);
-        const registered = registration;
-        if (registered === undefined) return yield* Effect.die("Recovery was not registered");
-        const inspection = yield* registered.inspect;
-        assert.equal(inspection.status, "terminal");
-        if (inspection.status !== "terminal")
-          return yield* Effect.die("Expected retained terminal");
-        assert.equal(inspection.event.status, status);
-        yield* registered.finalize(inspection.event, [], { runtimeReleased: false });
-        if (outcome !== "queued_completions") {
-          yield* Deferred.await(firstMarkerConsumed);
-          assert.isFalse(yield* Deferred.isDone(closed));
-          if (outcome === "unknown_probe") yield* complete;
-          else
-            yield* publication.withPermits(1)(
-              Ref.set(probe, "drained").pipe(
-                Effect.andThen(
-                  Queue.offer(queue, {
-                    type: "provider_thread.updated",
-                    driver,
-                    providerThread: parentProvider,
-                  }),
+      afterIngestion: (persist) =>
+        Effect.gen(function* () {
+          yield* Deferred.await(commandPersisted);
+          const registered = registration;
+          if (registered === undefined) return yield* Effect.die("Recovery was not registered");
+          const inspection = yield* registered.inspect;
+          assert.equal(inspection.status, "terminal");
+          if (inspection.status !== "terminal")
+            return yield* Effect.die("Expected retained terminal");
+          assert.equal(inspection.event.status, status);
+          yield* registered.finalize(inspection.event, [], { runtimeReleased: false });
+          if (outcome !== "queued_completions") {
+            yield* Deferred.await(firstMarkerConsumed);
+            assert.isFalse(yield* Deferred.isDone(closed));
+            if (outcome === "unknown_probe") yield* complete;
+            else
+              yield* publication.withPermits(1)(
+                Ref.set(probe, "drained").pipe(
+                  Effect.andThen(
+                    Queue.offer(queue, {
+                      type: "provider_thread.updated",
+                      driver,
+                      providerThread: parentProvider,
+                    }),
+                  ),
                 ),
-              ),
-            );
-        }
-        yield* Deferred.await(closed);
-      }),
+              );
+          }
+          if (retriesSettlement) {
+            yield* Deferred.await(firstWriteFailed);
+            assert.isFalse(yield* Deferred.isDone(closed));
+            // No more native events are emitted after the drained marker.
+            // The ordered consumer must retry without another routing wakeup.
+            ownerRevoked = outcome === "settlement_owner_lost";
+            shuttingDown = outcome === "settlement_shutdown";
+            if (outcome === "settlement_retry")
+              yield* persist([
+                { type: "turn_item.updated", driver, turnItem: completedDuringBackoff },
+              ]);
+            yield* TestClock.adjust("999 millis");
+            assert.equal(settlementWrites, 1);
+            yield* TestClock.adjust("1 millis");
+            if (outcome === "settlement_retry") {
+              yield* Deferred.await(secondWriteFailed);
+              assert.isFalse(yield* Deferred.isDone(closed));
+              yield* TestClock.adjust("1999 millis");
+              assert.equal(settlementWrites, 2);
+              yield* TestClock.adjust("1 millis");
+              yield* Deferred.await(settlementCommitted);
+            }
+          }
+          yield* Deferred.await(closed);
+        }),
     });
     const ownedItemIds = new Set([commandItem.id, toolItem.id, parentItem.id, childItem.id]);
     assert.equal(subscriptions, 2);
+    assert.equal(starts, 1);
+    if (retriesSettlement) {
+      assert.equal(
+        settlementWrites,
+        outcome === "settlement_retry" ? 3 : outcome === "settlement_owner_lost" ? 2 : 1,
+      );
+      assert.equal(yield* Deferred.isDone(settlementCommitted), outcome === "settlement_retry");
+      const expectedIds = [...ownedItemIds].sort();
+      assert.deepEqual(attemptedSettlementItemIds[0]?.toSorted(), expectedIds);
+      if (outcome === "settlement_retry") {
+        assert.deepEqual(
+          attemptedSettlementItemIds.slice(1).map((itemIds) => itemIds.toSorted()),
+          [
+            expectedIds.filter((id) => id !== toolItem.id),
+            expectedIds.filter((id) => id !== toolItem.id),
+          ],
+        );
+        const saved = result.durable.findLast(
+          (event) => event.type === "turn_item.updated" && event.turnItem.id === toolItem.id,
+        );
+        assert.deepEqual(
+          saved?.type === "turn_item.updated" ? saved.turnItem : undefined,
+          completedDuringBackoff,
+        );
+      }
+    }
     assert.deepEqual(
       result.observed.filter((value) => value.startsWith("run:")),
       [`run:${status}`],
@@ -5204,14 +5334,25 @@ it.effect.each(
         .sort(),
       outcome === "completion_lost"
         ? [...ownedItemIds].map((id) => [id, "interrupted"]).sort()
-        : [],
+        : outcome === "settlement_retry"
+          ? [...ownedItemIds]
+              .filter((id) => id !== toolItem.id)
+              .map((id) => [id, "interrupted"])
+              .sort()
+          : [],
     );
     assert.isFalse(
       result.written.some(
         (item) => item.id === savedHistory.id || item.id === savedChildHistory.id,
       ),
     );
-    if (outcome !== "completion_lost") {
+    for (const history of [savedHistory, savedChildHistory]) {
+      const saved = result.durable.findLast(
+        (event) => event.type === "turn_item.updated" && event.turnItem.id === history.id,
+      );
+      assert.deepEqual(saved?.type === "turn_item.updated" ? saved.turnItem : undefined, history);
+    }
+    if (!completionWasLost) {
       const completions = result.ingested.flatMap((event) =>
         event.type === "turn_item.updated" &&
         event.turnItem.status === "completed" &&
@@ -5238,7 +5379,7 @@ it.effect.each(
         ),
       );
     }
-  }),
+  }).pipe(Effect.provide(TestClock.layer())),
 );
 
 it.effect.each(

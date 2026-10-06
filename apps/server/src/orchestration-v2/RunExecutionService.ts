@@ -27,6 +27,7 @@ import {
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -35,6 +36,7 @@ import * as Ref from "effect/Ref";
 import * as Option from "effect/Option";
 import * as ThreadRecoveryService from "./ThreadRecoveryService.ts";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -1527,17 +1529,30 @@ export const layer: Layer.Layer<
               // The native publication permit and manager fanout put this
               // marker after completion emission. Its consumer callback runs
               // only after all earlier database ingestion in this subscription.
-              const settlement = yield* Effect.exit(settleRecoveredBackground(false, true));
-              if (Exit.isFailure(settlement)) {
-                yield* Effect.logWarning(
-                  "Recovered background recording is unavailable; retaining its reader",
-                  {
-                    runId: input.run.id,
-                    cause: settlement.cause,
-                  },
-                );
-                return false;
-              }
+              // A drained provider may never publish another event. Retry here
+              // in consumer order, rereading saved rows and ownership each time.
+              yield* Effect.gen(function* () {
+                // Intentional shutdown leaves remaining work to startup recovery.
+                if (yield* input.session.isShuttingDown ?? Effect.succeed(false)) return;
+                const settlement = yield* Effect.exit(settleRecoveredBackground(false, true));
+                if (Exit.isSuccess(settlement) || Cause.hasInterruptsOnly(settlement.cause))
+                  return yield* settlement;
+                yield* Effect.logWarning("Recovered background recording will be retried", {
+                  runId: input.run.id,
+                  cause: settlement.cause,
+                });
+                // SQL commit failures can be defects; retry every failure
+                // except interruption, as provider-session release recording does.
+                return yield* Effect.fail(settlement.cause);
+              }).pipe(
+                Effect.retry({
+                  schedule: Schedule.exponential("1 second").pipe(
+                    Schedule.modifyDelay(({ duration }) =>
+                      Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+                    ),
+                  ),
+                }),
+              );
               return true;
             }
             const terminal = yield* Ref.get(terminalEvent);
