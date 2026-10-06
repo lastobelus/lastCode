@@ -9,6 +9,7 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   assertRetainedRevision,
   releasePublishedPinnedRevision,
+  removeAutomationWorktree,
   checkpointRecoveryFingerprint,
   checkpointFailureDisposition,
   checkpointMessage,
@@ -84,6 +85,63 @@ it("fingerprints tracked file lists larger than the default subprocess buffer", 
     NodeFS.rmSync(repo, { recursive: true, force: true });
   }
 }, 30000);
+
+function linkedWorktreeFixture(prefix: string) {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+  const repo = NodePath.join(root, "repo");
+  const worktree = NodePath.join(root, "recovery");
+  const git = (cwd: string, args: string[]) =>
+    NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  NodeFS.mkdirSync(repo);
+  git(repo, ["init"]);
+  git(repo, [
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "commit.gpgSign=false",
+    "commit",
+    "--allow-empty",
+    "-m",
+    "source",
+  ]);
+  git(repo, ["worktree", "add", "--detach", worktree]);
+  NodeFS.mkdirSync(NodePath.join(worktree, "node_modules", ".pnpm"), { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(worktree, "node_modules", ".pnpm", ".DS_Store"), "");
+  const metadata = git(worktree, ["rev-parse", "--absolute-git-dir"]);
+  return { root, repo, worktree, metadata, git };
+}
+
+it("finishes deleting a worktree Git unregistered before its files were gone", () => {
+  const fixture = linkedWorktreeFixture("lastcode-worktree-residue-");
+  try {
+    removeAutomationWorktree(fixture.repo, fixture.worktree, () => {
+      // Git removes the metadata even when a concurrent `.DS_Store` write defeats its rmdir.
+      NodeFS.rmSync(fixture.metadata, { recursive: true });
+      throw new Error("git worktree remove failed");
+    });
+    assert.isFalse(NodeFS.existsSync(fixture.worktree));
+    assert.notInclude(fixture.git(fixture.repo, ["worktree", "list"]), fixture.worktree);
+  } finally {
+    NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+it("preserves a worktree when Git refuses removal before unregistering it", () => {
+  const fixture = linkedWorktreeFixture("lastcode-worktree-refused-");
+  try {
+    expect(() =>
+      removeAutomationWorktree(fixture.repo, fixture.worktree, () => {
+        throw new Error("contains modified or untracked files");
+      }),
+    ).toThrow("contains modified or untracked files");
+    assert.isTrue(NodeFS.existsSync(NodePath.join(fixture.worktree, "node_modules")));
+    assert.isTrue(NodeFS.existsSync(fixture.metadata));
+  } finally {
+    NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 it("leaves an unpublished pinned revision available for compilation recovery", () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-pinned-resume-"));

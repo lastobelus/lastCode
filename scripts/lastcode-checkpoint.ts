@@ -309,6 +309,29 @@ function git(
   });
 }
 
+/**
+ * Removes an automation-owned worktree after Git's own dirty and lock checks.
+ * Git drops the worktree's metadata even when deleting its files fails midway, for example when
+ * macOS writes `.DS_Store` into a directory Git is emptying. Once that metadata is gone the delete
+ * has already begun, so finish it with retries instead of leaving an unregistered checkout behind.
+ */
+export function removeAutomationWorktree(
+  repoRoot: string,
+  worktree: string,
+  removeWithGit = () => run(repoRoot, "git", ["worktree", "remove", worktree]),
+): void {
+  const gitDirectory = git(worktree, ["rev-parse", "--absolute-git-dir"], { cwd: worktree });
+  try {
+    removeWithGit();
+  } catch (error) {
+    if (NodeFS.existsSync(gitDirectory)) throw error;
+    console.error(
+      `[lastcode:checkpoint] Git unregistered ${worktree} but could not delete it; finishing the delete.`,
+    );
+    NodeFS.rmSync(worktree, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+}
+
 function fetchCarryReplayRefs(
   repoRoot: string,
   pushRemote: string,
@@ -670,7 +693,7 @@ function retireSupersededRecovery(
   if (git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: worktree })) {
     throw new Error(`Recovery ${recoveryBranch} is not clean after aborting its failed rebase.`);
   }
-  run(repoRoot, "git", ["worktree", "remove", worktree]);
+  removeAutomationWorktree(repoRoot, worktree);
   run(repoRoot, "git", ["update-ref", "-d", branchRef, branchCommit]);
 }
 
@@ -1585,7 +1608,7 @@ export function releasePublishedPinnedRevision(
       "Retained pinned revision differs from the published revision; inspect before cleanup.",
     );
   }
-  run(repoRoot, "git", ["worktree", "remove", worktree]);
+  removeAutomationWorktree(repoRoot, worktree);
   git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, installable.commit]);
 }
 
@@ -1738,7 +1761,7 @@ function publishRevisionIfNeeded(
     throw error;
   } finally {
     if (completed) {
-      run(repoRoot, "git", ["worktree", "remove", worktree]);
+      removeAutomationWorktree(repoRoot, worktree);
       git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`]);
     }
   }
@@ -2034,7 +2057,7 @@ function releasePublishedRecovery(
 ): void {
   if (NodeFS.existsSync(worktree)) {
     assertRecoverySelection(worktree, selection, selection.sourceCommit);
-    run(repoRoot, "git", ["worktree", "remove", worktree]);
+    removeAutomationWorktree(repoRoot, worktree);
   }
   const branchRef = `refs/heads/sync/nightly/${selection.nightlyTag}`;
   const branchHead = git(repoRoot, ["rev-parse", "--verify", branchRef], { allowFailure: true });
@@ -2777,7 +2800,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       let recoveryBranch = disposition.recoveryBranch;
       if (disposition.cleanup && worktree && carryBranch) {
         try {
-          run(repoRoot, "git", ["worktree", "remove", worktree]);
+          removeAutomationWorktree(repoRoot, worktree);
           git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
           carryWorktreePrepared = false;
         } catch (cleanupError) {
@@ -2923,7 +2946,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         );
         throw error;
       }
-      run(repoRoot, "git", ["worktree", "remove", worktree]);
+      removeAutomationWorktree(repoRoot, worktree);
       if (carryBranch) git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
       runPromotionThenShadow(
         () =>
@@ -2944,7 +2967,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
     if (carryWorktreePrepared && plan.bootstrapCheckpoint) {
       const worktree = automationWorktree();
-      run(repoRoot, "git", ["worktree", "remove", worktree]);
+      removeAutomationWorktree(repoRoot, worktree);
       if (carryBranch) git(repoRoot, ["update-ref", "-d", `refs/heads/${carryBranch}`]);
       carryWorktreePrepared = false;
     }
@@ -3217,7 +3240,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       if (selection) {
         releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
       } else {
-        run(repoRoot, "git", ["worktree", "remove", worktree]);
+        removeAutomationWorktree(repoRoot, worktree);
         git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`]);
       }
     }
