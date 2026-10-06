@@ -1785,6 +1785,17 @@ function publishRevisionIfNeeded(
   return { handled: true };
 }
 
+/**
+ * A merge that lands while a candidate is validated leaves main ahead of the candidate's source.
+ * The published tag stays installable; the merge's own service request (or the next scheduled run)
+ * publishes a revision that replays the merge onto it and promotes that instead.
+ */
+function deferPromotion(sourceCommit: string, current: string): void {
+  console.log(
+    `[lastcode:checkpoint] LastCode main advanced from candidate source ${sourceCommit} to ${current}; leaving promotion to the next run, which publishes a revision including it.`,
+  );
+}
+
 function promoteCheckpoint(
   repoRoot: string,
   commit: string,
@@ -1793,7 +1804,16 @@ function promoteCheckpoint(
   validated: boolean,
 ): void {
   if (options.promotion === "never") return;
-  const lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
+  let lock: ReturnType<typeof acquireMainWriteLock>;
+  try {
+    lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
+  } catch (error) {
+    // A guarded merge holds this lock while it writes main and then requests another run.
+    console.log(
+      `[lastcode:checkpoint] Another writer holds the LastCode main write lock; leaving promotion to the next run.\n${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
   try {
     git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
     const expected = git(repoRoot, [
@@ -1807,21 +1827,31 @@ function promoteCheckpoint(
       return;
     }
     if (expected !== sourceCommit) {
-      throw new Error(
-        `LastCode main changed from candidate source ${sourceCommit} to ${expected}; refusing stale promotion. Retry to incorporate the current main.`,
-      );
+      deferPromotion(sourceCommit, expected);
+      return;
     }
 
-    lock.push(
-      checkpointPromotionPushArgs(
-        options.pushRemote,
-        expected,
-        commit,
-        validated
-          ? { kind: "validated" }
-          : { kind: "pre-push", checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]) },
-      ),
-    );
+    try {
+      lock.push(
+        checkpointPromotionPushArgs(
+          options.pushRemote,
+          expected,
+          commit,
+          validated
+            ? { kind: "validated" }
+            : { kind: "pre-push", checkoutHead: git(repoRoot, ["rev-parse", "HEAD"]) },
+        ),
+      );
+    } catch (error) {
+      const current = splitLines(
+        git(repoRoot, ["ls-remote", options.pushRemote, "refs/heads/lastcode/main"], {
+          allowFailure: true,
+        }),
+      )[0]?.split(/\s+/)[0];
+      if (!current || current === sourceCommit || current === commit) throw error;
+      deferPromotion(sourceCommit, current);
+      return;
+    }
     console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
   } finally {
     lock.release();
@@ -2019,34 +2049,30 @@ export function recoveryPublicationArgs(
     "push",
     "--no-verify",
     "--atomic",
-    `--force-with-lease=refs/heads/lastcode/main:${selection.sourceCommit}`,
     `--force-with-lease=${sourceObjectRef(tag)}:${expectedRemoteSource ?? "0000000000000000000000000000000000000000"}`,
     remote,
     tag,
     `${selection.sourceCommit}:${sourceObjectRef(tag)}`,
-    `${selection.head}:refs/heads/lastcode/main`,
   ];
 }
 
+/** Publishes the repaired tag and its source; promotion follows separately and may defer. */
 function publishRepairedCheckpoint(
   repoRoot: string,
   remote: string,
   tag: string,
   selection: RecoverySelection,
 ): void {
-  const lock = acquireMainWriteLock(repoRoot, remote, selection.sourceCommit, "checkpoint");
-  try {
-    lock.push(
-      recoveryPublicationArgs(
-        remote,
-        tag,
-        selection,
-        immutableRemoteSourceCommit(repoRoot, remote, tag, selection.sourceCommit),
-      ),
-    );
-  } finally {
-    lock.release();
-  }
+  run(
+    repoRoot,
+    "git",
+    recoveryPublicationArgs(
+      remote,
+      tag,
+      selection,
+      immutableRemoteSourceCommit(repoRoot, remote, tag, selection.sourceCommit),
+    ),
+  );
 }
 
 function releasePublishedRecovery(
@@ -2359,7 +2385,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   // A crash after pushing but before clearing the selection must not republish or
   // rebase the repaired commit. The published immutable tag now preserves it.
   if (selection && publishedRecoveryInstallable(installables, selection)) {
-    if (!isAncestor(repoRoot, selection.head, sourceCommit))
+    if (
+      !isAncestor(repoRoot, selection.head, sourceCommit) &&
+      !isAncestor(repoRoot, selection.sourceCommit, sourceCommit)
+    )
       throw new Error(
         "Published recovery is not represented on main; inspect before releasing it.",
       );
@@ -2370,7 +2399,13 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     );
     return;
   }
-  if (selection) assertRecoverySelection(automationWorktree(), selection, sourceCommit);
+  if (selection) {
+    // Merges since selection are published afterwards as a revision on top of the repair.
+    if (!isAncestor(repoRoot, selection.sourceCommit, sourceCommit)) {
+      throw new Error("Recovery source changed; incorporate new main commits and select again.");
+    }
+    assertRecoverySelection(automationWorktree(), selection, selection.sourceCommit);
+  }
   const sourceAncestor = latestCheckpointAncestor(repoRoot, checkpoints, sourceCommit);
   const sourceNightlyTags = splitLines(
     git(repoRoot, ["tag", "--merged", sourceCommit, "--list", "v*-nightly.*"]),
@@ -2485,6 +2520,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       git(repoRoot, ["rev-list", "--count", `${selection.nightlyTag}..${selection.head}`]),
     );
     let pendingTag: string | undefined;
+    let shadowTag: string | undefined;
     let failurePhase: "publication" | "smoke" = "smoke";
     try {
       const normalizedHead =
@@ -2551,13 +2587,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceCommit: selection.sourceCommit,
       });
       releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
-      runHistoricalShadowIfNeeded(repoRoot, publishedTag, replay, (record) =>
-        appendCheckpointRunForOptions(options, record),
-      );
-      console.log(
-        "[lastcode:checkpoint] Repaired checkpoint published and promoted. Run the service again for later nightlies.",
-      );
-      return;
+      shadowTag = publishedTag;
     } catch (error) {
       if (pendingTag) deleteCheckpointTag(repoRoot, pendingTag);
       let recoveryFingerprint: string | undefined;
@@ -2593,6 +2623,17 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       );
       throw error;
     }
+    runPromotionThenShadow(
+      () => promoteCheckpoint(repoRoot, selection.head, options, selection.sourceCommit, true),
+      () =>
+        runHistoricalShadowIfNeeded(repoRoot, shadowTag, replay, (record) =>
+          appendCheckpointRunForOptions(options, record),
+        ),
+    );
+    console.log(
+      "[lastcode:checkpoint] Repaired checkpoint published. Run the service again for later nightlies.",
+    );
+    return;
   }
 
   let candidateRef = plan.candidateRef === options.sourceRef ? sourceCommit : plan.candidateRef;

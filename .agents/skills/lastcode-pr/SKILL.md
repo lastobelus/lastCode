@@ -75,8 +75,10 @@ workstream base, not the parent branch.
 Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
 promotion to `lastcode/main`. Never close, merge, or retarget an unrelated PR to
 unblock checkpoints. A candidate must incorporate its pinned source, and its
-promotion lease must protect that source against concurrent merges. Retain a
-selected recovery on source drift and reselect it against current main.
+promotion lease must protect that source against concurrent merges. Merging
+while a checkpoint runs is safe: the validated tag still publishes and the
+merge's service request follows with a revision. Reselect a recovery only when
+main no longer descends from its selected source.
 
 When `lastcode/main` advances, obtain fresh validation against the new base
 before merging. Refresh the PR branch as needed; validation from the previous
