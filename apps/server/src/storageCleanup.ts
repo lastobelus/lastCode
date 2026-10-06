@@ -188,10 +188,12 @@ export const make = Effect.gen(function* () {
     });
 
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
-    const active = yield* projections.getShellSnapshot();
-    const archived = yield* projections.getShellSnapshot({ location: "archive" });
+    const snapshot = yield* projections.getShellSnapshot();
     const projects = yield* projectStore.listShells();
-    return { projects, threads: [...active.threads, ...archived.threads] };
+    return {
+      projects,
+      threads: [...snapshot.threads, ...snapshot.archivedThreads],
+    };
   });
 
   // Local threads under another project need not have a worktreePath of their own.
@@ -276,7 +278,11 @@ export const make = Effect.gen(function* () {
     if (processCwds === null) return;
     const snapshot = yield* readThreads();
     const groups = Map.groupBy(
-      snapshot.threads.filter((thread) => thread.worktreePath !== null),
+      // Deleted shells can remain visible during cleanup; use their durable
+      // deletion activity and outbox guards through the deleted-candidate path.
+      snapshot.threads.filter(
+        (thread) => thread.worktreePath !== null && thread.deletedAt === null,
+      ),
       (thread) => path.resolve(thread.worktreePath!),
     );
     const deletedGroups = Map.groupBy(
@@ -284,7 +290,9 @@ export const make = Effect.gen(function* () {
       (thread) => path.resolve(thread.worktreePath!),
     );
     const candidates = [
-      ...[...groups.values()].flatMap((group) => (group.length === 1 ? [group[0]!] : [])),
+      ...[...groups.entries()].flatMap(([cwd, group]) =>
+        group.length === 1 && !deletedGroups.has(cwd) ? [group[0]!] : [],
+      ),
       ...[...deletedGroups.entries()].flatMap(([cwd, group]) =>
         !groups.has(cwd) && group.length === 1 ? [group[0]!] : [],
       ),
@@ -325,14 +333,17 @@ export const make = Effect.gen(function* () {
               return false;
             const latest = latestSnapshot.threads.filter(
               (entry) =>
+                entry.deletedAt === null &&
+                entry.worktreePath !== null &&
+                path.resolve(entry.worktreePath) === worktreePath,
+            );
+            const latestDeleted = (yield* readDeletedDependencyCandidates()).filter(
+              (entry) =>
                 entry.worktreePath !== null && path.resolve(entry.worktreePath) === worktreePath,
             );
             if (deleted) {
               if (latest.length !== 0) return false;
-              const rows = (yield* readDeletedDependencyCandidates()).filter(
-                (entry) =>
-                  entry.worktreePath !== null && path.resolve(entry.worktreePath) === worktreePath,
-              );
+              const rows = latestDeleted;
               if (
                 rows.length !== 1 ||
                 rows[0]!.id !== thread.id ||
@@ -348,6 +359,7 @@ export const make = Effect.gen(function* () {
             `;
               if (pending.length > 0) return false;
             } else if (
+              latestDeleted.length !== 0 ||
               latest.length !== 1 ||
               latest[0]!.id !== thread.id ||
               latest[0]!.branch !== thread.branch ||
@@ -389,6 +401,7 @@ export const make = Effect.gen(function* () {
         const inspection = yield* dependencies.inspect({
           managedWorktreesRoot: config.worktreesDir,
           worktreePath,
+          repositoryRoot: project.workspaceRoot,
         });
         if (inspection === null) return;
         const removed = yield* dependencies.remove(

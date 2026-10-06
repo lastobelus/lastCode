@@ -90,10 +90,12 @@ export class ProcessWorkingDirectories extends Context.Reference<
 
 interface DependencyInput {
   readonly managedWorktreesRoot: string;
+  readonly repositoryRoot: string;
   readonly worktreePath: string;
 }
 
 interface DependencyInspection extends DependencyInput {
+  readonly repositoryCommonGitDir: string;
   readonly dependencyPath: string;
   readonly packageManager: "npm" | "pnpm";
   /** Allocated bytes excluding multiply linked files (e.g. a shared pnpm store). */
@@ -206,6 +208,7 @@ const make = Effect.gen(function* () {
   const validate = Effect.fn("GeneratedDependencies.validate")(function* (input: DependencyInput) {
     const worktreePath = NodePath.resolve(input.worktreePath);
     const managedWorktreesRoot = NodePath.resolve(input.managedWorktreesRoot);
+    const repositoryRoot = NodePath.resolve(input.repositoryRoot);
     const dependencyPath = NodePath.join(worktreePath, "node_modules");
     const io = <A>(operation: () => Promise<A>) =>
       Effect.tryPromise({
@@ -231,11 +234,11 @@ const make = Effect.gen(function* () {
       return null;
     });
     if (candidate === null) return null;
-    const runGit = (args: ReadonlyArray<string>) =>
+    const runGit = (args: ReadonlyArray<string>, cwd = worktreePath) =>
       git
         .execute({
           operation: "GeneratedDependencies.inspect",
-          cwd: worktreePath,
+          cwd,
           args,
           allowNonZeroExit: true,
           maxOutputBytes: 64 * 1024,
@@ -251,7 +254,8 @@ const make = Effect.gen(function* () {
       "--absolute-git-dir",
       "--git-common-dir",
     ]);
-    if (location.exitCode !== 0 || location.stdoutTruncated) return null;
+    if (location.exitCode !== 0 || location.stdoutTruncated || location.stderrTruncated)
+      return null;
     const [top, gitDir, commonDir] = location.stdout.trim().split("\n");
     if (
       !top ||
@@ -261,6 +265,21 @@ const make = Effect.gen(function* () {
       NodePath.resolve(worktreePath, gitDir) === NodePath.resolve(worktreePath, commonDir)
     )
       return null;
+    const expectedLocation = yield* runGit(["rev-parse", "--git-common-dir"], repositoryRoot);
+    if (
+      expectedLocation.exitCode !== 0 ||
+      expectedLocation.stdoutTruncated ||
+      expectedLocation.stderrTruncated
+    )
+      return null;
+    const expectedCommonDir = expectedLocation.stdout.trim();
+    if (expectedCommonDir === "" || expectedCommonDir.includes("\n")) return null;
+    const repositoryCommonGitDir = yield* io(async () => {
+      const actual = await NodeFSP.realpath(NodePath.resolve(worktreePath, commonDir));
+      const expected = await NodeFSP.realpath(NodePath.resolve(repositoryRoot, expectedCommonDir));
+      return actual === expected ? actual : null;
+    });
+    if (repositoryCommonGitDir === null) return null;
     const tracked = yield* runGit([
       "ls-files",
       "-z",
@@ -287,6 +306,8 @@ const make = Effect.gen(function* () {
       ? null
       : ({
           managedWorktreesRoot,
+          repositoryRoot,
+          repositoryCommonGitDir,
           worktreePath,
           dependencyPath,
           packageManager: candidate.packageManager,
@@ -323,6 +344,7 @@ const make = Effect.gen(function* () {
     if (
       current === null ||
       current.dependencyPath !== inspection.dependencyPath ||
+      current.repositoryCommonGitDir !== inspection.repositoryCommonGitDir ||
       current.device !== inspection.device ||
       current.inode !== inspection.inode ||
       current.packageManager !== inspection.packageManager

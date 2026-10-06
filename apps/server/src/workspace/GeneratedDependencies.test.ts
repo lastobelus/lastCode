@@ -130,7 +130,7 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
     path.join(dependencyPath, "package", "index.js"),
     "module.exports = 1;\n",
   );
-  const input = { managedWorktreesRoot, worktreePath };
+  const input = { managedWorktreesRoot, repositoryRoot: repository, worktreePath };
   return { fs, path, cleanup, root, repository, input, dependencyPath, marker, lock, runGit };
 });
 
@@ -183,6 +183,93 @@ it.effect("never follows dependency links into outside files or a pnpm store", (
     assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
     assert.equal(yield* fs.readFileString(path.join(outside, "data")), "user data");
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("retains a same-branch install belonging to another project repository", () =>
+  Effect.gen(function* () {
+    const candidate = yield* fixture();
+    const expected = yield* fixture();
+    assert.equal(
+      (yield* candidate.runGit(candidate.input.worktreePath, ["branch", "--show-current"])).stdout,
+      (yield* expected.runGit(expected.input.worktreePath, ["branch", "--show-current"])).stdout,
+    );
+    assert.isNull(
+      yield* candidate.cleanup.inspect({ ...candidate.input, repositoryRoot: expected.repository }),
+    );
+    assert.isTrue(yield* candidate.fs.exists(candidate.dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect.each(["repository-subdirectory", "linked-worktree", "linked-subdirectory"] as const)(
+  "recognizes the expected repository through %s",
+  (location) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const root = location === "repository-subdirectory" ? f.repository : f.input.worktreePath;
+      const repositoryRoot = location === "linked-worktree" ? root : f.path.join(root, "nested");
+      yield* f.fs.makeDirectory(repositoryRoot, { recursive: true });
+      const inspected = yield* f.cleanup.inspect({ ...f.input, repositoryRoot });
+      assert.isNotNull(inspected);
+      assert.isNotNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("retains an install when the expected repository cannot be resolved", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    assert.isNull(yield* f.cleanup.inspect({ ...f.input, repositoryRoot: f.root }));
+    assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect.each(["stdoutTruncated", "stderrTruncated"] as const)(
+  "retains an inspected install when expected repository metadata is truncated (%s)",
+  (truncation) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      const execute = git.execute;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(git, "execute")
+            .mockImplementation((request) =>
+              execute(request).pipe(
+                Effect.map((result) =>
+                  request.cwd === f.repository && request.args[1] === "--git-common-dir"
+                    ? { ...result, [truncation]: true }
+                    : result,
+                ),
+              ),
+            ),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect.each(["repository", "linked-worktree"] as const)(
+  "rechecks repository association before removal (expected %s)",
+  (location) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const replacement = yield* fixture();
+      const repositoryRoot = location === "repository" ? f.repository : f.input.worktreePath;
+      const inspected = yield* f.cleanup.inspect({ ...f.input, repositoryRoot });
+      assert.isNotNull(inspected);
+      // Change only Git ownership, retaining the measured dependency directory's identity.
+      const replacementGitFile = yield* f.fs.readFileString(
+        f.path.join(replacement.input.worktreePath, ".git"),
+      );
+      yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, ".git"), replacementGitFile);
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* f.fs.exists(f.path.join(f.dependencyPath, "package/index.js")));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("measures an install once across inspection and removal", () =>
@@ -285,6 +372,7 @@ it.effect("rejects symlinked ancestors and checkout paths outside the managed ro
     yield* fs.symlink(input.managedWorktreesRoot, alias);
     assert.isNull(
       yield* cleanup.inspect({
+        repositoryRoot: input.repositoryRoot,
         managedWorktreesRoot: alias,
         worktreePath: path.join(alias, "feature"),
       }),
@@ -408,14 +496,18 @@ const makeShell = (worktreePath: string) =>
 
 type SweepCase =
   | "eligible"
+  | "archived"
   | "whole-policy"
   | "whole-removal"
+  | "whole-shared-deleted-visible-pending"
   | "disabled"
   | "recent"
   | "queued"
   | "background"
   | "delegated"
   | "shared"
+  | "shared-archived"
+  | "shared-deleted"
   | "terminal"
   | "preview"
   | "project-root"
@@ -425,6 +517,7 @@ type SweepCase =
   | "deleted"
   | "deleted-recent"
   | "deleted-pending"
+  | "deleted-visible-pending"
   | "deleted-event"
   | "process"
   | "process-unknown"
@@ -452,12 +545,44 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  const wholeSharedDeleted = mode === "whole-shared-deleted-visible-pending";
+  const visibleDeletedThread = wholeSharedDeleted
+    ? {
+        ...thread,
+        id: ThreadId.make("deleted-other"),
+        deletedAt: at(15),
+        worktreeCleanup: {
+          repositoryRoot: f.repository,
+          worktreePath: f.input.worktreePath,
+          status: "queued" as const,
+          queuedAt: DateTime.formatIso(at(15)),
+          blockedByThreadId: threadId,
+        },
+      }
+    : null;
+  if (mode === "archived") thread = { ...thread, archivedAt: at(15) };
+  if (mode === "deleted-visible-pending")
+    thread = {
+      ...thread,
+      deletedAt: at(15),
+      worktreeCleanup: {
+        repositoryRoot: f.repository,
+        worktreePath: f.input.worktreePath,
+        status: "queued",
+        queuedAt: DateTime.formatIso(at(15)),
+        blockedByThreadId: ThreadId.make("blocking-thread"),
+      },
+    };
   let settings: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
       ...DEFAULT_SERVER_SETTINGS.storageCleanup,
       worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
-      worktreeAfterDays: mode === "whole-policy" || mode === "whole-removal" ? 1 : null,
+      worktreeAfterDays: wholeSharedDeleted
+        ? 7
+        : mode === "whole-policy" || mode === "whole-removal"
+          ? 1
+          : null,
       worktreeOnDelete: false,
       worktreeOnMerge: false,
       worktreeUnchanged: false,
@@ -470,18 +595,21 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   if (mode === "delegated")
     yield* sql`INSERT INTO orchestration_v2_projection_subagents VALUES (${threadId}, NULL, 'running')`;
   const deleted = mode.startsWith("deleted");
-  if (deleted) {
+  if (deleted || mode === "shared-deleted" || wholeSharedDeleted) {
+    const deletedThreadId =
+      mode === "shared-deleted" || wholeSharedDeleted ? ThreadId.make("deleted-other") : threadId;
     const full = decodeFullThread({
-      ...thread,
+      ...(visibleDeletedThread ?? thread),
+      id: deletedThreadId,
       createdAt: DateTime.formatIso(at(30)),
       updatedAt: DateTime.formatIso(at(20)),
       deletedAt: DateTime.formatIso(at(mode === "deleted-recent" ? 1 : 15)),
     });
     const payload = encodeFullThread(full);
     yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
-    yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${threadId}, ${projectId}, ${payload}, 'deleted')`;
-    if (mode === "deleted-pending")
-      yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${threadId}, 'running')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${deletedThreadId}, ${projectId}, ${payload}, 'deleted')`;
+    if (mode === "deleted-pending" || mode === "deleted-visible-pending" || wholeSharedDeleted)
+      yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${deletedThreadId}, 'running')`;
     if (mode === "deleted-event")
       yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${DateTime.formatIso(at(1))})`;
   }
@@ -557,17 +685,26 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           if (reads > 2 && mode === "activity-changed")
             thread = { ...thread, latestRunCompletedAt: at(0) };
           const threads =
-            options?.location === "archive" || deleted
+            options?.location === "archive" ||
+            (deleted && mode !== "deleted-visible-pending") ||
+            mode === "archived"
               ? []
-              : mode === "shared"
-                ? [thread, { ...thread, id: ThreadId.make("other") }]
-                : [thread];
+              : visibleDeletedThread !== null
+                ? [thread, visibleDeletedThread]
+                : mode === "shared"
+                  ? [thread, { ...thread, id: ThreadId.make("other") }]
+                  : [thread];
           return {
             schemaVersion: 1 as const,
             snapshotSequence: 0,
             projects: [project],
             threads,
-            archivedThreads: [],
+            archivedThreads:
+              mode === "archived"
+                ? [thread]
+                : mode === "shared-archived"
+                  ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
+                  : [],
           };
         }),
     }),
@@ -590,15 +727,16 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   yield* worker
     .start()
     .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
-  // Only the whole-removal case has no research or source changes to preserve.
-  if (mode !== "whole-removal") {
+  // Clean worktrees exercise removal or shared-owner protection without research guards.
+  const preserveResearch = mode !== "whole-removal" && !wholeSharedDeleted;
+  if (preserveResearch) {
     yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "research"));
     yield* f.fs.writeFileString(
       f.path.join(f.input.worktreePath, "research", "notes.md"),
       "private research",
     );
   }
-  const cleanSource = mode === "whole-policy" || mode === "whole-removal";
+  const cleanSource = mode === "whole-policy" || mode === "whole-removal" || wholeSharedDeleted;
   const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
@@ -608,26 +746,33 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
     return;
   }
-  const expectedRemoval = mode === "eligible" || mode === "deleted" || mode === "whole-policy";
+  const expectedRemoval =
+    mode === "eligible" || mode === "archived" || mode === "deleted" || mode === "whole-policy";
+  assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
-  assert.equal(
-    yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research", "notes.md")),
-    "private research",
-  );
+  if (preserveResearch)
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research", "notes.md")),
+      "private research",
+    );
   assert.equal(yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")), source);
   assert.isTrue(yield* f.fs.exists(f.path.join(f.input.worktreePath, ".git")));
 });
 
 it.effect.each([
   "eligible",
+  "archived",
   "whole-policy",
   "whole-removal",
+  "whole-shared-deleted-visible-pending",
   "disabled",
   "recent",
   "queued",
   "background",
   "delegated",
   "shared",
+  "shared-archived",
+  "shared-deleted",
   "terminal",
   "preview",
   "project-root",
@@ -637,6 +782,7 @@ it.effect.each([
   "deleted",
   "deleted-recent",
   "deleted-pending",
+  "deleted-visible-pending",
   "deleted-event",
   "process",
   "process-unknown",
