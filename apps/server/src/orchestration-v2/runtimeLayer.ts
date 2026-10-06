@@ -88,6 +88,15 @@ const storesLayer = Layer.mergeAll(
 export const OrchestrationV2EventSinkLayerLive = eventSinkLayer.pipe(Layer.provide(storesLayer));
 const eventSinkProvided = OrchestrationV2EventSinkLayerLive;
 const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(Layer.provide(storesLayer));
+// Share the admission lock between orchestration and maintenance RPCs.
+const UpdateDrainAdmissionLayerLive = UpdateDrainAdmission.layer.pipe(
+  Layer.provide(
+    Layer.merge(
+      projectionStoreLayer,
+      UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryLive)),
+    ),
+  ),
+);
 const legacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(eventSinkProvided),
 );
@@ -241,9 +250,27 @@ const agentSessionImporterProvided = agentSessionImporterLayer.pipe(
 const threadManagementProvided = threadManagementServiceLayer.pipe(
   Layer.provide(Layer.merge(orchestratorProvided, legacyV1ThreadImporterProvided)),
 );
+const actionResumeProvided = ActionResume.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      threadManagementProvided,
+      ProjectStore.layer,
+      commandReceiptStoreProvided,
+      ActionRunStore.layer,
+    ),
+  ),
+  Layer.provide(UpdateDrainAdmissionLayerLive),
+);
 const worktreeCleanupProvided = WorktreeCleanupService.layer.pipe(
   Layer.provide(
-    Layer.mergeAll(threadManagementProvided, projectionStoreLayer, ProjectStore.layer, providerSessionManagerProvided, legacyV1ThreadImporterProvided, OrchestrationEventInfrastructureLayerLive),
+    Layer.mergeAll(
+      threadManagementProvided,
+      projectionStoreLayer,
+      ProjectStore.layer,
+      providerSessionManagerProvided,
+      legacyV1ThreadImporterProvided,
+      OrchestrationEventInfrastructureLayerLive,
+    ),
   ),
 );
 const worktreeCleanupWorkerProvided = Layer.effectDiscard(
