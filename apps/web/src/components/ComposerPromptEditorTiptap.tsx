@@ -62,7 +62,7 @@ import {
   groupUndoByChangeKind,
   markAsClipboardEdit,
 } from "~/composer-undo-grouping";
-import { setTypingMarksAfterPaste } from "~/composer-paste-marks";
+import { ComposerTypingMarksExtension } from "~/composer-typing-marks";
 import { collectInlineContextIds } from "~/lib/composerContextReferences";
 import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath } from "~/pierre-icons";
@@ -833,6 +833,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         ComposerMarkersExtension,
         ...(richText
           ? [
+              ComposerTypingMarksExtension,
               ComposerCodeExtension,
               TaskList,
               ComposerTaskItemExtension.extend({
@@ -1073,10 +1074,6 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
                 .insertContent(content)
                 .run();
             });
-            if (richText) {
-              const resetMarks = setTypingMarksAfterPaste(editorInstance.state);
-              if (resetMarks) editorInstance.view.dispatch(resetMarks);
-            }
             scrollTiptapCaretIntoView(editorInstance);
           }
           return true;
