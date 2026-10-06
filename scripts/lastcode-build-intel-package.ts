@@ -17,7 +17,8 @@ const REQUEST_SCHEMA_VERSION = 1;
 const GH_TIMEOUT_MS = 30_000;
 const REGISTRATION_TIMEOUT_MS = 2 * 60_000;
 const REGISTRATION_POLL_MS = 5_000;
-const RUN_TIMEOUT_MS = 2 * 60 * 60_000;
+// Include runner queueing, the three-hour build budget, and asset publication.
+const RUN_TIMEOUT_MS = 4 * 60 * 60_000;
 const RUN_POLL_MS = 30_000;
 
 const installableTagPattern =

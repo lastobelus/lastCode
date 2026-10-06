@@ -18,7 +18,8 @@ jobs:
   dispatch:
     name: Ensure newest installable has an Intel package
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    # Allow the four-hour build waiter plus setup and registration.
+    timeout-minutes: 250
     steps:
       - name: Checkout LastCode automation
         uses: actions/checkout@v6

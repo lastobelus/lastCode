@@ -29,7 +29,8 @@ jobs:
   build:
     name: Validate and build macOS x64
     runs-on: macos-15-intel
-    timeout-minutes: 90
+    # The full workspace gate and packaging can exceed 90 minutes on hosted Intel.
+    timeout-minutes: 180
     outputs:
       needs_build: ${{ steps.release.outputs.needs_build }}
       version: ${{ steps.target.outputs.version }}
