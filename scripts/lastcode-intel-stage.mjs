@@ -389,15 +389,25 @@ async function stageIntelUpdateLocked(
     .filter((release) => !maximum || compareInstallables(release, maximum) <= 0)
     .toSorted((left, right) => compareInstallables(right, left));
   const target = available[0];
+  const versions = {
+    currentVersion,
+    maximumVersion: maximum?.version ?? null,
+    availableVersion: target?.version ?? null,
+  };
   if (!target || compareInstallables(target, current) <= 0) {
     if (pending) cleanupUnreferencedCandidates(root, pending.candidateId);
-    return { schemaVersion: 1, status: pending ? "pending" : "up-to-date", pending };
+    const status = pending
+      ? "pending"
+      : maximum && compareInstallables(maximum, current) > 0
+        ? "waiting-for-release"
+        : "up-to-date";
+    return { schemaVersion: 1, status, ...versions, pending };
   }
   if (pending) {
     const pendingTag = parseInstallableTag(pending.tag);
     if (compareInstallables(target, pendingTag) <= 0) {
       cleanupUnreferencedCandidates(root, pending.candidateId);
-      return { schemaVersion: 1, status: "pending", pending };
+      return { schemaVersion: 1, status: "pending", ...versions, pending };
     }
   }
 
@@ -463,7 +473,7 @@ async function stageIntelUpdateLocked(
       syncParentDirectory: dependencies.syncPendingDirectory,
     });
     cleanupUnreferencedCandidates(root, identifier);
-    return { schemaVersion: 1, status: "staged", pending: readPending(root) };
+    return { schemaVersion: 1, status: "staged", ...versions, pending: readPending(root) };
   } catch (error) {
     if (!pointerCommitted) {
       NodeFS.rmSync(candidateMoved ? candidateDirectory : incomplete, {

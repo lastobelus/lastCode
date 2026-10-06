@@ -437,6 +437,14 @@ nightly, staging stops before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
+Stage results include `currentVersion`, `maximumVersion` (or `null` without a
+version source), and `availableVersion` (or `null` without an eligible release).
+When the version source is newer but there is neither a newer eligible release
+nor a newer pending candidate, the status is `waiting-for-release` rather than
+`up-to-date`.
+An available intermediate update still returns `staged` or `pending`; its
+version can be compared with `maximumVersion` to detect remaining lag.
+
 ### Deployment primitives
 
 This repository provides narrow components that private or organization-owned
