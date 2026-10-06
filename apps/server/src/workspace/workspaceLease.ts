@@ -1,3 +1,4 @@
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 
@@ -9,14 +10,15 @@ export const withWorkspaceLease = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
   Effect.suspend(() => {
-    const lease = leases.get(cwd) ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 };
-    leases.set(cwd, lease);
+    const workspacePath = NodePath.resolve(cwd);
+    const lease = leases.get(workspacePath) ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 };
+    leases.set(workspacePath, lease);
     lease.users++;
     return lease.semaphore.withPermit(effect).pipe(
       Effect.ensuring(
         Effect.sync(() => {
           lease.users--;
-          if (lease.users === 0) leases.delete(cwd);
+          if (lease.users === 0) leases.delete(workspacePath);
         }),
       ),
     );

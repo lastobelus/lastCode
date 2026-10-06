@@ -1,4 +1,5 @@
 import * as NetAddress from "effect/net/NetAddress";
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -27,11 +28,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { HttpServer } from "effect/http";
 
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
@@ -291,13 +294,14 @@ function makeProviderSession(input: {
   readonly providerSessionId: ProviderSessionId;
   readonly now: DateTime.Utc;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
+  readonly cwd?: string;
 }): OrchestrationV2ProviderSession {
   return {
     id: input.providerSessionId,
     driver: CODEX_DRIVER,
     providerInstanceId: modelSelection.instanceId,
     status: "ready",
-    cwd: process.cwd(),
+    cwd: input.cwd ?? process.cwd(),
     model: "gpt-5.4",
     capabilities: input.capabilities ?? CodexCapabilities,
     createdAt: input.now,
@@ -501,6 +505,7 @@ function makeProviderAdapter(
         const session = makeProviderSession({
           providerSessionId: input.providerSessionId,
           now,
+          cwd: input.runtimePolicy.cwd ?? process.cwd(),
           ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
         });
         yield* Ref.update(state, (current) => {
@@ -610,13 +615,17 @@ function makeTestLayer(input: {
   readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>;
+  readonly eventSinkLayer?: Layer.Layer<EventSink.EventSinkV2>;
+  readonly configureMcp?: boolean;
 }) {
   const configuredEventSinkLayer =
-    input.flakyReleaseWrites !== undefined
+    input.eventSinkLayer ??
+    (input.flakyReleaseWrites !== undefined
       ? makeFlakyReleaseEventSinkLayer(input.flakyReleaseWrites)
       : input.failReleaseEventWrites
         ? FailingReleaseEventSinkLayer
-        : TestEventSinkLayer;
+        : TestEventSinkLayer);
   const registryLayer = ProviderAdapterRegistry.makeSingleLayer(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
@@ -651,6 +660,7 @@ function makeTestLayer(input: {
     TestMcpRegistryLayer,
     ProviderSessionManager.layerWithOptions({
       idleTimeoutMs: input.idleTimeoutMs,
+      ...(input.configureMcp === undefined ? {} : { configureMcp: input.configureMcp }),
       ...(input.maxIdlePinMs === undefined ? {} : { maxIdlePinMs: input.maxIdlePinMs }),
     }).pipe(
       Layer.provide(
@@ -663,6 +673,7 @@ function makeTestLayer(input: {
           TestStoresLayer,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.fileSystemLayer === undefined ? [] : [input.fileSystemLayer]),
         ),
       ),
     ),
@@ -899,7 +910,7 @@ function makePendingRuntimeRequestEvents(input: {
   });
 }
 
-it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", () =>
+it.effect("ProviderSessionManagerV2 opens sessions in different workspaces concurrently", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const openStartedCount = yield* Ref.make(0);
@@ -949,7 +960,7 @@ it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", ()
           threadId: secondThreadId,
           providerSessionId: secondProviderSessionId,
           modelSelection,
-          runtimePolicy,
+          runtimePolicy: { ...runtimePolicy, cwd: NodePath.join(process.cwd(), "apps", "server") },
         })
         .pipe(Effect.forkScoped);
 
@@ -1026,6 +1037,152 @@ it.effect("ProviderSessionManagerV2 closes every live session for a provider ins
         makeTestLayer({
           state,
           idleTimeoutMs: 60_000,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("provider startup waits for workspace cleanup to release its lease", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const cleanupHeld = yield* Deferred.make<void>();
+    const releaseCleanup = yield* Deferred.make<void>();
+    const adapterStarted = yield* Deferred.make<void>();
+    const cleanupFinished = yield* Ref.make(false);
+    const fs = yield* FileSystem.FileSystem.pipe(Effect.provide(NodeServices.layer));
+    const directoryInfo = yield* fs.stat(runtimePolicy.cwd);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadId = ThreadId.make("thread-cleanup-start-overlap");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({
+            idAllocator,
+            threadId,
+            now: yield* DateTime.now,
+          }),
+        ],
+      });
+      const cleanup = yield* withWorkspaceLease(
+        ".",
+        Deferred.succeed(cleanupHeld, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseCleanup)),
+          Effect.andThen(Ref.set(cleanupFinished, true)),
+        ),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(cleanupHeld);
+      // The workspace stat and adapter dependencies are synchronous here, so
+      // immediate startup reaches either the held lease or the adapter barrier.
+      const startup = yield* manager
+        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .pipe(
+          Effect.provideService(References.PreventSchedulerYield, true),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+      assert.isFalse(yield* Deferred.isDone(adapterStarted));
+      assert.equal((yield* Ref.get(state)).openCount, 0);
+      yield* Deferred.succeed(releaseCleanup, undefined);
+      yield* Fiber.join(cleanup);
+      yield* Deferred.await(adapterStarted);
+      yield* Fiber.join(startup);
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          configureMcp: false,
+          fileSystemLayer: Layer.mock(FileSystem.FileSystem)({
+            stat: () => Effect.succeed(directoryInfo),
+          }),
+          beforeOpen: () =>
+            Deferred.succeed(adapterStarted, undefined).pipe(
+              Effect.andThen(Ref.get(cleanupFinished)),
+              Effect.tap((finished) => Effect.sync(() => assert.isTrue(finished))),
+              Effect.asVoid,
+            ),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("provider startup keeps cleanup blocked until its session attachment is durable", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const attachmentPending = yield* Deferred.make<void>();
+    const commitAttachment = yield* Deferred.make<void>();
+    const cleanupEntered = yield* Deferred.make<void>();
+    const pausedAttachmentSink = Layer.effect(
+      EventSink.EventSinkV2,
+      Effect.gen(function* () {
+        const delegate = yield* EventSink.EventSinkV2;
+        return EventSink.EventSinkV2.of({
+          ...delegate,
+          write: (input) =>
+            input.events.some((event) => event.type === "provider-session.attached")
+              ? Deferred.succeed(attachmentPending, undefined).pipe(
+                  Effect.andThen(Deferred.await(commitAttachment)),
+                  Effect.andThen(delegate.write(input)),
+                )
+              : delegate.write(input),
+        });
+      }),
+    ).pipe(Layer.provide(TestEventSinkLayer));
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread-start-cleanup-overlap");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({
+            idAllocator,
+            threadId,
+            now: yield* DateTime.now,
+          }),
+        ],
+      });
+      const startup = yield* manager
+        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(attachmentPending);
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+      const cleanup = yield* withWorkspaceLease(
+        runtimePolicy.cwd,
+        Effect.gen(function* () {
+          const current = yield* projections.getThreadRecords(threadId, ["providerSessions"]);
+          assert.equal(
+            current.providerSessions.find((session) => session.id === providerSessionId)?.status,
+            "ready",
+          );
+          yield* Deferred.succeed(cleanupEntered, undefined);
+        }),
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      assert.isFalse(yield* Deferred.isDone(cleanupEntered));
+      yield* Deferred.succeed(commitAttachment, undefined);
+      yield* Fiber.join(startup);
+      yield* Fiber.join(cleanup);
+      assert.isTrue(yield* Deferred.isDone(cleanupEntered));
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          configureMcp: false,
+          eventSinkLayer: pausedAttachmentSink,
         }),
       ),
     );

@@ -33,6 +33,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -1970,8 +1971,8 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
-        open: (input) =>
-          sessionOpen.withLock(
+        open: (input) => {
+          const open = sessionOpen.withLock(
             input.providerSessionId,
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
@@ -2137,7 +2138,14 @@ export const layerWithOptions = (
               yield* scheduleIdleRelease(input.providerSessionId);
               return exposedRuntime;
             }),
-          ),
+          );
+          // Cleanup owns the same lease until recursive deletion finishes.
+          // Keep startup protected until its durable attachment guards the cwd;
+          // running provider turns do not hold this lease.
+          return input.runtimePolicy.cwd === null
+            ? open
+            : withWorkspaceLease(input.runtimePolicy.cwd, open);
+        },
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
