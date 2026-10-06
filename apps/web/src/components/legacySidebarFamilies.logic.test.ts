@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
   legacySidebarFamilySummary,
@@ -9,6 +9,7 @@ import {
   legacySidebarSubagentStatusLabel,
   legacySidebarThreadKey,
   legacySidebarSubagentGroupKey,
+  legacySidebarThreadAnnotation,
   projectLegacySidebarFamilies,
 } from "./legacySidebarFamilies.logic";
 import { resolveThreadStatusPill } from "./Sidebar.logic";
@@ -52,6 +53,36 @@ const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
 describe("legacy sidebar subagent families", () => {
+  it("hides existing copied notes while preserving child edits and independently authored notes", () => {
+    const annotation = {
+      body: "Parent note",
+      anchorMessageId: MessageId.make("parent-message"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      resolvedAt: null,
+    };
+    const child = thread("child", "parent", {
+      createdAt: "2026-01-02T00:00:00.000Z",
+      annotation,
+    });
+    expect(legacySidebarThreadAnnotation(child)).toBeNull();
+    expect(
+      legacySidebarThreadAnnotation(
+        thread("root", undefined, { createdAt: child.createdAt, annotation }),
+      ),
+    ).toBe(annotation);
+    const ordinary = thread("ordinary", undefined, {
+      createdAt: child.createdAt,
+      annotation,
+      creatorThreadId: ThreadId.make("parent"),
+    });
+    expect(legacySidebarThreadAnnotation(ordinary)).toBeNull();
+    const edited = { ...annotation, updatedAt: "2026-01-03T00:00:00.000Z", body: "Child edit" };
+    expect(legacySidebarThreadAnnotation({ ...child, annotation: edited })).toBe(edited);
+    const independent = { ...edited, createdAt: child.createdAt };
+    expect(legacySidebarThreadAnnotation({ ...child, annotation: independent })).toBe(independent);
+    expect(legacySidebarThreadAnnotation({ ...child, createdAt: "invalid" })).toBe(annotation);
+  });
   it("collapses families by default and keeps the subagent section separately collapsed", () => {
     const parent = thread("parent");
     const helper = thread("helper", "parent");

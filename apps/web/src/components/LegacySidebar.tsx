@@ -273,6 +273,7 @@ import {
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   legacySidebarSubagentGroupKey,
+  legacySidebarThreadAnnotation,
   type LegacySidebarFamilyItem,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
@@ -638,7 +639,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
-  const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
+  const annotation = legacySidebarThreadAnnotation(thread);
+  const hasActiveAnnotation = annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
       ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
@@ -1426,9 +1428,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             >
               <span className="inline-flex items-center gap-1">
                 {jumpLabel ? (
-                  hasActiveAnnotation && thread.annotation ? (
+                  hasActiveAnnotation && annotation ? (
                     <ThreadAnnotationHoverPopover
-                      annotation={thread.annotation}
+                      annotation={annotation}
                       cwd={gitCwd ?? undefined}
                       onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                       onEdit={() => onEditAnnotation(thread)}
@@ -1461,9 +1463,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
                     </Tooltip>
                   )
-                ) : hasActiveAnnotation && thread.annotation ? (
+                ) : hasActiveAnnotation && annotation ? (
                   <ThreadAnnotationHoverPopover
-                    annotation={thread.annotation}
+                    annotation={annotation}
                     cwd={gitCwd ?? undefined}
                     onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
                     onEdit={() => onEditAnnotation(thread)}
@@ -3399,7 +3401,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             className="w-4 shrink-0 max-sm:w-10"
             style={
               projectEnvironmentIcons.length > 0
-                ? { width: `calc(1.75rem + ${projectEnvironmentIcons.length}rem)` }
+                ? { width: `calc(1.75rem + ${Math.min(projectEnvironmentIcons.length, 3)}rem)` }
                 : undefined
             }
           />
@@ -3419,32 +3421,65 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               } as CSSProperties
             }
           >
-            {projectEnvironmentIcons.map((entry) => (
-              <Tooltip key={entry.environmentId}>
+            {projectEnvironmentIcons
+              .slice(0, projectEnvironmentIcons.length > 3 ? 2 : 3)
+              .map((entry) => (
+                <Tooltip key={entry.environmentId}>
+                  <TooltipTrigger
+                    render={
+                      <span
+                        role="img"
+                        tabIndex={0}
+                        aria-label={entry.label}
+                        className="pointer-events-auto inline-flex size-3 items-center justify-center"
+                        data-legacy-sidebar-unscaled-content
+                      />
+                    }
+                  >
+                    <ConnectedEnvironmentIcon
+                      environmentId={entry.environmentId}
+                      context="project"
+                      color={resolveEnvironmentIconColor(
+                        props.environmentIconColors[entry.environmentId],
+                        props.knownEnvironmentIds.has(entry.environmentId),
+                      )}
+                      className="size-3"
+                    />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">{entry.label}</TooltipPopup>
+                </Tooltip>
+              ))}
+            {projectEnvironmentIcons.length > 3 ? (
+              <Tooltip>
                 <TooltipTrigger
                   render={
                     <span
                       role="img"
                       tabIndex={0}
-                      aria-label={entry.label}
-                      className="pointer-events-auto inline-flex size-3 items-center justify-center"
+                      aria-label={`${projectEnvironmentIcons.length - 2} more project environments`}
+                      className="pointer-events-auto inline-flex size-3 items-center justify-center text-3xs text-icon-muted"
                       data-legacy-sidebar-unscaled-content
                     />
                   }
                 >
-                  <ConnectedEnvironmentIcon
-                    environmentId={entry.environmentId}
-                    context="project"
-                    color={resolveEnvironmentIconColor(
-                      props.environmentIconColors[entry.environmentId],
-                      props.knownEnvironmentIds.has(entry.environmentId),
-                    )}
-                    className="size-3"
-                  />
+                  +{projectEnvironmentIcons.length - 2}
                 </TooltipTrigger>
-                <TooltipPopup side="top">{entry.label}</TooltipPopup>
+                <TooltipPopup side="top">
+                  <div className="flex flex-col gap-1.5">
+                    {projectEnvironmentIcons.slice(2).map((entry) => (
+                      <div key={entry.environmentId} className="flex items-center gap-2">
+                        <ConnectedEnvironmentIcon
+                          environmentId={entry.environmentId}
+                          context="project"
+                          className="size-3 shrink-0"
+                        />
+                        <span>{entry.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </TooltipPopup>
               </Tooltip>
-            ))}
+            ) : null}
           </span>
         )}
         <Tooltip>

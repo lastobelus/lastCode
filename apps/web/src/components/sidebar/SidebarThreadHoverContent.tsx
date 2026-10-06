@@ -93,7 +93,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
             <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
           </div>
         ) : null}
-        {props.environmentLabel ? (
+        {props.environmentLabel && props.thread.lineage.relationshipToParent !== "subagent" ? (
           <div className="flex min-w-0 items-center gap-2">
             <ConnectedEnvironmentIcon
               environmentId={props.thread.environmentId}
