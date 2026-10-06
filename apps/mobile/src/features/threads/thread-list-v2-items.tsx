@@ -85,6 +85,8 @@ import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 const STATUS_LABEL_BY_STATUS: Partial<
   Record<ThreadListV2Status, { label: string; className: string }>
 > = {
+  "not-responding": { label: "Not responding", className: "text-warning-foreground" },
+  "needs-repair": { label: "Needs repair", className: "text-warning-foreground" },
   approval: { label: "Approval", className: "text-warning-foreground" },
   input: { label: "Input", className: "text-adaptive-indigo-600-300" },
   question: { label: "? Question", className: "text-adaptive-violet-700-300" },

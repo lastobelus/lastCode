@@ -1,3 +1,6 @@
+import { ThreadRecoveryOperationError } from "@t3tools/contracts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./orchestration-v2/ThreadRecoveryRepairService.ts";
 import { OrchestrationDispatchCommandError, ActionResumeError } from "@t3tools/contracts";
 import * as ActionResume from "./actionResume/ActionResume.ts";
 import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
@@ -1223,6 +1226,8 @@ const makeWsRpcLayer = (
         }
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+      const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
+      const threadRepair = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -1901,6 +1906,29 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.recoverThread]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_V2_WS_METHODS.recoverThread,
+            startup.enqueueCommand(threadRecovery.recover(input)).pipe(
+              Effect.as({ ok: true as const }),
+              Effect.mapError(
+                (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.repairThread]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_V2_WS_METHODS.repairThread,
+            startup
+              .enqueueCommand(threadRepair.launch(input))
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+                ),
+              ),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>

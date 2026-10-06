@@ -388,6 +388,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         eventSinkProvided,
         IdAllocator.layer,
         providerEventIngestorProvided,
+        storesLayer,
         serverSettingsLayer,
       ),
     ),

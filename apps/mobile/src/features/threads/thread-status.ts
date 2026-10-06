@@ -1,3 +1,4 @@
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
 import type { StatusTone } from "../../components/StatusPill";
 import {
   threadRuntimeIsActive,
@@ -11,6 +12,8 @@ export type ThreadStatusKind =
   | "pending-approval"
   | "awaiting-input"
   | "question"
+  | "not-responding"
+  | "needs-repair"
   | "working"
   | "waiting"
   | "connecting"
@@ -83,6 +86,16 @@ export function resolveThreadStatus(
       pulse: false,
     };
   }
+
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel)
+    return {
+      kind: recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding",
+      label: recoveryLabel,
+      pillClassName: "bg-warning",
+      textClassName: "text-warning-foreground",
+      pulse: false,
+    };
 
   if (thread.hasPendingApprovals) {
     return {

@@ -117,6 +117,10 @@ and restart remain separate decisions. If another Action continuation is pending
 end the turn so its result can arrive, then list Actions again. An automated
 message alone does not make Actions unavailable; use the actual disabled reason.
 
+## Local Reviews
+
+When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra High review" or "review (up to 3 rounds)", run the reviews & address issues until a review comes back clean, or the budget is exhausted. Always finish addressing issues from the last review! Then proceed (if instructed) with babysitting the pr (addressing ci failures and github review comments). If instructed to merge, do so when ci/github-reviews are clean, even if the last round of local review was not clean. If instructed to "merge if clean", proceed through babysit pr but don't merge if the last local review was not clean, and notify the user.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.

@@ -29,7 +29,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
-  type OrchestrationV2AppThread,
+  OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -79,7 +79,11 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
+import {
+  CommandPolicyV2,
+  resolveMessageDispatchIntent,
+  runNeedsRecovery,
+} from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
@@ -1685,8 +1689,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           session.status !== "stopped" &&
           session.status !== "error",
       );
+      const supersedesRecovery =
+        projection.thread.recovery !== undefined &&
+        (projection.thread.recovery.runId !== startingRun.id ||
+          projection.thread.recovery.attemptId !== startingRun.activeAttemptId);
+      const { recovery: _previousRecovery, ...threadWithoutRecovery } = projection.thread;
+      const startingThread = {
+        ...(supersedesRecovery ? threadWithoutRecovery : projection.thread),
+        ...(selectionChanged
+          ? {
+              providerInstanceId: queuedRun.providerInstanceId,
+              modelSelection: queuedRun.modelSelection,
+              updatedAt: now,
+            }
+          : {}),
+      };
       yield* writeSystemEvents(
         [
+          ...(supersedesRecovery && !selectionChanged
+            ? [
+                {
+                  type: "thread.metadata-updated" as const,
+                  threadId,
+                  occurredAt: now,
+                  payload: startingThread,
+                },
+              ]
+            : []),
           ...(selectionChanged
             ? [
                 {
@@ -1697,12 +1726,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   threadId,
                   providerInstanceId: queuedRun.providerInstanceId,
                   occurredAt: now,
-                  payload: {
-                    ...projection.thread,
-                    providerInstanceId: queuedRun.providerInstanceId,
-                    modelSelection: queuedRun.modelSelection,
-                    updatedAt: now,
-                  },
+                  payload: startingThread,
                 },
               ]
             : []),
@@ -4333,6 +4357,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Target run ${input.targetRunId} was not found.`,
         });
       }
+      if (!input.forceRestart && runNeedsRecovery(input.projection.thread, targetRun)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: input.command.commandId,
+          commandType: input.command.type,
+          cause:
+            "This turn needs recovery before it can receive messages. Your message remains queued.",
+        });
+      }
       if (isNativeMaintenanceCommand(input)) {
         return yield* new OrchestratorDispatchError({
           commandId: input.command.commandId,
@@ -5314,6 +5346,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         if (
           active !== undefined &&
+          !runNeedsRecovery(projection.thread, active) &&
           activeTurn !== undefined &&
           providerThread?.providerSessionId != null &&
           (activeMessage === undefined || !isNativeMaintenanceCommand(activeMessage))
@@ -10502,6 +10535,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       default:
         return yield* dispatchUnsupported(command);
+    }
+    // A fresh attempt supersedes the old recovery incident for every provider,
+    // including providers without a recovery probe. Queued placeholders do not.
+    const plannedEvents = yield* Ref.get(events);
+    const startingRuns = plannedEvents.filter(
+      (event) =>
+        (event.type === "run.created" || event.type === "run.updated") &&
+        event.payload.status === "starting",
+    );
+    for (const event of startingRuns) {
+      if (event.type !== "run.created" && event.type !== "run.updated") continue;
+      const plannedThread = plannedEvents.findLast(
+        (candidate) =>
+          candidate.threadId === event.threadId &&
+          candidate.type.startsWith("thread.") &&
+          Schema.is(OrchestrationV2AppThread)(candidate.payload),
+      )?.payload;
+      const thread = Schema.is(OrchestrationV2AppThread)(plannedThread)
+        ? plannedThread
+        : yield* projectionStore.getThread(event.threadId).pipe(mapDispatchError(command));
+      if (
+        thread.recovery === undefined ||
+        (thread.recovery.runId === event.payload.id &&
+          thread.recovery.attemptId === event.payload.activeAttemptId)
+      )
+        continue;
+      const { recovery: _previousRecovery, ...cleared } = thread;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: thread.id,
+        occurredAt: event.occurredAt,
+        payload: cleared,
+      });
     }
     return {
       events: yield* Ref.get(events),

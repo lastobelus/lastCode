@@ -240,6 +240,16 @@ export function summarizeT3ToolCalls(
     case "thread-organize":
       label = phrase("Organized", "organize", `threads ${times}`);
       break;
+    case "thread-recover":
+      label = phrase(
+        "Requested recovery of",
+        "request recovery of",
+        quantity(countEntities(threadIds), "thread"),
+      );
+      break;
+    case "thread-repair":
+      label = phrase("Opened", "open", `repair conversations ${times}`);
+      break;
     case "thread-update":
       label = phrase("Updated", "update", quantity(countEntities(threadIds), "thread"));
       break;

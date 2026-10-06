@@ -5,9 +5,13 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/unstable/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
+
+import { type EnvironmentRpcInput, request } from "../rpc/client.ts";
+import { awaitThreadShell } from "./threadShellAvailability.ts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
@@ -233,6 +237,27 @@ export function createThreadEnvironmentAtoms<R, E>(
     clearAttention: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:clearAttention",
       execute: (input: ClearThreadAttentionInput) => clearThreadAttention(input),
+      scheduler,
+      concurrency,
+    }),
+    recoverThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:recoverThread",
+      tag: ORCHESTRATION_V2_WS_METHODS.recoverThread,
+      scheduler,
+      concurrency,
+    }),
+    repairThread: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:repairThread",
+      execute: (
+        input: EnvironmentRpcInput<typeof ORCHESTRATION_V2_WS_METHODS.repairThread>,
+        registry,
+        environmentId,
+      ) =>
+        request(ORCHESTRATION_V2_WS_METHODS.repairThread, input).pipe(
+          Effect.tap(({ threadId }) =>
+            awaitThreadShell(registry, snapshotAtom(environmentId), threadId),
+          ),
+        ),
       scheduler,
       concurrency,
     }),

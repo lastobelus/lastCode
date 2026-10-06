@@ -548,6 +548,8 @@ function needsRecovery(
     }
     case "runtime":
       return (
+        (projection.thread.recovery !== undefined &&
+          ["suspect", "stale", "recovering"].includes(projection.thread.recovery.status)) ||
         projection.runs.some(
           (run) =>
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
@@ -1468,6 +1470,7 @@ export function threadShellFromProjection(
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     lastVisitedAt: projection.thread.lastVisitedAt,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
+    ...(projection.thread.recovery ? { recovery: projection.thread.recovery } : {}),
     subagentPromotion: projection.thread.subagentPromotion ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
     deletedAt: projection.thread.deletedAt,
@@ -1707,6 +1710,7 @@ function shellFromState(input: {
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     lastVisitedAt: input.state.thread.lastVisitedAt,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
+    ...(input.state.thread.recovery ? { recovery: input.state.thread.recovery } : {}),
     subagentPromotion: input.state.thread.subagentPromotion ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
     deletedAt: input.state.thread.deletedAt,
@@ -3521,6 +3525,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       THEN json_array_length(payload_json, '$.pendingBackgroundTasks') > 0
                       ELSE 0 END
                 )
+                SELECT thread_id FROM orchestration_v2_projection_threads
+                WHERE CASE WHEN json_valid(payload_json)
+                  THEN json_extract(payload_json, '$.recovery.status') IN ('suspect', 'stale', 'recovering')
+                  ELSE 0 END
+                UNION
                 SELECT thread_id FROM orchestration_v2_projection_runs
                 WHERE status IN ('preparing', 'starting', 'running', 'waiting')
                 UNION

@@ -1717,8 +1717,21 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         // path. Serialize the race so only one can publish terminal events.
         const turnTerminalizationPermit = yield* Semaphore.make(1);
 
+        // Keep each provider thread's latest terminal until durable root
+        // finalization acknowledges it or this runtime is garbage-collected.
+        // Unrelated completions and runtime release must preserve evidence a
+        // failed persistence reader still needs to reconcile its exact turn.
+        const terminalEvidence = new Map<
+          string,
+          Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>
+        >();
         const emitProviderEvent = (event: ProviderAdapterV2Event) =>
-          Queue.offer(events, event).pipe(Effect.asVoid);
+          Effect.suspend(() => {
+            if (event.type === "turn.terminal") {
+              terminalEvidence.set(event.providerThreadId, event);
+            }
+            return Queue.offer(events, event).pipe(Effect.asVoid);
+          });
 
         // Call only for new model-output activity. A local item/completed can
         // arrive while the upstream response stream is still retrying.
@@ -5371,6 +5384,36 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          publishEventsBarrier: (barrier) =>
+            turnTerminalizationPermit.withPermits(1)(
+              Effect.gen(function* () {
+                const observation = yield* barrier.observe;
+                yield* emitProviderEvent({
+                  type: "events.barrier",
+                  driver: CODEX_PROVIDER,
+                  after: barrier.after(observation),
+                });
+              }),
+            ),
+          inspectTurn: ({ providerThread, providerTurnId }) =>
+            Effect.gen(function* () {
+              const event = terminalEvidence.get(providerThread.id);
+              if (event?.providerTurnId === providerTurnId) {
+                return { status: "terminal" as const, event };
+              }
+              const active = Array.from((yield* Ref.get(activeTurns)).values()).some(
+                (turn) =>
+                  turn.providerTurnId === providerTurnId &&
+                  turn.providerThread.id === providerThread.id,
+              );
+              return { status: active ? ("active" as const) : ("unknown" as const) };
+            }),
+          acknowledgeTurnTerminal: ({ providerThreadId, providerTurnId }) =>
+            Effect.sync(() => {
+              if (terminalEvidence.get(providerThreadId)?.providerTurnId === providerTurnId) {
+                terminalEvidence.delete(providerThreadId);
+              }
+            }),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Known gap: a subagent that Codex resumes later reads as completed
           // (not pending) between turns, so idle release can win the race

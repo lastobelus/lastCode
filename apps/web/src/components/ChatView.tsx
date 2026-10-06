@@ -1,4 +1,9 @@
 import {
+  recoveryQueuesFollowUps,
+  recoverySuppressesWorking,
+} from "@t3tools/client-runtime/state/thread-recovery";
+import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
+import {
   parseThreadAnnotationSubmission,
   saveThreadAnnotationSubmission,
 } from "./thread-annotation/threadAnnotationSubmission";
@@ -507,7 +512,10 @@ import {
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
-import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  applyComposerQueueConstraint,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
@@ -7262,6 +7270,17 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, navigate],
   );
 
+  const threadRecoveryBanner = useThreadRecoveryBanner({
+    thread: activeThreadShell,
+    environmentId,
+    onOpenThread: onOpenRelatedThread,
+  });
+  const suppressStaleWorking = recoverySuppressesWorking(activeThreadShell?.recovery);
+  const forceQueueFollowUps = recoveryQueuesFollowUps(
+    activeThreadShell?.recovery,
+    activeRuntime?.activeRunId,
+  );
+
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
     if (presentation === null || !activeThread) {
@@ -7727,6 +7746,7 @@ export default function ChatView(props: ChatViewProps) {
     threadAnnotationExpanded,
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    const threadRecoveryItems = threadRecoveryBanner === null ? [] : [threadRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = backgroundWorkBannerItem === null ? [] : [backgroundWorkBannerItem];
     const resumeCompactionItems =
@@ -7743,6 +7763,7 @@ export default function ChatView(props: ChatViewProps) {
     const annotationItems = threadAnnotationBannerItem === null ? [] : [threadAnnotationBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...threadRecoveryItems,
         ...feedbackBannerItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
@@ -7758,6 +7779,7 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
+      ...threadRecoveryItems,
       ...feedbackBannerItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
@@ -7814,6 +7836,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell,
     serverRuntime?.usageLimitResetAt,
     feedbackBannerItems,
+    threadRecoveryBanner,
     limitRecoveryBanner,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
@@ -8688,7 +8711,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
-    dispatchMode: ComposerDispatchMode = "auto",
+    rawDispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
@@ -8696,6 +8719,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    const dispatchMode = applyComposerQueueConstraint(rawDispatchMode, forceQueueFollowUps);
     // Typed out in full rather than picked from the menu. Attachments or contexts
     // mean the user is sending a prompt, so those go through as usual.
     if (
@@ -9270,7 +9294,8 @@ export default function ChatView(props: ChatViewProps) {
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const shouldQueueBehindActiveRun = phase === "running" && dispatchMode === "queue";
+    const shouldQueueBehindActiveRun =
+      (phase === "running" || forceQueueFollowUps) && dispatchMode === "queue";
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
@@ -11343,13 +11368,17 @@ export default function ChatView(props: ChatViewProps) {
                       onAnnotationReopen: () => void changeThreadAnnotationResolution("reopen"),
                     }
                   : {})}
-                isWorking={!paintOnlyDisplayedTimeline && isWorking}
-                runlessWorkActive={runlessWorkStartedAt !== null}
+                isWorking={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isWorking}
+                runlessWorkActive={!suppressStaleWorking && runlessWorkStartedAt !== null}
                 activeTurnInProgress={
-                  !paintOnlyDisplayedTimeline && (isWorking || !latestRunSettled)
+                  !paintOnlyDisplayedTimeline &&
+                  !suppressStaleWorking &&
+                  (isWorking || !latestRunSettled)
                 }
-                isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
-                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                isCompacting={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isCompacting}
+                activeTurnStartedAt={
+                  paintOnlyDisplayedTimeline || suppressStaleWorking ? null : activeWorkStartedAt
+                }
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
                 {...(paintOnlyDisplayedTimeline
@@ -11612,6 +11641,7 @@ export default function ChatView(props: ChatViewProps) {
                                 isLocalDraftThread && activeProject === null
                               }
                               phase={phase}
+                              forceQueue={forceQueueFollowUps}
                               canInterrupt={canInterruptRunningThread}
                               isConnecting={isConnecting}
                               isSendBusy={isSendBusy || isSavingQueuedEdit || isResuming}
@@ -11655,6 +11685,7 @@ export default function ChatView(props: ChatViewProps) {
                                 ) : null
                               }
                               bannerItems={composerBannerItems}
+                              suppressStaleActivity={suppressStaleWorking}
                               // With attachments or contexts aboard the pick just inserts the
                               // text, so it sends as a prompt like the typed path would.
                               onUsageLimitsCommand={

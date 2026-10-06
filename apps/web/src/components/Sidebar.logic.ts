@@ -1,3 +1,4 @@
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   resolveThreadWorkingStartedAt,
   threadShellIsCleanupRecovery,
@@ -663,7 +664,9 @@ export interface ThreadStatusPill {
     | "Deleting"
     | "Deleting (Queued)"
     | "Question"
-    | "Cleanup failed";
+    | "Cleanup failed"
+    | "Not responding"
+    | "Needs repair";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -682,6 +685,8 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Deleting: 7,
   "Deleting (Queued)": 7,
   "Cleanup failed": 8,
+  "Not responding": 8,
+  "Needs repair": 8,
 };
 
 type ThreadStatusInput = Pick<
@@ -695,6 +700,7 @@ type ThreadStatusInput = Pick<
   | "runtime"
   | "actionResume"
   | "worktreeCleanup"
+  | "recovery"
 > & {
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
@@ -1002,6 +1008,8 @@ export type SidebarThreadStatus =
   | "cleanup-deleting"
   | "cleanup-queued"
   | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -1027,12 +1035,15 @@ type SidebarThreadStatusInput = Pick<
   | "actionResume"
   | "attention"
   | "worktreeCleanup"
+  | "recovery"
 > & { pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined };
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
   if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
   if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
   if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals) {
     return "approval";
   }
@@ -1071,7 +1082,9 @@ export type SidebarV2TopStatusKind =
   | "question"
   | "cleanup-deleting"
   | "cleanup-queued"
-  | "cleanup-failed";
+  | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair";
 
 export function resolveSidebarV2TopStatus(input: {
   readonly status: SidebarThreadStatus;
@@ -1079,6 +1092,8 @@ export function resolveSidebarV2TopStatus(input: {
   readonly isWoke: boolean;
 }): SidebarV2TopStatusKind | null {
   if (
+    input.status === "not-responding" ||
+    input.status === "needs-repair" ||
     input.status === "question" ||
     input.status === "cleanup-deleting" ||
     input.status === "cleanup-queued" ||
@@ -1260,6 +1275,15 @@ export function resolveThreadStatusPill(input: {
       pulse: false,
     };
   }
+
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel)
+    return {
+      label: recoveryLabel,
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+    };
 
   if (thread.hasPendingApprovals) {
     return {

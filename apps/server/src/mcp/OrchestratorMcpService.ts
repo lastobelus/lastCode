@@ -627,6 +627,14 @@ function threadDetail(
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
+    ...(projection.thread.recovery === undefined
+      ? {}
+      : {
+          recovery: {
+            ...projection.thread.recovery,
+            updatedAt: DateTime.formatIso(projection.thread.recovery.updatedAt),
+          },
+        }),
     titleRegeneration:
       projection.thread.titleRegeneration === undefined ||
       projection.thread.titleRegeneration === null

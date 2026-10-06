@@ -125,6 +125,7 @@ export interface EnvironmentThreadShell {
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
   readonly subagentPromotion?: import("@t3tools/contracts").OrchestrationV2SubagentPromotion | null;
+  readonly recovery?: import("@t3tools/contracts").OrchestrationV2ThreadRecovery | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
@@ -291,6 +292,10 @@ export function presentThreadShell(
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
     subagentPromotion: thread.subagentPromotion ?? null,
+    recovery:
+      thread.activeRunId !== null && thread.activeRunId !== thread.recovery?.runId
+        ? null
+        : (thread.recovery ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),

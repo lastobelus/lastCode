@@ -4,6 +4,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import { CommandId, type ScopedThreadRef } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { useLayoutEffect, useRef, useState } from "react";
@@ -58,7 +59,9 @@ export function ThreadQuickComposerDialog({
   const unacknowledged = sender.hasUnacknowledgedMessage(key);
   const connected = target !== null && connectedEnvironmentIds.includes(target.environmentId);
   const blockReason = quickMessageBlockReason(thread, connected, unacknowledged);
-  const queueing = threadRuntimeIsActive(thread?.runtime);
+  const queueing =
+    threadRuntimeIsActive(thread?.runtime) ||
+    recoveryQueuesFollowUps(thread?.recovery, thread?.runtime?.activeRunId);
 
   const submit = async () => {
     if (!target || !text.trim() || sending || blockReason) return;

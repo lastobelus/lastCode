@@ -60,6 +60,8 @@ import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import { UpdateDrainRepositoryLive } from "../persistence/Layers/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
 
 /** The shared application event log and its command receipts. */
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -156,6 +158,16 @@ const providerAuthServiceProvided = ProviderAuthServiceLive.pipe(
   Layer.provide(Layer.merge(projectionStoreLayer, providerSessionManagerProvided)),
 );
 
+const threadRecoveryProvided = ThreadRecovery.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      projectionStoreLayer,
+      eventSinkProvided,
+      idAllocatorLayer,
+      ThreadCommandExecutor.layer,
+    ),
+  ),
+);
 const runExecutionServiceProvided = runExecutionServiceLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -163,6 +175,8 @@ const runExecutionServiceProvided = runExecutionServiceLayer.pipe(
       eventSinkProvided,
       idAllocatorLayer,
       providerEventIngestorProvided,
+      threadRecoveryProvided,
+      projectionStoreLayer,
     ),
   ),
 );
@@ -303,6 +317,18 @@ const threadLaunchProvided = threadLaunchServiceLayer.pipe(
 const threadLifecycleProvided = threadLifecycleServiceLayer.pipe(
   Layer.provide(threadManagementProvided),
 );
+const threadRecoveryRepairProvided = ThreadRecoveryRepair.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      threadManagementProvided,
+      projectionStoreLayer,
+      commandReceiptStoreProvided,
+      ProjectStore.layer,
+      threadLaunchProvided,
+      threadRecoveryProvided,
+    ),
+  ),
+);
 const scheduledTaskProvided = scheduledTaskServiceLayer.pipe(
   Layer.provide(Layer.mergeAll(threadLaunchProvided, threadManagementProvided)),
 );
@@ -355,6 +381,7 @@ const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
 );
 
 export const OrchestrationV2LayerLive = Layer.mergeAll(
+  threadRecoveryProvided,
   eventSinkProvided,
   orchestratorProvided,
   threadManagementProvided,
@@ -367,6 +394,7 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
 );
 
 export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
+  threadRecoveryRepairProvided,
   threadWaitProvided,
   actionResumeProvided,
   worktreeCleanupWorkerProvided,

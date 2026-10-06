@@ -383,7 +383,18 @@ export const OrchestrationV2SubagentPromotion = Schema.Struct({
 });
 export type OrchestrationV2SubagentPromotion = typeof OrchestrationV2SubagentPromotion.Type;
 
+export const OrchestrationV2ThreadRecovery = Schema.Struct({
+  runId: RunId,
+  attemptId: RunAttemptId,
+  status: Schema.Literals(["suspect", "stale", "recovering", "recovered", "failed"]),
+  detail: Schema.String,
+  updatedAt: Schema.DateTimeUtc,
+  repairThreadId: Schema.optional(ThreadId),
+});
+export type OrchestrationV2ThreadRecovery = typeof OrchestrationV2ThreadRecovery.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
+  recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
   creatorThreadId: Schema.optional(ThreadId),
@@ -1795,6 +1806,7 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
@@ -1956,6 +1968,11 @@ export const OrchestrationV2StoredEvent = Schema.Struct({
 });
 export type OrchestrationV2StoredEvent = typeof OrchestrationV2StoredEvent.Type;
 
+const OrchestrationV2ThreadRecoveryJson = OrchestrationV2ThreadRecovery.mapFields((fields) => ({
+  ...fields,
+  updatedAt: Schema.DateTimeUtcFromString,
+}));
+
 const OrchestrationV2SubagentPromotionJson = OrchestrationV2SubagentPromotion.mapFields(
   (fields) => ({
     ...fields,
@@ -1967,6 +1984,7 @@ const OrchestrationV2SubagentPromotionJson = OrchestrationV2SubagentPromotion.ma
 export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((fields) => ({
   ...fields,
   subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
+  recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -2383,6 +2401,7 @@ export type OrchestrationV2LatestVisibleMessageSummaryJson =
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
   subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
+  recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -3189,6 +3208,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
+  recoverThread: "orchestration.recoverThread",
+  repairThread: "orchestration.repairThread",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
