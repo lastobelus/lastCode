@@ -124,7 +124,7 @@ const make = Effect.gen(function* () {
   const inputFd = config.desktopBrowserFd;
   const controlFd = config.desktopBrowserControlFd;
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
-  const attachedTabs = new Map<string, DesktopTabKey>();
+  const attachedTabs = new Map<string, DesktopTabKey & { supportsNativeSurface: boolean }>();
   const profileRequests = new Map<string, Deferred.Deferred<PreviewAutomationProfiles | null>>();
   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
   const inbound = new Map<string, Queue.Queue<string>>();
@@ -170,6 +170,17 @@ const make = Effect.gen(function* () {
       ),
     );
   };
+
+  const failSurfaceRequests = (id: string) =>
+    Effect.forEach(
+      [...surfaceRequests.values()].filter((pending) => keyOf(pending.key) === id),
+      (pending) =>
+        Deferred.fail(
+          pending.deferred,
+          new DesktopBrowserTransportError({ reason: "guest-unavailable" }),
+        ),
+      { discard: true },
+    );
 
   const handleEvent = (
     desktopHostId: string,
@@ -262,9 +273,18 @@ const make = Effect.gen(function* () {
         }
         return Queue.offer(queue, event.message).pipe(Effect.asVoid);
       }
-      case "attached":
-        attachedTabs.set(id, key);
-        return PubSub.publish(changes, { key, attached: true }).pipe(Effect.asVoid);
+      case "attached": {
+        // A replacement or re-announcement must not inherit the previous guest's capability or lease.
+        const pending = failSurfaceRequests(id);
+        attachedTabs.set(id, {
+          ...key,
+          supportsNativeSurface: event.supportsNativeSurface === true,
+        });
+        return pending.pipe(
+          Effect.andThen(PubSub.publish(changes, { key, attached: true })),
+          Effect.asVoid,
+        );
+      }
       case "detached": {
         attachedTabs.delete(id);
         downloadDirectories.delete(id);
@@ -272,15 +292,7 @@ const make = Effect.gen(function* () {
         completedDownloads.delete(id);
         failedDownloads.delete(id);
         const queue = inbound.get(id);
-        return Effect.forEach(
-          [...surfaceRequests.values()].filter((pending) => keyOf(pending.key) === id),
-          (pending) =>
-            Deferred.fail(
-              pending.deferred,
-              new DesktopBrowserTransportError({ reason: "guest-unavailable" }),
-            ),
-          { discard: true },
-        ).pipe(
+        return failSurfaceRequests(id).pipe(
           Effect.andThen(queue ? Queue.shutdown(queue) : Effect.void),
           Effect.andThen(PubSub.publish(changes, { key, attached: false })),
           Effect.asVoid,
@@ -546,8 +558,12 @@ const make = Effect.gen(function* () {
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
     surface: (key, input, timeoutMs = 2_500) =>
       Effect.gen(function* () {
-        if (!attachedTabs.has(keyOf(key))) {
+        const attached = attachedTabs.get(keyOf(key));
+        if (!attached) {
           return yield* new DesktopBrowserTransportError({ reason: "guest-unavailable" });
+        }
+        if (!attached.supportsNativeSurface) {
+          return yield* new DesktopBrowserTransportError({ reason: "surface-unsupported" });
         }
         const requestId = NodeCrypto.randomUUID();
         const deferred = yield* Deferred.make<
@@ -566,7 +582,7 @@ const make = Effect.gen(function* () {
               Effect.fail(new DesktopBrowserTransportError({ reason: "layout-timeout" })),
           }),
           Effect.onError(() =>
-            input.action === "acquire"
+            input.action === "acquire" && attachedTabs.get(keyOf(key)) === attached
               ? command(
                   {
                     type: "surface",

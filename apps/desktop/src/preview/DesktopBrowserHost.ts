@@ -519,7 +519,10 @@ export const make = Effect.gen(function* () {
     };
     tabs.set(id, tab);
     debuggee.debugger.on("message", tab.onMessage);
-    emit({ type: "attached", threadId: key.threadId, tabId: key.tabId }, key.desktopHostId);
+    emit(
+      { type: "attached", threadId: key.threadId, tabId: key.tabId, supportsNativeSurface: true },
+      key.desktopHostId,
+    );
   };
 
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
@@ -665,7 +668,12 @@ export const make = Effect.gen(function* () {
           tab.relay = null;
           return PubSub.publish(outbox, {
             desktopHostId,
-            event: { type: "attached", threadId: tab.key.threadId, tabId: tab.key.tabId },
+            event: {
+              type: "attached",
+              threadId: tab.key.threadId,
+              tabId: tab.key.tabId,
+              supportsNativeSurface: true,
+            },
           });
         },
         { discard: true },

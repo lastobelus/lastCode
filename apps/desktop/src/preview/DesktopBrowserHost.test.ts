@@ -96,8 +96,12 @@ describe("DesktopBrowserHost", () => {
       );
       host.attach(key, makeDebuggee().tab, "runtime-local");
       // A restarted backend subscribes after the attach and still hears it.
-      expect(yield* takeEvents(host, 1)).toEqual([{ type: "attached", ...key }]);
-      expect(yield* takeEvents(host, 1)).toEqual([{ type: "attached", ...key }]);
+      expect(yield* takeEvents(host, 1)).toEqual([
+        { type: "attached", ...key, supportsNativeSurface: true },
+      ]);
+      expect(yield* takeEvents(host, 1)).toEqual([
+        { type: "attached", ...key, supportsNativeSurface: true },
+      ]);
     }),
   );
 
@@ -181,10 +185,19 @@ describe("remote desktop browser host", () => {
       const remoteKey = { ...key, desktopHostId: "remote-a" };
       host.attach(remoteKey, makeDebuggee().tab, "runtime-remote");
       yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
-      expect((yield* pull).every((event) => event.desktopHostId === "remote-a")).toBe(true);
+      expect(
+        (yield* pull).every(
+          (event) =>
+            event.desktopHostId === "remote-a" &&
+            event.event.type === "attached" &&
+            event.event.supportsNativeSurface === true,
+        ),
+      ).toBe(true);
       // Local FD announcements must never expose a remote environment's tabs.
       host.attach(key, makeDebuggee().tab, "runtime-local");
-      expect(yield* takeEvents(host, 1)).toEqual([{ type: "attached", ...key }]);
+      expect(yield* takeEvents(host, 1)).toEqual([
+        { type: "attached", ...key, supportsNativeSurface: true },
+      ]);
       yield* host.handleRemoteCommand({
         desktopHostId: "remote-a",
         command: { type: "profiles", requestId: "profiles-a" },

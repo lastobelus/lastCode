@@ -70,7 +70,12 @@ export const DesktopBrowserEvent = Schema.Union([
     profiles: Schema.NullOr(PreviewAutomationProfiles),
   }),
   /** A desktop `<webview>` for this server tab is attached and can be driven. */
-  Schema.Struct({ type: Schema.Literal("attached"), ...TabKey }),
+  Schema.Struct({
+    type: Schema.Literal("attached"),
+    ...TabKey,
+    /** Advertised by native hosts that acknowledge rendering leases. */
+    supportsNativeSurface: Schema.optionalKey(Schema.Boolean),
+  }),
   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
   Schema.Struct({ type: Schema.Literal("detached"), ...TabKey }),
   /** One CDP message from the tab's relay. */
@@ -112,10 +117,13 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "download-transfer-failed",
       "layout-timeout",
       "guest-unavailable",
+      "surface-unsupported",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "surface-unsupported")
+      return "This desktop app does not support the browser rendering protocol required by this server. Update the desktop app to a compatible release to run browser automation.";
     if (this.reason === "layout-timeout")
       return "The desktop browser did not finish applying its viewport before the readiness deadline.";
     if (this.reason === "guest-unavailable")

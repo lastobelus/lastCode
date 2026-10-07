@@ -1100,28 +1100,30 @@ it.live("viewers see the agent's pointer move to its target and click there", ()
   ).pipe(Effect.provide(layer)),
 );
 
-it.effect("reports native readiness failure without dispatching the page mutation", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      desktopRendersNext = true;
-      const { broker, tabId } = yield* ready;
-      surfaceCalls.length = 0;
-      surfaceFailure = new DesktopBrowserTransportError({ reason: "layout-timeout" });
-      const error = yield* broker
-        .invoke<void>({ scope, tabId, operation: "click", input: { locator: "button" } })
-        .pipe(Effect.flip);
-      expect(error).toMatchObject({
-        _tag: "PreviewAutomationRemoteUnavailableError",
-        cause: { detail: { reason: "layout-timeout" } },
-      });
-      expect(desktopConnections[0]!.context.page.locator).not.toHaveBeenCalled();
-      expect(surfaceCalls.map((call) => call.action)).toEqual(["acquire", "release"]);
-      surfaceFailure = null;
-      expect(
-        yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } }),
-      ).toBe("evaluated");
-    }),
-  ).pipe(Effect.provide(layer)),
+it.effect.each(["layout-timeout", "surface-unsupported"] as const)(
+  "reports native %s without dispatching the page mutation or evicting the host",
+  (reason) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        surfaceCalls.length = 0;
+        surfaceFailure = new DesktopBrowserTransportError({ reason });
+        const error = yield* broker
+          .invoke<void>({ scope, tabId, operation: "click", input: { locator: "button" } })
+          .pipe(Effect.flip);
+        expect(error).toMatchObject({
+          _tag: "PreviewAutomationRemoteUnavailableError",
+          cause: { detail: { reason } },
+        });
+        expect(desktopConnections[0]!.context.page.locator).not.toHaveBeenCalled();
+        expect(surfaceCalls.map((call) => call.action)).toEqual(["acquire", "release"]);
+        surfaceFailure = null;
+        expect(
+          yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } }),
+        ).toBe("evaluated");
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.effect.each(["encoder acquisition", "encoder setup", "CDP acquisition"] as const)(

@@ -89,12 +89,41 @@ const connectHost = (
   });
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect.each([undefined, false])(
+    "rejects missing native surface support (%s) immediately without dispatching or disconnecting",
+    (supportsNativeSurface) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const desktopKey = { ...key, desktopHostId: "host-a" };
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "attached",
+          ...key,
+          ...(supportsNativeSurface === undefined ? {} : { supportsNativeSurface }),
+        });
+        for (const action of ["acquire", "release"] as const) {
+          const error = yield* channel
+            .surface(desktopKey, { action, leaseId: "unsupported-lease" })
+            .pipe(Effect.flip);
+          expect(error.reason).toBe("surface-unsupported");
+          expect(error.message).toContain("Update the desktop app");
+        }
+        expect(yield* Queue.size(host.commands)).toBe(0);
+        expect(yield* channel.isAttached(desktopKey)).toBe(true);
+        expect(channel.available).toBe(true);
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("waits for the owning surface acknowledgement and returns its actual viewport", () =>
     Effect.gen(function* () {
       const channel = yield* remoteChannel;
       const first = yield* connectHost(channel, "socket-a", "host-a");
       yield* connectHost(channel, "socket-b", "host-b");
-      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+      });
       const request = yield* channel
         .surface(
           { ...key, desktopHostId: "host-a" },
@@ -141,7 +170,11 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
     Effect.gen(function* () {
       const channel = yield* remoteChannel;
       const host = yield* connectHost(channel, "socket-a", "host-a");
-      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+      });
       const request = yield* channel
         .surface(
           { ...key, desktopHostId: "host-a" },
@@ -168,6 +201,84 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         viewport: { width: 1280, height: 800 },
       });
       expect(yield* channel.isAttached({ ...key, desktopHostId: "host-a" })).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("forgets surface support on replacement and detach without affecting another tab", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const desktopKey = { ...key, desktopHostId: "host-a" };
+      const otherKey = { ...key, tabId: "tab-2" };
+      for (const tab of [key, otherKey]) {
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "attached",
+          ...tab,
+          supportsNativeSurface: true,
+        });
+      }
+      const pending = yield* channel
+        .surface(desktopKey, { action: "acquire", leaseId: "old-lease" })
+        .pipe(Effect.flip, Effect.forkScoped);
+      const old = yield* Queue.take(host.commands);
+      if (old.type !== "surface") throw new Error("Expected surface request");
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      expect(yield* Fiber.join(pending)).toMatchObject({ reason: "guest-unavailable" });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "surfaceReady",
+        ...key,
+        requestId: old.requestId,
+        viewport: { width: 1280, height: 800 },
+      });
+      const acquire = channel.surface(desktopKey, { action: "acquire", leaseId: "new-lease" });
+      expect(yield* acquire.pipe(Effect.flip)).toMatchObject({ reason: "surface-unsupported" });
+      expect(yield* Queue.size(host.commands)).toBe(0);
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "detached", ...key });
+      expect(yield* acquire.pipe(Effect.flip)).toMatchObject({ reason: "guest-unavailable" });
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      expect(yield* acquire.pipe(Effect.flip)).toMatchObject({ reason: "surface-unsupported" });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+      });
+      for (const tab of [desktopKey, { ...otherKey, desktopHostId: "host-a" }]) {
+        const ready = yield* channel
+          .surface(tab, { action: "acquire", leaseId: "current-lease" })
+          .pipe(Effect.forkScoped);
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "surface") throw new Error("Expected surface request");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "surfaceReady",
+          threadId: tab.threadId,
+          tabId: tab.tabId,
+          requestId: command.requestId,
+          viewport: { width: 390, height: 844 },
+        });
+        expect(yield* Fiber.join(ready)).toEqual({ width: 390, height: 844 });
+      }
+      expect(channel.available).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("does not carry surface support across a disconnected host's replacement", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const first = yield* connectHost(channel, "socket-a", "host-a");
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+      });
+      yield* Fiber.interrupt(first.fiber);
+      const replacement = yield* connectHost(channel, "socket-b", "host-a");
+      yield* channel.receiveEvent("socket-b", "host-a", { type: "attached", ...key });
+      const error = yield* channel
+        .surface({ ...key, desktopHostId: "host-a" }, { action: "acquire", leaseId: "lease-b" })
+        .pipe(Effect.flip);
+      expect(error.reason).toBe("surface-unsupported");
+      expect(yield* Queue.size(replacement.commands)).toBe(0);
+      expect(channel.available).toBe(true);
     }).pipe(Effect.scoped),
   );
   it.effect("rejects a different socket owner and keeps equal tab IDs on separate hosts", () =>
