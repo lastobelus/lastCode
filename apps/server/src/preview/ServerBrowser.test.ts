@@ -390,6 +390,8 @@ it.live.each([
       const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
       yield* viewer.input({ type: "takeControl" });
       yield* Queue.clear(viewer.output);
+      yield* viewer.input({ type: "key", action: "down", key: "Shift", code: "ShiftLeft" });
+      yield* viewer.input({ type: "mouse", action: "down", button: "left", x: 10, y: 20 });
       const started = Promise.withResolvers<void>();
       const committed = Promise.withResolvers<void>();
       const events: string[] = [];
@@ -427,10 +429,69 @@ it.live.each([
       yield* Fiber.join(releasing);
       yield* Fiber.join(resumed);
       expect(events).toEqual(["navigation committed", "agent acted"]);
+      const inputSession = contexts[0]!.sessions.at(-1)!;
+      expect(inputSession.send).toHaveBeenCalledWith("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Shift",
+        code: "ShiftLeft",
+      });
+      expect(inputSession.send).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 10,
+        y: 20,
+        buttons: 0,
+        clickCount: 1,
+      });
       const calls = contexts[0]!.page[method].mock.calls;
       expect(calls[0]?.at(-1)).toMatchObject({ waitUntil: "commit", timeout: 15_000 });
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(
+  [false, true].flatMap((native) =>
+    [
+      { method: "goto" as const, message: { type: "navigate", url: "http://10.255.255.1/" } },
+      { method: "goBack" as const, message: { type: "history", delta: -1 } },
+      { method: "goForward" as const, message: { type: "history", delta: 1 } },
+      { method: "reload" as const, message: { type: "reload" } },
+    ].map((navigation) => ({ ...navigation, native })),
+  ),
+)(
+  "a viewer $method that never commits does not hold back the viewer's next input (native: $native)",
+  ({ method, message, native }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = native;
+        const { browser, tabId } = yield* ready;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const context = native ? desktopConnections[0]!.context : contexts[0]!;
+        const hung = Promise.withResolvers<void>();
+        context.page[method].mockImplementationOnce(() => hung.promise);
+        yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve()));
+        yield* viewer.input(message);
+        yield* viewer.input({ type: "navigate", url: "http://localhost:5173/fixed" });
+        yield* viewer.input({ type: "text", text: "hello" });
+        expect(context.page.goto).toHaveBeenLastCalledWith(
+          "http://localhost:5173/fixed",
+          expect.objectContaining({ waitUntil: "commit" }),
+        );
+        expect(context.sessions.at(-1)!.send).toHaveBeenCalledWith("Input.insertText", {
+          text: "hello",
+        });
+        if (native) {
+          // Viewer navigation keeps the existing native lease until the viewer disconnects.
+          expect(surfaceCalls.map((call) => call.action)).toEqual([
+            "acquire",
+            "release",
+            "acquire",
+          ]);
+          expect(releasedDesktopTabs).toEqual([]);
+        }
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("enforces provider ownership and explicit targets when a session has multiple tabs", () =>
