@@ -66,28 +66,81 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       updatedAt: now,
     };
     for (const testCase of [
-      { status: "running", adapterRejected: true, deliveryRejected: true },
-      { status: "running", adapterRejected: undefined, deliveryRejected: undefined },
-      { status: "pending", adapterRejected: undefined, deliveryRejected: undefined },
+      { target: "recorded", status: "running", adapterRejected: true, deliveryRejected: true },
+      {
+        target: "recorded",
+        status: "running",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
+      {
+        target: "recorded",
+        status: "pending",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
       ...(["completed", "interrupted", "failed", "cancelled"] as const).map((status) => ({
+        target: "recorded" as const,
         status,
         adapterRejected: undefined,
         deliveryRejected: true,
       })),
+      ...(["completed", "interrupted", "failed", "cancelled", "rolled_back"] as const).map(
+        (runStatus) => ({
+          target: "terminal-run" as const,
+          status: "running" as const,
+          runStatus,
+          adapterRejected: undefined,
+          deliveryRejected: true,
+        }),
+      ),
+      ...(
+        ["detached", "retargeted", "missing-thread", "missing-turn", "mismatched-thread"] as const
+      ).map((target) => ({
+        target,
+        status: "running" as const,
+        adapterRejected: undefined,
+        deliveryRejected: true,
+      })),
+      {
+        target: "read-failure",
+        status: "running",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
     ] as const) {
+      const runStatus = "runStatus" in testCase ? testCase.runStatus : "running";
       const context = {
-        providerThread,
-        providerTurn: {
-          id: providerTurnId,
-          providerThreadId,
-          status: testCase.status,
-          nodeId,
-          runAttemptId: attemptId,
-          nativeTurnRef: null,
-          ordinal: 1,
-          startedAt: now,
-          completedAt: testCase.status === "running" || testCase.status === "pending" ? null : now,
-        },
+        providerThread:
+          testCase.target === "missing-thread"
+            ? undefined
+            : {
+                ...providerThread,
+                providerSessionId:
+                  testCase.target === "detached"
+                    ? null
+                    : testCase.target === "retargeted"
+                      ? ProviderSessionId.make("session:replacement")
+                      : providerSessionId,
+              },
+        providerTurn:
+          testCase.target === "missing-turn"
+            ? undefined
+            : {
+                id: providerTurnId,
+                providerThreadId:
+                  testCase.target === "mismatched-thread"
+                    ? ProviderThreadId.make("provider-thread:other")
+                    : providerThreadId,
+                status: testCase.status,
+                nodeId,
+                runAttemptId: attemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                startedAt: now,
+                completedAt:
+                  testCase.status === "running" || testCase.status === "pending" ? null : now,
+              },
         attempt: undefined,
         message: {
           id: messageId,
@@ -113,7 +166,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
           userMessageId: messageId,
           rootNodeId: nodeId,
           activeAttemptId: attemptId,
-          status: "running",
+          status: runStatus,
           requestedAt: now,
           startedAt: now,
           completedAt: null,
@@ -142,7 +195,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
         resumeThread: () => Effect.die("unused resumeThread"),
         startTurn: () => Effect.die("unused startTurn"),
         steerTurn: () =>
-          testCase.status === "running"
+          testCase.target === "recorded" && testCase.status === "running"
             ? Effect.fail(
                 new ProviderAdapterSteerRunError({
                   driver,
@@ -162,10 +215,21 @@ it.effect("preserves steering rejection separately from turn completion", () =>
         Layer.provide(
           Layer.merge(
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
-              getProviderControlContext: () => Effect.succeed(context),
+              getProviderControlContext: () =>
+                testCase.target === "read-failure"
+                  ? Effect.fail(
+                      new ProjectionStore.ProjectionStoreReadError({
+                        threadId,
+                        cause: "storage unavailable",
+                      }),
+                    )
+                  : Effect.succeed(context),
             }),
             Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-              get: () => Effect.succeed(Option.some(runtime)),
+              get: () =>
+                testCase.target === "recorded"
+                  ? Effect.succeed(Option.some(runtime))
+                  : Effect.die("Invalid targets must not reach a live provider session"),
             }),
           ),
         ),
@@ -182,9 +246,20 @@ it.effect("preserves steering rejection separately from turn completion", () =>
           })
           .pipe(Effect.flip);
       }).pipe(Effect.provide(layerControl));
-      assert.equal(error.turnCompleted, testCase.status === "completed");
-      assert.equal(error.deliveryRejected, testCase.deliveryRejected);
-      assert.equal(context.providerTurn?.status, testCase.status);
+      assert.equal(
+        error.turnCompleted,
+        testCase.target === "recorded"
+          ? testCase.status === "completed"
+          : testCase.target === "terminal-run"
+            ? runStatus === "completed"
+            : undefined,
+        testCase.target,
+      );
+      assert.equal(error.deliveryRejected, testCase.deliveryRejected, testCase.target);
+      assert.equal(
+        context.providerTurn?.status,
+        testCase.target === "missing-turn" ? undefined : testCase.status,
+      );
     }
   }),
 );

@@ -1283,7 +1283,36 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
       assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
       assert.deepEqual(yield* outbox.listByCommandId(rejectedCommandId), []);
-    }),
+      // The accepted steer is still durable when deletion detaches its session.
+      // Cancel the initial start: this fixture already supplied the running turn.
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["provider-turn.start"],
+        reason: "running provider turn seeded by test",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("zz-runtime-native-queued-model-delete"),
+        threadId,
+      });
+      const deleted = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNotNull(deleted.thread.deletedAt);
+      assert.notInclude(
+        deleted.providerSessions.map((row) => row.id),
+        providerSession.id,
+      );
+      assert.equal(deleted.runs.find((row) => row.id === run.id)?.status, "cancelled");
+      assert.equal(
+        deleted.providerTurns.find((row) => row.id === providerTurnId)?.status,
+        "running",
+      );
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      // Same-clock effects order by ID, so the earlier steer runs before delete cleanup.
+      assert.isTrue(yield* worker.runOnce);
+      const [settledSteer] = yield* outbox.listByCommandId(strict.commandId);
+      assert.equal(settledSteer?.status, "succeeded");
+      assert.equal(settledSteer?.attemptCount, 1);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
   it.effect("answers an async question after its provider exits and commits the answer once", () =>

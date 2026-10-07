@@ -111,7 +111,26 @@ export const layer: Layer.Layer<
             threadId: input.threadId,
             operation: input.operation,
             providerTurnId: input.providerTurnId,
+            ...(input.operation === "steer" ? { deliveryRejected: true } : {}),
             cause: "The recorded provider execution target is no longer valid.",
+          });
+        }
+        // Deletion cancels the run before its session-detach effect executes.
+        // The provider turn may still look running, but this delivery target has ended.
+        if (
+          input.operation === "steer" &&
+          context.run !== undefined &&
+          ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+            context.run.status,
+          )
+        ) {
+          return yield* new ProviderTurnControlError({
+            threadId: input.threadId,
+            operation: "steer",
+            providerTurnId: input.providerTurnId,
+            turnCompleted: context.run.status === "completed",
+            deliveryRejected: true,
+            cause: "The target run ended before the steering message was delivered.",
           });
         }
         // A restart-session command commits the replacement binding before its
