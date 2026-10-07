@@ -181,6 +181,11 @@ jobs:
         working-directory: target
         run: brew bundle install --file apps/mobile/Brewfile
 
+      - name: Install Chromium for server browser integration tests
+        if: steps.release.outputs.needs_build == 'true'
+        working-directory: target
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+
       - name: Run full checkpoint gate
         if: steps.release.outputs.needs_build == 'true'
         working-directory: target
