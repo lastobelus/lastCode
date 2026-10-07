@@ -64,6 +64,7 @@ import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopRendererHistory from "./telemetry/DesktopRendererHistory.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./updates/LastCodeLocalUpdates.ts";
 import * as BrowserImport from "./preview/BrowserImport/BrowserImport.ts";
 import * as LinuxBrowserSecret from "./preview/BrowserImport/LinuxBrowserSecret.ts";
 import * as BrowserSession from "./preview/BrowserSession.ts";
@@ -218,6 +219,7 @@ const layerDesktopApplication = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),
   Layer.provideMerge(DesktopUpdates.layer),
+  Layer.provideMerge(LastCodeLocalUpdates.layer),
   Layer.provideMerge(layerDesktopWslBackend),
   Layer.provideMerge(layerDesktopLocalEnvironmentAuth),
 );
