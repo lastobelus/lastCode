@@ -179,6 +179,126 @@ const emptyState: TestProviderRuntimeState = {
   eventQueues: new Map(),
 };
 
+it.effect.each(["completion", "timeout"] as const)(
+  "worktree teardown waits for concurrent session scope close (%s)",
+  (outcome) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closeEntered = yield* Deferred.make<void>();
+      const allowClose = yield* Deferred.make<void>();
+      const beforeClose = Deferred.succeed(closeEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(allowClose)),
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`teardown-${outcome}`);
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const outboxDetach = yield* manager
+          .detach({ threadId, providerSessionId })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(closeEntered);
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        const teardownDone = yield* Ref.make(false);
+        const teardown = yield* manager.teardownThread({ threadId, providerSessionId }).pipe(
+          Effect.tap(() => Ref.set(teardownDone, true)),
+          Effect.result,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Ref.get(teardownDone));
+        if (outcome === "timeout") {
+          // The ordinary detach persists release after 30s, while cleanup must still fail
+          // until the detached adapter finalizer actually finishes.
+          yield* TestClock.adjust("30 seconds");
+          yield* Fiber.join(outboxDetach);
+          yield* TestClock.adjust("30 seconds");
+          assert.equal((yield* Fiber.join(teardown))._tag, "Failure");
+          assert.equal((yield* Ref.get(state)).closeCount, 0);
+        }
+        yield* Deferred.succeed(allowClose, undefined);
+        yield* Fiber.join(outboxDetach);
+        if (outcome === "completion") assert.equal((yield* Fiber.join(teardown))._tag, "Success");
+        yield* manager.teardownThread({ threadId, providerSessionId });
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            capabilities: ExclusiveCapabilities,
+            beforeClose,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect("worktree teardown retains an older close when the same session ID is reused", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const closeEntered = yield* Deferred.make<void>();
+    const allowClose = yield* Deferred.make<void>();
+    let closes = 0;
+    const beforeClose = Effect.suspend(() =>
+      ++closes === 1
+        ? Deferred.succeed(closeEntered, undefined).pipe(Effect.andThen(Deferred.await(allowClose)))
+        : Effect.void,
+    );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const first = ThreadId.make("reused-session-first");
+      const other = ThreadId.make("reused-session-other");
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: first,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: first, now }),
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: other, now }),
+        ],
+      });
+      yield* manager.open({ threadId: first, providerSessionId, modelSelection, runtimePolicy });
+      const firstClose = yield* manager.close(providerSessionId).pipe(Effect.forkChild);
+      yield* Deferred.await(closeEntered);
+      yield* manager.open({ threadId: other, providerSessionId, modelSelection, runtimePolicy });
+      yield* manager.close(providerSessionId);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      const teardown = yield* manager
+        .teardownThread({ threadId: first, providerSessionId })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.equal(teardown.pollUnsafe(), undefined);
+      yield* Deferred.succeed(allowClose, undefined);
+      yield* Fiber.join(firstClose);
+      yield* Fiber.join(teardown);
+      assert.equal((yield* Ref.get(state)).closeCount, 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          capabilities: ExclusiveCapabilities,
+          beforeClose,
+        }),
+      ),
+    );
+  }),
+);
+
 const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
@@ -297,6 +417,67 @@ function makeProviderThread(input: {
   };
 }
 
+it.effect(
+  "worktree teardown retries shared-thread unload failure and preserves the other thread",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      let failUnload = true;
+      const beforeUnload = Effect.suspend(() =>
+        failUnload ? Effect.die("Native unload failed.") : Effect.void,
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const first = ThreadId.make("shared-teardown-first");
+        const second = ThreadId.make("shared-teardown-other");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: first, now }),
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: second, now }),
+            {
+              id: yield* ids.allocate.event({ threadId: first }),
+              type: "provider-thread.updated",
+              threadId: first,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: makeProviderThread({
+                idAllocator: ids,
+                threadId: first,
+                providerSessionId,
+                now,
+              }),
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId: first,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.open({ threadId: second, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal(
+          (yield* Effect.result(manager.teardownThread({ threadId: first, providerSessionId })))
+            ._tag,
+          "Failure",
+        );
+        assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), runtime);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        failUnload = false;
+        yield* manager.teardownThread({ threadId: first, providerSessionId });
+        assert.deepStrictEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), runtime);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, beforeUnload })));
+    }),
+);
+
 function unimplemented(detail: string) {
   return Effect.fail(
     new ProviderAdapterProtocolError({
@@ -326,6 +507,7 @@ function makeProviderAdapter(
     readonly spawnBeforeOpen?: boolean;
     /** Completed when a hanging scope close reaches its wedged finalizer. */
     readonly scopeCloseReached?: Deferred.Deferred<void>;
+    readonly beforeClose?: Effect.Effect<void>;
   } = {},
 ): ProviderAdapterV2Shape {
   const countClose = Effect.addFinalizer(() =>
@@ -352,6 +534,8 @@ function makeProviderAdapter(
       Effect.gen(function* () {
         if (options.spawnBeforeOpen === true) {
           yield* countClose;
+          if (options.beforeClose !== undefined)
+            yield* Effect.addFinalizer(() => options.beforeClose!);
           if (options.hangSessionScopeClose === true) yield* hangClose;
         }
         if (options.mcpConfigs !== undefined && options.spawnBeforeOpen === true) {
@@ -387,6 +571,8 @@ function makeProviderAdapter(
         });
         if (options.spawnBeforeOpen !== true) {
           yield* countClose;
+          if (options.beforeClose !== undefined)
+            yield* Effect.addFinalizer(() => options.beforeClose!);
           if (options.hangSessionScopeClose === true) yield* hangClose;
         }
 
@@ -468,6 +654,7 @@ function layerTest(input: {
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
+  readonly beforeClose?: Effect.Effect<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
@@ -497,6 +684,7 @@ function layerTest(input: {
       ...(input.scopeCloseReached === undefined
         ? {}
         : { scopeCloseReached: input.scopeCloseReached }),
+      ...(input.beforeClose === undefined ? {} : { beforeClose: input.beforeClose }),
     }),
   );
   const layerConfiguredMcpRegistry =
@@ -1772,7 +1960,7 @@ it.effect(
         assert.equal(resolved?.thread.threadId, threadId);
         assert.deepEqual(
           resolved?.capabilities,
-          new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+          new Set(["preview", "orchestration", "worktree", "pull-requests", "action-resume"]),
         );
 
         yield* manager.close(providerSessionId);
