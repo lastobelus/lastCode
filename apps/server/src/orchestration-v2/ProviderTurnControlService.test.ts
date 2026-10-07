@@ -95,7 +95,15 @@ it.effect("preserves steering rejection separately from turn completion", () =>
         }),
       ),
       ...(
-        ["detached", "retargeted", "missing-thread", "missing-turn", "mismatched-thread"] as const
+        [
+          "detached",
+          "retargeted",
+          "missing-thread",
+          "missing-turn",
+          "mismatched-thread",
+          "missing-run",
+          "missing-message",
+        ] as const
       ).map((target) => ({
         target,
         status: "running" as const,
@@ -108,6 +116,18 @@ it.effect("preserves steering rejection separately from turn completion", () =>
         adapterRejected: undefined,
         deliveryRejected: undefined,
       },
+      {
+        target: "missing-run",
+        status: "pending",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
+      ...(["missing-session", "session-read-failure"] as const).map((target) => ({
+        target,
+        status: "running" as const,
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      })),
     ] as const) {
       const runStatus = "runStatus" in testCase ? testCase.runStatus : "running";
       const context = {
@@ -142,37 +162,43 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                   testCase.status === "running" || testCase.status === "pending" ? null : now,
               },
         attempt: undefined,
-        message: {
-          id: messageId,
-          threadId,
-          runId,
-          nodeId,
-          role: "user",
-          text: "Pause after the current tool.",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "server",
-          streaming: false,
-          createdAt: now,
-          updatedAt: now,
-        },
-        run: {
-          id: runId,
-          threadId,
-          ordinal: 1,
-          providerInstanceId,
-          modelSelection,
-          providerThreadId,
-          userMessageId: messageId,
-          rootNodeId: nodeId,
-          activeAttemptId: attemptId,
-          status: runStatus,
-          requestedAt: now,
-          startedAt: now,
-          completedAt: null,
-          checkpointId: null,
-          contextHandoffId: null,
-        },
+        message:
+          testCase.target === "missing-message"
+            ? undefined
+            : {
+                id: messageId,
+                threadId,
+                runId,
+                nodeId,
+                role: "user",
+                text: "Pause after the current tool.",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "server",
+                streaming: false,
+                createdAt: now,
+                updatedAt: now,
+              },
+        run:
+          testCase.target === "missing-run"
+            ? undefined
+            : {
+                id: runId,
+                threadId,
+                ordinal: 1,
+                providerInstanceId,
+                modelSelection,
+                providerThreadId,
+                userMessageId: messageId,
+                rootNodeId: nodeId,
+                activeAttemptId: attemptId,
+                status: runStatus,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
       } satisfies ProjectionStore.ProjectionProviderControlContext;
       const runtime = {
         instanceId: providerInstanceId,
@@ -227,9 +253,18 @@ it.effect("preserves steering rejection separately from turn completion", () =>
             }),
             Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
               get: () =>
-                testCase.target === "recorded"
-                  ? Effect.succeed(Option.some(runtime))
-                  : Effect.die("Invalid targets must not reach a live provider session"),
+                testCase.target === "missing-session"
+                  ? Effect.succeed(Option.none())
+                  : testCase.target === "session-read-failure"
+                    ? Effect.fail(
+                        new ProviderSessionManager.ProviderSessionLookupError({
+                          providerSessionId,
+                          cause: "session unavailable",
+                        }),
+                      )
+                    : testCase.target === "recorded"
+                      ? Effect.succeed(Option.some(runtime))
+                      : Effect.die("Invalid targets must not reach a live provider session"),
             }),
           ),
         ),
@@ -248,11 +283,13 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       }).pipe(Effect.provide(layerControl));
       assert.equal(
         error.turnCompleted,
-        testCase.target === "recorded"
-          ? testCase.status === "completed"
-          : testCase.target === "terminal-run"
-            ? runStatus === "completed"
-            : undefined,
+        testCase.status === "pending"
+          ? false
+          : testCase.target === "recorded"
+            ? testCase.status === "completed"
+            : testCase.target === "terminal-run"
+              ? runStatus === "completed"
+              : undefined,
         testCase.target,
       );
       assert.equal(error.deliveryRejected, testCase.deliveryRejected, testCase.target);

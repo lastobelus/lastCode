@@ -105,7 +105,10 @@ export const layer: Layer.Layer<
           providerThread === undefined ||
           providerTurn === undefined ||
           (!targetsRecordedSession && !targetsCommittedReplacement) ||
-          providerTurn.providerThreadId !== providerThread.id
+          providerTurn.providerThreadId !== providerThread.id ||
+          (input.operation === "steer" &&
+            providerTurn.status === "running" &&
+            (context.run === undefined || context.message === undefined))
         ) {
           return yield* new ProviderTurnControlError({
             threadId: input.threadId,
@@ -334,6 +337,7 @@ export const layer: Layer.Layer<
               threadId: input.threadId,
               operation: "steer",
               providerTurnId: input.providerTurnId,
+              deliveryRejected: true,
               cause: "The persisted steering message or target run is missing.",
             });
           }
