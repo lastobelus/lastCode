@@ -16,6 +16,7 @@ import {
   OrchestrationV2ThreadShell,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
+  OrchestrationV2DomainEvent,
   ProjectId,
   ThreadId,
   type ServerSettings,
@@ -595,6 +596,7 @@ const decodeShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShell);
 const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
 const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 const decodeSession = Schema.decodeUnknownSync(OrchestrationV2ProviderSessionJson);
+const decodeDomainEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
 const encodeSession = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2ProviderSessionJson));
 const makeShell = (worktreePath: string) =>
   decodeShell({
@@ -691,12 +693,19 @@ type SweepCase =
   | "deleted-event"
   | "process"
   | "process-unknown"
-  | "process-started";
+  | "process-started"
+  | "worker-ready-burst"
+  | "worker-terminal-burst"
+  | "worker-settings-burst";
 
 const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   mode: SweepCase,
   setProcessReader: (reader: () => ReadonlyArray<string> | null) => void,
   dependencyInspections: () => number,
+  workerControl: {
+    readonly initialInventoryEntered: Deferred.Deferred<void>;
+    readonly releaseInitialInventory: Deferred.Deferred<void>;
+  },
 ) {
   yield* TestClock.setTime(NOW);
   const f = yield* fixture();
@@ -717,6 +726,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  const workerLifecycle = mode.startsWith("worker-");
   const batch =
     mode === "batch" ||
     mode === "batch-five" ||
@@ -880,7 +890,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('sibling-session', ${threadId})`;
     }
   }
-  const providerPayload = (id: string, status: "error" | "ready", cwd: string) =>
+  const providerPayload = (
+    id: string,
+    status: OrchestrationV2ProviderSessionJson["status"],
+    cwd: string,
+  ) =>
     encodeSession(
       decodeSession({
         id,
@@ -971,6 +985,80 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           },
         ]
       : [];
+  const publishBurst = yield* Deferred.make<void>();
+  const eventsConsumed = yield* Deferred.make<void>();
+  const settingsConsumed = yield* Deferred.make<void>();
+  const burstEvents = workerLifecycle
+    ? Array.from({ length: 12 }, (_, index) =>
+        decodeDomainEvent({
+          id: `burst-event-${index}`,
+          threadId: "unrelated-thread",
+          occurredAt: at(0),
+          type: "provider-session.updated",
+          payload: decodeSession(
+            JSON.parse(
+              providerPayload(
+                "burst-session",
+                mode === "worker-ready-burst"
+                  ? index % 2 === 0
+                    ? "ready"
+                    : "running"
+                  : index % 2 === 0
+                    ? "stopped"
+                    : "error",
+                f.repository,
+              ),
+            ),
+          ),
+        }),
+      )
+    : [];
+  if (mode === "worker-settings-burst")
+    burstEvents.push(
+      decodeDomainEvent({
+        id: "deleted-event",
+        threadId: "unrelated-thread",
+        occurredAt: at(0),
+        type: "thread.deleted",
+        payload: decodeFullThread({
+          ...thread,
+          id: "unrelated-thread",
+          worktreePath: null,
+          createdAt: DateTime.formatIso(at(30)),
+          updatedAt: DateTime.formatIso(at(20)),
+          deletedAt: DateTime.formatIso(at(0)),
+        }),
+      }),
+    );
+  const events = workerLifecycle
+    ? Stream.fromEffect(Deferred.await(publishBurst)).pipe(
+        Stream.flatMap(() => Stream.fromIterable(burstEvents)),
+        Stream.concat(
+          Stream.fromEffect(Deferred.succeed(eventsConsumed, undefined)).pipe(Stream.drain),
+        ),
+      )
+    : Stream.empty;
+  const changes =
+    mode === "worker-settings-burst"
+      ? Stream.fromEffect(Deferred.await(publishBurst)).pipe(
+          Stream.flatMap(() =>
+            Stream.fromIterable(
+              [8, 9, 30].map((days) => ({
+                ...settings,
+                storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: days },
+              })),
+            ),
+          ),
+          Stream.tap((next) =>
+            Effect.sync(() => {
+              settings = next;
+            }),
+          ),
+          Stream.concat(
+            Stream.fromEffect(Deferred.succeed(settingsConsumed, undefined)).pipe(Stream.drain),
+          ),
+        )
+      : Stream.empty;
   const dependencies = Layer.mergeAll(
     Layer.succeed(ServerConfig.ServerConfig, {
       ...config,
@@ -1069,7 +1157,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           return thread;
         }).pipe(Effect.orDie),
     }),
-    Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
+    Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: events }),
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
       ownershipRevision: Effect.sync(() => ownershipRevision),
       isLive: (sessionId) =>
@@ -1096,7 +1184,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
     Layer.mock(Settings.ServerSettingsService)({
       getSettings: Effect.sync(() => settings),
-      subscribeChanges: Effect.succeed(Stream.empty),
+      subscribeChanges: Effect.succeed(changes),
     }),
     Layer.mock(GitManager.GitManager)({ invalidateStatus: () => Effect.void }),
     Layer.mock(TerminalManager.TerminalManager)({
@@ -1111,7 +1199,12 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const worker = yield* StorageCleanup.make.pipe(Effect.provide(dependencies));
   yield* worker
     .start()
-    .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
+    .pipe(
+      Effect.provideService(
+        ServerActivation.ServerActivation,
+        workerLifecycle ? Effect.void : Effect.never,
+      ),
+    );
   // Clean worktrees exercise removal or shared-owner protection without research guards.
   const preserveResearch = mode !== "whole-removal" && !wholeSharedDeleted && !wholeSession;
   if (preserveResearch) {
@@ -1126,7 +1219,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
-  if (batch)
+  if (batch || workerLifecycle)
     for (const candidate of [thread, ...additionalThreads]) {
       yield* f.fs.makeDirectory(f.path.join(candidate.worktreePath!, "tmp"));
       yield* f.fs.writeFileString(
@@ -1134,7 +1227,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         "private notes",
       );
     }
-  yield* worker.sweep();
+  if (workerLifecycle) {
+    yield* Effect.gen(function* () {
+      yield* Deferred.await(workerControl.initialInventoryEntered);
+      yield* Deferred.succeed(publishBurst, undefined);
+      yield* Deferred.await(eventsConsumed);
+      if (mode === "worker-settings-burst") yield* Deferred.await(settingsConsumed);
+      yield* Deferred.succeed(workerControl.releaseInitialInventory, undefined);
+      yield* worker.drain;
+    }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
+    assert.equal(reads, mode === "worker-ready-burst" ? 1 : 2);
+    assert.equal(processReads, mode === "worker-terminal-burst" ? 3 : 2);
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
+      "private notes",
+    );
+    if (mode === "worker-settings-burst")
+      assert.equal(settings.storageCleanup.worktreeDependenciesAfterDays, 30);
+  } else yield* worker.sweep();
   if (
     mode === "whole-removal" ||
     (wholeSession && (stoppedSession || detachedSession || releasedErrorSession))
@@ -1152,6 +1262,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "shared-session-stopped" ||
     mode === "shared-session-detached" ||
     mode === "unrelated-streaming" ||
+    mode === "worker-ready-burst" ||
+    mode === "worker-terminal-burst" ||
     (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
     assert.equal(reads, 1);
@@ -1273,23 +1385,39 @@ it.effect.each([
   "process",
   "process-unknown",
   "process-started",
+  "worker-ready-burst",
+  "worker-terminal-burst",
+  "worker-settings-burst",
 ] as const)("sweep respects %s retention and protection rules", (mode) => {
-  let readProcesses: () => ReadonlyArray<string> | null = () => [];
-  let dependencyInspections = 0;
-  const processes = Effect.sync(() => readProcesses());
-  return integrationFixture(
-    mode,
-    (reader) => {
-      readProcesses = reader;
-    },
-    () => dependencyInspections,
-  ).pipe(
-    Effect.scoped,
-    Effect.provide(
-      Layer.merge(
-        testLayer(processes, () => dependencyInspections++),
-        NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
+  return Effect.gen(function* () {
+    let readProcesses: () => ReadonlyArray<string> | null = () => [];
+    let dependencyInspections = 0;
+    let processEffectReads = 0;
+    const initialInventoryEntered = yield* Deferred.make<void>();
+    const releaseInitialInventory = yield* Deferred.make<void>();
+    const processes = Effect.gen(function* () {
+      processEffectReads++;
+      if (mode.startsWith("worker-") && processEffectReads === 1) {
+        yield* Deferred.succeed(initialInventoryEntered, undefined);
+        yield* Deferred.await(releaseInitialInventory);
+      }
+      return readProcesses();
+    });
+    return yield* integrationFixture(
+      mode,
+      (reader) => {
+        readProcesses = reader;
+      },
+      () => dependencyInspections,
+      { initialInventoryEntered, releaseInitialInventory },
+    ).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.merge(
+          testLayer(processes, () => dependencyInspections++),
+          NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
+        ),
       ),
-    ),
-  );
+    );
+  });
 });

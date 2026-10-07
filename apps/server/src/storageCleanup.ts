@@ -781,14 +781,27 @@ export const make = Effect.gen(function* () {
       Effect.catch((error) => Effect.logWarning("rotated log cleanup failed", { error })),
     );
   });
+  let sweepQueued = false;
   const worker = yield* makeDrainableWorker(() =>
-    sweep().pipe(
-      Effect.catchCauseIf(
-        (cause) => !Cause.hasInterruptsOnly(cause),
-        (cause) => Effect.logWarning("storage cleanup failed", { cause }),
+    Effect.sync(() => {
+      // Changes during this sweep may request one follow-up using fresh state.
+      sweepQueued = false;
+    }).pipe(
+      Effect.andThen(
+        sweep().pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) => Effect.logWarning("storage cleanup failed", { cause }),
+          ),
+        ),
       ),
     ),
   );
+  const requestSweep = Effect.suspend(() => {
+    if (sweepQueued) return Effect.void;
+    sweepQueued = true;
+    return worker.enqueue(undefined);
+  }).pipe(Effect.uninterruptible);
 
   const start = Effect.fn("StorageCleanup.start")(function* () {
     const unsubscribe = yield* terminals.subscribeMetadata((event) =>
@@ -810,13 +823,11 @@ export const make = Effect.gen(function* () {
     const events = engine.streamDomainEvents;
     let lastSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
     yield* forkParked(
-      worker
-        .enqueue(undefined)
-        .pipe(
-          Effect.andThen(worker.drain),
-          Effect.repeat(Schedule.spaced("1 hour")),
-          Effect.asVoid,
-        ),
+      requestSweep.pipe(
+        Effect.andThen(worker.drain),
+        Effect.repeat(Schedule.spaced("1 hour")),
+        Effect.asVoid,
+      ),
     );
     yield* forkParked(
       Stream.runForEach(changes, (settings) => {
@@ -827,17 +838,19 @@ export const make = Effect.gen(function* () {
         )
           return Effect.void;
         lastSettings = settings;
-        return worker.enqueue(undefined);
+        return requestSweep;
       }),
     );
     yield* forkParked(
       Stream.runForEach(events, (event) =>
-        (event.type === "thread.deleted" || event.type === "provider-session.updated") &&
+        (event.type === "thread.deleted" ||
+          (event.type === "provider-session.updated" &&
+            (event.payload.status === "stopped" || event.payload.status === "error"))) &&
         anyWorktreePolicy(
           lastSettings,
           (rules) => rules.worktreeOnDelete || dependencyCleanupEnabled(rules),
         )
-          ? worker.enqueue(undefined)
+          ? requestSweep
           : Effect.void,
       ).pipe(
         Effect.catchCause((cause) =>
