@@ -159,6 +159,18 @@ function makeClaudeTestTurnInput(input: {
 }
 
 describe("ClaudeAdapterV2 runtime query policy", () => {
+  it("omits attached-MCP browser guidance when the T3 server is absent", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "no-mcp-thread",
+      resume: false,
+      cwd: "/workspace",
+    });
+    const systemPrompt = options.systemPrompt as { readonly append?: string };
+    assert.notInclude(systemPrompt.append ?? "", "T3 Code collaborative browser");
+    assert.notInclude(systemPrompt.append ?? "", "Use `delegate_task`");
+  });
+
   it.each([false, true])("requests thinking summaries with resume=%s", (resume) => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -722,6 +734,11 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
       assert.equal(systemPrompt.type, "preset");
       assert.equal(systemPrompt.preset, "claude_code");
       assert.include(systemPrompt.append ?? "", "Use `delegate_task`");
+      assert.include(systemPrompt.append ?? "", "without a separate browser-permission prompt");
+      assert.include(
+        systemPrompt.append ?? "",
+        "preview_open({ open: false, reuseExistingTab: false })",
+      );
       const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
       assert.equal(logged.hasMcpServers, true);
       assert.notInclude(JSON.stringify(logged), "secret-claude-token");
