@@ -104,6 +104,19 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
+For an already-started LastCode checkpoint service run, use the resumable
+**Wait for Checkpoint** action instead of agent-side sleep/status loops. Follow
+the action handoff and result rules in `docs/lastcode/release.md`; this action
+does not start or repair the service.
+
+For an authorized local Apple Silicon package build, select the exact installable
+tag and use the resumable **Build Local Package** action (`lc-build-local-package`)
+as described in `docs/lastcode/release.md`. End the turn after launch; do not run
+the build helper directly or poll build logs. The action builds only; installation
+and restart remain separate decisions. If another Action continuation is pending,
+end the turn so its result can arrive, then list Actions again. An automated
+message alone does not make Actions unavailable; use the actual disabled reason.
+
 ## Local Reviews
 
 When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra High review" or "review (up to 3 rounds)", run the reviews & address issues until a review comes back clean, or the budget is exhausted. Always finish addressing issues from the last review! Then proceed (if instructed) with babysitting the pr (addressing ci failures and github review comments). If instructed to merge, do so when ci/github-reviews are clean, even if the last round of local review was not clean. If instructed to "merge if clean", proceed through babysit pr but don't merge if the last local review was not clean, and notify the user.
@@ -111,6 +124,7 @@ When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra H
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
+- For LastCode PRs targeting `lastcode/main`, including authorized checkpoint or build repair PRs, follow `.agents/skills/lastcode-pr/SKILL.md`. When CI or review is passive and no current finding needs judgement, list Project Actions, launch the eligible **Wait for PR** action by its returned ID (prefer `lc-wait-for-pr`), and end the turn immediately. Use the action again after a fixing push when another wait is needed; do not spend agent turns polling GitHub or the running action. This applies without a separate “babysit” request and does not authorize creating or merging a PR.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
 - Use `https://redirect.github.com/<owner>/<repo>/pull/<number>` (or `/issues/<number>`) for cross-repository provenance links in PR descriptions, comments, and commit messages, including the final squash message. Ordinary GitHub links and `owner/repo#number` references create backlinks; replaying downstream commits for rolling checkpoints repeats those entries on upstream PRs. Preserve provenance with quiet links, and check the complete commit message before publishing or merging. Keep canonical repository/API URLs for Git operations and tooling. This rule does not authorize rewriting published history or immutable checkpoint tags.
