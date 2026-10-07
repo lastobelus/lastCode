@@ -1,3 +1,4 @@
+import type { MenuAction } from "@react-native-menu/menu";
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   getArchiveRecoveryRows,
@@ -134,19 +135,55 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
+/** Archive stays available beside settlement; the handler reads the authoritative family. */
+export function withThreadListV2ArchiveAction(
+  actions: ReadonlyArray<MenuAction>,
+  input: {
+    readonly archiveFamiliesSupported: boolean;
+    readonly archivePendingStatus?: "stopping" | "failed";
+  },
+): MenuAction[] {
+  const archive: MenuAction = {
+    id: "archive",
+    title: !input.archiveFamiliesSupported
+      ? "Archive (update server first)"
+      : input.archivePendingStatus === "failed"
+        ? "Retry archive"
+        : input.archivePendingStatus === "stopping"
+          ? "Archiving…"
+          : "Archive",
+    image: "archivebox",
+    attributes: {
+      disabled: !input.archiveFamiliesSupported || input.archivePendingStatus === "stopping",
+    },
+  };
+  if (actions.some((action) => action.id === "archive"))
+    return actions.map((action) => (action.id === "archive" ? archive : action));
+  const deleteIndex = actions.findIndex((action) => action.id === "delete");
+  const insertionIndex = deleteIndex < 0 ? actions.length : deleteIndex;
+  return [...actions.slice(0, insertionIndex), archive, ...actions.slice(insertionIndex)];
+}
+
 export function resolveThreadListV2SwipeActions(input: {
   readonly variant: "card" | "slim";
   readonly settlementSupported: boolean;
+  readonly archiveFamiliesSupported: boolean;
+  readonly persistent: boolean;
+  readonly archivePendingStatus?: "stopping" | "failed";
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   /** Row is on the snoozed shelf. */
   readonly snoozed?: boolean;
 }): {
   readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
-  readonly secondary: "snooze" | null;
+  readonly secondary: "snooze" | "archive" | null;
 } {
+  const canArchive =
+    input.archiveFamiliesSupported &&
+    !input.persistent &&
+    input.archivePendingStatus !== "stopping";
   if (input.snoozed === true) {
-    return { primary: "unsnooze", secondary: null };
+    return { primary: "unsnooze", secondary: canArchive ? "archive" : null };
   }
   const primary = input.settlementSupported
     ? input.variant === "slim"
@@ -155,7 +192,12 @@ export function resolveThreadListV2SwipeActions(input: {
     : "archive";
   return {
     primary,
-    secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,
+    secondary:
+      input.snoozeSupported && input.snoozable
+        ? "snooze"
+        : primary !== "archive" && canArchive
+          ? "archive"
+          : null,
   };
 }
 

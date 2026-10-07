@@ -24,6 +24,7 @@ import {
   type RuntimeRequestId,
   ThreadId,
   type ThreadEnvMode,
+  type ThreadArchiveChildDisposition,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -103,7 +104,7 @@ export interface SetThreadAttentionInput extends ThreadCommandInput {
   readonly attention: import("@t3tools/contracts").ThreadAttention;
 }
 export interface ArchiveThreadInput extends ThreadCommandInput {
-  readonly childDisposition?: "stop_and_archive" | "promote";
+  readonly childDisposition?: ThreadArchiveChildDisposition;
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
 }
 export type UnarchiveThreadInput = ThreadCommandInput;

@@ -1,4 +1,5 @@
 import {
+  compactThreadArchiveParticipant,
   NodeId,
   CommandId,
   OrchestrationV2DomainEvent,
@@ -427,7 +428,10 @@ export const layer: Layer.Layer<
                     archivedAt: parent.archivedAt,
                     deletedAt: parent.deletedAt,
                     archivedWith: archiveOwner,
-                    archivePending: parent.archivedAt === null ? parent.archivePending : null,
+                    archivePending:
+                      parent.archivedAt === null
+                        ? compactThreadArchiveParticipant(parent.archivePending)
+                        : null,
                   }
                 : providerEvent.appThread;
             return [

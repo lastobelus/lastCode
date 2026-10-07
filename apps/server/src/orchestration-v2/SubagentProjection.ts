@@ -18,7 +18,7 @@ import type {
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
-import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import { compactThreadArchiveParticipant, isOrchestrationV2WorkActive } from "@t3tools/contracts";
 
 function trimmed(value: string | null | undefined): string | undefined {
   const result = value?.trim();
@@ -85,7 +85,7 @@ export function makeSubagentChildThread(input: {
     updatedAt: input.now,
     archivedAt: input.parentThread.archivedAt,
     archivedWith: input.parentThread.archivedWith,
-    archivePending: input.parentThread.archivePending,
+    archivePending: compactThreadArchiveParticipant(input.parentThread.archivePending),
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,

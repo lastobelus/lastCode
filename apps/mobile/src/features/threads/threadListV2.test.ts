@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { makeRawThreadShell, makeThreadShellFixture } from "../../test-fixtures";
 import { threadJumpTarget } from "../keyboard/threadKeyboardShortcuts";
@@ -37,6 +38,7 @@ import {
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
+  withThreadListV2ArchiveAction,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
   threadHasUnseenCompletion,
@@ -286,11 +288,106 @@ describe("queued messages keep a settled thread active", () => {
   });
 });
 
+describe("ordinary thread archive menus", () => {
+  it.each([
+    ["active", ["settle", "rename", "delete"]],
+    ["snoozable", ["settle", "snooze", "delete"]],
+    ["settled", ["unsettle", "rename", "delete"]],
+    ["snoozed", ["unsnooze", "delete"]],
+    ["legacy", ["archive", "delete"]],
+  ])("offers Archive alongside the existing %s lifecycle actions", (_variant, ids) => {
+    const actions = ids.map((id) => ({ id, title: id }));
+    const items = withThreadListV2ArchiveAction(actions, { archiveFamiliesSupported: true });
+    expect(items.filter((item) => item.id === "archive")).toEqual([
+      {
+        id: "archive",
+        title: "Archive",
+        image: "archivebox",
+        attributes: { disabled: false },
+      },
+    ]);
+    expect(items.filter((item) => item.id !== "archive")).toEqual(
+      actions.filter((item) => item.id !== "archive"),
+    );
+    expect(items.findIndex((item) => item.id === "archive")).toBeLessThan(
+      items.findIndex((item) => item.id === "delete"),
+    );
+  });
+
+  it("keeps Archive visibly unavailable with an update-server explanation", () => {
+    const items = withThreadListV2ArchiveAction([{ id: "settle", title: "Settle" }], {
+      archiveFamiliesSupported: false,
+    });
+    expect(items.find((item) => item.id === "archive")).toMatchObject({
+      title: "Archive (update server first)",
+      attributes: { disabled: true },
+    });
+    expect(items.find((item) => item.id === "settle")).toEqual({ id: "settle", title: "Settle" });
+  });
+
+  it("replaces ordinary Archive with one Retry archive after a failed shutdown", () => {
+    const items = withThreadListV2ArchiveAction(
+      [
+        { id: "archive", title: "Archive" },
+        { id: "delete", title: "Delete" },
+      ],
+      {
+        archiveFamiliesSupported: true,
+        archivePendingStatus: "failed",
+      },
+    );
+    expect(items.filter((item) => item.id === "archive")).toEqual([
+      {
+        id: "archive",
+        title: "Retry archive",
+        image: "archivebox",
+        attributes: { disabled: false },
+      },
+    ]);
+  });
+
+  it("does not allow another Archive while shutdown is pending", () => {
+    const items = withThreadListV2ArchiveAction([], {
+      archiveFamiliesSupported: true,
+      archivePendingStatus: "stopping",
+    });
+    expect(items[0]).toMatchObject({ title: "Archiving…", attributes: { disabled: true } });
+  });
+
+  it.each([undefined, "failed"] as const)(
+    "keeps ordinary and retry archive protected by persistence (%s)",
+    (archivePendingStatus) => {
+      const items = buildThreadPersistenceMenuItems({
+        actions: withThreadListV2ArchiveAction(
+          [
+            { id: "settle", title: "Settle" },
+            { id: "delete", title: "Delete" },
+          ],
+          {
+            archiveFamiliesSupported: true,
+            archivePendingStatus,
+          },
+        ),
+        persistent: true,
+        supported: true,
+      });
+      expect(items.find((item) => item.id === "archive")).toMatchObject({
+        title: `${archivePendingStatus === "failed" ? "Retry archive" : "Archive"} (disable persistence first)`,
+        attributes: { disabled: true },
+      });
+      expect(items.find((item) => item.id === "settle")).toEqual({ id: "settle", title: "Settle" });
+      expect(items[0]?.id).toBe("disable-persistence");
+    },
+  );
+});
+
 describe("resolveThreadListV2SwipeActions", () => {
   it("offers settle and snooze for an active snoozable thread", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
@@ -302,6 +399,8 @@ describe("resolveThreadListV2SwipeActions", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "slim",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
@@ -309,29 +408,70 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "unsettle", secondary: "snooze" });
   });
 
-  it("omits snooze when the server or thread does not allow it", () => {
+  it("offers archive when the server or thread does not allow snooze", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: false,
         snoozable: true,
       }),
-    ).toEqual({ primary: "settle", secondary: null });
+    ).toEqual({ primary: "settle", secondary: "archive" });
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: false,
       }),
-    ).toEqual({ primary: "settle", secondary: null });
+    ).toEqual({ primary: "settle", secondary: "archive" });
+  });
+
+  it.each([
+    ["older server", false, false, undefined],
+    ["persistent thread", true, true, undefined],
+    ["pending shutdown", true, false, "stopping"],
+  ] as const)(
+    "omits Archive swipe for %s while retaining Settle",
+    (_reason, archiveFamiliesSupported, persistent, archivePendingStatus) => {
+      expect(
+        resolveThreadListV2SwipeActions({
+          variant: "card",
+          settlementSupported: true,
+          archiveFamiliesSupported,
+          persistent,
+          archivePendingStatus,
+          snoozeSupported: true,
+          snoozable: false,
+        }),
+      ).toEqual({ primary: "settle", secondary: null });
+    },
+  );
+
+  it("keeps Archive swipe available after a failed shutdown", () => {
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: true,
+        archiveFamiliesSupported: true,
+        persistent: false,
+        archivePendingStatus: "failed",
+        snoozeSupported: true,
+        snoozable: false,
+      }),
+    ).toEqual({ primary: "settle", secondary: "archive" });
   });
 
   it("falls back to archive only for a pre-lifecycle server", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: false,
         snoozeSupported: false,
         snoozable: true,
@@ -339,16 +479,18 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "archive", secondary: null });
   });
 
-  it("offers wake and no snooze on a snoozed row", () => {
+  it("offers wake and archive on a snoozed row", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "slim",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
         snoozed: true,
       }),
-    ).toEqual({ primary: "unsnooze", secondary: null });
+    ).toEqual({ primary: "unsnooze", secondary: "archive" });
   });
 });
 

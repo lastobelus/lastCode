@@ -61,6 +61,7 @@ import {
   resolveThreadListV2Status,
   resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
+  withThreadListV2ArchiveAction,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
@@ -100,8 +101,7 @@ const STATUS_LABEL_BY_STATUS: Partial<
   limited: { label: "Limited", className: "text-warning-foreground" },
 };
 
-// Menus keep lifecycle and title regeneration together. Archive keeps its
-// own surface (thread screen / settings) rather than crowding v2 rows.
+// Menus retain settlement and title actions; archive is added to every row below.
 const CARD_MENU_ACTIONS: MenuAction[] = [
   { id: "settle", title: "Settle", image: "checkmark" },
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
@@ -640,6 +640,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       configs.get(thread.environmentId)?.environment.capabilities.previewHostingProcessControl ===
       true,
   );
+  const archiveFamiliesSupported = useAtomValue(
+    environmentServerConfigsAtom,
+    (configs) =>
+      configs.get(thread.environmentId)?.environment.capabilities.threadArchiveFamilies === true,
+  );
   const hasManagedProcesses = supportsProcessControls && (hasRunningSubprocess || hasPreviewLease);
 
   const { providerDrivers, providerIconUrl } = useMemo(() => {
@@ -725,7 +730,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMoveUp = useCallback(() => onMoveThread?.(thread, "up"), [onMoveThread, thread]);
   const handleMoveDown = useCallback(() => onMoveThread?.(thread, "down"), [onMoveThread, thread]);
-  const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleArchive = useCallback((): void => onArchiveThread(thread), [onArchiveThread, thread]);
   const handlePersistence = useCallback(
     async (persistent: boolean) => {
       const result = await setThreadPersistence({
@@ -836,6 +841,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const swipeActions = resolveThreadListV2SwipeActions({
     variant,
     settlementSupported: props.settlementSupported,
+    archiveFamiliesSupported,
+    persistent: thread.persistent === true,
+    archivePendingStatus: thread.archivePending?.status,
     snoozeSupported: props.snoozeSupported,
     snoozable: canSnooze(thread, { now: new Date().toISOString() }),
     snoozed: snoozedRow,
@@ -948,27 +956,27 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const withPersistence = useCallback(
     (actions: ReadonlyArray<MenuAction>) =>
       buildThreadPersistenceMenuItems({
-        actions: [
-          ...(thread.archivePending?.status === "failed" &&
-          !actions.some((action) => action.id === "archive")
-            ? [{ id: "archive", title: "Retry archive", image: "archivebox" }]
-            : []),
-          ...(hasManagedProcesses
-            ? [
-                {
-                  id: "stop-thread-processes",
-                  title: "Stop all previews & processes",
-                  image: "stop.fill",
-                  attributes: { destructive: true },
-                },
-                ...actions,
-              ]
-            : actions),
-        ],
+        actions: withThreadListV2ArchiveAction(
+          [
+            ...(hasManagedProcesses
+              ? [
+                  {
+                    id: "stop-thread-processes",
+                    title: "Stop all previews & processes",
+                    image: "stop.fill",
+                    attributes: { destructive: true },
+                  },
+                  ...actions,
+                ]
+              : actions),
+          ],
+          { archiveFamiliesSupported, archivePendingStatus: thread.archivePending?.status },
+        ),
         persistent: thread.persistent === true,
         supported: props.persistenceSupported,
       }),
     [
+      archiveFamiliesSupported,
       hasManagedProcesses,
       props.persistenceSupported,
       thread.persistent,
@@ -1169,16 +1177,30 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               onPressAction: handleMenuAction,
               title: "Snooze until",
             },
-            onPress: () => undefined,
+            onPress: (): void => undefined,
           }
-        : null,
-    [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
+        : swipeActions.secondary === "archive"
+          ? {
+              accessibilityLabel: `${thread.archivePending?.status === "failed" ? "Retry archive" : "Archive"} ${thread.title}`,
+              icon: "archivebox" as const,
+              label: thread.archivePending?.status === "failed" ? "Retry archive" : "Archive",
+              onPress: handleArchive,
+            }
+          : null,
+    [
+      handleArchive,
+      handleMenuAction,
+      snoozePresetActions,
+      swipeActions.secondary,
+      thread.title,
+      thread.archivePending?.status,
+    ],
   );
   const swipeAccessibilityHint = !canOperateThread
     ? "Opens the thread"
     : secondaryAction === null
       ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
-      : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
+      : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and ${secondaryAction.label.toLowerCase()} actions.`;
   const threadAccessibilityLabel = [
     thread.title,
     archiveStatus ? `${archiveStatus.label}. ${archiveStatus.description}` : null,
@@ -1562,7 +1584,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         enabled={
           !cleanupPending &&
           !cleanupFailed &&
-          !(thread.persistent === true && swipeActions.primary === "archive")
+          !(
+            swipeActions.primary === "archive" &&
+            (thread.persistent === true ||
+              !archiveFamiliesSupported ||
+              thread.archivePending?.status === "stopping")
+          )
         }
         containerStyle={rowAppearance.swipeContainerStyle}
         enableTrackpadSwipe

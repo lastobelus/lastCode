@@ -8,6 +8,19 @@ export function getThreadArchivePlan(pending: OrchestrationV2AppThread["archiveP
   return pending != null && "archiveThreadIds" in pending ? pending : null;
 }
 
+/** Descendants reference the operation without copying its family plan. */
+export function compactThreadArchiveParticipant(
+  pending: OrchestrationV2AppThread["archivePending"],
+) {
+  if (pending == null) return pending;
+  return {
+    threadId: pending.threadId,
+    commandId: pending.commandId,
+    status: pending.status,
+    ...(pending.error === undefined ? {} : { error: pending.error }),
+  };
+}
+
 interface FamilyThread {
   readonly id: ThreadId;
   readonly lineage: OrchestrationV2AppThreadLineage;
