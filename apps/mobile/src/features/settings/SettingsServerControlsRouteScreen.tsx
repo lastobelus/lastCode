@@ -532,7 +532,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         }
                       >
                         <SettingsSwitchRow
-                          icon="shippingbox"
+                          icon="archivebox"
                           label="Remove inactive worktree dependencies"
                           subtitle="Remove recognized npm or pnpm node_modules installations after inactive days. Keep the worktree, source, tmp, notes, and other files. Active agents, terminals, and previews prevent cleanup. Reinstall dependencies before resuming work."
                           value={dependencySettings.enabled}

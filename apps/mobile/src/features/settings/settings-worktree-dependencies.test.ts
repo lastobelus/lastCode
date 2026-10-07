@@ -25,6 +25,7 @@ const firstProject = "first-project" as ProjectId;
 const secondProject = "second-project" as ProjectId;
 const defaultRules = resolveWorktreeCleanup(DEFAULT_SERVER_SETTINGS, null);
 const capabilities = {
+  repositoryIdentity: true,
   storageCleanup: true,
   worktreeDependencyCleanup: true,
   projectWorktreeCleanup: true,
@@ -166,9 +167,12 @@ describe("mobile worktree dependency retention", () => {
 
   it("requires advertised capabilities and a connected target", () => {
     expect(supportsMobileWorktreeDependencyCleanup([], false)).toBe(false);
-    expect(supportsMobileWorktreeDependencyCleanup([environment(firstId, {}, {})], false)).toBe(
-      false,
-    );
+    expect(
+      supportsMobileWorktreeDependencyCleanup(
+        [environment(firstId, {}, { repositoryIdentity: false })],
+        false,
+      ),
+    ).toBe(false);
     expect(planMobileWorktreeDependencyCleanup([], false, { kind: "days", value: 8 })).toEqual([]);
   });
 
