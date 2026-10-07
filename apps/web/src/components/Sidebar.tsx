@@ -1757,6 +1757,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {pinIndicator}
             <ThreadDashboardIndicator items={thread.dashboardItems} />
             {terminalStatusIcon}
+            {props.providerBadgePreferences.enabled ? (
+              <span
+                aria-hidden
+                className="pointer-events-none mr-1 inline-flex shrink-0 items-center gap-1.5"
+              >
+                <SidebarProviderStack
+                  thread={thread}
+                  providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  omitCurrent={providerEntry !== null && !showInstanceBadge}
+                />
+                <ConnectedSidebarEnvironmentIcon
+                  environmentId={thread.environmentId}
+                  context="v2-row"
+                  color={environmentIconColor}
+                  className="size-3.5"
+                  provider={providerEntry}
+                  badgeSize={props.providerBadgePreferences.size}
+                  badgeTransparency={props.providerBadgePreferences.transparency}
+                />
+              </span>
+            ) : null}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
                 Regenerating title
@@ -2191,6 +2212,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
+                {props.providerBadgePreferences.enabled ? (
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                    omitCurrent={providerEntry !== null && !showInstanceBadge}
+                  />
+                ) : null}
                 {props.providerBadgePreferences.enabled ||
                 (thread.lineage.relationshipToParent !== "subagent" &&
                   showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon)) ? (
@@ -2207,11 +2235,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     />
                   </span>
                 ) : null}
-                <SidebarProviderStack
-                  thread={thread}
-                  providerEntryByInstanceId={props.providerEntryByInstanceId}
-                  omitCurrent={props.providerBadgePreferences.enabled && providerEntry !== null}
-                />
+                {!props.providerBadgePreferences.enabled ? (
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  />
+                ) : null}
               </span>
             </div>
           </div>
