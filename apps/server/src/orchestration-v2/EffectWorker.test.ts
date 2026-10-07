@@ -167,7 +167,13 @@ function layerExecutorFor(input: {
   );
 }
 
-it.effect("settles native-only steering without a follow-up when completion wins delivery", () =>
+it.effect.each([
+  { label: "the target completes", fields: { turnCompleted: true } },
+  {
+    label: "the active target rejects steering",
+    fields: { turnCompleted: false, deliveryRejected: true },
+  },
+])("settles native-only steering without a follow-up when $label", (rejection) =>
   Effect.gen(function* () {
     const events = yield* Ref.make<ReadonlyArray<string>>([]);
     const layerExecutor = layerExecutorFor({
@@ -178,7 +184,7 @@ it.effect("settles native-only steering without a follow-up when completion wins
             threadId,
             operation: "steer",
             providerTurnId,
-            turnCompleted: true,
+            ...rejection.fields,
           }),
         ),
       threads: {
@@ -205,8 +211,8 @@ it.effect("settles native-only steering without a follow-up when completion wins
       clearCancellation: () => Effect.void,
       succeed: () =>
         Ref.update(events, (existing) => [...existing, "succeeded"]).pipe(Effect.as(true)),
-      retry: () => Effect.die("a completed target must not retry"),
-      fail: () => Effect.die("a completed target must not leave a failed outbox row"),
+      retry: () => Effect.die("a terminal non-delivery must not retry"),
+      fail: () => Effect.die("a terminal non-delivery must not leave a failed outbox row"),
     });
     yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
@@ -217,6 +223,44 @@ it.effect("settles native-only steering without a follow-up when completion wins
       ),
     );
     assert.deepEqual(yield* Ref.get(events), ["succeeded"]);
+  }),
+);
+
+it.effect("preserves an unclassified native steering failure", () =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+      Effect.provide(
+        layerExecutorFor({
+          events,
+          steer: () =>
+            Effect.fail(
+              new ProviderTurnControlService.ProviderTurnControlError({
+                threadId,
+                operation: "steer",
+                providerTurnId,
+                turnCompleted: false,
+                cause: "transient connection failure",
+              }),
+            ),
+        }),
+      ),
+    );
+    const error = yield* executor
+      .execute({
+        ...restartEffect(yield* DateTime.now, { type: "detach" }),
+        request: {
+          type: "provider-turn.steer",
+          nativeOnly: true,
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+          messageId: MessageId.make("native-transient-steer"),
+        },
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, EffectWorker.OrchestrationEffectExecutionError);
+    assert.deepEqual(yield* Ref.get(events), []);
   }),
 );
 

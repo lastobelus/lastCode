@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  MessageId,
   type ModelSelection,
   NodeId,
   type OrchestrationV2ProviderThread,
@@ -25,6 +26,7 @@ import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2SessionRuntime } from "./ProviderAdapter.ts";
+import { ProviderAdapterSteerRunError } from "./ProviderAdapter.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 
@@ -34,6 +36,158 @@ const modelSelection = {
   instanceId: providerInstanceId,
   model: "gpt-5.4",
 } satisfies ModelSelection;
+
+it.effect("preserves steering rejection separately from turn completion", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:steer-rejected");
+    const providerSessionId = ProviderSessionId.make("session:steer-rejected");
+    const providerThreadId = ProviderThreadId.make("provider-thread:steer-rejected");
+    const providerTurnId = ProviderTurnId.make("provider-turn:steer-rejected");
+    const messageId = MessageId.make("message:steer-rejected");
+    const runId = RunId.make("run:steer-rejected");
+    const nodeId = NodeId.make("node:steer-rejected");
+    const attemptId = RunAttemptId.make("attempt:steer-rejected");
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: providerThreadId,
+      driver,
+      providerInstanceId,
+      providerSessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "active",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    for (const testCase of [
+      { status: "running", adapterRejected: true, deliveryRejected: true },
+      { status: "running", adapterRejected: undefined, deliveryRejected: undefined },
+      { status: "pending", adapterRejected: undefined, deliveryRejected: undefined },
+      ...(["completed", "interrupted", "failed", "cancelled"] as const).map((status) => ({
+        status,
+        adapterRejected: undefined,
+        deliveryRejected: true,
+      })),
+    ] as const) {
+      const context = {
+        providerThread,
+        providerTurn: {
+          id: providerTurnId,
+          providerThreadId,
+          status: testCase.status,
+          nodeId,
+          runAttemptId: attemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          startedAt: now,
+          completedAt: testCase.status === "running" || testCase.status === "pending" ? null : now,
+        },
+        attempt: undefined,
+        message: {
+          id: messageId,
+          threadId,
+          runId,
+          nodeId,
+          role: "user",
+          text: "Pause after the current tool.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "server",
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+        run: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId: messageId,
+          rootNodeId: nodeId,
+          activeAttemptId: attemptId,
+          status: "running",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      } satisfies ProjectionStore.ProjectionProviderControlContext;
+      const runtime = {
+        instanceId: providerInstanceId,
+        driver,
+        providerSessionId,
+        providerSession: {
+          id: providerSessionId,
+          driver,
+          providerInstanceId,
+          status: "running",
+          cwd: "/workspace",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+        events: Stream.empty,
+        ensureThread: () => Effect.die("unused ensureThread"),
+        resumeThread: () => Effect.die("unused resumeThread"),
+        startTurn: () => Effect.die("unused startTurn"),
+        steerTurn: () =>
+          testCase.status === "running"
+            ? Effect.fail(
+                new ProviderAdapterSteerRunError({
+                  driver,
+                  providerThreadId,
+                  providerTurnId,
+                  ...(testCase.adapterRejected ? { deliveryRejected: true } : {}),
+                }),
+              )
+            : Effect.die("Inactive provider turns must not receive steering"),
+        interruptTurn: () => Effect.die("unused interruptTurn"),
+        respondToRuntimeRequest: () => Effect.die("unused respondToRuntimeRequest"),
+        readThreadSnapshot: () => Effect.die("unused readThreadSnapshot"),
+        rollbackThread: () => Effect.die("unused rollbackThread"),
+        forkThread: () => Effect.die("unused forkThread"),
+      } satisfies ProviderAdapterV2SessionRuntime;
+      const layerControl = ProviderTurnControlService.layer.pipe(
+        Layer.provide(
+          Layer.merge(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getProviderControlContext: () => Effect.succeed(context),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              get: () => Effect.succeed(Option.some(runtime)),
+            }),
+          ),
+        ),
+      );
+      const error = yield* Effect.gen(function* () {
+        const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+        return yield* control
+          .steer({
+            threadId,
+            providerSessionId,
+            providerThreadId,
+            providerTurnId,
+            messageId,
+          })
+          .pipe(Effect.flip);
+      }).pipe(Effect.provide(layerControl));
+      assert.equal(error.turnCompleted, testCase.status === "completed");
+      assert.equal(error.deliveryRejected, testCase.deliveryRejected);
+      assert.equal(context.providerTurn?.status, testCase.status);
+    }
+  }),
+);
 
 function makeProjection(input: {
   readonly now: DateTime.Utc;

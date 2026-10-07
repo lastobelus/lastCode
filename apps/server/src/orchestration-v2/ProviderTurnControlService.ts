@@ -15,6 +15,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { ProviderAdapterSteerRunError } from "./ProviderAdapter.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(
@@ -35,11 +36,13 @@ export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnCon
     operation: Schema.Literals(["interrupt", "restart", "steer"]),
     providerTurnId: ProviderTurnId,
     turnCompleted: Schema.optional(Schema.Boolean),
+    deliveryRejected: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlError);
+const isProviderAdapterSteerRunError = Schema.is(ProviderAdapterSteerRunError);
 
 export interface ProviderTurnControlServiceV2Shape {
   readonly interrupt: (input: {
@@ -125,6 +128,7 @@ export const layer: Layer.Layer<
               operation: "steer",
               providerTurnId: input.providerTurnId,
               turnCompleted: providerTurn.status === "completed",
+              ...(providerTurn.status === "pending" ? {} : { deliveryRejected: true }),
               cause: "The provider turn ended before the steering message was delivered.",
             });
           }
@@ -349,6 +353,9 @@ export const layer: Layer.Layer<
                     operation: "steer",
                     providerTurnId: input.providerTurnId,
                     turnCompleted: current.providerTurn?.status === "completed",
+                    ...(isProviderAdapterSteerRunError(cause) && cause.deliveryRejected === true
+                      ? { deliveryRejected: true }
+                      : {}),
                     cause,
                   });
                 }),

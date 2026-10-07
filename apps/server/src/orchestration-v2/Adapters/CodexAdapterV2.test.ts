@@ -81,6 +81,7 @@ const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerRep
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
 const decodeReplayTranscriptJson = Schema.decodeUnknownEffect(replayTranscriptJson);
 const encodeStringJson = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
+const isProviderAdapterSteerRunError = Schema.is(ProviderAdapterSteerRunError);
 
 describe("Codex context usage compatibility", () => {
   const previous: ModelSelection = {
@@ -2730,7 +2731,48 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
-  it.effect("rejects a late native steer without starting or interrupting a turn", () =>
+  it.effect.each([
+    {
+      name: "late native turn",
+      error: { code: -32600, message: "No active turn to steer" },
+      deliveryRejected: undefined,
+    },
+    ...(["review", "compact"] as const).map((turnKind) => ({
+      name: `${turnKind} turn`,
+      error: {
+        code: -32600,
+        message: `cannot steer a ${turnKind} turn`,
+        data: {
+          message: `cannot steer a ${turnKind} turn`,
+          codexErrorInfo: { activeTurnNotSteerable: { turnKind } },
+          additionalDetails: null,
+        },
+      },
+      deliveryRejected: true,
+    })),
+    {
+      name: "transient request failure",
+      error: { code: -32603, message: "Temporarily unavailable" },
+      deliveryRejected: undefined,
+    },
+    {
+      name: "unstructured review error",
+      error: { code: -32600, message: "cannot steer a review turn" },
+      deliveryRejected: undefined,
+    },
+    {
+      name: "unknown turn kind",
+      error: {
+        code: -32600,
+        message: "cannot steer this turn",
+        data: {
+          message: "cannot steer this turn",
+          codexErrorInfo: { activeTurnNotSteerable: { turnKind: "unknown" } },
+        },
+      },
+      deliveryRejected: undefined,
+    },
+  ])("classifies $name steering failure without starting or interrupting", (rejection) =>
     Effect.gen(function* () {
       const nativeThreadId = "strict-steer-thread";
       const nativeTurnId = "strict-steer-turn";
@@ -2757,7 +2799,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             label: "turn/steer/rejected",
             frame: {
               id: 4,
-              error: { code: -32600, message: "No active turn to steer" },
+              error: rejection.error,
             },
           },
         ],
@@ -2794,6 +2836,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         })
         .pipe(Effect.flip);
       assert.instanceOf(error, ProviderAdapterSteerRunError);
+      assert.equal(
+        isProviderAdapterSteerRunError(error) ? error.deliveryRejected : undefined,
+        rejection.deliveryRejected,
+      );
       assert.deepEqual(sentMethods, ["turn/steer"]);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );

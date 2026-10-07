@@ -255,6 +255,16 @@ export const layerExecutor: Layer.Layer<
                 Effect.catch((error) =>
                   Effect.gen(function* () {
                     if (
+                      effect.request.type === "provider-turn.steer" &&
+                      effect.request.nativeOnly === true &&
+                      "deliveryRejected" in error &&
+                      error.deliveryRejected === true
+                    ) {
+                      // A provider's definite rejection is final non-delivery;
+                      // retrying it must not strand cleanup or start another turn.
+                      return;
+                    }
+                    if (
                       !("turnCompleted" in error) ||
                       !error.turnCompleted ||
                       effect.request.type !== "provider-turn.steer"
