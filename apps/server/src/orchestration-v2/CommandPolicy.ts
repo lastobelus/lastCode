@@ -284,6 +284,7 @@ const decideSteeringExecution: CommandPolicyV2Shape["decideSteeringExecution"] =
     if (
       input.forceRestart ||
       !input.capabilities.turns.supportsActiveSteering ||
+      input.capabilities.turns.supportsStrictActiveSteering !== true ||
       input.capabilities.turns.activeSteeringInterruptsTools === true
     ) {
       return Effect.fail(

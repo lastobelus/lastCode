@@ -14,6 +14,8 @@ import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { AcpProviderCapabilitiesV2 } from "./Adapters/AcpAdapterV2.ts";
+import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import { CursorProviderCapabilitiesV2 } from "./Adapters/CursorAdapterV2.ts";
 import { GrokProviderCapabilitiesV2 } from "./Adapters/GrokAdapterV2.ts";
 import * as CommandPolicy from "./CommandPolicy.ts";
@@ -219,6 +221,18 @@ layer("CommandPolicyV2", (it) => {
       );
       for (const unsafe of [
         { forceRestart: true, capabilities: baseCapabilities },
+        ...[
+          AcpProviderCapabilitiesV2,
+          ClaudeProviderCapabilitiesV2,
+          CursorProviderCapabilitiesV2,
+          GrokProviderCapabilitiesV2,
+        ].map((providerCapabilities) => ({ capabilities: providerCapabilities })),
+        ...[false, undefined].map((supportsStrictActiveSteering) => ({
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsStrictActiveSteering },
+          })),
+        })),
         {
           capabilities: capabilities((current) => ({
             ...current,

@@ -65,6 +65,7 @@ import {
   ProviderAdapterOpenSessionError,
   ProviderAdapterReadThreadSnapshotError,
   ProviderAdapterRollbackThreadError,
+  ProviderAdapterSteerRunError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2SessionRuntime,
@@ -2726,6 +2727,74 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           text: "then £ship it",
         },
       });
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("rejects a late native steer without starting or interrupting a turn", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "strict-steer-thread";
+      const nativeTurnId = "strict-steer-turn";
+      const prompt = "Run a command.";
+      const transcript = makeCodexReplayTranscript({
+        scenario: "strict-steer-completion-race",
+        entries: [
+          ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+          {
+            type: "expect_outbound",
+            label: "turn/steer",
+            frame: {
+              id: 4,
+              method: "turn/steer",
+              params: {
+                expectedTurnId: nativeTurnId,
+                input: [{ type: "text", text: "Pause after the current tool." }],
+                threadId: nativeThreadId,
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "turn/steer/rejected",
+            frame: {
+              id: 4,
+              error: { code: -32600, message: "No active turn to steer" },
+            },
+          },
+        ],
+      });
+      const sentMethods: string[] = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        () => Effect.void,
+        (method) => Effect.sync(() => void sentMethods.push(method)),
+      );
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("strict-steer-attempt"),
+        text: prompt,
+      });
+      yield* harness.runtime.startTurn(turnInput);
+      sentMethods.length = 0;
+      const error = yield* harness.runtime
+        .steerTurn({
+          threadId: harness.threadId,
+          runId: turnInput.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeTurnId,
+          }),
+          message: {
+            ...turnInput.message,
+            messageId: MessageId.make("strict-steer-message"),
+            text: "Pause after the current tool.",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderAdapterSteerRunError);
+      assert.deepEqual(sentMethods, ["turn/steer"]);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
