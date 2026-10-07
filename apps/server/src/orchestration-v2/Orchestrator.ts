@@ -11151,6 +11151,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
     )
       return yield* reject("A conversation in this family is already being archived.");
+    // Ownership release completes in an internal command. Check its targets
+    // while the requesting caller's limit is still in scope, before stopping.
+    for (const thread of shells) {
+      if (!promoteIds.includes(thread.id)) continue;
+      yield* refuseAboveDispatchModeLimit(command, thread.id, thread);
+    }
     const context = yield* projectionStore
       .getThreadProviderContext(command.threadId)
       .pipe(mapDispatchError(command));
