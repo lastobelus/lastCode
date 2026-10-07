@@ -4846,7 +4846,7 @@ it.effect(
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
         assert.isTrue(Option.isSome(yield* manager.get(sessionId)));
         assert.equal((yield* Ref.get(state)).closeCount, 0);
-      }).pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
     }),
 );
 
