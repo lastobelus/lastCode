@@ -105,7 +105,7 @@ export const ThreadProviderBadgeSize = Schema.Int.check(
   }),
 );
 export type ThreadProviderBadgeSize = typeof ThreadProviderBadgeSize.Type;
-export const DEFAULT_THREAD_PROVIDER_BADGE_SIZE: ThreadProviderBadgeSize = 80;
+const DEFAULT_THREAD_PROVIDER_BADGE_SIZE: ThreadProviderBadgeSize = 80;
 export const MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY = 0;
 export const MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY = 100;
 export const ThreadProviderBadgeTransparency = Schema.Int.check(
@@ -115,7 +115,7 @@ export const ThreadProviderBadgeTransparency = Schema.Int.check(
   }),
 );
 export type ThreadProviderBadgeTransparency = typeof ThreadProviderBadgeTransparency.Type;
-export const DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY: ThreadProviderBadgeTransparency = 0;
+const DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY: ThreadProviderBadgeTransparency = 0;
 
 export const LegacySidebarThreadGroupingStyle = Schema.Literals(["minimal", "typed-groups"]);
 export type LegacySidebarThreadGroupingStyle = typeof LegacySidebarThreadGroupingStyle.Type;
