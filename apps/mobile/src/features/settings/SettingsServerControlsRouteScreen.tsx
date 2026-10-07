@@ -187,10 +187,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     label: "environment settings update",
     reportFailure: true,
   });
-  const supportsDependencies = supportsMobileWorktreeDependencyCleanup(
-    selectedTargets,
-    projectSelected,
-  );
+  const supportsDependencies = supportsMobileWorktreeDependencyCleanup(targets, projectSelected);
   const pageProjectKeys = PAGE_PROJECT_KEYS[props.page].filter(
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );

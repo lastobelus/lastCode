@@ -138,7 +138,7 @@ describe("mobile worktree dependency retention", () => {
         environment(secondId, {}, { ...capabilities, [capability]: false }),
       ];
       const targets = resolveMobileSettingsTargets(environments, null);
-      expect(supportsMobileWorktreeDependencyCleanup(environments, false)).toBe(false);
+      expect(supportsMobileWorktreeDependencyCleanup(targets, false)).toBe(false);
       expect(
         planMobileWorktreeDependencyCleanup(targets, false, { kind: "days", value: 8 }),
       ).toEqual([]);
@@ -156,7 +156,7 @@ describe("mobile worktree dependency retention", () => {
         { environmentId: firstId, id: firstProject },
         { environmentId: secondId, id: secondProject },
       ]);
-      expect(supportsMobileWorktreeDependencyCleanup(environments, true)).toBe(false);
+      expect(supportsMobileWorktreeDependencyCleanup(targets, true)).toBe(false);
       for (const value of ["inherit", "off", "custom"] as const) {
         expect(planMobileWorktreeDependencyCleanup(targets, true, { kind: "mode", value })).toEqual(
           [],
@@ -169,7 +169,10 @@ describe("mobile worktree dependency retention", () => {
     expect(supportsMobileWorktreeDependencyCleanup([], false)).toBe(false);
     expect(
       supportsMobileWorktreeDependencyCleanup(
-        [environment(firstId, {}, { repositoryIdentity: false })],
+        resolveMobileSettingsTargets(
+          [environment(firstId, {}, { repositoryIdentity: false })],
+          null,
+        ),
         false,
       ),
     ).toBe(false);
@@ -198,6 +201,77 @@ describe("mobile worktree dependency retention", () => {
 });
 
 describe("mobile project cleanup policies", () => {
+  it("allows supported project members while excluding an unrelated unsupported environment", () => {
+    const rules = { ...defaultRules, worktreeDependenciesAfterDays: 21, worktreeOnMerge: true };
+    const environments = [
+      environment(firstId, {
+        projectSettingsOverrides: {
+          [firstProject]: {
+            defaultAutoPull: true,
+            continueThreadsAfterServerUpdate: true,
+            worktreeCleanup: { mode: "custom", rules },
+          },
+        },
+      }),
+      environment(secondId, {}, { repositoryIdentity: true }),
+    ];
+    const targets = resolveMobileSettingsTargets(environments, [
+      { environmentId: firstId, id: firstProject },
+    ]);
+
+    expect(supportsMobileWorktreeDependencyCleanup(targets, true)).toBe(true);
+    expect(
+      supportsMobileWorktreeDependencyCleanup(
+        resolveMobileSettingsTargets(environments, null),
+        false,
+      ),
+    ).toBe(false);
+    expect(resolveMobileWorktreeDependencySettings(targets)).toMatchObject({
+      mode: "custom",
+      days: 21,
+      enabled: true,
+    });
+    expect(planMobileWorktreeDependencyCleanup(targets, true, { kind: "days", value: 14 })).toEqual(
+      [
+        {
+          environmentId: firstId,
+          patch: {
+            projectSettingsOverrides: {
+              [firstProject]: {
+                defaultAutoPull: true,
+                continueThreadsAfterServerUpdate: true,
+                worktreeCleanup: {
+                  mode: "custom",
+                  rules: { ...rules, worktreeDependenciesAfterDays: 14 },
+                },
+              },
+            },
+          },
+        },
+      ],
+    );
+    expect(
+      planMobileScopedSettingsClear(targets, [
+        "worktreeCleanup",
+        "continueThreadsAfterServerUpdate",
+      ]),
+    ).toEqual([
+      {
+        environmentId: firstId,
+        patch: { projectSettingsOverrides: { [firstProject]: { defaultAutoPull: true } } },
+      },
+    ]);
+
+    const noProjectTargets = resolveMobileSettingsTargets(environments, []);
+    expect(supportsMobileWorktreeDependencyCleanup(noProjectTargets, true)).toBe(false);
+    expect(
+      planMobileWorktreeDependencyCleanup(noProjectTargets, true, {
+        kind: "mode",
+        value: "custom",
+      }),
+    ).toEqual([]);
+  });
+
   it("preserves separate rules and unrelated overrides for multiple checkouts on one server", () => {
     const firstRules = { ...defaultRules, worktreeAfterDays: 21, worktreeOnMerge: true };
     const secondRules = { ...defaultRules, worktreeAfterDays: 60, worktreeOnDelete: true };

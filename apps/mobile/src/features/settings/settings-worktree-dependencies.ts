@@ -1,7 +1,6 @@
 import type { EnvironmentId, ServerSettingsPatch } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 
-import type { SettingsTarget } from "./settings-environment-filter";
 import {
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
@@ -23,12 +22,12 @@ export function parseMobileRetentionDays(text: string): number | null {
 }
 
 export function supportsMobileWorktreeDependencyCleanup(
-  environments: readonly SettingsTarget[],
+  targets: readonly ScopedMobileSettingsTarget[],
   projectSelected: boolean,
 ) {
   return (
-    environments.length > 0 &&
-    environments.every(({ serverConfig }) => {
+    targets.length > 0 &&
+    targets.every(({ environment: { serverConfig } }) => {
       const capabilities = serverConfig.environment.capabilities;
       return (
         capabilities.storageCleanup === true &&
@@ -78,13 +77,7 @@ export function planMobileWorktreeDependencyCleanup(
   projectSelected: boolean,
   change: MobileDependencyCleanupChange,
 ) {
-  if (
-    !supportsMobileWorktreeDependencyCleanup(
-      targets.map((target) => target.environment),
-      projectSelected,
-    )
-  )
-    return [];
+  if (!supportsMobileWorktreeDependencyCleanup(targets, projectSelected)) return [];
   if (change.kind === "mode" && !projectSelected) return [];
   if (change.kind === "days") {
     if (
