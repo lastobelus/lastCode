@@ -1808,17 +1808,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         if (!current || current.webContentsId !== wc.id || webContents.fromId(wc.id) !== wc) {
           return [Option.none<PreviewTabState>(), tabs] as const;
         }
-        // Electron emits did-stop-loading after did-fail-load. At that point the
-        // failed guest is no longer "loading", but it has not successfully
-        // navigated anywhere. Keep the failure until a new load actually starts.
+        // Electron can commit its error document after did-fail-load, then emit
+        // navigation, stop and title updates without a successful retry. Keep
+        // the failure until a new main-frame navigation actually starts.
         const navStatus =
-          preserveLoadFailure &&
-          current.navStatus.kind === "LoadFailed" &&
-          computedNavStatus.kind === "Success"
+          preserveLoadFailure && current.navStatus.kind === "LoadFailed"
             ? current.navStatus
             : computedNavStatus;
         const clearFavicon =
           confirmedNavigation &&
+          navStatus.kind !== "LoadFailed" &&
           current.favicon !== undefined &&
           safeHttpOrigin(current.favicon.pageUrl) !==
             safeHttpOrigin(navStatus.kind === "Idle" ? wc.getURL() : navStatus.url);
@@ -1843,8 +1842,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       if (Option.isSome(next)) yield* emitIfCurrent(tabId, next.value);
     });
     const sync = () => runFork(syncState(true));
-    const syncNavigation = () => runFork(syncState(false, true));
-    const syncInPageNavigation = () => runFork(syncState(false));
+    const syncNavigation = () => runFork(syncState(true, true));
+    const syncInPageNavigation = () => runFork(syncState(true));
     const restoreRecordingCursor = () =>
       runFork(
         Effect.gen(function* () {
@@ -1863,7 +1862,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const navigationStarted = (
       event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
     ) => {
-      if (event.isMainFrame && !event.isSameDocument) cancelFaviconCapture();
+      if (event.isMainFrame && !event.isSameDocument) {
+        cancelFaviconCapture();
+        runFork(syncState(false));
+      }
     };
     const audioStateChanged = (
       event: Electron.Event<Electron.WebContentsAudioStateChangedEventParams>,
