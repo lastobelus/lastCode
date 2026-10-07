@@ -543,6 +543,108 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("starts child notes independently of historical copied and resolved parent notes", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const projectId = ProjectId.make("notes:project");
+    const parentId = ThreadId.make("notes:parent");
+    yield* orchestrator.dispatch(create(parentId, projectId));
+    for (const kind of ["ordinary", "subagent"] as const) {
+      const threadId = ThreadId.make(`notes:${kind}`);
+      yield* orchestrator.dispatch(create(threadId, projectId));
+      const thread = yield* projections.getThread(threadId);
+      const now = yield* DateTime.now;
+      const copiedAt = DateTime.formatIso(DateTime.add(now, { hours: -1 }));
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`event:${kind}:copied-note`),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              ...(kind === "ordinary"
+                ? { creatorThreadId: parentId, creatorGrouping: "grouped" as const }
+                : {
+                    lineage: {
+                      rootThreadId: parentId,
+                      parentThreadId: parentId,
+                      relationshipToParent: "subagent" as const,
+                    },
+                  }),
+              annotation: {
+                body: "Copied parent note",
+                anchorMessageId: MessageId.make("notes:parent-message"),
+                createdAt: copiedAt,
+                updatedAt: copiedAt,
+                resolvedAt: copiedAt,
+              },
+            },
+          },
+          {
+            id: EventId.make(`event:${kind}:own-message`),
+            type: "message.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make(`notes:${kind}:message`),
+              threadId,
+              runId: null,
+              nodeId: null,
+              role: "user",
+              text: "Own child message",
+              attachments: [],
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+              createdBy: "user",
+              creationSource: "web",
+            },
+          },
+        ],
+      });
+      for (const type of ["thread.annotation.resolve", "thread.annotation.reopen"] as const) {
+        assert.equal(
+          (yield* Effect.exit(
+            orchestrator.dispatch({ type, threadId, commandId: CommandId.make(`${kind}:${type}`) }),
+          ))._tag,
+          "Failure",
+        );
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.annotation.upsert",
+        commandId: CommandId.make(`notes:${kind}:create`),
+        threadId,
+        body: "Own child note",
+      });
+      const independent = (yield* projections.getThread(threadId)).annotation;
+      assert.equal(independent?.body, "Own child note");
+      assert.equal(independent?.anchorMessageId, `notes:${kind}:message`);
+      assert.equal(independent?.createdAt, DateTime.formatIso(now));
+      assert.isNull(independent?.resolvedAt);
+      yield* orchestrator.dispatch({
+        type: "thread.annotation.resolve",
+        commandId: CommandId.make(`notes:${kind}:resolve`),
+        threadId,
+      });
+      const resolved = (yield* projections.getThread(threadId)).annotation;
+      yield* orchestrator.dispatch({
+        type: "thread.annotation.upsert",
+        commandId: CommandId.make(`notes:${kind}:edit`),
+        threadId,
+        body: "Edited child note",
+      });
+      const edited = (yield* projections.getThread(threadId)).annotation;
+      assert.equal(edited?.createdAt, independent?.createdAt);
+      assert.isNotNull(resolved?.resolvedAt);
+      assert.equal(edited?.resolvedAt, resolved?.resolvedAt);
+    }
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("rejects new message intake while update admission is closed", () => {
   const closed = Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
     admit: () =>

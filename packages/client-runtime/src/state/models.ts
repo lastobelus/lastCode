@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
@@ -320,7 +321,7 @@ export function presentThreadShell(
           },
     deletedAt: nullableIso(thread.deletedAt),
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
-    annotation: thread.annotation ?? null,
+    annotation: threadAnnotationOf(thread),
     attention: thread.attention ?? null,
     dashboardItems: thread.dashboardItems ?? [],
     actionResume: thread.actionResume ?? null,

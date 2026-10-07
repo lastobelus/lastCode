@@ -517,7 +517,7 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
-    Schema.withDecodingDefault(Effect.succeed("typed-groups")),
+    Schema.withDecodingDefault(Effect.succeed("minimal")),
   ),
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),

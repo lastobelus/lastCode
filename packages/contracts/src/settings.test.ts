@@ -740,8 +740,19 @@ describe("ClientSettings sidebar", () => {
     expect(settings.compactLegacySidebarStatuses).toBe(false);
     expect(settings.showThreadWorktreeIndicators).toBe(true);
     expect(settings.legacySidebarScale).toBe(100);
-    expect(settings.legacySidebarThreadGroupingStyle).toBe("typed-groups");
+    expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
     expect(settings.legacySidebarEnabled).toBe(false);
+  });
+
+  it("preserves an explicit thread grouping choice", () => {
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "typed-groups" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("typed-groups");
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "minimal" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("minimal");
   });
 
   it("drops the retired sidebar v2 beta keys, resetting everyone to the default", () => {

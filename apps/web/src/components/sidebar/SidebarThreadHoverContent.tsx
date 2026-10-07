@@ -10,7 +10,7 @@ import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { EnvironmentIcon } from "../../environmentIcons";
+import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { ThreadPullRequestsMiniList } from "../ThreadStatusIndicators";
@@ -27,7 +27,6 @@ export interface SidebarThreadHoverContentProps {
   projectFaviconPath: string | null;
   projectIcon?: ProjectIconOverride | null;
   environmentLabel: string | null;
-  environmentIconKind?: "laptop" | "server";
   environmentIconColor?: EnvironmentIconColor | undefined;
   providerEntry: ProviderInstanceEntry | null;
   providerEntryByInstanceId?: ReadonlyMap<string, ProviderInstanceEntry> | undefined;
@@ -78,6 +77,11 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
       <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
         {props.thread.title}
       </div>
+      {props.thread.persistent ? (
+        <div className="text-xs text-muted-foreground">
+          Persistent thread · protected from archive and deletion
+        </div>
+      ) : null}
       <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
@@ -96,12 +100,14 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {props.environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            <EnvironmentIcon
-              kind={props.environmentIconKind ?? "server"}
-              context="hover"
-              color={props.environmentIconColor}
-              className="size-3 shrink-0"
-            />
+            {props.thread.lineage.relationshipToParent !== "subagent" ? (
+              <ConnectedEnvironmentIcon
+                environmentId={props.thread.environmentId}
+                context="hover"
+                color={props.environmentIconColor}
+                className="size-3 shrink-0"
+              />
+            ) : null}
             <div className="min-w-0 truncate text-foreground/75">{props.environmentLabel}</div>
           </div>
         ) : null}

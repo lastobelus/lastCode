@@ -20,10 +20,12 @@ import { useResizeDrag } from "~/hooks/useResizeDrag";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
+import { bindSidebarRailScroll } from "./sidebarRailScroll";
+import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 
 const SIDEBAR_WIDTH = "16rem";
-const SIDEBAR_WIDTH_MOBILE = "calc(100vw - var(--spacing(3)))";
+const SIDEBAR_WIDTH_MOBILE = "calc(100vw - 3 * var(--spacing))";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH = 16 * 16;
 
@@ -366,6 +368,11 @@ function SidebarRail({
   const canResize = resolvedResizable !== null && open;
   const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
   const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
+  React.useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !open || props.onWheel) return;
+    return bindSidebarRailScroll(rail);
+  }, [open, props.onWheel]);
   const resize = useResizeDrag<HTMLButtonElement>((event) => {
     if (!resolvedResizable || !open) return null;
     const rail = event.currentTarget;
@@ -581,12 +588,17 @@ function SidebarContent({
 }: React.ComponentProps<"div"> & {
   fixedHeader?: React.ReactNode;
 }) {
+  const scrollAreaRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (scrollAreaRef.current) return bindSidebarPageScroll(scrollAreaRef.current);
+  }, []);
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
       {/* Rows take focus on click. Scroll padding would make the browser nudge
           the list whenever a focused row sits under the fade. */}
       <ScrollArea
+        ref={scrollAreaRef}
         hideScrollbars
         scrollFade
         scrollFadePadding={false}

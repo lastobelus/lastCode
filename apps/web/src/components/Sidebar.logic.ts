@@ -665,6 +665,7 @@ export interface ThreadStatusPill {
     | "Deleting (Queued)"
     | "Question"
     | "Cleanup failed"
+    | "Failed"
     | "Not responding"
     | "Needs repair";
   colorClass: string;
@@ -685,6 +686,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Deleting: 7,
   "Deleting (Queued)": 7,
   "Cleanup failed": 8,
+  Failed: 8,
   "Not responding": 8,
   "Needs repair": 8,
 };

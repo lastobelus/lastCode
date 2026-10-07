@@ -91,6 +91,8 @@ function threadDetailToShell(
     forkedFrom: thread.forkedFrom,
     createdBy: thread.createdBy,
     creationSource: thread.creationSource,
+    ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
+    ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
     latestRunId: latestRun?.runId ?? null,
     activeRunId: runtime?.activeRunId ?? null,
     status: runtime?.status ?? "idle",

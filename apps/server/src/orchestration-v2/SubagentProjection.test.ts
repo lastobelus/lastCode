@@ -114,6 +114,38 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
   });
 });
 
+it("starts native and app-owned subagents without the parent's protection or annotation", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const parentThread = {
+      ...makeParentThread(),
+      persistent: true,
+      annotation: {
+        body: "Parent note",
+        anchorMessageId: MessageId.make("message:parent-note"),
+        createdAt: DateTime.formatIso(parentCreatedAt),
+        updatedAt: DateTime.formatIso(parentCreatedAt),
+        resolvedAt: null,
+      },
+    } satisfies OrchestrationV2AppThread;
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Independent helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isFalse(childThread.persistent);
+    assert.isNull(childThread.annotation);
+    assert.isTrue(parentThread.persistent);
+    assert.equal(parentThread.annotation.body, "Parent note");
+  }
+});
+
 it("does not inherit the parent's ordinary creator history or placement for either subagent kind", () => {
   for (const creationSource of ["provider", "mcp"] as const) {
     const parentThread = {

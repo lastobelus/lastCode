@@ -23,7 +23,11 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "r
 
 import { environmentCatalog } from "../../connection/catalog";
 import { isElectron } from "../../env";
-import { EnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
+import {
+  ConnectedEnvironmentIcon,
+  EnvironmentIcon,
+  updateEnvironmentIconColors,
+} from "../../environmentIcons";
 import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
@@ -391,11 +395,11 @@ export function LastCodeSettingsPanel() {
           {...searchableSetting("thread-grouping-style")}
           description="Choose how the Projects sidebar distinguishes subagents from ordinary threads created by an agent. This changes presentation, not thread relationships."
           resetAction={
-            clientSettings.legacySidebarThreadGroupingStyle !== "typed-groups" ? (
+            clientSettings.legacySidebarThreadGroupingStyle !== "minimal" ? (
               <SettingResetButton
                 label="thread grouping style"
                 onClick={() =>
-                  updateClientSettings({ legacySidebarThreadGroupingStyle: "typed-groups" })
+                  updateClientSettings({ legacySidebarThreadGroupingStyle: "minimal" })
                 }
               />
             ) : null
@@ -494,8 +498,8 @@ export function LastCodeSettingsPanel() {
               key={environment.environmentId}
               title={
                 <span className="inline-flex min-w-0 items-center gap-2">
-                  <EnvironmentIcon
-                    kind={isLocal ? "laptop" : "server"}
+                  <ConnectedEnvironmentIcon
+                    environmentId={environment.environmentId}
                     context="settings"
                     color={color}
                     className="size-4 shrink-0"
@@ -528,7 +532,7 @@ export function LastCodeSettingsPanel() {
                     <div className="min-w-0 space-y-1">
                       <div className="text-xs font-medium text-foreground">Show local icon</div>
                       <p className="max-w-xl text-xs leading-snug text-muted-foreground">
-                        Show a Laptop icon for local threads. Legacy rows always reserve its space.
+                        Show this environment's Connections icon for local threads.
                       </p>
                     </div>
                     <Switch
