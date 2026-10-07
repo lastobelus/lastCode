@@ -206,6 +206,9 @@ jobs:
       - name: Test nightly release checks
         run: node --test .github/scripts/check-nightly-release.test.cjs
 
+      - name: Test APT mirror configuration
+        run: node --test .github/scripts/setup-apt-mirrors.test.cjs
+
       - name: Finish installing browser secret helper build libraries
         timeout-minutes: 5
         run: |
@@ -274,6 +277,8 @@ jobs:
       # No Electron setup here: `t3` (apps/server) has no Electron dependency
       # and none of its tests touch the runtime. Only the non-server `test`
       # job, which covers @t3tools/desktop, needs the download.
+      - uses: ./.github/actions/setup-apt-mirrors
+
       - name: Install Chromium for server browser integration tests
         run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
 
