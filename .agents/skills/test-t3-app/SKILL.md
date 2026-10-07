@@ -25,13 +25,17 @@ directory. Substitute that literal path for `<isolated-home>` in these commands
 (the quoted argument works in POSIX shells, PowerShell, and cmd.exe):
 
 ```text
-vp run dev --dry-run --home-dir "<isolated-home>"
-vp run dev --home-dir "<isolated-home>"
+./node_modules/.bin/vp run dev --dry-run --home-dir "<isolated-home>"
+./node_modules/.bin/vp run dev --home-dir "<isolated-home>"
 ```
 
 Run the dry run first and read `webPort` from its `[dev-runner]` output. Use
 `http://localhost:<webPort>` as the requested preview URL, then give the second
 command to `preview_host` with the same working directory and environment.
+Use the workspace-installed executable for this unattended launch; a global
+Vite+ proxy can wait before starting the command. On Windows use
+`node_modules\\.bin\\vp.cmd`. If the workspace executable is missing, repair setup
+before launching.
 To choose a port range, supply `T3CODE_PORT_OFFSET` through the tool's environment
 overrides (and the dry-run process environment): the initial web port is
 `5733 + offset` and backend port is `13773 + offset`. The runner can shift
@@ -39,25 +43,18 @@ occupied ports, so use the dry-run result, not the formula alone. `--port`
 selects the backend, not the browser-facing web listener. If a port is taken
 between resolution and launch, resolve a free pair again.
 
-`preview_host` does not expose startup output or a terminal handle. For ordinary
-QA, mint a fresh standard-scope pairing URL after launch:
+For an authenticated T3 dev handoff, configure the reusable dev credential
+using `docs/operations/development.md#reusable-dev-credential`. Reuse an existing
+configured value; otherwise generate one value once for this isolated setup and
+retain it as `T3CODE_DEV_AUTH_TOKEN` in the managed launch's environment. Supply
+`browserAuth: "t3-dev"` to `preview_host`. The app then renews browser access when
+the user opens the clean handoff link, including after its cookie expires or
+its server sleeps. Do not generate new credentials inside a replayable command
+or emit a one-time pairing link as the lasting QA handoff.
 
-```text
-node apps/server/src/bin.ts pair --base-dir "<isolated-home>"
-```
-
-Administrative QA, such as Connections management, needs admin scopes that
-`pair` does not grant. Before launching, configure the reusable dev credential
-using `docs/operations/development.md#reusable-dev-credential`, including its
-trusted-hostname requirement. Reuse the configured value when present; otherwise
-generate one value once for this QA setup with
-`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`
-and retain it as `T3CODE_DEV_AUTH_TOKEN` in the managed launch's environment
-overrides. Never generate a new value inside the replayable launch command.
-Navigate the dedicated tab to `<web-origin>/pair#token=<credential>` once; the
-dev server seeds this credential with administrative scopes. Reuse the same
-credential on managed recovery, and pair again if the browser session expires.
-Do not replace a shared configured credential or restart the user's LastCode.
+The automation tab can initially pair with that same configured credential.
+Keep it in the selected QA profile. Never replace a shared configured credential
+or restart the user's LastCode to prepare QA.
 
 Keep pairing URLs and credentials private: never commit them, include them in
 reports, or capture them in screenshots. Do not redirect startup output into
@@ -73,18 +70,20 @@ inspecting or seeding SQLite. Stop the test server before direct fixture writes.
 
 Routine automated QA against isolated development state does not need a
 separate permission prompt. Keep it in the background so the user can continue
-using LastCode. Call `preview_status`, then
-`preview_open({ open: false, reuseExistingTab: false })` to create a dedicated
-QA tab. Retain the returned `tabId` and pass it to subsequent tools; reuse that
+using LastCode. Call `preview_status` and `preview_profiles`, then explicitly select `Default`
+or an existing dedicated QA profile with
+`preview_open({ open: false, profileName: "Default", reuseExistingTab: false })`.
+Verify its returned profile. GitHub work requiring login uses a separate tab in
+`Logged in Developer`; never change the default profile to obtain that session. Retain the returned `tabId` and pass it to subsequent tools; reuse that
 QA tab for the rest of the task. Do not hide or repurpose a tab the user is
 inspecting.
 
 A newly created blank tab can initially report `available: false` while its
 native browser starts. Navigate before declaring it unavailable; navigation
-waits for readiness. Navigate to the complete pairing URL once with
-`preview_navigate`, then use `preview_snapshot` and T3's interaction tools.
-If the token was consumed or expired, follow the scope-aware recovery above.
-Keep using the same tab.
+waits for readiness. Initially pair the automation tab using the configured dev
+credential and `preview_navigate`, then use `preview_snapshot` and T3's interaction
+tools. Keep using that tab. The user's lasting handoff is the clean URL with
+managed browser authentication described above, not this initial pairing URL.
 
 If managed hosting fails readiness, inspect the startup diagnostics returned by
 `preview_host`, the launch command, actual listening port, and ownership before
@@ -98,10 +97,22 @@ a workaround.
 ## Verify and retain
 
 Exercise the affected flow and capture the state that proves it works. Keep
-the server, state, and panel available while the user inspects or iterates.
-An assistant turn ending is not teardown. Stop only processes you started,
-using retained terminal sessions or captured PIDs.
+the saved handoff, isolated state, dependencies, and panel available while the
+user inspects or iterates, including after the process sleeps.
+An assistant turn ending is not teardown. Do not stop a managed handoff at turn end; explicit stop or thread deletion
+cancels its future reopening.
 
 When sharing is requested, start with `vp run dev --share` and give the user
 a fresh complete pairing URL that you have not consumed. Keep other credentials
 out of screenshots, commits, and replies.
+
+When manual QA is requested, prepare the scenario and a clean integrated-browser
+link without asking the user to begin a QA window. Leave the result ready even
+if acceptance comes much later. Ask under the machine policy only when starting
+back-and-forth human QA or foreground application control. Human acceptance is
+still pending until the user provides it.
+
+If a browser fault persists after a bounded diagnostic attempt, record the exact
+failed operation and recovery condition. New feature commits alone do not fix a
+browser fault. Do not repeatedly send another thread the same QA request; use
+thread coordination to investigate the common failure, with one clear owner.
