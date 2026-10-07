@@ -19,12 +19,11 @@ type Request = {
   readonly children: ReadonlyArray<EnvironmentThreadShell>;
   readonly activeChildren: ReadonlyArray<EnvironmentThreadShell>;
   readonly canPromote: boolean;
+  readonly canStopAndArchive: boolean;
   readonly protectedCount: number;
   readonly nativeCount: number;
-  /** Keep failures retryable unless the displayed family choices are obsolete. */
-  readonly submit: (
-    choice: ArchiveChildDisposition,
-  ) => Promise<string | { readonly error: string; readonly close: true } | null>;
+  /** A failed attempt closes; the caller reports its original error. */
+  readonly submit: (choice: ArchiveChildDisposition) => Promise<string | null>;
   readonly resolve: (choice: ArchiveChildDisposition | null) => void;
 };
 const useRequest = create<{ request: Request | null }>(() => ({ request: null }));
@@ -60,7 +59,6 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
   const [choice, setChoice] = useState<ArchiveChildDisposition | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const activeCount = request.activeChildren.length;
   const count = request.children.length;
   const listedChildren =
@@ -88,14 +86,12 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     if (submitting.current) return;
     submitting.current = true;
     setChoice(next);
-    setError(null);
     try {
       const failure = await request.submit(next);
       if (failure === null) finish(next);
-      else if (typeof failure !== "string") finish(null);
-      else setError(`Couldn't archive. ${failure}`);
-    } catch (cause) {
-      setError(cause instanceof Error ? `Couldn't archive. ${cause.message}` : "Couldn't archive.");
+      else finish(null);
+    } catch {
+      finish(null);
     } finally {
       submitting.current = false;
       setChoice(null);
@@ -169,11 +165,6 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
             Undo restores archived threads. Stopped work won't restart; promoted threads stay
             separate.
           </p>
-          {error ? (
-            <p role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
-          ) : null}
         </AlertDialogHeader>
         <AlertDialogFooter>
           <Button
@@ -195,7 +186,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
           ) : null}
           <Button
             variant="destructive"
-            disabled={choice !== null || request.protectedCount > 0}
+            disabled={choice !== null || !request.canStopAndArchive}
             onClick={() => void submit("stop_and_archive")}
           >
             {choice === "stop_and_archive" ? "Archiving…" : "Stop and archive"}

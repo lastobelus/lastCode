@@ -3759,6 +3759,21 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedError<Orch
   }
 }
 
+/** Read-time choices; archive commands recheck ownership and work under their locks. */
+export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
+  threads: Schema.Array(OrchestrationV2ThreadShell),
+  childThreadIds: Schema.Array(ThreadId),
+  activeChildThreadIds: Schema.Array(ThreadId),
+  promotableChildThreadIds: Schema.Array(ThreadId),
+  keptThreadIds: Schema.Array(ThreadId),
+  protectedChildThreadIds: Schema.Array(ThreadId),
+  nativeStopCount: Schema.Number,
+  requiresConfirmation: Schema.Boolean,
+  canPromote: Schema.Boolean,
+  canStopAndArchive: Schema.Boolean,
+});
+export type OrchestrationV2ThreadArchiveFamily = typeof OrchestrationV2ThreadArchiveFamily.Type;
+
 export const OrchestrationV2RpcSchemas = {
   dispatchCommand: {
     input: OrchestrationV2Command,
@@ -3778,7 +3793,7 @@ export const OrchestrationV2RpcSchemas = {
   },
   getThreadArchiveFamily: {
     input: Schema.Struct({ threadId: ThreadId }),
-    output: Schema.Array(OrchestrationV2ThreadShell),
+    output: OrchestrationV2ThreadArchiveFamily,
   },
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,

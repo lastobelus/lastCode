@@ -9,6 +9,7 @@ import {
   ThreadId,
   type OrchestrationV2Command,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadArchiveFamily,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -87,6 +88,17 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
 const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
   archiveFamily: readonly OrchestrationV2ThreadShell[] = SNAPSHOT.threads,
   archiveFamilyError?: Error,
+  decision: Omit<OrchestrationV2ThreadArchiveFamily, "threads"> = {
+    childThreadIds: [],
+    activeChildThreadIds: [],
+    promotableChildThreadIds: [],
+    keptThreadIds: [],
+    protectedChildThreadIds: [],
+    nativeStopCount: 0,
+    requiresConfirmation: false,
+    canPromote: false,
+    canStopAndArchive: true,
+  },
 ) {
   const familyReads: { threadId: ThreadId }[] = [];
   const requests = yield* Queue.unbounded<{
@@ -106,7 +118,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
           [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: (input: { threadId: ThreadId }) => {
             familyReads.push(input);
             return archiveFamilyError === undefined
-              ? Effect.succeed(archiveFamily)
+              ? Effect.succeed({ ...decision, threads: archiveFamily })
               : Effect.fail(archiveFamilyError);
           },
           [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
@@ -173,7 +185,17 @@ it.effect("reads a scoped complete family without replacing the active shell sna
         },
       },
     ];
-    const h = yield* makeHarness(shells);
+    const h = yield* makeHarness(shells, undefined, {
+      childThreadIds: [liveChildId],
+      activeChildThreadIds: [liveChildId],
+      promotableChildThreadIds: [],
+      keptThreadIds: [],
+      protectedChildThreadIds: [liveChildId],
+      nativeStopCount: 1,
+      requiresConfirmation: true,
+      canPromote: false,
+      canStopAndArchive: false,
+    });
     const result = yield* Effect.promise(() =>
       executeAtomQuery(
         h.registry,
@@ -186,10 +208,16 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     );
     expect(result._tag).toBe("Success");
     if (result._tag !== "Success") return;
-    expect(result.value.map(({ id, environmentId }) => ({ id, environmentId }))).toEqual(
+    expect(result.value.threads.map(({ id, environmentId }) => ({ id, environmentId }))).toEqual(
       shells.map(({ id }) => ({ id, environmentId: ENVIRONMENT_ID })),
     );
-    expect(result.value.find(({ id }) => id === liveChildId)?.runtime?.status).toBe("running");
+    expect(result.value.children.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.activeChildren[0]?.runtime?.status).toBe("running");
+    expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.promotableChildren).toEqual([]);
+    expect(result.value.requiresConfirmation).toBe(true);
+    expect(result.value.canStopAndArchive).toBe(false);
+    expect(result.value.nativeStopCount).toBe(1);
     expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
     expect(h.registry.get(h.visibleAtom)).toBe(SNAPSHOT);
   }),

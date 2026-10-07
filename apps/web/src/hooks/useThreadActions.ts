@@ -9,7 +9,6 @@ import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-se
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import {
-  archiveChildNeedsAttention,
   archiveRetryThreadId,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
@@ -18,7 +17,6 @@ import {
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
-  getOwnedThreadFamily,
   type ScopedThreadRef,
   type ThreadArchiveChildDisposition,
   ThreadId,
@@ -78,44 +76,6 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { requestThreadArchiveDialog } from "../components/ThreadArchiveDialog";
-
-function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target: ScopedThreadRef) {
-  const familyThreads = threads
-    .filter((thread) => thread.environmentId === target.environmentId)
-    .map((thread) => ({ ...thread, creationSource: thread.source.creationSource }));
-  const family = getOwnedThreadFamily(familyThreads, target.threadId);
-  const keptIds = new Set(
-    family.promotableChildren.flatMap((child) => [
-      child.id,
-      ...getOwnedThreadFamily(familyThreads, child.id).children.map((descendant) => descendant.id),
-    ]),
-  );
-  return {
-    ...family,
-    keptThreadIds: keptIds,
-    canPromote:
-      family.promotableChildren.length > 0 &&
-      family.protectedChildren.every((child) => keptIds.has(child.id)),
-  };
-}
-
-function archiveFamilyChoicesMatch(
-  before: ReturnType<typeof resolveArchiveFamily>,
-  after: ReturnType<typeof resolveArchiveFamily>,
-) {
-  const sameIds = (left: readonly { id: ThreadId }[], right: readonly { id: ThreadId }[]) => {
-    const ids = new Set(right.map((thread) => thread.id));
-    return left.length === right.length && left.every((thread) => ids.has(thread.id));
-  };
-  return (
-    sameIds(before.children, after.children) &&
-    sameIds(before.promotableChildren, after.promotableChildren) &&
-    sameIds(before.nativeChildren, after.nativeChildren) &&
-    sameIds(before.protectedChildren, after.protectedChildren) &&
-    before.keptThreadIds.size === after.keptThreadIds.size &&
-    [...before.keptThreadIds].every((id) => after.keptThreadIds.has(id))
-  );
-}
 
 /** Failed participants share one retry owner, even when that owner is already archived. */
 export function normalizeArchiveSelectedEntries<
@@ -455,6 +415,10 @@ export function useThreadActions() {
     reportFailure: false,
     refresh: true,
   });
+  type ArchiveFamily = Extract<
+    Awaited<ReturnType<typeof loadArchiveFamily>>,
+    { _tag: "Success" }
+  >["value"];
   const refreshVcsStatus = useAtomCommand(vcsEnvironment.refreshStatus, {
     reportFailure: false,
   });
@@ -492,30 +456,6 @@ export function useThreadActions() {
     return resolveThreadRouteRef(currentRouteParams);
   }, [router]);
 
-  const archiveChoicesChanged = useCallback(
-    async (
-      target: ScopedThreadRef,
-      owner: EnvironmentThreadShell,
-      family: ReturnType<typeof resolveArchiveFamily>,
-    ) => {
-      const fresh = await loadArchiveFamily({
-        environmentId: target.environmentId,
-        input: { threadId: target.threadId },
-      });
-      // Unknown state also requires a new action and fresh consent, never a stale retry.
-      if (fresh._tag === "Failure") return true;
-      const currentOwner = fresh.value.find(
-        (thread) => thread.id === target.threadId && thread.environmentId === target.environmentId,
-      );
-      return (
-        !currentOwner ||
-        (owner.persistent === true) !== (currentOwner.persistent === true) ||
-        !archiveFamilyChoicesMatch(family, resolveArchiveFamily(fresh.value, target))
-      );
-    },
-    [loadArchiveFamily],
-  );
-
   const unarchiveThread = useCallback(
     async (target: ScopedThreadRef, opts: { navigate?: boolean } = {}) => {
       ThreadUndo.invalidate("archive", scopedThreadKey(target));
@@ -548,10 +488,10 @@ export function useThreadActions() {
         confirmed?: boolean;
         familyChoice?: {
           childDisposition: ThreadArchiveChildDisposition;
-          expectedChildThreadIds: ThreadId[];
+          expectedChildThreadIds: readonly ThreadId[];
         };
         familyOwner?: EnvironmentThreadShell;
-        familySnapshot?: ReturnType<typeof resolveArchiveFamily>;
+        familySnapshot?: ArchiveFamily;
       } = {},
     ) => {
       const permissionFailure = threadOperationFailure(target);
@@ -582,7 +522,7 @@ export function useThreadActions() {
           });
       if (familyResult?._tag === "Failure") return familyResult;
       if (familyResult?._tag === "Success") {
-        const owner = familyResult.value.find(
+        const owner = familyResult.value.threads.find(
           (candidate) =>
             candidate.id === threadRef.threadId &&
             candidate.environmentId === threadRef.environmentId,
@@ -597,10 +537,7 @@ export function useThreadActions() {
           );
         thread = owner;
       }
-      const family =
-        familyResult === null
-          ? (opts.familySnapshot ?? null)
-          : resolveArchiveFamily(familyResult.value, threadRef);
+      const family = familyResult === null ? (opts.familySnapshot ?? null) : familyResult.value;
       if (thread.persistent === true) {
         return AsyncResult.failure(
           Cause.fail(
@@ -610,7 +547,7 @@ export function useThreadActions() {
           ),
         );
       }
-      if (!retry && !threadRuntimeCanArchive(thread.runtime) && !family?.children.length) {
+      if (!retry && !threadRuntimeCanArchive(thread.runtime) && !family?.childThreadIds.length) {
         return AsyncResult.failure(
           Cause.fail(
             new ThreadArchiveBlockedError({
@@ -621,8 +558,7 @@ export function useThreadActions() {
         );
       }
 
-      const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
-      const expectedChildThreadIds = family?.children.map((child) => child.id) ?? [];
+      const expectedChildThreadIds = family?.childThreadIds ?? [];
       const mutate = (childDisposition?: ThreadArchiveChildDisposition) => {
         archivedChildDisposition =
           familyChoice?.childDisposition ?? childDisposition ?? "archive_if_idle";
@@ -643,38 +579,27 @@ export function useThreadActions() {
         });
       };
       let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
-      let closedForChangedChoices = false;
-      if (
-        !familyChoice &&
-        family !== null &&
-        (activeChildren.length > 0 ||
-          family.protectedChildren.length > 0 ||
-          ((!threadRuntimeCanArchive(thread.runtime) || archiveChildNeedsAttention(thread)) &&
-            family.children.length > 0))
-      ) {
+      if (!familyChoice && family?.requiresConfirmation) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
           children: family.children,
-          activeChildren,
+          activeChildren: family.activeChildren,
           canPromote: family.canPromote,
-          nativeCount: family.nativeChildren.length,
-          protectedCount: family.protectedChildren.length,
+          canStopAndArchive: family.canStopAndArchive,
+          nativeCount: family.nativeStopCount,
+          protectedCount: family.protectedChildThreadIds.length,
           submit: async (selected) => {
             archiveResult = await mutate(selected);
             if (archiveResult._tag === "Success") return null;
             const error = squashAtomCommandFailure(archiveResult);
             const message =
               error instanceof Error ? error.message : "The archive did not complete.";
-            if (await archiveChoicesChanged(threadRef, thread, family)) {
-              closedForChangedChoices = true;
-              return { error: message, close: true as const };
-            }
             return message;
           },
         });
         if (choice === null) {
           action?.finish();
-          if (closedForChangedChoices && archiveResult?._tag === "Failure") return archiveResult;
+          if (archiveResult?._tag === "Failure") return archiveResult;
           return AsyncResult.failure(Cause.interrupt());
         }
       } else {
@@ -702,10 +627,9 @@ export function useThreadActions() {
         currentRouteThreadRef.environmentId === threadRef.environmentId &&
         (currentRouteThreadRef.threadId === threadRef.threadId ||
           ((currentRouteThreadRef.threadId === target.threadId ||
-            (family?.children.some((child) => child.id === currentRouteThreadRef.threadId) ??
-              false)) &&
+            (family?.childThreadIds.includes(currentRouteThreadRef.threadId) ?? false)) &&
             (archivedChildDisposition !== "promote" ||
-              !family?.keptThreadIds.has(currentRouteThreadRef.threadId))));
+              !family?.keptThreadIds.includes(currentRouteThreadRef.threadId))));
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -735,7 +659,6 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
-      archiveChoicesChanged,
       loadArchiveFamily,
       confirmThreadArchive,
       getCurrentRouteThreadRef,
@@ -760,7 +683,7 @@ export function useThreadActions() {
         };
       const families: Array<
         (typeof selected)[number] & {
-          family: ReturnType<typeof resolveArchiveFamily>;
+          family: ArchiveFamily;
           owner: EnvironmentThreadShell;
         }
       > = [];
@@ -775,7 +698,7 @@ export function useThreadActions() {
             mutationFailure: result,
             followupFailures: [],
           };
-        const owner = result.value.find(
+        const owner = result.value.threads.find(
           (candidate) =>
             candidate.id === entry.threadRef.threadId &&
             candidate.environmentId === entry.threadRef.environmentId,
@@ -794,7 +717,7 @@ export function useThreadActions() {
           };
         families.push({
           ...entry,
-          family: resolveArchiveFamily(result.value, entry.threadRef),
+          family: result.value,
           owner,
         });
       }
@@ -804,7 +727,7 @@ export function useThreadActions() {
           !families.some(
             (other) =>
               other.threadRef.environmentId === entry.threadRef.environmentId &&
-              other.family.children.some((child) => child.id === entry.threadRef.threadId),
+              other.family.childThreadIds.includes(entry.threadRef.threadId),
           ),
       );
       const children = [
@@ -826,38 +749,32 @@ export function useThreadActions() {
             >
           >
         | undefined;
-      const completedThreadKeys = new Set<string>();
-      const completedParticipantKeys = new Set<string>();
       const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
-      let failedEntry: (typeof entries)[number] | undefined;
       const perform = async (choice: ThreadArchiveChildDisposition) => {
-        failedEntry = undefined;
         const attempt = await archiveSelectedThreadEntries({
-          entries: entries.filter((entry) => !completedThreadKeys.has(entry.threadKey)),
-          archive: async (entry, onArchived) => {
+          entries,
+          archive: (entry, onArchived) => {
             const { threadRef, family, owner } = entry;
-            const result = await archiveThread(threadRef, {
+            return archiveThread(threadRef, {
               confirmed: true,
               familyChoice: {
                 childDisposition: choice,
-                expectedChildThreadIds: family.children.map((child) => child.id),
+                expectedChildThreadIds: family.childThreadIds,
               },
               familyOwner: owner,
               familySnapshot: family,
               onArchived,
             });
-            if (result._tag === "Failure") failedEntry = entry;
-            return result;
           },
         });
+        const completedParticipantKeys = new Set<string>();
         for (const threadKey of attempt.archivedThreadKeys) {
-          completedThreadKeys.add(threadKey);
           const entry = entriesByKey.get(threadKey);
           if (!entry) continue;
-          for (const thread of [entry.owner, ...entry.family.children]) {
-            if (choice === "promote" && entry.family.keptThreadIds.has(thread.id)) continue;
+          for (const threadId of [entry.owner.id, ...entry.family.childThreadIds]) {
+            if (choice === "promote" && entry.family.keptThreadIds.includes(threadId)) continue;
             completedParticipantKeys.add(
-              scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, thread.id)),
+              scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, threadId)),
             );
           }
         }
@@ -867,51 +784,30 @@ export function useThreadActions() {
           archivedThreadKeys: selected
             .filter(({ threadRef }) => completedParticipantKeys.has(scopedThreadKey(threadRef)))
             .map(({ threadKey }) => threadKey),
-          followupFailures: [...(outcome?.followupFailures ?? []), ...attempt.followupFailures],
         };
         if (!outcome.mutationFailure) return null;
         const error = squashAtomCommandFailure(outcome.mutationFailure);
         return error instanceof Error ? error.message : "The archive did not complete.";
       };
-      const activeChildren = children.filter(archiveChildNeedsAttention);
-      const protectedCount = children.filter((child) => child.persistent).length;
-      if (
-        activeChildren.length > 0 ||
-        protectedCount > 0 ||
-        entries.some(
-          ({ owner, family }) =>
-            (!threadRuntimeCanArchive(owner.runtime) || archiveChildNeedsAttention(owner)) &&
-            family.children.length > 0,
-        )
-      ) {
+      const activeChildren = entries.flatMap(({ family }) => family.activeChildren);
+      const protectedCount = entries.reduce(
+        (count, { family }) => count + family.protectedChildThreadIds.length,
+        0,
+      );
+      if (entries.some(({ family }) => family.requiresConfirmation)) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive ${entries.length} threads?`,
           children,
           activeChildren,
           protectedCount,
           canPromote:
-            entries.some(({ family }) => family.promotableChildren.length > 0) &&
+            entries.some(({ family }) => family.canPromote) &&
             entries.every(
-              ({ family }) => family.protectedChildren.length === 0 || family.canPromote,
+              ({ family }) => family.protectedChildThreadIds.length === 0 || family.canPromote,
             ),
-          nativeCount: entries.reduce(
-            (count, { family }) => count + family.nativeChildren.length,
-            0,
-          ),
-          submit: async (choice) => {
-            const error = await perform(choice);
-            if (error === null) return null;
-            if (
-              failedEntry &&
-              (await archiveChoicesChanged(
-                failedEntry.threadRef,
-                failedEntry.owner,
-                failedEntry.family,
-              ))
-            )
-              return { error, close: true as const };
-            return error;
-          },
+          canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
+          nativeCount: entries.reduce((count, { family }) => count + family.nativeStopCount, 0),
+          submit: perform,
         });
         // Completed participants still leave selection even if the remaining operation was cancelled.
         if (choice === null) return outcome ?? null;
@@ -925,7 +821,7 @@ export function useThreadActions() {
       }
       return outcome ?? null;
     },
-    [archiveThread, archiveChoicesChanged, confirmThreadArchive, loadArchiveFamily],
+    [archiveThread, confirmThreadArchive, loadArchiveFamily],
   );
 
   const setThreadPersistence = useCallback(

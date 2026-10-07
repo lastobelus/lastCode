@@ -54,30 +54,40 @@ describe("thread family archive confirmation", () => {
       lineage: { rootThreadId: root.id, parentThreadId: parent, relationshipToParent: "subagent" },
     });
 
-  it("keeps promotion available for protected descendants behind inactive intermediates", () => {
-    const first = child("first");
-    const inactive = { ...child("inactive", first.id), archivedAt: "2026-09-02T00:00:00.000Z" };
-    const protectedChild = { ...child("protected", inactive.id), persistent: true };
-    const family = resolveThreadArchiveFamily([root, first, inactive, protectedChild], root);
-    expect(family.children.map(({ id }) => id)).toEqual([first.id, protectedChild.id]);
-    expect(family.canKeepSeparately).toBe(true);
-    expect(family.canStopAndArchive).toBe(false);
+  const decision = (
+    children: ReturnType<typeof child>[],
+    options: Partial<Parameters<typeof resolveThreadArchiveFamily>[0]> = {},
+  ): Parameters<typeof resolveThreadArchiveFamily>[0] => ({
+    threads: [root, ...children],
+    children,
+    childThreadIds: children.map(({ id }) => id),
+    promotableChildThreadIds: [],
+    keptThreadIds: [],
+    activeChildThreadIds: [],
+    protectedChildThreadIds: [],
+    nativeStopCount: 0,
+    requiresConfirmation: false,
+    canPromote: false,
+    canStopAndArchive: true,
+    activeChildren: [],
+    promotableChildren: [],
+    protectedChildren: [],
+    ...options,
   });
 
-  it("requires confirmation for recursive work and attention without pulling in other environments", () => {
+  it("formats the server's attention preview and available choices", () => {
     const first = child("first");
     const nested = { ...child("nested", first.id), hasPendingApprovals: true };
-    const otherEnvironment = {
-      ...child("remote"),
-      environmentId: EnvironmentId.make("remote"),
-      hasPendingUserInput: true,
-    };
-    const dormant = resolveThreadArchiveFamily([root, first, otherEnvironment], root);
-    expect(dormant.requiresConfirmation).toBe(false);
-    expect(dormant.children.map((thread) => thread.id)).toEqual([first.id]);
-    const family = resolveThreadArchiveFamily([root, first, nested, otherEnvironment], root);
+    const family = resolveThreadArchiveFamily(
+      decision([first, nested], {
+        activeChildren: [nested],
+        requiresConfirmation: true,
+        canPromote: true,
+      }),
+      root,
+    );
     expect(family.requiresConfirmation).toBe(true);
-    expect(family.children.map((thread) => thread.id)).toEqual([first.id, nested.id]);
+    expect(family.canKeepSeparately).toBe(true);
     expect(family.message).toContain("1 subagent is still working or needs your attention");
     expect(family.message).toContain("nested · Needs Approval");
     expect(family.message).toContain("Stopped work won't restart; promoted threads stay separate.");
@@ -125,20 +135,28 @@ describe("thread family archive confirmation", () => {
     }
   });
 
-  it("allows keeping persistent descendants only under an independently runnable branch", () => {
-    const first = child("first");
-    const nested = { ...child("persistent", first.id), persistent: true };
-    const family = resolveThreadArchiveFamily([root, first, nested], root);
-    expect(family.requiresConfirmation).toBe(true);
-    expect(family.canStopAndArchive).toBe(false);
-    expect(family.canKeepSeparately).toBe(true);
-    expect(family.message).toContain("Keep running separately preserves them");
-    const native = { ...first, source: { ...first.source, creationSource: "provider" as const } };
-    const nativeFamily = resolveThreadArchiveFamily([root, native, nested], root);
-    expect(nativeFamily.canStopAndArchive).toBe(false);
-    expect(nativeFamily.canKeepSeparately).toBe(false);
-    expect(nativeFamily.message).toContain("Remove their persistent protection");
-  });
+  it.each([true, false])(
+    "formats server-supplied persistent protection choices: %s",
+    (canPromote) => {
+      const protectedChild = { ...child("persistent"), persistent: true };
+      const family = resolveThreadArchiveFamily(
+        decision([protectedChild], {
+          protectedChildren: [protectedChild],
+          requiresConfirmation: true,
+          canStopAndArchive: false,
+          canPromote,
+        }),
+        root,
+      );
+      expect(family.canStopAndArchive).toBe(false);
+      expect(family.canKeepSeparately).toBe(canPromote);
+      expect(family.message).toContain(
+        canPromote
+          ? "Keep running separately preserves them"
+          : "Remove their persistent protection",
+      );
+    },
+  );
 
   it("notes native subagents that will stop, and bounds the child preview", () => {
     const children = Array.from({ length: 5 }, (_, index) => ({
@@ -147,7 +165,14 @@ describe("thread family archive confirmation", () => {
     }));
     const native = children[0]!;
     children[0] = { ...native, source: { ...native.source, creationSource: "provider" } };
-    const family = resolveThreadArchiveFamily([root, ...children], root);
+    const family = resolveThreadArchiveFamily(
+      decision(children, {
+        activeChildren: children,
+        nativeStopCount: 1,
+        requiresConfirmation: true,
+      }),
+      root,
+    );
     expect(family.message).toContain("1 provider subagent cannot run on their own");
     expect(family.message).toContain("+2 more");
     expect(family.message).not.toContain("child-3");

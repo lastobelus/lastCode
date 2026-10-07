@@ -537,8 +537,24 @@ export function createThreadEnvironmentAtoms<R, E>(
       execute: (input: { readonly threadId: ThreadId }) =>
         Effect.gen(function* () {
           const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-          const shells = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily, input);
-          return shells.map((shell) => presentThreadShell(supervisor.target.environmentId, shell));
+          const family = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily, input);
+          const threads = family.threads.map((shell) =>
+            presentThreadShell(supervisor.target.environmentId, shell),
+          );
+          const byId = new Map(threads.map((thread) => [thread.id, thread]));
+          const select = (ids: readonly ThreadId[]) =>
+            ids.flatMap((id) => {
+              const thread = byId.get(id);
+              return thread === undefined ? [] : [thread];
+            });
+          return {
+            ...family,
+            threads,
+            children: select(family.childThreadIds),
+            activeChildren: select(family.activeChildThreadIds),
+            promotableChildren: select(family.promotableChildThreadIds),
+            protectedChildren: select(family.protectedChildThreadIds),
+          };
         }),
     }),
     ...commands,

@@ -39,13 +39,14 @@ function options(title = "Original child") {
     children: [child],
     activeChildren: [child],
     canPromote: true,
+    canStopAndArchive: true,
     protectedCount: 0,
     nativeCount: 0,
   };
 }
 
 it("closes obsolete choices and requires a new confirmation before acting on the fresh family", async () => {
-  const submit = vi.fn().mockResolvedValue({ error: "The subagents changed", close: true });
+  const submit = vi.fn().mockResolvedValue("The subagents changed");
   let result!: ReturnType<typeof requestThreadArchiveDialog>;
   await act(() => {
     result = requestThreadArchiveDialog({ ...options(), submit });
@@ -67,19 +68,38 @@ it("closes obsolete choices and requires a new confirmation before acting on the
   expect(freshSubmit).toHaveBeenCalledExactlyOnceWith("promote");
 });
 
-it("keeps unchanged-family shutdown failures visible and retryable in the same confirmation", async () => {
-  const submit = vi.fn().mockResolvedValueOnce("Shutdown failed").mockResolvedValueOnce(null);
+it("closes an unchanged-family shutdown failure after one attempt", async () => {
+  const submit = vi.fn().mockResolvedValue("Shutdown failed");
   let result!: ReturnType<typeof requestThreadArchiveDialog>;
   await act(() => {
     result = requestThreadArchiveDialog({ ...options(), submit });
   });
   await act(() => button("Stop and archive").click());
-  expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
-  expect(document.querySelector('[role="alert"]')?.textContent).toBe(
-    "Couldn't archive. Shutdown failed",
-  );
-  expect(button("Stop and archive").disabled).toBe(false);
-  await act(() => button("Stop and archive").click());
-  expect(await result).toBe("stop_and_archive");
-  expect(submit).toHaveBeenCalledTimes(2);
+  expect(await result).toBeNull();
+  expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+  expect(submit).toHaveBeenCalledExactlyOnceWith("stop_and_archive");
+});
+
+it("cancels without submitting", async () => {
+  const submit = vi.fn();
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({ ...options(), submit });
+  });
+  await act(() => button("Cancel").click());
+  expect(await result).toBeNull();
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it("uses the server stop permission even when the display shells are unprotected", async () => {
+  const submit = vi.fn().mockResolvedValue(null);
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({ ...options(), canStopAndArchive: false, submit });
+  });
+  expect(button("Stop and archive").disabled).toBe(true);
+  expect(button("Keep running separately").disabled).toBe(false);
+  await act(() => button("Keep running separately").click());
+  expect(await result).toBe("promote");
+  expect(submit).toHaveBeenCalledExactlyOnceWith("promote");
 });

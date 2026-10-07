@@ -257,7 +257,11 @@ const idleArchiveFamily = Effect.gen(function* () {
       },
     },
   });
-  const snapshot = yield* orchestrator.getThreadArchiveFamily(ids.parent);
+  const decision = yield* orchestrator.getThreadArchiveFamily(ids.parent);
+  assert.isFalse(decision.requiresConfirmation);
+  assert.deepEqual(decision.keptThreadIds, [ids.child, ids.grandchild, native]);
+  assert.equal(decision.nativeStopCount, 0);
+  const snapshot = decision.threads;
   assert.lengthOf(snapshot, 4);
   for (const shell of snapshot) {
     assert.include(["idle", "completed"], shell.status);
@@ -373,11 +377,20 @@ it.effect.each([
       }
       if (change === "watch") yield* watch(parent, 12);
 
+      const decision = yield* orchestrator.getThreadArchiveFamily(parent);
+      assert.deepEqual(decision.childThreadIds, childIds);
+      assert.isTrue(decision.requiresConfirmation);
       assert.deepEqual(
-        (yield* orchestrator.getThreadArchiveFamily(parent))
-          .filter((shell) => shell.id !== parent)
-          .map((shell) => shell.id),
-        childIds,
+        decision.activeChildThreadIds,
+        change === "owner work" || change === "watch"
+          ? []
+          : [
+              change === "child work"
+                ? child
+                : change === "attention" || change === "background"
+                  ? grandchild
+                  : native,
+            ],
       );
       if (change === "question" || change === "approval" || change === "native turn")
         assert.isEmpty((yield* orchestrator.getThreadProjection(native)).runs);
@@ -1688,7 +1701,7 @@ it.effect("stores a single family plan through shutdown failure and completion",
     const command = archive(parent, [child, grandchild]);
     yield* orchestrator.dispatch(command);
     for (const status of ["stopping", "failed"] as const) {
-      const shells = yield* orchestrator.getThreadArchiveFamily(parent);
+      const { threads: shells } = yield* orchestrator.getThreadArchiveFamily(parent);
       const plans = shells.flatMap((shell) => {
         const pending = getThreadArchivePlan(shell.archivePending);
         return pending === null ? [] : [pending];

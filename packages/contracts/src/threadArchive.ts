@@ -50,12 +50,18 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
   }
   const visited = new Set<ThreadId>([rootThreadId]);
   const children: T[] = [];
-  const visit = (id: ThreadId) => {
+  const keptThreadIds = new Set<ThreadId>();
+  const visit = (id: ThreadId, kept = false) => {
     for (const child of byParent.get(id) ?? []) {
       if (visited.has(child.id)) continue;
       visited.add(child.id);
-      if (child.archivedAt === null && child.deletedAt == null) children.push(child);
-      visit(child.id);
+      const live = child.archivedAt === null && child.deletedAt == null;
+      const retain = kept || (id === rootThreadId && live && child.creationSource !== "provider");
+      if (live) {
+        children.push(child);
+        if (retain) keptThreadIds.add(child.id);
+      }
+      visit(child.id, retain);
     }
   };
   visit(rootThreadId);
@@ -63,5 +69,12 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
   const promotableChildren = directChildren.filter((child) => child.creationSource !== "provider");
   const nativeChildren = directChildren.filter((child) => child.creationSource === "provider");
   const protectedChildren = children.filter((child) => child.persistent === true);
-  return { children, directChildren, promotableChildren, nativeChildren, protectedChildren };
+  return {
+    children,
+    directChildren,
+    promotableChildren,
+    nativeChildren,
+    protectedChildren,
+    keptThreadIds,
+  };
 }

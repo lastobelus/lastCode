@@ -76,13 +76,26 @@ vi.mock("../state/use-atom-query-runner", () => ({
           environmentId: EnvironmentId;
           input: { threadId: ThreadId };
         }) =>
-          AsyncResult.success(
-            state.threads
+          AsyncResult.success({
+            childThreadIds: [],
+            promotableChildThreadIds: [],
+            keptThreadIds: [],
+            activeChildThreadIds: [],
+            protectedChildThreadIds: [],
+            nativeStopCount: 0,
+            requiresConfirmation: false,
+            canPromote: false,
+            canStopAndArchive: true,
+            children: [],
+            activeChildren: [],
+            promotableChildren: [],
+            protectedChildren: [],
+            threads: state.threads
               .filter(
                 (thread) => thread.environmentId === environmentId && thread.id === input.threadId,
               )
               .map((thread) => makeThreadFixture({ ...thread, runtime: null })),
-          )
+          })
       : async (environmentId: string) =>
           state.sessionLookupFails
             ? AsyncResult.failure(Cause.fail(new Error("Session lookup failed")))

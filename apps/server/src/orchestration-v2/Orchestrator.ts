@@ -48,6 +48,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2ThreadArchiveFamily,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2Subagent,
@@ -346,7 +347,7 @@ export interface OrchestratorV2Shape {
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
   readonly getThreadArchiveFamily: (
     threadId: ThreadId,
-  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, OrchestratorV2Error>;
+  ) => Effect.Effect<OrchestrationV2ThreadArchiveFamily, OrchestratorV2Error>;
   readonly getThreadEventSequence: (
     threadId: ThreadId,
   ) => Effect.Effect<number, OrchestratorV2Error>;
@@ -10989,7 +10990,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const ownedThreadFamily = (command: OrchestrationV2ServerCommand) =>
     projectionStore.getOwnedThreadIds(commandThreadId(command)).pipe(mapDispatchError(command));
 
-  const getThreadArchiveFamily = (threadId: ThreadId) =>
+  const readArchiveFamilyShells = (threadId: ThreadId) =>
     projectionStore.getOwnedThreadIds(threadId).pipe(
       Effect.flatMap((ids) =>
         Effect.forEach(ids, (id) =>
@@ -11018,7 +11019,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   const archiveFamilyShells = (command: OrchestrationV2ServerCommand) =>
-    getThreadArchiveFamily(commandThreadId(command)).pipe(mapDispatchError(command));
+    readArchiveFamilyShells(commandThreadId(command)).pipe(mapDispatchError(command));
+
+  const archiveThreadNeedsConfirmation = Effect.fnUntraced(function* (
+    thread: OrchestrationV2ThreadShell,
+  ) {
+    if (archiveShellNeedsConfirmation(thread)) return true;
+    const controls = yield* projectionStore.getThreadRecords(thread.id, [
+      "runs",
+      "runtimeRequests",
+      "providerThreads",
+      "providerTurns",
+    ]);
+    return hasUnfinishedArchiveWork(controls);
+  });
+
+  const getThreadArchiveFamily = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const threads = yield* readArchiveFamilyShells(threadId);
+      const family = getOwnedThreadFamily(threads, threadId);
+      const activeChildren = yield* Effect.filter(family.children, archiveThreadNeedsConfirmation);
+      const owner = threads.find((thread) => thread.id === threadId);
+      const ownerNeedsConfirmation =
+        owner !== undefined && (yield* archiveThreadNeedsConfirmation(owner));
+      return {
+        threads,
+        childThreadIds: family.children.map((thread) => thread.id),
+        activeChildThreadIds: activeChildren.map((thread) => thread.id),
+        promotableChildThreadIds: family.promotableChildren.map((thread) => thread.id),
+        keptThreadIds: [...family.keptThreadIds],
+        protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
+        nativeStopCount: family.children.filter(
+          (thread) => thread.creationSource === "provider" && !family.keptThreadIds.has(thread.id),
+        ).length,
+        requiresConfirmation:
+          family.children.length > 0 &&
+          (ownerNeedsConfirmation ||
+            activeChildren.length > 0 ||
+            family.protectedChildren.length > 0),
+        canPromote:
+          family.promotableChildren.length > 0 &&
+          family.protectedChildren.every((thread) => family.keptThreadIds.has(thread.id)),
+        canStopAndArchive: family.protectedChildren.length === 0,
+      };
+    }).pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
   // An already archived intermediate owner retains its own restore cohort.
   const archiveOwnerFor = Effect.fnUntraced(function* (
@@ -11145,13 +11189,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     disposition: ThreadArchiveChildDisposition,
   ) => {
     const family = getOwnedThreadFamily(threads, rootId);
-    const retained = new Set<ThreadId>();
-    if (disposition === "promote")
-      for (const child of family.promotableChildren) {
-        retained.add(child.id);
-        for (const descendant of getOwnedThreadFamily(threads, child.id).children)
-          retained.add(descendant.id);
-      }
+    const retained = disposition === "promote" ? family.keptThreadIds : new Set<ThreadId>();
     return {
       family,
       archiveIds: [
@@ -11355,19 +11393,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.childDisposition === "archive_if_idle" && family.children.length > 0) {
       for (const thread of shells) {
         if (!familyIds.has(thread.id)) continue;
-        if (archiveShellNeedsConfirmation(thread))
-          return yield* reject(
-            "This family now has work that needs attention. Review the archive choices again.",
-          );
-        const controls = yield* projectionStore
-          .getThreadRecords(thread.id, [
-            "runs",
-            "runtimeRequests",
-            "providerThreads",
-            "providerTurns",
-          ])
-          .pipe(mapDispatchError(command));
-        if (hasUnfinishedArchiveWork(controls))
+        if (yield* archiveThreadNeedsConfirmation(thread).pipe(mapDispatchError(command)))
           return yield* reject(
             "This family now has work that needs attention. Review the archive choices again.",
           );
@@ -11796,9 +11822,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
     if (!allowedWhileArchiving && command.type !== "thread.create") {
       const current = yield* projectionStore
-        .getThreadShell(commandThreadId(command))
-        .pipe(mapDispatchError(command));
-      if (current?.archivePending?.status === "stopping") {
+        .getThread(commandThreadId(command))
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          mapDispatchError(command),
+        );
+      if (
+        current?.archivePending?.status === "stopping" &&
+        (current.deletedAt === null || current.worktreeCleanup != null)
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,

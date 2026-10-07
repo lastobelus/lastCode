@@ -3,32 +3,21 @@ import {
   EnvironmentId,
   OrchestrationV2ThreadShellJson,
   ProjectId,
-  RunAttemptId,
-  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import {
-  archiveChildNeedsAttention,
   archiveRetryThreadId,
   getArchiveRecoveryRows,
   presentThreadArchive,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
-import { v2Now, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
+import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 
 const base = presentThreadShell(EnvironmentId.make("environment-test"), v2ThreadShell);
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);
 const decodeShell = Schema.decodeSync(OrchestrationV2ThreadShellJson);
-const idleRuntime = {
-  status: "idle" as const,
-  activeRunId: null,
-  providerInstanceId: base.providerInstanceId,
-  providerName: "Codex",
-  lastError: null,
-  updatedAt: "2026-10-07T00:00:00.000Z",
-};
 const pending = {
   threadId: base.id,
   commandId: CommandId.make("archive-family"),
@@ -52,68 +41,6 @@ const action = {
   exitCode: null,
   exitSignal: null,
 };
-
-describe("archive family attention", () => {
-  it("does not require a choice for dormant or successfully recovered children", () => {
-    expect(archiveChildNeedsAttention(base)).toBe(false);
-    expect(
-      archiveChildNeedsAttention({
-        ...base,
-        recovery: {
-          runId: RunId.make("old-run"),
-          attemptId: RunAttemptId.make("old-attempt"),
-          status: "recovered",
-          detail: "Recovered",
-          updatedAt: v2Now,
-        },
-      }),
-    ).toBe(false);
-  });
-  it.each(["suspect", "stale", "recovering", "failed"] as const)(
-    "requires a choice for %s recovery with idle provider runtime",
-    (status) => {
-      expect(
-        archiveChildNeedsAttention({
-          ...base,
-          runtime: idleRuntime,
-          recovery: {
-            runId: RunId.make("old-run"),
-            attemptId: RunAttemptId.make("old-attempt"),
-            status,
-            detail: "Provider stopped responding",
-            updatedAt: v2Now,
-          },
-        }),
-      ).toBe(true);
-    },
-  );
-  it("requires a choice for waiting and working Actions even with no active provider run", () => {
-    expect(
-      archiveChildNeedsAttention({ ...base, runtime: idleRuntime, actionResume: action }),
-    ).toBe(true);
-    expect(
-      archiveChildNeedsAttention({
-        ...base,
-        runtime: idleRuntime,
-        actionResume: {
-          ...action,
-          progress: {
-            version: 1,
-            state: "working",
-            summary: "Running checks",
-            updatedAt: action.startedAt,
-          },
-        },
-      }),
-    ).toBe(true);
-    expect(
-      archiveChildNeedsAttention({
-        ...base,
-        actionResume: { ...action, outcome: "succeeded", finishedAt: action.startedAt },
-      }),
-    ).toBe(false);
-  });
-});
 
 describe("durable archive presentation", () => {
   it.each(["stopping", "failed"] as const)(

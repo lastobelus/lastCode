@@ -3,9 +3,9 @@ import {
   type ThreadRuntimeSummary,
 } from "@t3tools/client-runtime/state/models";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { getOwnedThreadFamily } from "@t3tools/contracts";
+import type { AsyncResult, Atom } from "effect/reactivity";
+import type { threadEnvironment } from "../../state/threads";
 import { resolveThreadStatus } from "../threads/thread-status";
-import { archiveChildNeedsAttention } from "@t3tools/client-runtime/state/thread-archive";
 
 /**
  * Standalone archive must not detach an executing provider. A family can stop
@@ -34,34 +34,21 @@ export function threadUnarchiveTargetId(
     : thread.id;
 }
 
-/** Snapshot the environment's owned children so confirmation and command agree. */
+type ArchiveFamilyResult =
+  ReturnType<typeof threadEnvironment.archiveFamilyAtom> extends Atom.Atom<
+    AsyncResult.AsyncResult<infer Value, infer _Error>
+  >
+    ? Value
+    : never;
+
+/** Format the server's archive choices without deciding family membership or policy. */
 export function resolveThreadArchiveFamily(
-  threads: readonly EnvironmentThreadShell[],
+  family: ArchiveFamilyResult,
   thread: EnvironmentThreadShell,
 ) {
-  const familyThreads = threads
-    .filter((candidate) => candidate.environmentId === thread.environmentId)
-    .map((candidate) => ({ ...candidate, creationSource: candidate.source.creationSource }));
-  const family = getOwnedThreadFamily(familyThreads, thread.id);
-  const byId = new Map(familyThreads.map((child) => [child.id, child]));
-  const keptIds = new Set(family.promotableChildren.map((child) => child.id));
-  const isKept = (child: (typeof family.children)[number]): boolean => {
-    const visited = new Set<string>();
-    let current: typeof child | undefined = child;
-    while (current && !visited.has(current.id)) {
-      if (keptIds.has(current.id)) return true;
-      visited.add(current.id);
-      if (current.lineage.parentThreadId === null) return false;
-      current = byId.get(current.lineage.parentThreadId);
-    }
-    return false;
-  };
-  const activeChildren = family.children.filter(archiveChildNeedsAttention);
-  const canKeepSeparately =
-    family.promotableChildren.length > 0 && family.protectedChildren.every(isKept);
-  const nativeStopCount = family.children.filter(
-    (child) => child.creationSource === "provider" && !isKept(child),
-  ).length;
+  const activeChildren = family.activeChildren;
+  const canKeepSeparately = family.canPromote;
+  const nativeStopCount = family.nativeStopCount;
   const total = family.children.length;
   const active = activeChildren.length;
   const summary =
@@ -83,11 +70,6 @@ export function resolveThreadArchiveFamily(
   if (remaining > 0) details.push(`+${remaining} more`);
   return {
     ...family,
-    requiresConfirmation:
-      active > 0 ||
-      family.protectedChildren.length > 0 ||
-      (!threadCanArchive(thread.runtime) && total > 0),
-    canStopAndArchive: family.protectedChildren.length === 0,
     canKeepSeparately,
     message: [
       !threadCanArchive(thread.runtime)

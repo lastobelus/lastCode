@@ -1,4 +1,5 @@
 import { makeThreadShellFixture } from "../../test-fixtures";
+import type { resolveThreadArchiveFamily } from "./threadArchive";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
@@ -16,7 +17,7 @@ const state = vi.hoisted(() => ({
   dropBusy: false,
   scopes: new Map<string, Set<string>>(),
   shells: [] as EnvironmentThreadShell[],
-  archiveFamily: undefined as EnvironmentThreadShell[] | undefined,
+  archiveFamily: undefined as Parameters<typeof resolveThreadArchiveFamily>[0] | undefined,
   archiveFamilyError: undefined as Error | undefined,
   archiveMutationError: undefined as Error | undefined,
   archiveFamilyReads: [] as { environmentId: string; input: { threadId: string } }[],
@@ -104,22 +105,18 @@ vi.mock("../../state/use-atom-query-runner", () => ({
       state.archiveFamilyReads.push(request);
       return state.archiveFamilyError === undefined
         ? AsyncResult.success(
-            state.archiveFamily ?? [
-              state.shells.find(
-                (thread) =>
-                  thread.id === request.input.threadId &&
-                  thread.environmentId === request.environmentId,
-              ) ??
-                makeThread({
-                  id: ThreadId.make(request.input.threadId),
-                  environmentId: EnvironmentId.make(request.environmentId),
-                }),
-              ...state.shells.filter(
-                (thread) =>
-                  thread.id !== request.input.threadId ||
-                  thread.environmentId !== request.environmentId,
-              ),
-            ],
+            state.archiveFamily ??
+              makeArchiveDecision([
+                state.shells.find(
+                  (thread) =>
+                    thread.id === request.input.threadId &&
+                    thread.environmentId === request.environmentId,
+                ) ??
+                  makeThread({
+                    id: ThreadId.make(request.input.threadId),
+                    environmentId: EnvironmentId.make(request.environmentId),
+                  }),
+              ]),
           )
         : AsyncResult.failure(Cause.fail(state.archiveFamilyError));
     },
@@ -194,6 +191,30 @@ function makeThread(input: Partial<EnvironmentThreadShell> = {}): EnvironmentThr
   });
 }
 
+function makeArchiveDecision(
+  threads: EnvironmentThreadShell[],
+  children: EnvironmentThreadShell[] = [],
+  options: Partial<Parameters<typeof resolveThreadArchiveFamily>[0]> = {},
+): Parameters<typeof resolveThreadArchiveFamily>[0] {
+  return {
+    threads,
+    children,
+    childThreadIds: children.map((child) => child.id),
+    promotableChildThreadIds: [],
+    keptThreadIds: [],
+    activeChildThreadIds: [],
+    protectedChildThreadIds: [],
+    nativeStopCount: 0,
+    requiresConfirmation: false,
+    canPromote: false,
+    canStopAndArchive: true,
+    activeChildren: [],
+    promotableChildren: [],
+    protectedChildren: [],
+    ...options,
+  };
+}
+
 const mutationCases = [
   ["archiveThread", "archive"],
   ["settleThread", "settle"],
@@ -254,7 +275,10 @@ describe("archive family reads", () => {
         },
       });
       state.shells = [root];
-      state.archiveFamily = [root, child];
+      state.archiveFamily = makeArchiveDecision([root, child], [child], {
+        requiresConfirmation: true,
+        canPromote: true,
+      });
       const archiving = useThreadListActions().archiveThread(root);
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
       expect(state.archiveFamilyReads).toHaveLength(1);
@@ -297,7 +321,10 @@ describe("archive family reads", () => {
         },
       });
       state.shells = [local];
-      state.archiveFamily = [owner, child];
+      state.archiveFamily = makeArchiveDecision([owner, child], [child], {
+        requiresConfirmation: true,
+        canPromote: true,
+      });
       const archiving = useThreadListActions().archiveThread(local);
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
       expect(state.alerts[0]?.title).toContain("Authoritative title");
@@ -324,7 +351,7 @@ describe("archive family reads", () => {
   it("archives the authoritative idle standalone owner despite locally running state", async () => {
     const local = makeThread({ runtime: workingRuntime });
     state.shells = [local];
-    state.archiveFamily = [{ ...local, runtime: null }];
+    state.archiveFamily = makeArchiveDecision([{ ...local, runtime: null }]);
     await useThreadListActions().archiveThread(local);
     expect(state.requests).toEqual([
       expect.objectContaining({
@@ -346,7 +373,7 @@ describe("archive family reads", () => {
       lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
     });
     state.shells = [root];
-    state.archiveFamily = [root, child];
+    state.archiveFamily = makeArchiveDecision([root, child], [child]);
     await useThreadListActions().archiveThread(root);
     expect(state.alerts).toEqual([]);
     expect(state.requests).toEqual([
@@ -368,7 +395,7 @@ describe("archive family reads", () => {
       lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
     });
     state.shells = [root];
-    state.archiveFamily = [root, child];
+    state.archiveFamily = makeArchiveDecision([root, child], [child]);
     state.archiveMutationError = new Error(
       "This family now has work that needs attention. Review the archive choices again.",
     );
@@ -389,6 +416,47 @@ describe("archive family reads", () => {
     expect(state.archiveFamilyReads).toHaveLength(1);
   });
 
+  it("refreshes membership and asks for new consent after a failed native archive", async () => {
+    const root = makeThread();
+    const first = makeThread({ id: ThreadId.make("first-child") });
+    const added = makeThread({ id: ThreadId.make("added-child") });
+    state.archiveFamily = makeArchiveDecision([root, first], [first], {
+      requiresConfirmation: true,
+    });
+    state.archiveMutationError = new Error("The family changed. Review the archive choices again.");
+    const actions = useThreadListActions();
+    actions.archiveThread(root);
+    await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+    expect(
+      state.alerts[0]!.buttons!.some((button) => button.text === "Keep running separately"),
+    ).toBe(false);
+    state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
+    await vi.waitFor(() => expect(state.alerts[1]?.title).toBe("Could not archive thread"));
+    expect(state.requests[0]?.input).toEqual({
+      threadId: root.id,
+      childDisposition: "stop_and_archive",
+      expectedChildThreadIds: [first.id],
+    });
+
+    state.archiveMutationError = undefined;
+    state.archiveFamily = makeArchiveDecision([root, first, added], [first, added], {
+      requiresConfirmation: true,
+      canPromote: true,
+    });
+    actions.archiveThread(root);
+    await vi.waitFor(() => expect(state.alerts[2]?.buttons).toBeDefined());
+    expect(state.archiveFamilyReads).toHaveLength(2);
+    expect(state.requests).toHaveLength(1);
+    state.alerts[2]!.buttons!.find((button) => button.text === "Keep running separately")!
+      .onPress!();
+    await vi.waitFor(() => expect(state.requests).toHaveLength(2));
+    expect(state.requests[1]?.input).toEqual({
+      threadId: root.id,
+      childDisposition: "promote",
+      expectedChildThreadIds: [first.id, added.id],
+    });
+  });
+
   it.each(["question", "failed"] as const)(
     "offers explicit choices for owner %s with idle children",
     async (attention) => {
@@ -405,7 +473,10 @@ describe("archive family reads", () => {
         },
       });
       state.shells = [root];
-      state.archiveFamily = [root, child];
+      state.archiveFamily = makeArchiveDecision([root, child], [child], {
+        requiresConfirmation: true,
+        canPromote: true,
+      });
       const archiving = useThreadListActions().archiveThread(root);
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
       expect(state.requests).toEqual([]);
@@ -429,7 +500,9 @@ describe("archive family reads", () => {
     async (kind) => {
       const local = makeThread();
       state.shells = [local];
-      state.archiveFamily = kind === "missing" ? [] : [{ ...local, persistent: true }];
+      state.archiveFamily = makeArchiveDecision(
+        kind === "missing" ? [] : [{ ...local, persistent: true }],
+      );
       await useThreadListActions().archiveThread(local);
       expect(state.requests).toEqual([]);
       expect(state.alertMessages[0]).toContain(
@@ -452,7 +525,7 @@ describe("archive family reads", () => {
         },
       });
       state.shells = [root];
-      state.archiveFamily = kind === "none" ? [root] : [root, unrelated];
+      state.archiveFamily = makeArchiveDecision(kind === "none" ? [root] : [root, unrelated]);
       await useThreadListActions().archiveThread(root);
       expect(state.archiveFamilyReads).toHaveLength(1);
       expect(state.requests).toEqual([]);
@@ -489,7 +562,11 @@ describe("archive family reads", () => {
       },
     });
     state.shells = [root, descendant];
-    state.archiveFamily = [root, intermediate, descendant];
+    state.archiveFamily = makeArchiveDecision([root, intermediate, descendant], [descendant], {
+      requiresConfirmation: true,
+      activeChildren: [descendant],
+      activeChildThreadIds: [descendant.id],
+    });
     const archiving = useThreadListActions().archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
     expect(state.requests).toEqual([]);

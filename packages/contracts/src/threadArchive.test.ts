@@ -10,12 +10,13 @@ const thread = (
     independent?: boolean;
     source?: string;
     archived?: boolean;
+    deleted?: boolean;
     persistent?: boolean;
   } = {},
 ) => ({
   id: ThreadId.make(id),
   archivedAt: options.archived ? "2026-01-01" : null,
-  deletedAt: null,
+  deletedAt: options.deleted ? "2026-01-01" : null,
   creationSource: options.source ?? "mcp",
   persistent: options.persistent ?? false,
   lineage: {
@@ -46,6 +47,7 @@ describe("owned archive family", () => {
       "live-below-archive",
     ]);
     expect(family.directChildren.map((child) => child.id)).toEqual(["child"]);
+    expect([...family.keptThreadIds]).toEqual(["child", "grandchild"]);
   });
 
   it("separates independently runnable app children from native mirrors and tracks protection", () => {
@@ -60,6 +62,27 @@ describe("owned archive family", () => {
     expect(family.nativeChildren.map((child) => child.id)).toEqual(["native"]);
     expect(family.promotableChildren.map((child) => child.id)).toEqual(["app"]);
     expect(family.protectedChildren.map((child) => child.id)).toEqual(["native-protected", "app"]);
+    expect([...family.keptThreadIds]).toEqual(["app"]);
+  });
+
+  it("retains live descendants across hidden owners only inside a promotable branch", () => {
+    const family = getOwnedThreadFamily(
+      [
+        thread("app", "root"),
+        thread("hidden", "app", { deleted: true }),
+        thread("nested-native", "hidden", { source: "provider", persistent: true }),
+        thread("archived-direct", "root", { archived: true }),
+        thread("stranded", "archived-direct"),
+        thread("fork", "app", { relationship: "fork" }),
+        thread("fork-child", "fork"),
+        thread("released", "app", { independent: true }),
+        thread("released-child", "released"),
+      ],
+      ThreadId.make("root"),
+    );
+    expect(family.children.map((child) => child.id)).toEqual(["app", "nested-native", "stranded"]);
+    expect([...family.keptThreadIds]).toEqual(["app", "nested-native"]);
+    expect(family.protectedChildren.map((child) => child.id)).toEqual(["nested-native"]);
   });
 
   it("terminates malformed lineage cycles without including the root as its own child", () => {
