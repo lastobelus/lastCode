@@ -1205,6 +1205,9 @@ const StorageRetentionDays = Schema.NullOr(
 
 export const WorktreeCleanupRules = Schema.Struct({
   worktreeAfterDays: StorageRetentionDays,
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   worktreeOnMerge: Schema.Boolean,
   worktreeOnDelete: Schema.Boolean,
   worktreeUnchanged: Schema.Boolean,
@@ -1297,6 +1300,9 @@ const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettin
 ]);
 
 export const StorageCleanupSettings = Schema.Struct({
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   worktreeAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   worktreeOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeOnDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1727,6 +1733,7 @@ export const ServerSettingsPatch = Schema.Struct({
         Schema.Struct({
           mode: Schema.Literal("custom"),
           rules: Schema.Struct({
+            worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
             worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
@@ -1738,6 +1745,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
+      worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
       worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
