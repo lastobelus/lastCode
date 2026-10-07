@@ -11151,10 +11151,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
     )
       return yield* reject("A conversation in this family is already being archived.");
-    // Ownership release completes in an internal command. Check its targets
-    // while the requesting caller's limit is still in scope, before stopping.
+    // Shutdown and ownership release complete after this command. Check every
+    // target while the requesting caller's limit is in scope, before stopping.
     for (const thread of shells) {
-      if (!promoteIds.includes(thread.id)) continue;
+      if (!archiveIds.includes(thread.id) && !promoteIds.includes(thread.id)) continue;
       yield* refuseAboveDispatchModeLimit(command, thread.id, thread);
     }
     const context = yield* projectionStore
@@ -11177,6 +11177,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return;
     }
     const now = yield* DateTime.now;
+    const modeLimit = yield* DispatchModeLimit;
     const pending = {
       threadId: command.threadId,
       commandId: command.commandId,
@@ -11184,6 +11185,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       childThreadIds: family.children.map((child) => child.id),
       archiveThreadIds: archiveIds,
       promoteThreadIds: promoteIds,
+      ...(modeLimit === undefined
+        ? {}
+        : {
+            modeLimit: {
+              runtimeMode: modeLimit.runtimeMode,
+              interactionMode: modeLimit.interactionMode,
+            },
+          }),
       status: "stopping" as const,
     };
     for (const id of archiveIds) {
@@ -11252,6 +11261,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: "The subagents changed while stopping. Review the archive choices again.",
         });
+      if (pending.modeLimit !== undefined) {
+        for (const id of new Set([...pending.archiveThreadIds, ...pending.promoteThreadIds])) {
+          const participant = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+          yield* refuseAboveDispatchModeLimit(command, id, participant).pipe(
+            Effect.provideService(DispatchModeLimit, pending.modeLimit),
+          );
+        }
+      }
     }
     const resultIds =
       command.type === "thread.archive.fail"
@@ -12273,6 +12290,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ...family,
                 ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
                 ...(root?.archivePending?.archiveThreadIds ?? []),
+                ...(root?.archivePending?.promoteThreadIds ?? []),
                 ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
               ]),
             ].toSorted();

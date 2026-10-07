@@ -132,6 +132,10 @@ export const ThreadArchivePending = Schema.Struct({
   childThreadIds: Schema.Array(ThreadId),
   archiveThreadIds: Schema.Array(ThreadId),
   promoteThreadIds: Schema.Array(ThreadId),
+  /** Keeps a limited caller's ceiling across provider shutdown and server recovery. */
+  modeLimit: Schema.optional(
+    Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
+  ),
   status: Schema.Literals(["stopping", "failed"]),
   error: Schema.optional(Schema.String),
 });

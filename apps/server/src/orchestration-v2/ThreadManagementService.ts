@@ -26,6 +26,7 @@ import {
   type TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -570,6 +571,7 @@ const make = Effect.gen(function* () {
         }),
       );
       if (stopped._tag === "Failure") {
+        const failure = Cause.findErrorOption(stopped.cause);
         yield* Effect.logWarning("Thread family archive could not confirm shutdown", {
           threadId: input.threadId,
           cause: stopped.cause,
@@ -580,7 +582,10 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           requestId: input.requestId,
           error:
-            "Could not stop all subagents and provider work. The conversations remain visible; some work may still be running. Try archiving again.",
+            Option.isSome(failure) &&
+            failure.value instanceof Orchestrator.OrchestratorThreadAboveModeLimitError
+              ? "Permissions changed while stopping. The family remains visible; some work may have stopped. Review the archive choices again."
+              : "Could not stop all subagents and provider work. The conversations remain visible; some work may still be running. Try archiving again.",
         });
       }
     });
