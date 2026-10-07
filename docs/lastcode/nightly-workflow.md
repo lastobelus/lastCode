@@ -172,6 +172,8 @@ the next immutable
 `lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
 metadata and cannot manufacture duplicate revisions. The guarded merge command
 requests an immediate daemon run without interrupting one already in progress.
+When checkpoint creation is explicitly deferred, use `pnpm lastcode:merge --skip-checkpoint`.
+This skips the merge's request without changing the service's existing schedule or stopping a run.
 Hosts without the optional service skip that request silently; the managed
 checkpoint service repairs a missed request where it is installed.
 

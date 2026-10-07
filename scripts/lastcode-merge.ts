@@ -105,8 +105,16 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
   );
 }
 
-export function postMergeCheckpointArguments(): ReadonlyArray<string> {
+export function postMergeCheckpointArguments(skipCheckpoint = false): ReadonlyArray<string> | null {
+  if (skipCheckpoint) return null;
   return ["scripts/lastcode-nightly-service.ts", "run-now", "--if-installed"];
+}
+
+export function parseMergeOptions(argv: ReadonlyArray<string>) {
+  if (argv.some((argument) => argument !== "--dry-run" && argument !== "--skip-checkpoint")) {
+    throw new Error("Usage: pnpm lastcode:merge [--dry-run] [--skip-checkpoint]");
+  }
+  return { dryRun: argv.includes("--dry-run"), skipCheckpoint: argv.includes("--skip-checkpoint") };
 }
 
 export function squashMergeArguments(
@@ -186,10 +194,7 @@ function readPullRequest(repoRoot: string, branch: string): PullRequestForMerge 
 
 function main(argv: ReadonlyArray<string>): void {
   assertSupportedNodeVersion();
-  const dryRun = argv.length === 1 && argv[0] === "--dry-run";
-  if (argv.length > (dryRun ? 1 : 0)) {
-    throw new Error("Usage: pnpm lastcode:merge [--dry-run]");
-  }
+  const { dryRun, skipCheckpoint } = parseMergeOptions(argv);
 
   const repoRoot = resolveRepoRoot();
   assertCleanWorktree(repoRoot);
@@ -267,8 +272,13 @@ function main(argv: ReadonlyArray<string>): void {
   } finally {
     lock.release();
   }
+  const checkpointArguments = postMergeCheckpointArguments(skipCheckpoint);
+  if (checkpointArguments === null) {
+    console.log("[lastcode:merge] Checkpoint request skipped by --skip-checkpoint.");
+    return;
+  }
   try {
-    runCommand(repoRoot, process.execPath, postMergeCheckpointArguments());
+    runCommand(repoRoot, process.execPath, checkpointArguments);
   } catch (error) {
     console.warn(
       `[lastcode:merge] Merge succeeded, but the checkpoint service could not be started: ${error instanceof Error ? error.message : String(error)}`,

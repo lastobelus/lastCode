@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   postMergeCheckpointArguments,
+  parseMergeOptions,
   squashMergeArguments,
   validateGithubCiForMerge,
   validatePullRequestForMerge,
@@ -21,6 +22,16 @@ const mergeablePullRequest = {
 } as const;
 
 describe("lastcode-merge", () => {
+  it("allows an explicit merge without requesting a checkpoint", () => {
+    const options = parseMergeOptions(["--skip-checkpoint"]);
+    expect(options.dryRun).toBe(false);
+    expect(postMergeCheckpointArguments(options.skipCheckpoint)).toBeNull();
+    expect(parseMergeOptions(["--dry-run", "--skip-checkpoint"])).toEqual({
+      dryRun: true,
+      skipCheckpoint: true,
+    });
+    expect(() => parseMergeOptions(["--skip-ci"])).toThrow("Usage:");
+  });
   it("silently skips the optional checkpoint request on hosts without the service", () => {
     expect(postMergeCheckpointArguments()).toEqual([
       "scripts/lastcode-nightly-service.ts",
