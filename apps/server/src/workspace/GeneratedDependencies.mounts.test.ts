@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
@@ -126,6 +127,134 @@ it.effect.each(["root", "directory", "file", "unavailable"] as const)(
           Effect.sync(() => {
             reads++;
             return points;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["root", "directory", "file", "unavailable"] as const)(
+  "preserves data when eligibility changes the mount inventory to %s",
+  (location) => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    let reads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const canRemove = Effect.sync(() => {
+        points =
+          location === "unavailable"
+            ? null
+            : [
+                "/",
+                location === "root"
+                  ? f.dependencyPath
+                  : location === "directory"
+                    ? f.path.dirname(f.data)
+                    : f.data,
+              ];
+        return true;
+      });
+      assert.isEmpty(yield* f.cleanup.removeBatch([{ inspection: inspected!, canRemove }]));
+      assert.equal(reads, 2);
+      assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.sync(() => {
+            reads++;
+            return points;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "waits for every eligibility callback before sharing the final cohort mount snapshot",
+  () => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    let completed = 0;
+    const snapshotCompletions: number[] = [];
+    return Effect.gen(function* () {
+      const fixtures = yield* Effect.forEach([0, 1, 2, 3], () => fixture());
+      const inspections = yield* Effect.forEach(fixtures, (f) => f.cleanup.inspect(f.input));
+      for (const inspection of inspections) assert.isNotNull(inspection);
+      const earlierEligibilityFinished = yield* Deferred.make<void>();
+      const earlier = Effect.gen(function* () {
+        completed++;
+        yield* Deferred.succeed(earlierEligibilityFinished, undefined);
+        return true;
+      });
+      const later = Effect.gen(function* () {
+        yield* Deferred.await(earlierEligibilityFinished);
+        points = ["/", fixtures[0]!.data];
+        completed++;
+        return true;
+      });
+      const eligible = Effect.sync(() => {
+        completed++;
+        return true;
+      });
+      const ineligible = Effect.sync(() => {
+        completed++;
+        return false;
+      });
+      const callbacks = [earlier, later, eligible, ineligible];
+      const removed = yield* fixtures[0]!.cleanup.removeBatch(
+        inspections.map((inspection, index) => ({
+          inspection: inspection!,
+          canRemove: callbacks[index]!,
+        })),
+      );
+      assert.lengthOf(removed, 2);
+      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4]);
+      for (const f of [fixtures[0]!, fixtures[3]!]) {
+        assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+      }
+      for (const f of [fixtures[1]!, fixtures[2]!]) {
+        assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+      }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.sync(() => {
+            snapshotCompletions.push(completed);
+            return points;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "preserves ineligible installs without taking an unnecessary final mount snapshot",
+  () => {
+    let reads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      assert.isEmpty(
+        yield* f.cleanup.removeBatch([
+          { inspection: inspected!, canRemove: Effect.succeed(false) },
+        ]),
+      );
+      assert.equal(reads, 1);
+      assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.sync(() => {
+            reads++;
+            return ["/"];
           }),
         ),
       ),

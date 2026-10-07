@@ -385,16 +385,11 @@ const make = Effect.gen(function* () {
     // Leases stay held, and no candidate queues behind another lengthy removal.
     const processes = yield* processCwds;
     if (processes === null) return [];
-    // One fresh mount snapshot covers the entire cohort, including same-device
-    // bind mounts added anywhere below an install since its size was measured.
-    const mounts = yield* mountPoints;
-    if (mounts === null) return [];
-    const removed = yield* Effect.forEach(
+    const eligible = (yield* Effect.forEach(
       validated,
       ({ current, inspection, canRemove }) =>
         Effect.gen(function* () {
           if (
-            DependencyMounts.containsMount(current.dependencyPath, mounts) ||
             processes.some(
               (cwd) =>
                 NodePath.resolve(cwd) === current.worktreePath ||
@@ -403,6 +398,20 @@ const make = Effect.gen(function* () {
             !(yield* canRemove)
           )
             return null;
+          return { current, inspection };
+        }).pipe(Effect.catch(skip)),
+      { concurrency: validated.length },
+    )).filter((entry) => entry !== null);
+    if (eligible.length === 0) return [];
+    // One fresh mount snapshot covers the entire cohort, including same-device
+    // bind mounts added while any candidate's asynchronous eligibility checks ran.
+    const mounts = yield* mountPoints;
+    if (mounts === null) return [];
+    const removed = yield* Effect.forEach(
+      eligible,
+      ({ current, inspection }) =>
+        Effect.gen(function* () {
+          if (DependencyMounts.containsMount(current.dependencyPath, mounts)) return null;
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {
@@ -418,7 +427,7 @@ const make = Effect.gen(function* () {
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
           }).pipe(Effect.uninterruptible);
         }).pipe(Effect.catch(skip)),
-      { concurrency: validated.length },
+      { concurrency: eligible.length },
     );
     return removed.filter((entry) => entry !== null);
   });
