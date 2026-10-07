@@ -123,6 +123,8 @@ export interface EnvironmentThreadShell {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly archivedAt: string | null;
+  readonly archivedWith?: OrchestrationV2ThreadShell["archivedWith"];
+  readonly archivePending?: OrchestrationV2ThreadShell["archivePending"];
   readonly settledOverride: "settled" | "active" | null;
   readonly settledAt: string | null;
   readonly unsettledAt: string | null;
@@ -259,7 +261,7 @@ export function presentThreadShell(
     id: thread.id,
     projectId: thread.projectId,
     title:
-      thread.lineage.relationshipToParent === "subagent"
+      thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
         ? formatSubagentDisplayTitle(thread.title)
         : thread.title,
     providerInstanceId: thread.providerInstanceId,
@@ -294,6 +296,8 @@ export function presentThreadShell(
     createdAt: iso(thread.createdAt),
     updatedAt,
     archivedAt: nullableIso(thread.archivedAt),
+    archivedWith: thread.archivedWith ?? null,
+    archivePending: thread.archivePending ?? null,
     settledOverride: thread.settledOverride,
     settledAt: nullableIso(thread.settledAt),
     unsettledAt: nullableIso(thread.unsettledAt ?? null),

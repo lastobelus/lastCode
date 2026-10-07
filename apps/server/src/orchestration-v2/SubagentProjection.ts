@@ -84,6 +84,8 @@ export function makeSubagentChildThread(input: {
     createdAt: input.now,
     updatedAt: input.now,
     archivedAt: input.parentThread.archivedAt,
+    archivedWith: input.parentThread.archivedWith,
+    archivePending: input.parentThread.archivePending,
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
@@ -222,7 +224,10 @@ export function delegatedTaskProgress(projection: {
     Pick<OrchestrationV2ConversationMessage, "runId" | "notification">
   >;
   readonly subagents: ReadonlyArray<
-    Pick<OrchestrationV2ThreadProjection["subagents"][number], "status" | "completionDelivery">
+    Pick<
+      OrchestrationV2ThreadProjection["subagents"][number],
+      "status" | "completionDelivery" | "ownershipReleased"
+    >
   >;
   readonly providerThreads: ReadonlyArray<
     Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
@@ -242,11 +247,12 @@ export function delegatedTaskProgress(projection: {
   const children =
     projection.subagents.some(
       (task) =>
-        isOrchestrationV2WorkActive(task.status) ||
-        // Publishing a child's result precedes scheduling its parent's wake.
-        // The parent still owes that follow-up even between those transactions.
-        task.completionDelivery?.state === "pending" ||
-        task.completionDelivery?.state === "claimed",
+        task.ownershipReleased !== true &&
+        (isOrchestrationV2WorkActive(task.status) ||
+          // Publishing a child's result precedes scheduling its parent's wake.
+          // The parent still owes that follow-up even between those transactions.
+          task.completionDelivery?.state === "pending" ||
+          task.completionDelivery?.state === "claimed"),
     ) ||
     projection.providerThreads.some((thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0);
   const resultRun = workRuns

@@ -118,8 +118,23 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   rootThreadId: ThreadId,
+  /** Releases delegated ownership without changing where the conversation came from. */
+  independent: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
+
+export const ThreadArchiveChildDisposition = Schema.Literals(["stop_and_archive", "promote"]);
+export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
+export const ThreadArchivePending = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  childDisposition: ThreadArchiveChildDisposition,
+  childThreadIds: Schema.Array(ThreadId),
+  archiveThreadIds: Schema.Array(ThreadId),
+  promoteThreadIds: Schema.Array(ThreadId),
+  status: Schema.Literals(["stopping", "failed"]),
+  error: Schema.optional(Schema.String),
+});
 
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",
@@ -441,10 +456,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   archivedAt: Schema.NullOr(Schema.DateTimeUtc),
-  /** Identifies the archive operation that owns a cascading restore. */
-  archivedWith: Schema.optional(
-    Schema.NullOr(Schema.Struct({ threadId: ThreadId, commandId: CommandId })),
-  ),
+  archivedWith: Schema.optional(Schema.NullOr(ThreadArchivedWith)),
+  archivePending: Schema.optional(Schema.NullOr(ThreadArchivePending)),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -732,6 +745,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   // blocking tool call). Absent on legacy records; treated as settled_only.
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
+  ownershipReleased: Schema.optional(Schema.Boolean),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -1897,6 +1911,8 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  archivedWith: OrchestrationV2AppThread.fields.archivedWith,
+  archivePending: OrchestrationV2AppThread.fields.archivePending,
   recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
@@ -2774,6 +2790,8 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.archive"),
     commandId: CommandId,
     threadId: ThreadId,
+    childDisposition: Schema.optional(ThreadArchiveChildDisposition),
+    expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.unarchive"),
@@ -3247,6 +3265,19 @@ const OrchestrationV2InternalCommand = Schema.Union([
     ]),
   }),
 
+  Schema.Struct({
+    type: Schema.Literal("thread.archive.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.archive.fail"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    error: Schema.String,
+  }),
   Schema.Struct({
     type: Schema.Literal("subagent.promote.advance"),
     commandId: CommandId,

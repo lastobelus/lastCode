@@ -131,7 +131,6 @@ export function useThreadActionMenu(input: {
     supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const handoffs = useThreadHandoffs(threadRef);
@@ -358,12 +357,6 @@ export function useThreadActionMenu(input: {
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
           case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
             let didArchive = false;
             const result = await archiveThread(threadRef, {
               onArchived: () => {
@@ -414,7 +407,6 @@ export function useThreadActionMenu(input: {
       closeTerminal,
       stopThreadProcesses,
       hasStoppableProcesses,
-      confirmThreadArchive,
       confirmThreadDelete,
       confirmAndUnpinThread,
       copyBranchToClipboard,

@@ -3923,6 +3923,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
       });
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const archived = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(archived.thread.archivedAt);

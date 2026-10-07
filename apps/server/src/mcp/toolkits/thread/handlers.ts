@@ -360,6 +360,18 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       let command: OrchestrationV2Command;
       switch (input.action) {
+        case "archive":
+          command = {
+            ...common,
+            type: "thread.archive",
+            ...(input.childDisposition === undefined
+              ? {}
+              : { childDisposition: input.childDisposition }),
+            ...(input.expectedChildThreadIds === undefined
+              ? {}
+              : { expectedChildThreadIds: input.expectedChildThreadIds }),
+          };
+          break;
         case "snooze":
           if (input.snoozedUntil === undefined) {
             return yield* new OrchestratorMcpFailure({

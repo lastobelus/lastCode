@@ -1,10 +1,16 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useThreadActions } from "./useThreadActions";
 import { threadEnvironment } from "../state/threads";
 import { toastManager } from "../components/ui/toast";
 import { useThreadUndoNotice } from "./showThreadUndoNotice";
+import { makeThreadFixture } from "../test-fixtures";
+
+const familyState = vi.hoisted(() => ({ threads: [] as ReturnType<typeof makeThreadFixture>[] }));
+const archiveDialog = vi.hoisted(() => vi.fn());
+vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
 
 const commands = vi.hoisted(() => ({
   pin: vi.fn(),
@@ -54,6 +60,7 @@ vi.mock("../state/entities", async (original) => ({
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readThreadShell: () => threadShell,
+  readThreadShells: () => familyState.threads,
 }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => {
@@ -91,6 +98,8 @@ function currentUndo() {
 }
 
 beforeEach(() => {
+  familyState.threads = [];
+  archiveDialog.mockReset();
   vi.useFakeTimers();
   for (const command of Object.values(commands)) {
     command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
@@ -165,6 +174,81 @@ describe("archive Undo", () => {
     const add = vi.spyOn(toastManager, "add").mockReturnValue("toast");
     await useThreadActions().archiveThread(target);
     expect(add).not.toHaveBeenCalled();
+  });
+});
+
+describe("archive family confirmation", () => {
+  function seedFamily() {
+    const child = makeThreadFixture({
+      id: ThreadId.make("child"),
+      environmentId: target.environmentId,
+      lineage: {
+        parentThreadId: target.threadId,
+        rootThreadId: target.threadId,
+        relationshipToParent: "subagent",
+      },
+      attention: { kind: "question", raisedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    const nested = makeThreadFixture({
+      id: ThreadId.make("nested"),
+      environmentId: target.environmentId,
+      lineage: {
+        parentThreadId: child.id,
+        rootThreadId: target.threadId,
+        relationshipToParent: "subagent",
+      },
+    });
+    familyState.threads = [child, nested];
+    return { child, nested };
+  }
+
+  it("cancels without dispatching archive or presenting Undo", async () => {
+    seedFamily();
+    archiveDialog.mockResolvedValue(null);
+    const result = await useThreadActions().archiveThread(target);
+    expect(result._tag).toBe("Failure");
+    expect(commands.archive).not.toHaveBeenCalled();
+    expect(useThreadUndoNotice.getState().notice).toBeNull();
+  });
+
+  it.each(["stop_and_archive", "promote"] as const)(
+    "requires %s consent and includes recursive descendants",
+    async (choice) => {
+      const { child, nested } = seedFamily();
+      archiveDialog.mockImplementation(async (request) => {
+        expect(commands.archive).not.toHaveBeenCalled();
+        expect(request.children.map((thread: { id: string }) => thread.id)).toEqual([
+          child.id,
+          nested.id,
+        ]);
+        expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      await useThreadActions().archiveThread(target);
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: target.threadId,
+          childDisposition: choice,
+          expectedChildThreadIds: [child.id, nested.id],
+        },
+      });
+      expect(useThreadUndoNotice.getState().notice).toMatchObject({ action: "Archived", count: 1 });
+    },
+  );
+
+  it("keeps failed shutdown in the modal and offers no Undo", async () => {
+    seedFamily();
+    commands.archive.mockResolvedValue({
+      _tag: "Failure",
+      cause: Cause.fail(new Error("Shutdown failed")),
+    });
+    archiveDialog.mockImplementation(async (request) => {
+      expect(await request.submit("stop_and_archive")).toContain("Shutdown failed");
+      return null;
+    });
+    await useThreadActions().archiveThread(target);
+    expect(useThreadUndoNotice.getState().notice).toBeNull();
   });
 });
 

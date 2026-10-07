@@ -13,6 +13,7 @@ import {
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
+  getOwnedThreadFamily,
   type ScopedThreadRef,
   ThreadId,
   sessionGrantsScope,
@@ -24,7 +25,11 @@ import { AsyncResult } from "effect/reactivity";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef } from "react";
 
-import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../components/Sidebar.logic";
+import {
+  archiveSelectedThreadEntries,
+  getFallbackThreadIdAfterDelete,
+  pinOrderKeyBetween,
+} from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { environmentSession, readEnvironmentScope } from "../state/session";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -65,6 +70,32 @@ import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
+import {
+  requestThreadArchiveDialog,
+  type ArchiveChildDisposition,
+} from "../components/ThreadArchiveDialog";
+
+function readArchiveFamily(target: ScopedThreadRef) {
+  return getOwnedThreadFamily(
+    readThreadShells()
+      .filter((thread) => thread.environmentId === target.environmentId)
+      .map((thread) => ({ ...thread, creationSource: thread.source.creationSource })),
+    target.threadId,
+  );
+}
+
+function archiveChildNeedsAttention(thread: EnvironmentThreadShell) {
+  return (
+    !threadRuntimeCanArchive(thread.runtime) ||
+    thread.runtime?.status === "waiting" ||
+    thread.runtime?.status === "queued" ||
+    thread.hasPendingApprovals ||
+    thread.hasPendingUserInput ||
+    thread.hasActionableProposedPlan ||
+    thread.attention != null ||
+    thread.pendingBackgroundTasks.length > 0
+  );
+}
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -384,6 +415,7 @@ export function useThreadActions() {
   });
   const sidebarThreadSortOrder = useClientSettings((settings) => settings.sidebarThreadSortOrder);
   const confirmThreadDelete = useClientSettings((settings) => settings.confirmThreadDelete);
+  const confirmThreadArchive = useClientSettings((settings) => settings.confirmThreadArchive);
   const confirmThreadUnpin = useClientSettings((settings) => settings.confirmThreadUnpin);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
   const clearProjectDraftThreadById = useComposerDraftStore(
@@ -440,7 +472,17 @@ export function useThreadActions() {
   );
 
   const archiveThread = useCallback(
-    async (target: ScopedThreadRef, opts: { onArchived?: () => void } = {}) => {
+    async (
+      target: ScopedThreadRef,
+      opts: {
+        onArchived?: () => void;
+        confirmed?: boolean;
+        familyChoice?: {
+          childDisposition: ArchiveChildDisposition;
+          expectedChildThreadIds: ThreadId[];
+        };
+      } = {},
+    ) => {
       const resolved = resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
       const { thread, threadRef } = resolved;
@@ -459,11 +501,66 @@ export function useThreadActions() {
       const shouldNavigateToDraft =
         currentRouteThreadRef?.threadId === threadRef.threadId &&
         currentRouteThreadRef.environmentId === threadRef.environmentId;
-      const action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
-      const archiveResult = await archiveThreadMutation({
-        environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId },
-      });
+      let action: ReturnType<typeof ThreadUndo.begin> | undefined;
+      const family = readArchiveFamily(threadRef);
+      const activeChildren = family.children.filter(archiveChildNeedsAttention);
+      const expectedChildThreadIds = family.children.map((child) => child.id);
+      const mutate = (childDisposition?: ArchiveChildDisposition) => {
+        action?.finish();
+        action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
+        return archiveThreadMutation({
+          environmentId: threadRef.environmentId,
+          input: {
+            threadId: threadRef.threadId,
+            ...(opts.familyChoice ??
+              (family.children.length > 0
+                ? {
+                    childDisposition: childDisposition ?? "stop_and_archive",
+                    expectedChildThreadIds,
+                  }
+                : {})),
+          },
+        });
+      };
+      let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
+      if (
+        !opts.familyChoice &&
+        (activeChildren.length > 0 || family.protectedChildren.length > 0)
+      ) {
+        const choice = await requestThreadArchiveDialog({
+          title: `Archive "${thread.title}"?`,
+          children: family.children,
+          activeChildren,
+          canPromote: family.promotableChildren.length > 0,
+          nativeCount: family.nativeChildren.length,
+          protectedCount: family.protectedChildren.length,
+          submit: async (selected) => {
+            archiveResult = await mutate(selected);
+            if (archiveResult._tag === "Success") return null;
+            const error = squashAtomCommandFailure(archiveResult);
+            return error instanceof Error ? error.message : "The archive did not complete.";
+          },
+        });
+        if (choice === null) {
+          action?.finish();
+          return AsyncResult.failure(Cause.interrupt());
+        }
+      } else {
+        if (!opts.confirmed && !opts.familyChoice && confirmThreadArchive) {
+          const confirmed = await readLocalApi()?.dialogs.confirm(
+            `Archive thread "${thread.title}"${family.children.length > 0 ? ` and its ${family.children.length} subagents` : ""}?`,
+          );
+          if (!confirmed) {
+            action?.finish();
+            return AsyncResult.failure(Cause.interrupt());
+          }
+        }
+        archiveResult = await mutate();
+      }
+      if (archiveResult === undefined || action === undefined) {
+        action?.finish();
+        return AsyncResult.success(undefined);
+      }
       if (archiveResult._tag === "Failure") {
         action.finish();
         return archiveResult;
@@ -497,11 +594,93 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
+      confirmThreadArchive,
       getCurrentRouteThreadRef,
       markThreadVisited,
       resolveThreadTarget,
       unarchiveThread,
     ],
+  );
+
+  const archiveThreads = useCallback(
+    async (selected: ReadonlyArray<{ threadKey: string; threadRef: ScopedThreadRef }>) => {
+      const families = selected.map((entry) => ({
+        ...entry,
+        family: readArchiveFamily(entry.threadRef),
+      }));
+      // A selected descendant is handled by its selected ancestor's family operation.
+      const entries = families.filter(
+        (entry) =>
+          !families.some(
+            (other) =>
+              other.threadRef.environmentId === entry.threadRef.environmentId &&
+              other.family.children.some((child) => child.id === entry.threadRef.threadId),
+          ),
+      );
+      const children = [
+        ...new Map(
+          entries.flatMap(({ threadRef, family }) =>
+            family.children.map(
+              (child) => [`${threadRef.environmentId}:${child.id}`, child] as const,
+            ),
+          ),
+        ).values(),
+      ];
+      let outcome:
+        | Awaited<
+            ReturnType<
+              typeof archiveSelectedThreadEntries<
+                (typeof entries)[number],
+                Awaited<ReturnType<typeof archiveThread>>
+              >
+            >
+          >
+        | undefined;
+      const perform = async (choice: ArchiveChildDisposition) => {
+        outcome = await archiveSelectedThreadEntries({
+          entries,
+          archive: ({ threadRef, family }, onArchived) =>
+            archiveThread(threadRef, {
+              confirmed: true,
+              familyChoice: {
+                childDisposition: choice,
+                expectedChildThreadIds: family.children.map((child) => child.id),
+              },
+              onArchived,
+            }),
+        });
+        if (!outcome.mutationFailure) return null;
+        const error = squashAtomCommandFailure(outcome.mutationFailure);
+        return error instanceof Error ? error.message : "The archive did not complete.";
+      };
+      const activeChildren = children.filter(archiveChildNeedsAttention);
+      const protectedCount = children.filter((child) => child.persistent).length;
+      if (activeChildren.length > 0 || protectedCount > 0) {
+        const choice = await requestThreadArchiveDialog({
+          title: `Archive ${entries.length} threads?`,
+          children,
+          activeChildren,
+          protectedCount,
+          canPromote: entries.some(({ family }) => family.promotableChildren.length > 0),
+          nativeCount: entries.reduce(
+            (count, { family }) => count + family.nativeChildren.length,
+            0,
+          ),
+          submit: perform,
+        });
+        // Completed participants still leave selection even if the remaining operation was cancelled.
+        if (choice === null) return outcome ?? null;
+      } else {
+        if (
+          confirmThreadArchive &&
+          !(await readLocalApi()?.dialogs.confirm(`Archive ${entries.length} threads?`))
+        )
+          return null;
+        await perform("stop_and_archive");
+      }
+      return outcome ?? null;
+    },
+    [archiveThread, confirmThreadArchive],
   );
 
   const setThreadPersistence = useCallback(
@@ -1122,6 +1301,7 @@ export function useThreadActions() {
   return useMemo(
     () => ({
       archiveThread,
+      archiveThreads,
       unarchiveThread,
       setThreadPersistence,
       deleteThread,
@@ -1140,6 +1320,7 @@ export function useThreadActions() {
     }),
     [
       archiveThread,
+      archiveThreads,
       confirmAndDeleteThread,
       confirmAndUnpinThread,
       deleteThread,

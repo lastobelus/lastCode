@@ -4787,6 +4787,70 @@ it.effect(
 );
 
 it.effect(
+  "terminal teardown unloads a native child that never attached to its shared runtime",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const parentId = ThreadId.make("native-mirror-parent");
+        const childId = ThreadId.make("native-mirror-child");
+        const sessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const childEvent = yield* makeThreadCreatedEvent({
+          idAllocator: ids,
+          threadId: childId,
+          now,
+        });
+        const childProviderThread = makeProviderThread({
+          idAllocator: ids,
+          threadId: childId,
+          providerSessionId: sessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: parentId, now }),
+            {
+              ...childEvent,
+              payload: {
+                ...childEvent.payload,
+                creationSource: "provider",
+                lineage: {
+                  parentThreadId: parentId,
+                  relationshipToParent: "subagent",
+                  rootThreadId: parentId,
+                },
+              },
+            },
+            {
+              id: yield* ids.allocate.event({ threadId: childId }),
+              type: "provider-thread.updated",
+              threadId: childId,
+              occurredAt: now,
+              payload: childProviderThread,
+            },
+          ],
+        });
+        yield* manager.open({
+          threadId: parentId,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.teardownThread({ threadId: childId, providerSessionId: sessionId });
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.isTrue(Option.isSome(yield* manager.get(sessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+      }).pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+    }),
+);
+
+it.effect(
   "ProviderSessionManagerV2 opens one shared runtime, broadcasts events, and detaches threads independently",
   () =>
     Effect.gen(function* () {

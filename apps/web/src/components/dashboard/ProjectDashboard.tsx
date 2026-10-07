@@ -264,7 +264,7 @@ export function ProjectDashboard({
     (thread) =>
       thread.deletedAt === null &&
       thread.archivedAt === null &&
-      thread.lineage.relationshipToParent !== "subagent" &&
+      (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true) &&
       (threadRuntimeIsActive(thread.runtime) || thread.pendingBackgroundTasks.length > 0),
   );
   const projectOptions = projects.map((candidate) => ({

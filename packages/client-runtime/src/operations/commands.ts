@@ -102,7 +102,10 @@ export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
 export interface SetThreadAttentionInput extends ThreadCommandInput {
   readonly attention: import("@t3tools/contracts").ThreadAttention;
 }
-export type ArchiveThreadInput = ThreadCommandInput;
+export interface ArchiveThreadInput extends ThreadCommandInput {
+  readonly childDisposition?: "stop_and_archive" | "promote";
+  readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
+}
 export type UnarchiveThreadInput = ThreadCommandInput;
 export type SettleThreadInput = ThreadCommandInput;
 
@@ -534,7 +537,15 @@ export const setThreadAttention = Effect.fn("EnvironmentCommands.setThreadAttent
 export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(function* (
   input: ArchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.archive", input);
+  return yield* dispatch({
+    type: "thread.archive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.childDisposition === undefined ? {} : { childDisposition: input.childDisposition }),
+    ...(input.expectedChildThreadIds === undefined
+      ? {}
+      : { expectedChildThreadIds: input.expectedChildThreadIds }),
+  });
 });
 
 export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(function* (

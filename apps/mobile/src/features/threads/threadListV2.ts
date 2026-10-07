@@ -279,7 +279,10 @@ export function getThreadListV2OrderedSection(input: {
 }): EnvironmentThreadShell[] {
   const threads = input.threads.filter((thread) => {
     if (threadShellIsCleanupRecovery(thread)) return input.section === "active";
-    if (!threadShellIsVisible(thread) || thread.lineage.relationshipToParent === "subagent")
+    if (
+      !threadShellIsVisible(thread) ||
+      (thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true)
+    )
       return false;
     if (
       (input.settlementEnvironmentIds?.has(thread.environmentId) ?? true) &&
@@ -719,7 +722,9 @@ export function buildThreadListV2Items(input: {
   for (const thread of input.threads) {
     if (
       !threadShellIsVisible(thread) ||
-      (!threadShellIsCleanupRecovery(thread) && thread.lineage.relationshipToParent === "subagent")
+      (!threadShellIsCleanupRecovery(thread) &&
+        thread.lineage.relationshipToParent === "subagent" &&
+        thread.lineage.independent !== true)
     ) {
       continue;
     }

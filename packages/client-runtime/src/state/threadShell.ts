@@ -211,7 +211,8 @@ export function createEnvironmentThreadShellAtoms(input: {
         if (
           !threadShellIsVisible(thread) ||
           (!threadShellIsCleanupRecovery(thread) &&
-            thread.lineage.relationshipToParent === "subagent")
+            thread.lineage.relationshipToParent === "subagent" &&
+            thread.lineage.independent !== true)
         )
           continue;
         next.push(scopedThread(environmentId, thread));

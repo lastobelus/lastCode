@@ -142,6 +142,7 @@ export interface EventSinkV2Shape {
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
+      readonly threadIds?: ReadonlyArray<ThreadId>;
       readonly reason: string;
     };
   }) => Effect.Effect<
@@ -794,10 +795,16 @@ const layerBase: Layer.Layer<
           const cancelledEffectIds =
             input.cancelUnsettledEffects === undefined
               ? []
-              : yield* effectOutbox.cancelUnsettled({
-                  threadId: input.threadId,
-                  ...input.cancelUnsettledEffects,
-                });
+              : (yield* Effect.forEach(
+                  input.cancelUnsettledEffects.threadIds ?? [input.threadId],
+                  (threadId) =>
+                    effectOutbox.cancelUnsettled({
+                      threadId,
+                      effectTypes: input.cancelUnsettledEffects!.effectTypes,
+                      reason: input.cancelUnsettledEffects!.reason,
+                    }),
+                  { concurrency: 1 },
+                )).flat();
           return { receipt, storedEvents, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

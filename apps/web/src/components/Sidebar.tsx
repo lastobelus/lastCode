@@ -2273,7 +2273,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   />
                 ) : null}
                 {props.providerBadgePreferences.enabled ||
-                (thread.lineage.relationshipToParent !== "subagent" &&
+                ((thread.lineage.relationshipToParent !== "subagent" ||
+                  thread.lineage.independent === true) &&
                   showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon)) ? (
                   <span className="inline-flex shrink-0 items-center">
                     <ConnectedSidebarEnvironmentIcon
@@ -2510,7 +2511,6 @@ export default function Sidebar() {
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
@@ -5039,12 +5039,6 @@ export default function Sidebar() {
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
           case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
             let didArchive = false;
             const result = await archiveThread(threadRef, {
               onArchived: () => {
@@ -5108,7 +5102,6 @@ export default function Sidebar() {
       attemptUnpin,
       attemptUnsettle,
       attemptUnsnooze,
-      confirmThreadArchive,
       confirmThreadDelete,
       copyBranchToClipboard,
       copyPathToClipboard,

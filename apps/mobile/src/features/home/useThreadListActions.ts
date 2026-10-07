@@ -29,7 +29,7 @@ import {
   threadDropLifecycle,
 } from "../threads/threadOrder";
 import { getThreadListV2OrderedSection } from "../threads/threadListV2";
-import { threadCanArchive } from "./threadArchive";
+import { resolveThreadArchiveFamily, threadCanArchive } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 /** Version skew: never send settle/unsettle to a server that predates them
@@ -138,6 +138,68 @@ function useThreadActionExecutor(
       inFlightThreadKeys.current.add(key);
       selectionHaptic();
       try {
+        let archiveInput: {
+          threadId: EnvironmentThreadShell["id"];
+          childDisposition: "stop_and_archive" | "promote";
+          expectedChildThreadIds: EnvironmentThreadShell["id"][];
+        } = {
+          threadId: thread.id,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [],
+        };
+        if (action === "archive") {
+          const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+          thread =
+            shells.find(
+              (candidate) =>
+                candidate.id === thread.id && candidate.environmentId === thread.environmentId,
+            ) ?? thread;
+          if (thread.persistent === true) {
+            Alert.alert(
+              actionFailureTitle(action),
+              "This thread is persistent. Remove its persistent protection before archiving it.",
+            );
+            return false;
+          }
+          if (!threadCanArchive(thread.runtime)) {
+            Alert.alert(
+              actionFailureTitle(action),
+              "This thread is working. Interrupt it first, then try again.",
+            );
+            return false;
+          }
+          const family = resolveThreadArchiveFamily(shells, thread);
+          const childDisposition = family.requiresConfirmation
+            ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
+                Alert.alert(
+                  `Archive "${thread.title || "Untitled thread"}"?`,
+                  family.message,
+                  [
+                    { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
+                    ...(family.canKeepSeparately
+                      ? [{ text: "Keep running separately", onPress: () => resolve("promote") }]
+                      : []),
+                    ...(family.canStopAndArchive
+                      ? [
+                          {
+                            text: "Stop and archive",
+                            style: "destructive" as const,
+                            onPress: () => resolve("stop_and_archive"),
+                          },
+                        ]
+                      : []),
+                  ],
+                  { cancelable: true, onDismiss: () => resolve(null) },
+                );
+              })
+            : "stop_and_archive";
+          if (childDisposition === null) return false;
+          archiveInput = {
+            threadId: thread.id,
+            childDisposition,
+            expectedChildThreadIds: family.children.map((child) => child.id),
+          };
+        }
         if (
           (action === "settle" || action === "unsettle") &&
           !environmentSupportsSettlement(thread.environmentId)
@@ -148,39 +210,33 @@ function useThreadActionExecutor(
           );
           return false;
         }
-        // Archive keeps its original, narrower guard: never interrupt a
-        // thread mid-turn.
-        if (action === "archive" && !threadCanArchive(thread.runtime)) {
-          Alert.alert(
-            actionFailureTitle(action),
-            "This thread is working. Interrupt it first, then try again.",
-          );
-          return false;
-        }
-        const result = await withThreadDismissal(
-          key,
-          async () =>
-            action === "unsettle"
-              ? // reason "user" pins the thread active: auto-settle stays
-                // suppressed until real activity clears the pin server-side.
-                await unsettleMutation({
-                  environmentId: thread.environmentId,
-                  input: { threadId: thread.id, reason: "user" },
-                })
-              : await (
-                  action === "settle"
-                    ? settleMutation
-                    : action === "archive"
-                      ? archiveMutation
-                      : action === "unarchive"
-                        ? unarchiveMutation
-                        : deleteMutation
-                )({
-                  environmentId: thread.environmentId,
-                  input: { threadId: thread.id },
-                }),
-          (result) => result._tag === "Success",
-        );
+        // Family archive waits for provider shutdown; keep its row visible
+        // until the server confirms success, including when shutdown fails.
+        const result =
+          action === "archive"
+            ? await archiveMutation({ environmentId: thread.environmentId, input: archiveInput })
+            : await withThreadDismissal(
+                key,
+                async () =>
+                  action === "unsettle"
+                    ? // reason "user" pins the thread active: auto-settle stays
+                      // suppressed until real activity clears the pin server-side.
+                      await unsettleMutation({
+                        environmentId: thread.environmentId,
+                        input: { threadId: thread.id, reason: "user" },
+                      })
+                    : await (
+                        action === "settle"
+                          ? settleMutation
+                          : action === "unarchive"
+                            ? unarchiveMutation
+                            : deleteMutation
+                      )({
+                        environmentId: thread.environmentId,
+                        input: { threadId: thread.id },
+                      }),
+                (result) => result._tag === "Success",
+              );
         if (result._tag === "Failure") {
           Alert.alert(actionFailureTitle(action), actionFailureMessage(action, result.cause));
           return false;

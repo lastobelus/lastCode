@@ -427,6 +427,7 @@ export const layer: Layer.Layer<
                     archivedAt: parent.archivedAt,
                     deletedAt: parent.deletedAt,
                     archivedWith: archiveOwner,
+                    archivePending: parent.archivedAt === null ? parent.archivePending : null,
                   }
                 : providerEvent.appThread;
             return [

@@ -247,7 +247,6 @@ import {
 } from "../threadSelectionStore";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
-  archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   collectUnprotectedBulkThreadEntries,
   getSidebarThreadIdsToPrewarm,
@@ -595,7 +594,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     props.providerBadgePreferences.enabled ||
     (environmentPresentation.showRowIcon &&
       props.familyRow.parentKey === null &&
-      thread.lineage.relationshipToParent !== "subagent");
+      (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true));
   const threadEnvironmentLabel = props.providerBadgePreferences.enabled
     ? (environmentPresentation.hoverLabel ?? remoteEnvLabel ?? "Local")
     : props.familyRow.parentKey !== null
@@ -714,7 +713,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const creatorDetails = legacySidebarCreatorDetails(thread, creatorShell);
   const creatorDescription = creatorDetails.description;
   const lineageDescription =
-    thread.lineage.relationshipToParent === "subagent"
+    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${props.familyRow.unavailableParentLabel ? ` · ${props.familyRow.unavailableParentLabel}` : ""}`
       : null;
   const relationshipDescription = creatorDescription
@@ -1048,7 +1047,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";
   const subagentLabel =
-    thread.lineage.relationshipToParent === "subagent"
+    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${family.unavailableParentLabel ? ` · ${family.unavailableParentLabel}` : ""}`
       : null;
   const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
@@ -1899,6 +1898,7 @@ interface SidebarProjectItemProps {
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -1927,6 +1927,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     newThreadShortcutLabel,
     handleNewThread,
     archiveThread,
+    archiveThreads,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -2781,20 +2782,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "archive") {
-        if (appSettingsConfirmThreadArchive) {
-          const confirmed = await api.dialogs.confirm(
-            `Archive ${count} thread${count === 1 ? "" : "s"}?`,
-          );
-          if (!confirmed) return;
-        }
-        if (
-          !selectedThreadEntries.every(({ threadRef }) =>
-            checkTaskPermission(threadRef.environmentId),
-          )
-        ) {
-          return;
-        }
-
         const currentEntries = collectUnprotectedBulkThreadEntries({
           threadKeys: selectedThreadEntries.map(({ threadKey }) => threadKey),
           getEntry: readSelectedThreadEntry,
@@ -2806,13 +2793,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         if (!currentEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId)))
           return;
-
         if (currentEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
 
-        const archiveOutcome = await archiveSelectedThreadEntries({
-          entries: currentEntries,
-          archive: ({ threadRef }, onArchived) => archiveThread(threadRef, { onArchived }),
-        });
+        const archiveOutcome = await archiveThreads(currentEntries);
+        if (archiveOutcome === null) return;
         for (const failure of archiveOutcome.followupFailures) {
           if (isAtomCommandInterrupted(failure)) continue;
           const error = squashAtomCommandFailure(failure);
@@ -2907,9 +2891,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
     },
     [
-      appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadDelete,
-      archiveThread,
+      archiveThreads,
       clearSelection,
       deleteThread,
       markThreadUnread,
@@ -3010,7 +2993,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
         return;
       }
-      const result = await archiveThread(threadRef);
+      const result = await archiveThread(threadRef, { confirmed: true });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -4176,6 +4159,7 @@ interface SidebarProjectsContentProps {
   handleProjectDragCancel: (event: DragCancelEvent) => void;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -4322,6 +4306,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleProjectDragCancel,
     handleNewThread,
     archiveThread,
+    archiveThreads,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -4490,6 +4475,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
+                        archiveThreads={archiveThreads}
                         deleteThread={deleteThread}
                         setThreadPersistence={setThreadPersistence}
                         markThreadUnread={markThreadUnread}
@@ -4535,6 +4521,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
+                archiveThreads={archiveThreads}
                 deleteThread={deleteThread}
                 setThreadPersistence={setThreadPersistence}
                 markThreadUnread={markThreadUnread}
@@ -4596,7 +4583,7 @@ export default function LegacySidebar() {
   );
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread, markThreadUnread, setThreadPersistence } =
+  const { archiveThread, archiveThreads, deleteThread, markThreadUnread, setThreadPersistence } =
     useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
@@ -5274,6 +5261,7 @@ export default function LegacySidebar() {
         handleProjectDragCancel={handleProjectDragCancel}
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
+        archiveThreads={archiveThreads}
         deleteThread={deleteThread}
         setThreadPersistence={setThreadPersistence}
         markThreadUnread={markThreadUnread}

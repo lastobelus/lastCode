@@ -1598,6 +1598,34 @@ it("excludes subagents from navigation, search and ordering while retaining user
   ).toEqual([fork.id, root.id]);
 });
 
+it("shows released subagents in navigation, search and ordering", () => {
+  const root = makeThread({ id: ThreadId.make("root"), title: "Root", archivedAt: NOW });
+  const child = makeThread({
+    id: ThreadId.make("released"),
+    title: "Released work",
+    lineage: {
+      parentThreadId: root.id,
+      rootThreadId: root.id,
+      relationshipToParent: "subagent",
+      independent: true,
+    },
+  });
+  const threads = [root, child];
+  expect(
+    buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "Released",
+      now: NOW,
+    }).items.map((item) => item.thread.id),
+  ).toEqual([child.id]);
+  expect(
+    getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
+      (thread) => thread.id,
+    ),
+  ).toEqual([child.id]);
+});
+
 /* ─── Recycled-list equality + per-row clock scoping ─────────────────── */
 
 const BASE_MS = Date.parse(NOW);

@@ -281,6 +281,28 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
+  it.effect("forwards the explicit archive decision and reviewed child set", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      yield* archiveThread({
+        commandId: CommandId.make("archive-family"),
+        threadId: ThreadId.make("parent"),
+        childDisposition: "promote",
+        expectedChildThreadIds: [ThreadId.make("child")],
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands).toEqual([
+        {
+          type: "thread.archive",
+          commandId: "archive-family",
+          threadId: "parent",
+          childDisposition: "promote",
+          expectedChildThreadIds: ["child"],
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("resolves run ordinal zero to the persisted thread-start checkpoint", () =>
     Effect.gen(function* () {
       const scopeId = CheckpointScopeId.make("checkpoint-scope-root");

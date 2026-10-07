@@ -1328,6 +1328,56 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("a late first native child announcement inherits its parent's archived family", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const rootEvent = yield* threadCreatedEvent(now);
+      if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+      const commandId = CommandId.make("archive-native-parent");
+      const parent = {
+        ...rootEvent.payload,
+        archivedAt: now,
+        archivedWith: { threadId: rootEvent.threadId, commandId },
+      };
+      yield* eventSink.write({ events: [{ ...rootEvent, payload: parent }] });
+      const childId = ThreadId.make("late-native-child");
+      yield* ingestor.ingestNormalized({
+        providerSessionId: yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: parent.id,
+        }),
+        providerInstanceId: modelSelection.instanceId,
+        threadId: parent.id,
+        event: {
+          type: "app_thread.created",
+          driver: CODEX_DRIVER,
+          appThread: {
+            ...parent,
+            id: childId,
+            creationSource: "provider",
+            archivedAt: null,
+            archivedWith: null,
+            lineage: {
+              parentThreadId: parent.id,
+              relationshipToParent: "subagent",
+              rootThreadId: parent.id,
+            },
+          },
+        },
+      });
+      const child = yield* projections.getThread(childId);
+      assert.deepEqual(child.archivedAt, now);
+      assert.deepEqual(child.archivedWith, parent.archivedWith);
+      assert.isFalse(
+        (yield* projections.getShellSnapshot()).threads.some((thread) => thread.id === childId),
+      );
+    }),
+  );
+
   it.effect.each(["waiting", "promoted"] as const)(
     "preserves %s promotion when a restarted provider reannounces its child",
     (status) =>

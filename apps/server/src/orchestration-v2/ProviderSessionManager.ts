@@ -2048,7 +2048,16 @@ export const layerWithOptions = (
                 });
               }
               const detachedEntry =
-                Option.getOrUndefined(detached) ?? pendingThreadUnloads.get(unloadKey)?.entry;
+                Option.getOrUndefined(detached) ??
+                pendingThreadUnloads.get(unloadKey)?.entry ??
+                // Native subagent mirrors share their parent's runtime without
+                // attaching independently. Terminal cleanup still owns their
+                // native threads and must unload them before confirming Stop.
+                (input.revokeMcpCredential === true &&
+                currentEntry?.supportsMultipleProviderThreads === true &&
+                detachedProviderThreads.length > 0
+                  ? currentEntry
+                  : undefined);
               if (detachedEntry === undefined) return;
               detachedProviderThreads =
                 pendingThreadUnloads.get(unloadKey)?.providerThreads ?? detachedProviderThreads;
