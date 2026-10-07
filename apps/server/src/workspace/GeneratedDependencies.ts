@@ -119,6 +119,8 @@ export class GeneratedDependencies extends Context.Service<
       entries: ReadonlyArray<{
         readonly inspection: DependencyInspection;
         readonly canRemove: Effect.Effect<boolean>;
+        /** Lightweight application-state invalidation after cohort preparation. */
+        readonly isStillEligible: Effect.Effect<boolean>;
       }>,
     ) => Effect.Effect<ReadonlyArray<DependencyInspection>>;
   }
@@ -353,6 +355,7 @@ const make = Effect.gen(function* () {
     entries: ReadonlyArray<{
       readonly inspection: DependencyInspection;
       readonly canRemove: Effect.Effect<boolean>;
+      readonly isStillEligible: Effect.Effect<boolean>;
     }>,
   ) {
     if (
@@ -364,7 +367,7 @@ const make = Effect.gen(function* () {
       return [];
     const validated = (yield* Effect.forEach(
       entries,
-      ({ inspection, canRemove }) =>
+      ({ inspection, canRemove, isStillEligible }) =>
         Effect.gen(function* () {
           const current = yield* validate(inspection);
           if (
@@ -376,7 +379,7 @@ const make = Effect.gen(function* () {
             current.packageManager !== inspection.packageManager
           )
             return null;
-          return { current, inspection, canRemove };
+          return { current, inspection, canRemove, isStillEligible };
         }).pipe(Effect.catch(skip)),
       { concurrency: entries.length },
     )).filter((entry) => entry !== null);
@@ -387,7 +390,7 @@ const make = Effect.gen(function* () {
     if (processes === null) return [];
     const eligible = (yield* Effect.forEach(
       validated,
-      ({ current, inspection, canRemove }) =>
+      ({ current, inspection, canRemove, isStillEligible }) =>
         Effect.gen(function* () {
           if (
             processes.some(
@@ -398,7 +401,7 @@ const make = Effect.gen(function* () {
             !(yield* canRemove)
           )
             return null;
-          return { current, inspection };
+          return { current, inspection, isStillEligible };
         }).pipe(Effect.catch(skip)),
       { concurrency: validated.length },
     )).filter((entry) => entry !== null);
@@ -409,9 +412,13 @@ const make = Effect.gen(function* () {
     if (mounts === null) return [];
     const removed = yield* Effect.forEach(
       eligible,
-      ({ current, inspection }) =>
+      ({ current, inspection, isStillEligible }) =>
         Effect.gen(function* () {
-          if (DependencyMounts.containsMount(current.dependencyPath, mounts)) return null;
+          if (
+            DependencyMounts.containsMount(current.dependencyPath, mounts) ||
+            !(yield* isStillEligible)
+          )
+            return null;
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {

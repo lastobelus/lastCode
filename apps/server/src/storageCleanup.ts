@@ -492,9 +492,50 @@ export const make = Effect.gen(function* () {
                 repositoryRoot: project.workspaceRoot,
               });
               if (inspection === null) return null;
+              let eligibilitySequence: number | null = null;
+              const canRemove = Effect.gen(function* () {
+                eligibilitySequence = yield* readApplicationSequence();
+                return yield* revalidate();
+              }).pipe(Effect.catch(() => Effect.succeed(false)));
+              const isStillEligible = Effect.gen(function* () {
+                if (eligibilitySequence === null || hasTerminal(worktreePath)) return false;
+                if (
+                  resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
+                    .worktreeDependenciesAfterDays !== days
+                )
+                  return false;
+                // Siblings and mount inventory may take time. Invalidate prepared
+                // eligibility with indexed new events and current state, without
+                // repeating Git, project-root resolution or provider-history scans.
+                const changed = yield* sql`
+                  SELECT 1 FROM orchestration_events
+                  WHERE sequence > ${eligibilitySequence}
+                    AND (aggregate_kind = 'project' OR event_type LIKE 'thread.%'
+                      OR (aggregate_kind = 'thread' AND stream_id = ${thread.id}))
+                  LIMIT 1
+                `;
+                if (changed.length > 0 || (yield* hasPendingWorkspaceWork(thread.id))) return false;
+                if (deleted) {
+                  const pending = yield* sql`
+                    SELECT 1 FROM orchestration_v2_effect_outbox
+                    WHERE thread_id = ${thread.id} AND status NOT IN ('succeeded', 'cancelled')
+                    LIMIT 1
+                  `;
+                  if (pending.length > 0) return false;
+                }
+                if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
+                  return false;
+                if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
+                return (
+                  !hasTerminal(worktreePath) &&
+                  resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
+                    .worktreeDependenciesAfterDays === days
+                );
+              }).pipe(Effect.catch(() => Effect.succeed(false)));
               return {
                 inspection,
-                canRemove: revalidate().pipe(Effect.catch(() => Effect.succeed(false))),
+                canRemove,
+                isStillEligible,
                 threadId: thread.id,
               };
             }).pipe(

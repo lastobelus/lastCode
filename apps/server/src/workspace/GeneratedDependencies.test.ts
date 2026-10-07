@@ -32,6 +32,7 @@ import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
+import * as DependencyMounts from "./DependencyMounts.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -54,6 +55,7 @@ const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServ
 const testLayer = (
   processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
   onDependencyInspection: () => void = () => undefined,
+  mountPoints?: Effect.Effect<ReadonlyArray<string> | null>,
 ) => {
   const gitLayer = Layer.effect(
     GitVcsDriver.GitVcsDriver,
@@ -69,13 +71,18 @@ const testLayer = (
       };
     }),
   ).pipe(Layer.provide(GitVcsDriver.layer));
-  return GeneratedDependencies.layer.pipe(
+  const dependencies = GeneratedDependencies.layer.pipe(
     Layer.provideMerge(gitLayer),
     Layer.provide(VcsProcess.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
   );
+  return mountPoints === undefined
+    ? dependencies
+    : dependencies.pipe(
+        Layer.provideMerge(Layer.succeed(DependencyMounts.MountPoints, mountPoints)),
+      );
 };
 
 const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
@@ -88,7 +95,7 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
     canRemove: Effect.Effect<boolean>,
   ) =>
     cleanup
-      .removeBatch([{ inspection, canRemove }])
+      .removeBatch([{ inspection, canRemove, isStillEligible: Effect.succeed(true) }])
       .pipe(Effect.map((removed) => removed[0] ?? null));
   const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dependencies-" });
   // /tmp is itself a symlink on macOS; candidates must use the actual path.
@@ -531,13 +538,18 @@ it.effect(
       yield* Effect.gen(function* () {
         const removal = yield* first.cleanup
           .removeBatch([
-            { inspection: first.inspection, canRemove: Effect.succeed(true) },
+            {
+              inspection: first.inspection,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
             {
               inspection: second.inspection,
               canRemove: Effect.sync(() => {
                 siblingGuarded = true;
                 return true;
               }),
+              isStillEligible: Effect.succeed(true),
             },
           ])
           .pipe(Effect.forkScoped);
@@ -572,8 +584,16 @@ it.effect("one dependency removal error leaves its sibling eligible for deletion
       () => Effect.sync(() => rm.mockImplementation(original)),
     );
     const removed = yield* first.cleanup.removeBatch([
-      { inspection: first.inspection, canRemove: Effect.succeed(true) },
-      { inspection: second.inspection, canRemove: Effect.succeed(true) },
+      {
+        inspection: first.inspection,
+        canRemove: Effect.succeed(true),
+        isStillEligible: Effect.succeed(true),
+      },
+      {
+        inspection: second.inspection,
+        canRemove: Effect.succeed(true),
+        isStillEligible: Effect.succeed(true),
+      },
     ]);
     assert.deepStrictEqual(
       removed.map((entry) => entry.dependencyPath),
@@ -702,6 +722,11 @@ type SweepCase =
   | "process"
   | "process-unknown"
   | "process-started"
+  | "final-mount-unchanged"
+  | "final-mount-policy-off"
+  | "final-mount-queued-run"
+  | "final-mount-candidate-event"
+  | "final-mount-provider-ownership"
   | "worker-ready-burst"
   | "worker-terminal-burst"
   | "worker-settings-burst";
@@ -714,6 +739,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     readonly initialInventoryEntered: Deferred.Deferred<void>;
     readonly releaseInitialInventory: Deferred.Deferred<void>;
   },
+  setMountReader: (reader: Effect.Effect<ReadonlyArray<string> | null>) => void,
 ) {
   yield* TestClock.setTime(NOW);
   const f = yield* fixture();
@@ -833,6 +859,25 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       worktreeUnchanged: false,
     },
   };
+  let mountReads = 0;
+  setMountReader(
+    Effect.gen(function* () {
+      mountReads++;
+      if (mountReads === 2) {
+        if (mode === "final-mount-policy-off")
+          settings = {
+            ...settings,
+            storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: null },
+          };
+        if (mode === "final-mount-queued-run")
+          yield* sql`INSERT INTO orchestration_v2_projection_runs VALUES (${threadId}, 'queued')`;
+        if (mode === "final-mount-candidate-event")
+          yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(0))}, 2)`;
+        if (mode === "final-mount-provider-ownership") acquireManagerOwnership();
+      }
+      return ["/"];
+    }).pipe(Effect.orDie),
+  );
   if (mode === "recent") thread = { ...thread, latestRunCompletedAt: at(1) };
   if (mode === "queued") thread = { ...thread, status: "queued" };
   if (mode === "background")
@@ -1286,6 +1331,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   const expectedRemoval =
     mode === "eligible" ||
+    mode === "final-mount-unchanged" ||
     mode === "archived" ||
     mode === "deleted" ||
     mode === "deleted-unrelated-events" ||
@@ -1345,6 +1391,29 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
+  if (mode.startsWith("final-mount-")) {
+    // The mutation occurs only after both complete eligibility checks have run.
+    assert.equal(mountReads, 2);
+    assert.equal(targetedReads.length, 4);
+    assert.equal(processReads, 2);
+    assert.equal(reads, 1);
+    if (mode === "final-mount-policy-off")
+      assert.isNull(settings.storageCleanup.worktreeDependenciesAfterDays);
+    if (mode === "final-mount-queued-run")
+      assert.deepStrictEqual(
+        yield* sql`SELECT thread_id, status FROM orchestration_v2_projection_runs`,
+        [{ thread_id: threadId, status: "queued" }],
+      );
+    if (mode === "final-mount-candidate-event")
+      assert.deepStrictEqual(yield* sql`SELECT stream_id, event_type FROM orchestration_events`, [
+        { stream_id: threadId, event_type: "turn-item.updated" },
+      ]);
+    else assert.deepStrictEqual(yield* sql`SELECT sequence FROM orchestration_events`, []);
+    if (mode === "final-mount-provider-ownership") {
+      assert.equal(ownershipRevision, 1);
+      assert.isTrue(managerOwnsSession);
+    }
+  }
   assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   if (stoppedSession && !wholeSession)
@@ -1431,6 +1500,11 @@ it.effect.each([
   "process",
   "process-unknown",
   "process-started",
+  "final-mount-unchanged",
+  "final-mount-policy-off",
+  "final-mount-queued-run",
+  "final-mount-candidate-event",
+  "final-mount-provider-ownership",
   "worker-ready-burst",
   "worker-terminal-burst",
   "worker-settings-burst",
@@ -1439,6 +1513,7 @@ it.effect.each([
     let readProcesses: () => ReadonlyArray<string> | null = () => [];
     let dependencyInspections = 0;
     let processEffectReads = 0;
+    let readMounts: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed(["/"]);
     const initialInventoryEntered = yield* Deferred.make<void>();
     const releaseInitialInventory = yield* Deferred.make<void>();
     const processes = Effect.gen(function* () {
@@ -1456,11 +1531,18 @@ it.effect.each([
       },
       () => dependencyInspections,
       { initialInventoryEntered, releaseInitialInventory },
+      (reader) => {
+        readMounts = reader;
+      },
     ).pipe(
       Effect.scoped,
       Effect.provide(
         Layer.merge(
-          testLayer(processes, () => dependencyInspections++),
+          testLayer(
+            processes,
+            () => dependencyInspections++,
+            Effect.suspend(() => readMounts),
+          ),
           NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
         ),
       ),

@@ -116,7 +116,13 @@ it.effect.each(["root", "directory", "file", "unavailable"] as const)(
                   : f.data,
             ];
       assert.isEmpty(
-        yield* f.cleanup.removeBatch([{ inspection: inspected!, canRemove: Effect.succeed(true) }]),
+        yield* f.cleanup.removeBatch([
+          {
+            inspection: inspected!,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+        ]),
       );
       assert.equal(reads, 2);
       assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
@@ -157,7 +163,11 @@ it.effect.each(["root", "directory", "file", "unavailable"] as const)(
               ];
         return true;
       });
-      assert.isEmpty(yield* f.cleanup.removeBatch([{ inspection: inspected!, canRemove }]));
+      assert.isEmpty(
+        yield* f.cleanup.removeBatch([
+          { inspection: inspected!, canRemove, isStillEligible: Effect.succeed(true) },
+        ]),
+      );
       assert.equal(reads, 2);
       assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
     }).pipe(
@@ -209,6 +219,7 @@ it.effect(
         inspections.map((inspection, index) => ({
           inspection: inspection!,
           canRemove: callbacks[index]!,
+          isStillEligible: Effect.succeed(true),
         })),
       );
       assert.lengthOf(removed, 2);
@@ -243,7 +254,11 @@ it.effect(
       assert.isNotNull(inspected);
       assert.isEmpty(
         yield* f.cleanup.removeBatch([
-          { inspection: inspected!, canRemove: Effect.succeed(false) },
+          {
+            inspection: inspected!,
+            canRemove: Effect.succeed(false),
+            isStillEligible: Effect.succeed(true),
+          },
         ]),
       );
       assert.equal(reads, 1);
@@ -261,6 +276,86 @@ it.effect(
     );
   },
 );
+
+it.effect("preserves an earlier cohort member invalidated by a later eligibility callback", () => {
+  let earlierEligible = true;
+  let reads = 0;
+  return Effect.gen(function* () {
+    const fixtures = yield* Effect.forEach([0, 1], () => fixture());
+    const inspections = yield* Effect.forEach(fixtures, (f) => f.cleanup.inspect(f.input));
+    for (const inspection of inspections) assert.isNotNull(inspection);
+    const earlierEligibilityFinished = yield* Deferred.make<void>();
+    const earlier = Effect.gen(function* () {
+      yield* Deferred.succeed(earlierEligibilityFinished, undefined);
+      return true;
+    });
+    const later = Effect.gen(function* () {
+      yield* Deferred.await(earlierEligibilityFinished);
+      earlierEligible = false;
+      return true;
+    });
+    const removed = yield* fixtures[0]!.cleanup.removeBatch([
+      {
+        inspection: inspections[0]!,
+        canRemove: earlier,
+        isStillEligible: Effect.sync(() => earlierEligible),
+      },
+      { inspection: inspections[1]!, canRemove: later, isStillEligible: Effect.succeed(true) },
+    ]);
+    assert.deepEqual(
+      removed.map((entry) => entry.dependencyPath),
+      [fixtures[1]!.dependencyPath],
+    );
+    assert.equal(reads, 3);
+    assert.equal(
+      yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
+      "preserve mounted data\n",
+    );
+    assert.isFalse(yield* fixtures[1]!.fs.exists(fixtures[1]!.dependencyPath));
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      testLayer(
+        Effect.sync(() => {
+          reads++;
+          return ["/"];
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("preserves an install invalidated while the final mount inventory is captured", () => {
+  let eligible = true;
+  let reads = 0;
+  return Effect.gen(function* () {
+    const f = yield* fixture();
+    const inspected = yield* f.cleanup.inspect(f.input);
+    assert.isNotNull(inspected);
+    assert.isEmpty(
+      yield* f.cleanup.removeBatch([
+        {
+          inspection: inspected!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.sync(() => eligible),
+        },
+      ]),
+    );
+    assert.equal(reads, 2);
+    assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      testLayer(
+        Effect.sync(() => {
+          reads++;
+          if (reads === 2) eligible = false;
+          return ["/"];
+        }),
+      ),
+    ),
+  );
+});
 
 it.effect("preserves installs when inspection cannot read the mount table", () =>
   Effect.gen(function* () {
@@ -282,6 +377,7 @@ it.effect("shares one final mount snapshot and only removes unmounted batch memb
       inspections.map((inspection) => ({
         inspection: inspection!,
         canRemove: Effect.succeed(true),
+        isStillEligible: Effect.succeed(true),
       })),
     );
     assert.lengthOf(removed, 3);
@@ -312,7 +408,13 @@ it.effect("allows mount ancestors and path-prefix siblings outside the dependenc
     const inspected = yield* f.cleanup.inspect(f.input);
     assert.isNotNull(inspected);
     assert.lengthOf(
-      yield* f.cleanup.removeBatch([{ inspection: inspected!, canRemove: Effect.succeed(true) }]),
+      yield* f.cleanup.removeBatch([
+        {
+          inspection: inspected!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+      ]),
       1,
     );
     assert.isFalse(yield* f.fs.exists(f.dependencyPath));
