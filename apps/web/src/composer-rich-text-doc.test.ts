@@ -1,6 +1,7 @@
 import { getSchemaByResolvedExtensions, Node, resolveExtensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { TaskList } from "@tiptap/extension-task-list";
+import { history, redo, undo, undoDepth } from "@tiptap/pm/history";
 import { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { describe, expect, it } from "vite-plus/test";
@@ -377,6 +378,81 @@ describe("caret stops at styled edges", () => {
   function typed(state: EditorState, text: string) {
     return serializeEditorDoc(state.apply(state.tr.insertText(text)).doc).value;
   }
+
+  function typeCharacters(state: EditorState, text: string) {
+    for (const character of text) state = state.apply(state.tr.insertText(character));
+    return state;
+  }
+
+  it("keeps typing plain after stepping outside pasted bold", () => {
+    let state = stateAt("", 1);
+    state = state.apply(
+      state.tr
+        .replaceSelectionWith(schema.text("bold", [schema.marks.bold!.create()]), false)
+        .setMeta("uiEvent", "paste"),
+    );
+    state = state.apply(stepCaretAcrossStyledEdge(state, 1)!);
+    state = typeCharacters(state, " plain");
+    expect(serializeEditorDoc(state.doc).value).toBe("**bold** plain");
+  });
+
+  it("can step outside bold after cutting its trailing plain text", () => {
+    let state = stateAt("**b** plain", 8);
+    state = state.apply(
+      state.tr
+        .setSelection(TextSelection.create(state.doc, 2, 8))
+        .deleteRange(2, 8)
+        .setMeta("uiEvent", "cut"),
+    );
+    state = state.apply(stepCaretAcrossStyledEdge(state, 1)!);
+    state = typeCharacters(state, " again");
+    expect(serializeEditorDoc(state.doc).value).toBe("**b** again");
+  });
+
+  it("keeps caret steps out of history and can recover either stop after undo", () => {
+    let state = stateAt("**b**", 2).reconfigure({ plugins: [history()] });
+    state = state.apply(stepCaretAcrossStyledEdge(state, 1)!);
+    expect(undoDepth(state)).toBe(0);
+    state = typeCharacters(state, " plain");
+    expect(undoDepth(state)).toBe(1);
+
+    expect(
+      undo(state, (transaction) => {
+        state = state.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(serializeEditorDoc(state.doc).value).toBe("**b**");
+    expect(state.selection.from).toBe(2);
+    expect(undoDepth(state)).toBe(0);
+
+    expect(
+      redo(state, (transaction) => {
+        state = state.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(serializeEditorDoc(state.doc).value).toBe("**b** plain");
+    expect(state.selection.from).toBe(8);
+
+    expect(
+      undo(state, (transaction) => {
+        state = state.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(typed(state, "x")).toBe("**bx**");
+    state = state.apply(stepCaretAcrossStyledEdge(state, 1)!);
+    expect(typed(state, "x")).toBe("**b**x");
+  });
+
+  it("sustains explicit formatting toggles across several characters", () => {
+    let state = stateAt("**b**", 2);
+    state = state.apply(stepCaretAcrossStyledEdge(state, 1)!);
+    state = state.apply(state.tr.addStoredMark(schema.marks.bold!.create()));
+    state = typeCharacters(state, "xy");
+    expect(serializeEditorDoc(state.doc).value).toBe("**bxy**");
+    state = state.apply(state.tr.removeStoredMark(schema.marks.bold!));
+    state = typeCharacters(state, " plain");
+    expect(serializeEditorDoc(state.doc).value).toBe("**bxy** plain");
+  });
 
   it("lets the caret step out in front of bold that starts the line", () => {
     const inside = stateAt("**bold** tail", 1);
