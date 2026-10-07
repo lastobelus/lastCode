@@ -188,7 +188,8 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning: !threadRuntimeCanArchive(thread.runtime),
+          isRunning:
+            thread.archivePending?.status !== "failed" && !threadRuntimeCanArchive(thread.runtime),
           hasRunningAction: thread.actionResume?.outcome === "running",
           hasStoppableProcesses,
           supports,

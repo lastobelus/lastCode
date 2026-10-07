@@ -546,6 +546,62 @@ describe("sidebar thread lineage helpers", () => {
     expect(recovery.archivedAt).toBe("2026-03-09T09:00:00.000Z");
   });
 
+  it.each(["stopping", "failed"] as const)(
+    "shows a stranded %s archive repair without making ordinary owned children independent",
+    (status) => {
+      const owner = makeThreadFixture({
+        id: ThreadId.make("archive-owner"),
+        archivedAt: "2026-10-07T00:00:00.000Z",
+      });
+      const child = makeThreadFixture({
+        id: ThreadId.make("stranded-native"),
+        environmentId: owner.environmentId,
+        projectId: owner.projectId,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+        archivePending: {
+          threadId: owner.id,
+          commandId: CommandId.make("archive-repair"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      });
+      const ordinaryChild = { ...child, id: ThreadId.make("ordinary-child"), archivePending: null };
+      const scope = new Set([`${owner.environmentId}:${owner.projectId}`]);
+      expect(filterSidebarV2VisibleThreads([owner, child, ordinaryChild], scope)).toEqual([child]);
+      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope)).toEqual([child]);
+      expect(
+        filterSidebarV2VisibleThreads(
+          [{ ...owner, archivedAt: null }, child, ordinaryChild],
+          scope,
+        ),
+      ).toEqual([{ ...owner, archivedAt: null }]);
+      expect(filterSidebarV2VisibleThreads([owner, child], new Set())).toEqual([]);
+      expect(isSidebarSubagentThread(child)).toBe(true);
+      expect(child.lineage.independent).toBeUndefined();
+      const nestedOwner = {
+        ...child,
+        archivePending: { ...child.archivePending!, threadId: child.id },
+      };
+      const nestedChild = {
+        ...nestedOwner,
+        id: ThreadId.make("nested-participant"),
+        lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+      };
+      const activeRoot = { ...owner, archivedAt: null };
+      expect(filterSidebarV2VisibleThreads([activeRoot, nestedOwner, nestedChild], scope)).toEqual([
+        activeRoot,
+        nestedOwner,
+      ]);
+    },
+  );
+
   it("identifies subagent threads so the sidebar can hide them", () => {
     const parentId = ThreadId.make("thread-parent");
     const subagent = makeThreadFixture({

@@ -1,5 +1,8 @@
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
-import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import {
   resolveThreadWorkingStartedAt,
   threadShellIsCleanupRecovery,
@@ -577,16 +580,20 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
 export function filterSidebarV2VisibleThreads<
   T extends Pick<
     SidebarThreadSummary,
-    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage"
+    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage" | "archivePending"
   > & {
+    id: string;
     environmentId: string;
     projectId: string;
   },
 >(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
+  const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   return threads.filter(
     (thread) =>
       threadShellIsVisible(thread) &&
-      (threadShellIsCleanupRecovery(thread) || !isSidebarSubagentThread(thread)) &&
+      (threadShellIsCleanupRecovery(thread) ||
+        archiveRecoveryRows.has(thread) ||
+        !isSidebarSubagentThread(thread)) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
@@ -1579,7 +1586,8 @@ export function sortLogicalProjectsForSidebar<
 
 export function sortSidebarV2ProjectGroups<
   TProject extends LogicalSidebarProject,
-  TThread extends ScopedSidebarThread & Pick<SidebarThreadSummary, "lineage">,
+  TThread extends ScopedSidebarThread &
+    Pick<SidebarThreadSummary, "id" | "lineage" | "archivePending">,
 >(
   projects: readonly TProject[],
   threads: readonly TThread[],

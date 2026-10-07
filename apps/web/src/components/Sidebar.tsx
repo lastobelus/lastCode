@@ -1,5 +1,8 @@
 import { type EnvironmentId } from "@t3tools/contracts";
-import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import {
   ConnectedSidebarEnvironmentIcon,
   useSidebarProviderBadgePreferences,
@@ -2994,6 +2997,7 @@ export default function Sidebar() {
     // Subagent child threads live in the parent's Agents surface, not the
     // sidebar roster (v2 models them as real threads with lineage).
     const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+    const archiveRecoveryRows = getArchiveRecoveryRows(threads);
     inboxReturns.observe(workingShelfEnabled ? threads : null);
     const pinned: EnvironmentThreadShell[] = [];
     const active: EnvironmentThreadShell[] = [];
@@ -3008,7 +3012,7 @@ export default function Sidebar() {
     const activeReorderable = new Set<string>();
     for (const thread of visible) {
       const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
-      if (thread.worktreeCleanup != null) {
+      if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
         active.push(thread);
         continue;
       }

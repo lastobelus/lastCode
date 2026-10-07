@@ -12,6 +12,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   archiveChildNeedsAttention,
   archiveRetryThreadId,
+  getArchiveRecoveryRows,
   presentThreadArchive,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
@@ -115,6 +116,71 @@ describe("archive family attention", () => {
 });
 
 describe("durable archive presentation", () => {
+  it.each(["stopping", "failed"] as const)(
+    "surfaces the %s nested operation owner while retaining its descendants underneath it",
+    (status) => {
+      const ownerId = ThreadId.make("nested-owner");
+      const owner = {
+        ...base,
+        id: ownerId,
+        lineage: {
+          rootThreadId: base.id,
+          parentThreadId: base.id,
+          relationshipToParent: "subagent" as const,
+        },
+        archivePending: { ...pending, threadId: ownerId, status },
+      };
+      const child = {
+        ...owner,
+        id: ThreadId.make("nested-child"),
+        lineage: { ...owner.lineage, parentThreadId: ownerId },
+      };
+      expect([...getArchiveRecoveryRows([base, owner, child])]).toEqual([owner]);
+      expect(owner.lineage).not.toHaveProperty("independent");
+      expect(child.lineage).not.toHaveProperty("independent");
+    },
+  );
+  it.each(["stopping", "failed"] as const)(
+    "surfaces %s owned participants only when their archive owner is unavailable",
+    (status) => {
+      const child = {
+        ...base,
+        id: ThreadId.make("stranded-native"),
+        lineage: {
+          rootThreadId: base.id,
+          parentThreadId: base.id,
+          relationshipToParent: "subagent" as const,
+        },
+        archivePending: { ...pending, status },
+      };
+      expect([...getArchiveRecoveryRows([base, child])]).toEqual([]);
+      expect([...getArchiveRecoveryRows([child])]).toEqual([child]);
+      expect([
+        ...getArchiveRecoveryRows([{ ...base, archivedAt: action.startedAt }, child]),
+      ]).toEqual([child]);
+      expect([
+        ...getArchiveRecoveryRows([{ ...base, deletedAt: action.startedAt }, child]),
+      ]).toEqual([child]);
+      expect([...getArchiveRecoveryRows([{ ...child, archivePending: null }])]).toEqual([]);
+      expect([...getArchiveRecoveryRows([{ ...child, deletedAt: action.startedAt }])]).toEqual([]);
+      expect([...getArchiveRecoveryRows([{ ...child, archivedAt: action.startedAt }])]).toEqual([]);
+      expect(child.lineage).not.toHaveProperty("independent");
+    },
+  );
+  it("does not let an active same-id owner in another environment hide a stranded repair", () => {
+    const child = {
+      ...base,
+      id: ThreadId.make("stranded-native"),
+      lineage: {
+        rootThreadId: base.id,
+        parentThreadId: base.id,
+        relationshipToParent: "subagent" as const,
+      },
+      archivePending: { ...pending, status: "failed" as const },
+    };
+    const foreignOwner = { ...base, environmentId: EnvironmentId.make("other-environment") };
+    expect([...getArchiveRecoveryRows([foreignOwner, child])]).toEqual([child]);
+  });
   it("retries a failed participant through the original operation owner without treating stopping as a retry", () => {
     const childId = ThreadId.make("native-child");
     const child = {

@@ -1022,3 +1022,151 @@ it.effect(
       );
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect.each([false, true])(
+  "promotion after failed shutdown clears former-owner failures and preserves unrelated failures=%s",
+  (unrelatedFailure) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild } = yield* family;
+      const stop = archive(parent, [child, grandchild]);
+      yield* orchestrator.dispatch(stop);
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make(`${stop.commandId}:failed`),
+        threadId: parent,
+        requestId: stop.commandId,
+        error: "Isolated shutdown failed",
+      });
+      const previous = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+      assert.equal(previous.archivePending?.status, "failed");
+      if (unrelatedFailure) {
+        yield* projections.apply({
+          id: EventId.make("unrelated-grandchild-archive-failure"),
+          type: "thread.metadata-updated",
+          threadId: grandchild,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...previous,
+            archivePending: {
+              ...previous.archivePending!,
+              threadId: grandchild,
+              commandId: CommandId.make("unrelated-archive-request"),
+            },
+          },
+        });
+      }
+      const promote = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(promote);
+      yield* threads.executeArchive({ threadId: parent, requestId: promote.commandId });
+      const kept = (yield* orchestrator.getThreadProjection(child)).thread;
+      const nested = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+      assert.isTrue(kept.lineage.independent);
+      assert.isNull(kept.archivePending ?? null);
+      assert.isNull(kept.archivedAt);
+      assert.isNull(nested.archivedAt);
+      if (unrelatedFailure) {
+        assert.equal(nested.archivePending?.threadId, grandchild);
+        assert.equal(nested.archivePending?.commandId, "unrelated-archive-request");
+      } else {
+        assert.isNull(nested.archivePending ?? null);
+        const independentArchive = archive(child, [grandchild]);
+        yield* orchestrator.dispatch(independentArchive);
+        yield* threads.executeArchive({ threadId: child, requestId: independentArchive.commandId });
+        for (const id of [child, grandchild])
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(id)).thread.archivedWith?.threadId,
+            child,
+          );
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(archiveModeLimits)(
+  "a descendant's raised $mode ceiling blocks clearing failure and releasing its branch",
+  (limit) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild } = yield* family;
+      for (const id of [parent, child, grandchild]) {
+        const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+        yield* projections.apply({
+          id: EventId.make(`retry-initial-mode:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...thread,
+            runtimeMode: limit.runtimeMode,
+            interactionMode: limit.interactionMode,
+          },
+        });
+      }
+      const stop = archive(parent, [child, grandchild]);
+      yield* orchestrator.dispatch(stop).pipe(Effect.provideService(DispatchModeLimit, limit));
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make(`${stop.commandId}:failed`),
+        threadId: parent,
+        requestId: stop.commandId,
+        error: "Isolated shutdown failed",
+      });
+      const providerThread = (yield* orchestrator.getThreadProjection(parent)).providerThreads[0]!;
+      yield* projections.apply({
+        id: EventId.make("retry-parent-shutdown-session"),
+        type: "provider-thread.updated",
+        threadId: parent,
+        occurredAt: yield* DateTime.now,
+        payload: { ...providerThread, providerSessionId: importSessionId },
+      });
+      const promote = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(promote).pipe(Effect.provideService(DispatchModeLimit, limit));
+      const stopping = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const shutdown = yield* threads
+        .executeArchive({ threadId: parent, requestId: promote.commandId })
+        .pipe(
+          Effect.provide(
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              teardownThread: () =>
+                Deferred.succeed(stopping, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+            }),
+          ),
+          Effect.forkChild,
+        );
+      yield* Deferred.await(stopping);
+      yield* orchestrator.dispatch(
+        limit.mode === "runtime"
+          ? {
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("raise-retained-descendant-runtime"),
+              threadId: grandchild,
+              runtimeMode: "full-access",
+            }
+          : {
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make("raise-retained-descendant-interaction"),
+              threadId: grandchild,
+              interactionMode: "default",
+            },
+      );
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(shutdown);
+      const root = (yield* orchestrator.getThreadProjection(parent)).thread;
+      assert.isNull(root.archivedAt);
+      assert.equal(root.archivePending?.status, "failed");
+      assert.include(root.archivePending?.error, "Permissions changed while stopping");
+      const kept = (yield* orchestrator.getThreadProjection(child)).thread;
+      const nested = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+      assert.isUndefined(kept.lineage.independent);
+      assert.equal(kept.archivePending?.commandId, stop.commandId);
+      assert.equal(nested.archivePending?.commandId, stop.commandId);
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(parent)).subagents[0]?.ownershipReleased,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);

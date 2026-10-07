@@ -1,6 +1,39 @@
 import type { EnvironmentThreadShell } from "./models.ts";
 import { threadRuntimeIsActive } from "./models.ts";
 
+type ArchiveRecoveryThread = Pick<EnvironmentThreadShell, "lineage" | "archivePending"> & {
+  readonly id: string;
+  readonly environmentId?: string;
+  readonly archivedAt: unknown | null;
+  readonly deletedAt: unknown | null;
+};
+
+/** Keep pending owned archive roots and stranded participants reachable without releasing ownership. */
+export function getArchiveRecoveryRows<T extends ArchiveRecoveryThread>(threads: readonly T[]) {
+  const key = (environmentId: string | undefined, id: string) =>
+    `${environmentId ?? ""}\u0000${id}`;
+  const owners = new Map(threads.map((thread) => [key(thread.environmentId, thread.id), thread]));
+  return new Set(
+    threads.filter((thread) => {
+      if (
+        thread.archivedAt !== null ||
+        thread.deletedAt !== null ||
+        !thread.archivePending ||
+        thread.lineage.relationshipToParent !== "subagent" ||
+        thread.lineage.independent === true
+      )
+        return false;
+      const owner = owners.get(key(thread.environmentId, thread.archivePending.threadId));
+      return (
+        thread.archivePending.threadId === thread.id ||
+        owner === undefined ||
+        owner.archivedAt !== null ||
+        owner.deletedAt !== null
+      );
+    }),
+  );
+}
+
 /** Every failed participant retries the original owner, including an archived repair owner. */
 export function archiveRetryThreadId(
   thread: Pick<EnvironmentThreadShell, "id" | "archivePending">,

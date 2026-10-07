@@ -11066,6 +11066,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
+    if (command.childDisposition !== undefined || command.expectedChildThreadIds !== undefined) {
+      yield* dispatchArchiveFamilyRequest(command, events, effects, true);
+      return;
+    }
     // Preserve the ordinary repair's protection and unfinished-work guards.
     // Its plan remains uncommitted until provider shutdown is known to be safe.
     const plannedEvents = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
@@ -11309,6 +11313,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .getThreadRecords(command.threadId, ["runs", "runtimeRequests", "providerThreads"])
       .pipe(mapDispatchError(command));
     if (
+      !archivedRepair &&
       family.children.length === 0 &&
       context.providerSessions.length === 0 &&
       !controls.providerThreads.some(
@@ -11525,8 +11530,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
-    if (command.type === "thread.archive.complete")
-      for (const id of pending.promoteThreadIds) {
+    if (command.type === "thread.archive.complete") {
+      const archivedIds = new Set(pending.archiveThreadIds);
+      const promotedIds = new Set(pending.promoteThreadIds);
+      for (const id of promotedIds) {
         const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
         yield* emit(
           events,
@@ -11535,7 +11542,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           type: "thread.metadata-updated",
           threadId: id,
           occurredAt: now,
-          payload: { ...thread, lineage: { ...thread.lineage, independent: true }, updatedAt: now },
+          payload: {
+            ...thread,
+            lineage: { ...thread.lineage, independent: true },
+            ...(thread.archivePending?.status === "failed" &&
+            thread.archivePending.threadId === root.id
+              ? { archivePending: null }
+              : {}),
+            updatedAt: now,
+          },
         });
         const parent = yield* getProjectionWithPendingEvents(root.id, events);
         for (const task of parent.subagents.filter(
@@ -11557,6 +11572,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             },
           });
       }
+      // A failed stop can mark the whole branch. Releasing that branch also
+      // releases its obsolete retry owner, without clearing a separate failure.
+      for (const thread of familyThreads.values()) {
+        if (
+          archivedIds.has(thread.id) ||
+          promotedIds.has(thread.id) ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          thread.archivePending?.status !== "failed" ||
+          thread.archivePending.threadId !== root.id
+        )
+          continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+    }
   });
 
   const dispatchUnarchiveFamily = Effect.fnUntraced(function* (

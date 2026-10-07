@@ -1629,6 +1629,94 @@ it("excludes subagents from navigation, search and ordering while retaining user
   ).toEqual([fork.id, root.id]);
 });
 
+it.each(["stopping", "failed"] as const)(
+  "keeps stranded %s native archive repair visible outside collapsed shelves",
+  (status) => {
+    const owner = makeThread({
+      id: ThreadId.make("archive-owner"),
+      title: "Owner",
+      archivedAt: NOW,
+    });
+    const child = makeThread({
+      id: ThreadId.make("stranded-native"),
+      title: "Repair child",
+      lineage: {
+        rootThreadId: owner.id,
+        parentThreadId: owner.id,
+        relationshipToParent: "subagent",
+      },
+      archivePending: {
+        threadId: owner.id,
+        commandId: CommandId.make("archive-repair"),
+        childDisposition: "stop_and_archive",
+        childThreadIds: [],
+        archiveThreadIds: [],
+        promoteThreadIds: [],
+        status,
+      },
+      settledOverride: "settled",
+      pinnedAt: NOW,
+      snoozedAt: NOW,
+      snoozedUntil: "2026-07-01T00:00:00.000Z",
+    });
+    const ordinaryChild = { ...child, id: ThreadId.make("ordinary-child"), archivePending: null };
+    const threads = [owner, child, ordinaryChild];
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: owner.environmentId,
+      searchQuery: "Repair",
+      now: NOW,
+      workingShelfEnabled: true,
+      workingShelfExpanded: false,
+      snoozedShelfExpanded: false,
+    });
+    expect(layout.items.map((item) => [item.thread.id, item.variant])).toEqual([
+      [child.id, "card"],
+    ]);
+    expect(getThreadListV2OrderedSection({ threads, section: "active", now: NOW })).toEqual([
+      child,
+    ]);
+    expect(getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW })).toEqual([]);
+    expect(
+      buildThreadListV2Items({
+        threads: [child],
+        environmentId: null,
+        searchQuery: "",
+        now: NOW,
+      }).items.map((item) => item.thread.id),
+    ).toEqual([child.id]);
+    expect(
+      buildThreadListV2Items({
+        threads: [{ ...owner, archivedAt: null }, child],
+        environmentId: null,
+        searchQuery: "Repair",
+        now: NOW,
+      }).items,
+    ).toEqual([]);
+    expect(child.lineage.independent).toBeUndefined();
+    const nestedOwner = {
+      ...child,
+      archivePending: { ...child.archivePending!, threadId: child.id },
+    };
+    const nestedChild = {
+      ...nestedOwner,
+      id: ThreadId.make("nested-participant"),
+      lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+    };
+    expect(
+      buildThreadListV2Items({
+        threads: [{ ...owner, archivedAt: null }, nestedOwner, nestedChild],
+        environmentId: null,
+        searchQuery: "Repair",
+        now: NOW,
+        workingShelfEnabled: true,
+        workingShelfExpanded: false,
+        snoozedShelfExpanded: false,
+      }).items.map((item) => [item.thread.id, item.variant]),
+    ).toEqual([[nestedOwner.id, "card"]]);
+  },
+);
+
 it("shows released subagents in navigation, search and ordering", () => {
   const root = makeThread({ id: ThreadId.make("root"), title: "Root", archivedAt: NOW });
   const child = makeThread({

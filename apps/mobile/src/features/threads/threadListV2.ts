@@ -1,5 +1,8 @@
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
-import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import {
@@ -283,8 +286,10 @@ export function getThreadListV2OrderedSection(input: {
   readonly snoozeEnvironmentIds?: ReadonlySet<EnvironmentId>;
   readonly queuedThreadKeys?: ReadonlySet<string>;
 }): EnvironmentThreadShell[] {
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   const threads = input.threads.filter((thread) => {
     if (threadShellIsCleanupRecovery(thread)) return input.section === "active";
+    if (archiveRecoveryRows.has(thread)) return input.section === "active";
     if (
       !threadShellIsVisible(thread) ||
       (thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true)
@@ -725,10 +730,12 @@ export function buildThreadListV2Items(input: {
   const settled: EnvironmentThreadShell[] = [];
   const snoozed: EnvironmentThreadShell[] = [];
   let nextSnoozeWakeAt: string | null = null;
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   for (const thread of input.threads) {
     if (
       !threadShellIsVisible(thread) ||
       (!threadShellIsCleanupRecovery(thread) &&
+        !archiveRecoveryRows.has(thread) &&
         thread.lineage.relationshipToParent === "subagent" &&
         thread.lineage.independent !== true)
     ) {
@@ -756,8 +763,8 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
-    // Cleanup is deleted-thread recovery state and stays in the active block.
-    if (thread.worktreeCleanup != null) {
+    // Unfinished cleanup and archive recovery stay reachable in the active block.
+    if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
       active.push(thread);
       continue;
     }

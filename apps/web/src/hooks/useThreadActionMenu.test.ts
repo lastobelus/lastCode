@@ -1,9 +1,11 @@
 import {
   AuthOrchestrationOperateScope,
   EnvironmentId,
+  ProviderInstanceId,
   ThreadId,
   type ContextMenuItem,
 } from "@t3tools/contracts";
+import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -21,6 +23,9 @@ const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
   completed: deferred<void>(),
+  runtime: null as ThreadRuntimeSummary | null,
+  archivePendingStatus: null as "stopping" | "failed" | null,
+  persistent: false,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -61,7 +66,10 @@ vi.mock("../state/entities", () => ({
     title: "Thread",
     branch: "main",
     worktreePath: null,
-    runtime: null,
+    runtime: state.runtime,
+    archivePending:
+      state.archivePendingStatus === null ? null : { status: state.archivePendingStatus },
+    persistent: state.persistent,
     latestRun: null,
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
@@ -173,6 +181,9 @@ beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.completed = deferred<void>();
+  state.runtime = null;
+  state.archivePendingStatus = null;
+  state.persistent = false;
   state.show.mockReset().mockResolvedValue(null);
 });
 
@@ -228,5 +239,46 @@ describe("thread menu permissions", () => {
     createMenu().openMenu(position);
     await state.completed.promise;
     expect(state.effects).toEqual([effect]);
+  });
+});
+
+describe("thread menu archive retries", () => {
+  const nativeRuntime: ThreadRuntimeSummary = {
+    status: "running",
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: "2026-03-09T10:00:00.000Z",
+  };
+
+  it("allows retry after native shutdown fails while retaining the active archive guard", async () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    const menu = createMenu();
+    menu.openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
+
+    state.archivePendingStatus = "stopping";
+    menu.openMenu(position);
+    expect(state.show.mock.calls[1]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
+
+    state.archivePendingStatus = "failed";
+    state.show.mockResolvedValue("archive");
+    menu.openMenu(position);
+    await state.completed.promise;
+    expect(state.show.mock.calls[2]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+    expect(state.effects).toEqual(["archiveThread"]);
+  });
+
+  it("keeps a protected native thread's failed archive retry disabled", () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    state.archivePendingStatus = "failed";
+    state.persistent = true;
+    createMenu().openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
   });
 });
