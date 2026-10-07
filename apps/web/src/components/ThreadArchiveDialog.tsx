@@ -21,8 +21,10 @@ type Request = {
   readonly canPromote: boolean;
   readonly protectedCount: number;
   readonly nativeCount: number;
-  /** A failure keeps the choice visible so the user can retry or cancel. */
-  readonly submit: (choice: ArchiveChildDisposition) => Promise<string | null>;
+  /** Keep failures retryable unless the displayed family choices are obsolete. */
+  readonly submit: (
+    choice: ArchiveChildDisposition,
+  ) => Promise<string | { readonly error: string; readonly close: true } | null>;
   readonly resolve: (choice: ArchiveChildDisposition | null) => void;
 };
 const useRequest = create<{ request: Request | null }>(() => ({ request: null }));
@@ -90,6 +92,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     try {
       const failure = await request.submit(next);
       if (failure === null) finish(next);
+      else if (typeof failure !== "string") finish(null);
       else setError(`Couldn't archive. ${failure}`);
     } catch (cause) {
       setError(cause instanceof Error ? `Couldn't archive. ${cause.message}` : "Couldn't archive.");

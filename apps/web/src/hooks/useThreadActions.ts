@@ -99,6 +99,24 @@ function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target
   };
 }
 
+function archiveFamilyChoicesMatch(
+  before: ReturnType<typeof resolveArchiveFamily>,
+  after: ReturnType<typeof resolveArchiveFamily>,
+) {
+  const sameIds = (left: readonly { id: ThreadId }[], right: readonly { id: ThreadId }[]) => {
+    const ids = new Set(right.map((thread) => thread.id));
+    return left.length === right.length && left.every((thread) => ids.has(thread.id));
+  };
+  return (
+    sameIds(before.children, after.children) &&
+    sameIds(before.promotableChildren, after.promotableChildren) &&
+    sameIds(before.nativeChildren, after.nativeChildren) &&
+    sameIds(before.protectedChildren, after.protectedChildren) &&
+    before.keptThreadIds.size === after.keptThreadIds.size &&
+    [...before.keptThreadIds].every((id) => after.keptThreadIds.has(id))
+  );
+}
+
 /** Failed participants share one retry owner, even when that owner is already archived. */
 export function normalizeArchiveSelectedEntries<
   T extends { threadKey: string; threadRef: ScopedThreadRef },
@@ -474,6 +492,30 @@ export function useThreadActions() {
     return resolveThreadRouteRef(currentRouteParams);
   }, [router]);
 
+  const archiveChoicesChanged = useCallback(
+    async (
+      target: ScopedThreadRef,
+      owner: EnvironmentThreadShell,
+      family: ReturnType<typeof resolveArchiveFamily>,
+    ) => {
+      const fresh = await loadArchiveFamily({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      });
+      // Unknown state also requires a new action and fresh consent, never a stale retry.
+      if (fresh._tag === "Failure") return true;
+      const currentOwner = fresh.value.find(
+        (thread) => thread.id === target.threadId && thread.environmentId === target.environmentId,
+      );
+      return (
+        !currentOwner ||
+        (owner.persistent === true) !== (currentOwner.persistent === true) ||
+        !archiveFamilyChoicesMatch(family, resolveArchiveFamily(fresh.value, target))
+      );
+    },
+    [loadArchiveFamily],
+  );
+
   const unarchiveThread = useCallback(
     async (target: ScopedThreadRef, opts: { navigate?: boolean } = {}) => {
       ThreadUndo.invalidate("archive", scopedThreadKey(target));
@@ -601,6 +643,7 @@ export function useThreadActions() {
         });
       };
       let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
+      let closedForChangedChoices = false;
       if (
         !familyChoice &&
         family !== null &&
@@ -620,11 +663,18 @@ export function useThreadActions() {
             archiveResult = await mutate(selected);
             if (archiveResult._tag === "Success") return null;
             const error = squashAtomCommandFailure(archiveResult);
-            return error instanceof Error ? error.message : "The archive did not complete.";
+            const message =
+              error instanceof Error ? error.message : "The archive did not complete.";
+            if (await archiveChoicesChanged(threadRef, thread, family)) {
+              closedForChangedChoices = true;
+              return { error: message, close: true as const };
+            }
+            return message;
           },
         });
         if (choice === null) {
           action?.finish();
+          if (closedForChangedChoices && archiveResult?._tag === "Failure") return archiveResult;
           return AsyncResult.failure(Cause.interrupt());
         }
       } else {
@@ -685,6 +735,7 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
+      archiveChoicesChanged,
       loadArchiveFamily,
       confirmThreadArchive,
       getCurrentRouteThreadRef,
@@ -778,11 +829,14 @@ export function useThreadActions() {
       const completedThreadKeys = new Set<string>();
       const completedParticipantKeys = new Set<string>();
       const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
+      let failedEntry: (typeof entries)[number] | undefined;
       const perform = async (choice: ThreadArchiveChildDisposition) => {
+        failedEntry = undefined;
         const attempt = await archiveSelectedThreadEntries({
           entries: entries.filter((entry) => !completedThreadKeys.has(entry.threadKey)),
-          archive: ({ threadRef, family, owner }, onArchived) =>
-            archiveThread(threadRef, {
+          archive: async (entry, onArchived) => {
+            const { threadRef, family, owner } = entry;
+            const result = await archiveThread(threadRef, {
               confirmed: true,
               familyChoice: {
                 childDisposition: choice,
@@ -791,7 +845,10 @@ export function useThreadActions() {
               familyOwner: owner,
               familySnapshot: family,
               onArchived,
-            }),
+            });
+            if (result._tag === "Failure") failedEntry = entry;
+            return result;
+          },
         });
         for (const threadKey of attempt.archivedThreadKeys) {
           completedThreadKeys.add(threadKey);
@@ -841,7 +898,20 @@ export function useThreadActions() {
             (count, { family }) => count + family.nativeChildren.length,
             0,
           ),
-          submit: perform,
+          submit: async (choice) => {
+            const error = await perform(choice);
+            if (error === null) return null;
+            if (
+              failedEntry &&
+              (await archiveChoicesChanged(
+                failedEntry.threadRef,
+                failedEntry.owner,
+                failedEntry.family,
+              ))
+            )
+              return { error, close: true as const };
+            return error;
+          },
         });
         // Completed participants still leave selection even if the remaining operation was cancelled.
         if (choice === null) return outcome ?? null;
@@ -855,7 +925,7 @@ export function useThreadActions() {
       }
       return outcome ?? null;
     },
-    [archiveThread, confirmThreadArchive, loadArchiveFamily],
+    [archiveThread, archiveChoicesChanged, confirmThreadArchive, loadArchiveFamily],
   );
 
   const setThreadPersistence = useCallback(
