@@ -3424,6 +3424,22 @@ export function ArchivedThreadsPanel() {
     refresh: refreshArchivedThreads,
   } = useArchivedThreadSnapshots(environmentIds);
   const isLoadingArchive = !isScopeReady || isLoadingSnapshots;
+  const restoreThreadId = useCallback(
+    (thread: EnvironmentThreadShell) => {
+      const cohort = thread.archivedWith;
+      if (cohort == null || cohort.threadId === thread.id) return thread.id;
+      const owner = archivedSnapshots
+        .find((entry) => entry.environmentId === thread.environmentId)
+        ?.snapshot.threads.find((candidate) => candidate.id === cohort.threadId);
+      return owner &&
+        owner.deletedAt === null &&
+        owner.archivedAt !== null &&
+        owner.archivedWith?.commandId === cohort.commandId
+        ? owner.id
+        : thread.id;
+    },
+    [archivedSnapshots],
+  );
 
   const archivedGroups = useMemo(() => {
     const selectedProjectKeys =
@@ -3498,10 +3514,7 @@ export function ArchivedThreadsPanel() {
   const handleArchivedThreadContextMenu = useCallback(
     async (thread: EnvironmentThreadShell, position: { x: number; y: number }) => {
       const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-      const restoreRef = scopeThreadRef(
-        thread.environmentId,
-        thread.archivedWith?.threadId ?? thread.id,
-      );
+      const restoreRef = scopeThreadRef(thread.environmentId, restoreThreadId(thread));
       const api = readLocalApi();
       if (!api) return;
       const clicked = await api.contextMenu.show(
@@ -3555,7 +3568,13 @@ export function ArchivedThreadsPanel() {
         }
       }
     },
-    [archivedSnapshots, confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [
+      archivedSnapshots,
+      confirmAndDeleteThread,
+      refreshArchivedThreads,
+      restoreThreadId,
+      unarchiveThread,
+    ],
   );
 
   return (
@@ -3605,11 +3624,7 @@ export function ArchivedThreadsPanel() {
             {projectThreads.map((thread) => (
               <div
                 key={thread.id}
-                className={
-                  thread.archivedWith && thread.archivedWith.threadId !== thread.id
-                    ? "pl-4"
-                    : undefined
-                }
+                className={restoreThreadId(thread) !== thread.id ? "pl-4" : undefined}
               >
                 <SettingsRow
                   onContextMenu={(event) => {
@@ -3640,9 +3655,7 @@ export function ArchivedThreadsPanel() {
                       Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}
                       {" \u00b7 Created "}
                       {formatRelativeTimeLabel(thread.createdAt)}
-                      {thread.archivedWith && thread.archivedWith.threadId !== thread.id
-                        ? " · Archived with family"
-                        : null}
+                      {restoreThreadId(thread) !== thread.id ? " · Archived with family" : null}
                     </>
                   }
                   control={
@@ -3654,10 +3667,7 @@ export function ArchivedThreadsPanel() {
                       onClick={() => {
                         void (async () => {
                           const result = await unarchiveThread(
-                            scopeThreadRef(
-                              thread.environmentId,
-                              thread.archivedWith?.threadId ?? thread.id,
-                            ),
+                            scopeThreadRef(thread.environmentId, restoreThreadId(thread)),
                           );
                           if (result._tag === "Success") {
                             refreshArchivedThreads();
@@ -3679,9 +3689,7 @@ export function ArchivedThreadsPanel() {
                     >
                       <ArchiveX className="size-3.5" />
                       <span>
-                        {thread.archivedWith && thread.archivedWith.threadId !== thread.id
-                          ? "Restore family"
-                          : "Unarchive"}
+                        {restoreThreadId(thread) !== thread.id ? "Restore family" : "Unarchive"}
                       </span>
                     </Button>
                   }

@@ -16,9 +16,21 @@ export function threadCanArchive(runtime: ThreadRuntimeSummary | null | undefine
 
 /** Restore a cascaded archive through its owner; provenance alone does not imply a shared archive. */
 export function threadUnarchiveTargetId(
-  thread: Pick<EnvironmentThreadShell, "id" | "archivedWith">,
+  thread: Pick<EnvironmentThreadShell, "environmentId" | "id" | "archivedWith">,
+  archivedThreads: readonly EnvironmentThreadShell[] = [],
 ) {
-  return thread.archivedWith?.threadId ?? thread.id;
+  const cohort = thread.archivedWith;
+  if (!cohort || cohort.threadId === thread.id) return thread.id;
+  const owner = archivedThreads.find(
+    (candidate) =>
+      candidate.id === cohort.threadId && candidate.environmentId === thread.environmentId,
+  );
+  return owner?.archivedAt != null &&
+    owner.deletedAt === null &&
+    owner.archivedWith?.threadId === cohort.threadId &&
+    owner.archivedWith.commandId === cohort.commandId
+    ? owner.id
+    : thread.id;
 }
 
 /** Snapshot the environment's owned children so confirmation and command agree. */

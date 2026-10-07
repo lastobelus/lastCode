@@ -123,6 +123,7 @@ function checkThreadOperationPermission(thread: EnvironmentThreadShell, title: s
 /** Resolves to true iff the action was dispatched and succeeded. */
 function useThreadActionExecutor(
   onCompleted?: (action: ThreadListAction, thread: EnvironmentThreadShell) => void,
+  archivedThreads?: readonly EnvironmentThreadShell[],
 ) {
   const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
   const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
@@ -239,7 +240,9 @@ function useThreadActionExecutor(
                         environmentId: thread.environmentId,
                         input: {
                           threadId:
-                            action === "unarchive" ? threadUnarchiveTargetId(thread) : thread.id,
+                            action === "unarchive"
+                              ? threadUnarchiveTargetId(thread, archivedThreads)
+                              : thread.id,
                         },
                       }),
                 (result) => result._tag === "Success",
@@ -261,6 +264,7 @@ function useThreadActionExecutor(
     },
     [
       archiveMutation,
+      archivedThreads,
       deleteMutation,
       onCompleted,
       settleMutation,
@@ -834,6 +838,7 @@ export function useThreadListActions(): {
 
 export function useArchivedThreadListActions(
   onCompleted: (thread: EnvironmentThreadShell) => void,
+  archivedThreads: readonly EnvironmentThreadShell[],
 ): {
   readonly unarchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly confirmDeleteThread: (thread: EnvironmentThreadShell) => void;
@@ -844,7 +849,7 @@ export function useArchivedThreadListActions(
     },
     [onCompleted],
   );
-  const executeAction = useThreadActionExecutor(handleCompleted);
+  const executeAction = useThreadActionExecutor(handleCompleted, archivedThreads);
   const unarchiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
       void executeAction("unarchive", thread);

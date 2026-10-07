@@ -480,7 +480,9 @@ const make = Effect.gen(function* () {
       yield* ensureCommandTranscripts(command);
       const result = yield* orchestrator.dispatch(command);
       if (command.type !== "thread.archive") return result;
-      const inspect = (thread: OrchestrationV2ThreadProjection["thread"]) => {
+      const inspect = (
+        thread: OrchestrationV2ThreadProjection["thread"],
+      ): Effect.Effect<boolean, Orchestrator.OrchestratorDispatchError> => {
         if (thread.archivedAt !== null && thread.archivedWith?.commandId === command.commandId)
           return Effect.succeed(true);
         if (

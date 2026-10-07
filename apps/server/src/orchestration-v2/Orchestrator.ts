@@ -11383,11 +11383,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
     const cohort = root.archivedWith;
+    let releaseOwnership = false;
     if (cohort !== undefined && cohort !== null && cohort.threadId !== root.id) {
       const parent = yield* projectionStore
         .getThreadShell(cohort.threadId)
         .pipe(mapDispatchError(command));
-      if (parent?.archivedAt != null)
+      releaseOwnership = parent === null || parent.deletedAt !== null;
+      if (!releaseOwnership && parent?.archivedAt != null)
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -11395,13 +11397,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
     }
     yield* dispatchThreadMutation(command, events, effects);
-    if (cohort?.threadId !== root.id) return;
-    for (const child of yield* archiveFamilyShells(command)) {
+    if (cohort == null || (!releaseOwnership && cohort.threadId !== root.id)) return;
+    const shells = yield* archiveFamilyShells(command);
+    const survivingBranch = releaseOwnership
+      ? new Set(
+          getOwnedThreadFamily(
+            shells
+              .filter(
+                (thread) =>
+                  thread.archivedWith?.threadId === cohort.threadId &&
+                  thread.archivedWith.commandId === cohort.commandId,
+              )
+              .map((thread) => ({ ...thread, archivedAt: null })),
+            root.id,
+          ).children.map((thread) => thread.id),
+        )
+      : null;
+    if (releaseOwnership) {
+      const restored = (yield* getProjectionWithPendingEvents(root.id, events)).thread;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: root.id,
+        occurredAt: restored.updatedAt,
+        payload: { ...restored, lineage: { ...restored.lineage, independent: true } },
+      });
+    }
+    for (const child of shells) {
       if (
         child.id === root.id ||
         child.archivedAt === null ||
-        child.archivedWith?.threadId !== root.id ||
-        child.archivedWith.commandId !== cohort.commandId
+        child.deletedAt !== null ||
+        child.archivedWith?.threadId !== cohort.threadId ||
+        child.archivedWith.commandId !== cohort.commandId ||
+        (survivingBranch !== null && !survivingBranch.has(child.id))
       )
         continue;
       yield* dispatchThreadMutation({ ...command, threadId: child.id }, events, effects);

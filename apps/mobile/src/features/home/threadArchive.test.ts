@@ -75,16 +75,44 @@ describe("thread family archive confirmation", () => {
 
   it("restores a cascade through its archived owner while preserving individually archived children", () => {
     const archivedChild = { ...child("archived-child"), archivedAt: "2026-10-06T00:00:00.000Z" };
+    const cohort = { threadId: root.id, commandId: CommandId.make("archive-family") };
+    const archivedOwner = { ...root, archivedAt: archivedChild.archivedAt, archivedWith: cohort };
     expect(threadUnarchiveTargetId(archivedChild)).toBe(archivedChild.id);
     expect(
-      threadUnarchiveTargetId({
-        ...archivedChild,
-        archivedWith: { threadId: root.id, commandId: CommandId.make("archive-family") },
-      }),
+      threadUnarchiveTargetId(
+        {
+          ...archivedChild,
+          archivedWith: cohort,
+        },
+        [archivedOwner],
+      ),
     ).toBe(root.id);
     expect(threadUnarchiveTargetId({ ...archivedChild, archivedWith: null })).toBe(
       archivedChild.id,
     );
+  });
+
+  it("restores the surviving child when its archive owner is unavailable or belongs to another cohort", () => {
+    const cohort = { threadId: root.id, commandId: CommandId.make("archive-family") };
+    const archivedAt = "2026-10-06T00:00:00.000Z";
+    const archivedChild = { ...child("survivor"), archivedAt, archivedWith: cohort };
+    const archivedOwner = { ...root, archivedAt, archivedWith: cohort };
+    const unavailableOwners = [
+      [],
+      [{ ...archivedOwner, deletedAt: archivedAt }],
+      [{ ...archivedOwner, archivedAt: null }],
+      [
+        {
+          ...archivedOwner,
+          archivedWith: { ...cohort, commandId: CommandId.make("other-archive") },
+        },
+      ],
+      [{ ...archivedOwner, archivedWith: null }],
+      [{ ...archivedOwner, environmentId: EnvironmentId.make("other-environment") }],
+    ];
+    for (const owners of unavailableOwners) {
+      expect(threadUnarchiveTargetId(archivedChild, owners)).toBe(archivedChild.id);
+    }
   });
 
   it("allows keeping persistent descendants only under an independently runnable branch", () => {

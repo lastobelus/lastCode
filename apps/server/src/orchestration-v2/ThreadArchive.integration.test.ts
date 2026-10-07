@@ -286,6 +286,87 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("restores a surviving branch independently after its archived owner is deleted", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { parent, child, grandchild } = yield* family;
+    const sibling = yield* delegate(parent, "sibling");
+    const separate = ThreadId.make("separately-archived-descendant");
+    yield* createWatchingThread(separate, 6);
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("separate-descendant-archive"),
+      threadId: separate,
+    });
+    const separateThread = (yield* orchestrator.getThreadProjection(separate)).thread;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("separate-descendant-lineage"),
+      type: "thread.metadata-updated",
+      threadId: separate,
+      occurredAt: now,
+      payload: {
+        ...separateThread,
+        lineage: {
+          parentThreadId: child,
+          relationshipToParent: "subagent",
+          rootThreadId: parent,
+        },
+      },
+    });
+    const command = archive(parent, [child, grandchild, sibling]);
+    yield* orchestrator.dispatch(command);
+    yield* threads.executeArchive({ threadId: parent, requestId: command.commandId }).pipe(
+      Effect.provide(
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          teardownThread: () => Effect.void,
+        }),
+      ),
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("delete-archived-owner"),
+      threadId: parent,
+    });
+    assert.isTrue(
+      Exit.isFailure(
+        yield* Effect.exit(
+          orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("cannot-restore-deleted-owner"),
+            threadId: parent,
+          }),
+        ),
+      ),
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("restore-surviving-branch"),
+      threadId: child,
+    });
+    const restoredChild = (yield* orchestrator.getThreadProjection(child)).thread;
+    assert.isTrue(restoredChild.lineage.independent);
+    assert.equal(restoredChild.lineage.parentThreadId, parent);
+    assert.equal(restoredChild.lineage.rootThreadId, parent);
+    for (const id of [child, grandchild]) {
+      const projection = yield* orchestrator.getThreadProjection(id);
+      assert.isNull(projection.thread.archivedAt);
+      assert.isNull(projection.thread.archivedWith);
+      assert.isTrue(projection.runs.every((run) => run.status === "cancelled"));
+    }
+    const deletedOwner = (yield* orchestrator.getThreadProjection(parent)).thread;
+    assert.isNotNull(deletedOwner.deletedAt);
+    assert.isNotNull(deletedOwner.archivedAt);
+    for (const id of [sibling, separate])
+      assert.isNotNull((yield* orchestrator.getThreadProjection(id)).thread.archivedAt);
+    assert.isUndefined(
+      (yield* orchestrator.getThreadProjection(grandchild)).thread.lineage.independent,
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect(
   "keeping app-owned subagents preserves their subtree and releases future cancellation ownership",
   () =>
