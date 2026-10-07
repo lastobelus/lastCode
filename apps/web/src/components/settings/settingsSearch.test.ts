@@ -582,6 +582,28 @@ describe("settings sidebar scope", () => {
     });
   });
 
+  it.each([
+    ["show thread provider badges", "show-thread-provider-badges"],
+    ["provider badge size", "thread-provider-badge-size"],
+    ["provider badge transparency", "thread-provider-badge-transparency"],
+  ])("routes %s to LastCode settings", (query, id) => {
+    expect(searchSettings(query)[0]).toMatchObject({
+      id,
+      to: "/settings/lastcode",
+    });
+  });
+
+  it("finds badge transparency through opacity search", () => {
+    expect(searchSettings("provider badge opacity")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "thread-provider-badge-transparency",
+          to: "/settings/lastcode",
+        }),
+      ]),
+    );
+  });
+
   it("routes project icon rounding to LastCode settings", () => {
     expect(searchSettings("rounded project icons")[0]).toMatchObject({
       id: "rounded-project-icons",

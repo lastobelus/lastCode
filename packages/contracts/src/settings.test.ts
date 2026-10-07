@@ -734,6 +734,51 @@ describe("ClientSettings environment icons", () => {
   );
 });
 
+describe("ClientSettings thread provider badges", () => {
+  it("enables opaque provider badges at 80% for existing client settings", () => {
+    const settings = decodeClientSettings({ showLocalEnvironmentIcon: false });
+    expect(settings.showThreadProviderBadge).toBe(true);
+    expect(settings.threadProviderBadgeSize).toBe(80);
+    expect(settings.threadProviderBadgeTransparency).toBe(0);
+  });
+
+  it("keeps omitted badge preferences out of partial updates", () => {
+    const patch = decodeClientSettingsPatch({ showLocalEnvironmentIcon: true });
+    expect(patch).not.toHaveProperty("showThreadProviderBadge");
+    expect(patch).not.toHaveProperty("threadProviderBadgeSize");
+    expect(patch).not.toHaveProperty("threadProviderBadgeTransparency");
+  });
+
+  it("persists badge appearance while badges are disabled", () => {
+    const input = {
+      showThreadProviderBadge: false,
+      threadProviderBadgeSize: 65,
+      threadProviderBadgeTransparency: 30,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([
+    ["threadProviderBadgeSize", 10, 100],
+    ["threadProviderBadgeTransparency", 0, 100],
+  ] as const)("validates percentage bounds for %s", (key, minimum, maximum) => {
+    for (const value of [minimum, maximum]) {
+      expect(decodeClientSettings({ [key]: value })[key]).toBe(value);
+      expect(decodeClientSettingsPatch({ [key]: value })).toEqual({ [key]: value });
+    }
+    for (const value of [minimum - 1, maximum + 1, minimum + 0.5, "50", null]) {
+      expect(() => decodeClientSettings({ [key]: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ [key]: value })).toThrow();
+    }
+  });
+
+  it.each(["yes", 1, null])("rejects a non-boolean badge toggle: %s", (value) => {
+    expect(() => decodeClientSettings({ showThreadProviderBadge: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ showThreadProviderBadge: value })).toThrow();
+  });
+});
+
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar", () => {
     const settings = decodeClientSettings({});

@@ -1,6 +1,7 @@
 import {
   DesktopLastCodeSettingsState,
   LastCodeSettingsImportPreview,
+  ProviderDriverKind,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -12,6 +13,10 @@ import {
   MAX_SCROLLBAR_MARGIN,
   MAX_SCROLLBAR_WIDTH,
   MAX_HANDOFFS_MENU_LIMIT,
+  MIN_THREAD_PROVIDER_BADGE_SIZE,
+  MAX_THREAD_PROVIDER_BADGE_SIZE,
+  MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+  MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
   MIN_LEGACY_SIDEBAR_SCALE,
   MIN_SCROLLBAR_MARGIN,
   MIN_SCROLLBAR_WIDTH,
@@ -33,6 +38,7 @@ import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
+import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
@@ -47,6 +53,17 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 
+const PROVIDER_BADGE_PREVIEWS = [
+  {
+    kind: "laptop",
+    provider: { driverKind: ProviderDriverKind.make("claudeAgent"), displayName: "Claude" },
+  },
+  {
+    kind: "server",
+    provider: { driverKind: ProviderDriverKind.make("codex"), displayName: "Codex" },
+  },
+] as const;
+
 const STATUS_INDICATOR_PREVIEW = {
   colorClass: "text-sky-600 dark:text-sky-300/80",
   dotClass: "bg-sky-500 dark:bg-sky-300/80",
@@ -60,13 +77,14 @@ const WORKTREE_INDICATOR_PREVIEW_THREAD = {
   worktreePath: "/example/worktrees/example",
 };
 
-function PixelSlider({
+function SettingsSlider({
   id,
   label,
   min,
   max,
   value,
   onChange,
+  unit = "px",
 }: {
   id: string;
   label: string;
@@ -74,6 +92,7 @@ function PixelSlider({
   max: number;
   value: number;
   onChange: (value: number) => void;
+  unit?: "px" | "%";
 }) {
   const ratio = (value - min) / (max - min);
   const sliderStyle = {
@@ -87,7 +106,8 @@ function PixelSlider({
         className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
         htmlFor={id}
       >
-        {value}px
+        {value}
+        {unit}
       </output>
       <input
         aria-label={label}
@@ -301,7 +321,7 @@ export function LastCodeSettingsPanel() {
                 ) : null
               }
               control={
-                <PixelSlider
+                <SettingsSlider
                   id="scrollbar-width"
                   label="Scrollbar width"
                   min={MIN_SCROLLBAR_WIDTH}
@@ -325,7 +345,7 @@ export function LastCodeSettingsPanel() {
                 ) : null
               }
               control={
-                <PixelSlider
+                <SettingsSlider
                   id="scrollbar-margin"
                   label="Scrollbar margin"
                   min={MIN_SCROLLBAR_MARGIN}
@@ -490,6 +510,76 @@ export function LastCodeSettingsPanel() {
         title="Environments"
         icon={<ServerIcon className="size-5" />}
       >
+        <SettingsRow
+          {...searchableSetting("show-thread-provider-badges")}
+          description="Show the thread's provider logo at the lower-right of its machine icon in the sidebar. Badges also show machine icons for local threads when Show local icon is off."
+          status={
+            <span className="inline-flex flex-wrap items-center gap-5 rounded-md bg-sidebar px-3 py-2 text-xs text-secondary-label">
+              {PROVIDER_BADGE_PREVIEWS.map(({ kind, provider }) => (
+                <span key={kind} className="inline-flex items-center gap-3">
+                  <SidebarEnvironmentIcon
+                    kind={kind}
+                    context="settings"
+                    className="size-5"
+                    provider={clientSettings.showThreadProviderBadge ? provider : null}
+                    badgeSize={clientSettings.threadProviderBadgeSize}
+                    badgeTransparency={clientSettings.threadProviderBadgeTransparency}
+                  />
+                  <span>
+                    {kind === "laptop" ? "Local" : "Remote"} · {provider.displayName}
+                  </span>
+                </span>
+              ))}
+            </span>
+          }
+          control={
+            <Switch
+              checked={clientSettings.showThreadProviderBadge}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ showThreadProviderBadge: Boolean(checked) })
+              }
+              aria-label="Show thread provider badges"
+            />
+          }
+        />
+        {clientSettings.showThreadProviderBadge ? (
+          <>
+            <SettingsRow
+              {...searchableSetting("thread-provider-badge-size")}
+              description="Provider badge size as a percentage of the machine icon."
+              control={
+                <SettingsSlider
+                  id="thread-provider-badge-size-slider"
+                  label="Provider badge size"
+                  min={MIN_THREAD_PROVIDER_BADGE_SIZE}
+                  max={MAX_THREAD_PROVIDER_BADGE_SIZE}
+                  value={clientSettings.threadProviderBadgeSize}
+                  unit="%"
+                  onChange={(threadProviderBadgeSize) =>
+                    updateClientSettings({ threadProviderBadgeSize })
+                  }
+                />
+              }
+            />
+            <SettingsRow
+              {...searchableSetting("thread-provider-badge-transparency")}
+              description="0% keeps the provider logo opaque; 100% makes it fully transparent."
+              control={
+                <SettingsSlider
+                  id="thread-provider-badge-transparency-slider"
+                  label="Provider badge transparency"
+                  min={MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY}
+                  max={MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY}
+                  value={clientSettings.threadProviderBadgeTransparency}
+                  unit="%"
+                  onChange={(threadProviderBadgeTransparency) =>
+                    updateClientSettings({ threadProviderBadgeTransparency })
+                  }
+                />
+              }
+            />
+          </>
+        ) : null}
         {environmentSettings.map((environment) => {
           const color = clientSettings.environmentIconColors[environment.environmentId];
           const isLocal = environment.kind === "local";
@@ -532,7 +622,8 @@ export function LastCodeSettingsPanel() {
                     <div className="min-w-0 space-y-1">
                       <div className="text-xs font-medium text-foreground">Show local icon</div>
                       <p className="max-w-xl text-xs leading-snug text-muted-foreground">
-                        Show this environment's Connections icon for local threads.
+                        Show this environment's machine icon for local threads even when provider
+                        badges are off.
                       </p>
                     </div>
                     <Switch

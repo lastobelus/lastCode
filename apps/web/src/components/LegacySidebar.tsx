@@ -1,3 +1,8 @@
+import {
+  ConnectedSidebarEnvironmentIcon,
+  useSidebarProviderBadgePreferences,
+  type SidebarProviderBadgePreferences,
+} from "./sidebar/SidebarEnvironmentIcon";
 import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { describeHandoff } from "../handoffs/handoffMenu";
 import { readThreadHandoffs } from "../handoffs/handoffsStore";
@@ -416,6 +421,7 @@ interface SidebarThreadRowProps {
   compactStatusIndicators: boolean;
   showWorktreeIndicators: boolean;
   showLocalEnvironmentIcon: boolean;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
@@ -556,15 +562,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const environmentPresentation = legacyThreadEnvironmentPresentation({
     isPrimary: !isRemoteThread,
     isDesktopLocal: isDesktopLocalThread,
-    showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
+    showLocalEnvironmentIcon:
+      props.showLocalEnvironmentIcon || props.providerBadgePreferences.enabled,
     environmentLabel: remoteEnvLabel,
   });
   const showsThreadEnvironmentIcon =
-    environmentPresentation.showRowIcon &&
-    props.familyRow.parentKey === null &&
-    thread.lineage.relationshipToParent !== "subagent";
-  const threadEnvironmentLabel =
-    props.familyRow.parentKey !== null ? null : environmentPresentation.hoverLabel;
+    props.providerBadgePreferences.enabled ||
+    (environmentPresentation.showRowIcon &&
+      props.familyRow.parentKey === null &&
+      thread.lineage.relationshipToParent !== "subagent");
+  const threadEnvironmentLabel = props.providerBadgePreferences.enabled
+    ? (environmentPresentation.hoverLabel ?? remoteEnvLabel ?? "Local")
+    : props.familyRow.parentKey !== null
+      ? null
+      : environmentPresentation.hoverLabel;
   const environmentIconColor = resolveEnvironmentIconColor(
     props.configuredEnvironmentIconColor,
     environment !== null && !isDesktopLocalThread,
@@ -1359,7 +1370,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       <TooltipTrigger
                         render={
                           <span
-                            aria-label={threadEnvironmentLabel ?? "Remote"}
+                            aria-label={[
+                              threadEnvironmentLabel ?? "Remote",
+                              props.providerBadgePreferences.enabled
+                                ? providerEntry?.displayName
+                                : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
                             className={`inline-flex shrink-0 items-center justify-center ${
                               isConfirmingArchive ? "invisible" : ""
                             }`}
@@ -1367,14 +1385,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           />
                         }
                       >
-                        <ConnectedEnvironmentIcon
+                        <ConnectedSidebarEnvironmentIcon
                           environmentId={thread.environmentId}
                           context="legacy-row"
                           color={environmentIconColor}
                           className="size-3"
+                          provider={props.providerBadgePreferences.enabled ? providerEntry : null}
+                          badgeSize={props.providerBadgePreferences.size}
+                          badgeTransparency={props.providerBadgePreferences.transparency}
                         />
                       </TooltipTrigger>
-                      <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
+                      <TooltipPopup side="top">
+                        {threadEnvironmentLabel}
+                        {props.providerBadgePreferences.enabled && providerEntry
+                          ? ` · ${providerEntry.displayName}`
+                          : null}
+                      </TooltipPopup>
                     </Tooltip>
                   ) : null}
                 </span>
@@ -1548,6 +1574,7 @@ interface SidebarProjectThreadListProps {
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   showLocalEnvironmentIcon: boolean;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
   projectCwd: string | null;
   projectKey: string;
   projectExpanded: boolean;
@@ -1616,6 +1643,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     providerEntriesByEnvironmentId,
     environmentIconColors,
     showLocalEnvironmentIcon,
+    providerBadgePreferences,
     projectCwd,
     projectKey,
     projectExpanded,
@@ -1732,6 +1760,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 compactStatusIndicators={compactStatusIndicators}
                 showWorktreeIndicators={showWorktreeIndicators}
                 showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                providerBadgePreferences={providerBadgePreferences}
                 configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                 projectCwd={projectCwd}
                 providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
@@ -1812,6 +1841,7 @@ interface SidebarProjectItemProps {
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   showLocalEnvironmentIcon: boolean;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
@@ -3526,6 +3556,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         environmentIconColors={props.environmentIconColors}
         showLocalEnvironmentIcon={props.showLocalEnvironmentIcon}
+        providerBadgePreferences={props.providerBadgePreferences}
         projectCwd={project.workspaceRoot}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
@@ -3987,6 +4018,7 @@ interface SidebarProjectsContentProps {
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   showLocalEnvironmentIcon: boolean;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
 }
 
 // Drafts the user typed into but never sent, rendered above the projects
@@ -4132,6 +4164,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     knownEnvironmentIds,
     environmentIconColors,
     showLocalEnvironmentIcon,
+    providerBadgePreferences,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -4256,6 +4289,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         knownEnvironmentIds={knownEnvironmentIds}
                         environmentIconColors={environmentIconColors}
                         showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                        providerBadgePreferences={providerBadgePreferences}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -4300,6 +4334,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 knownEnvironmentIds={knownEnvironmentIds}
                 environmentIconColors={environmentIconColors}
                 showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                providerBadgePreferences={providerBadgePreferences}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -4362,6 +4397,7 @@ export default function LegacySidebar() {
   );
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
+  const providerBadgePreferences = useSidebarProviderBadgePreferences();
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const scaleStyle = useMemo(
     () => legacySidebarScaleStyle(legacySidebarScale),
@@ -5056,6 +5092,7 @@ export default function LegacySidebar() {
         knownEnvironmentIds={knownEnvironmentIds}
         environmentIconColors={environmentIconColors}
         showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+        providerBadgePreferences={providerBadgePreferences}
       />
       <SidebarChromeFooter />
     </>
