@@ -65,7 +65,7 @@ describe("CI process ownership", () => {
             ({ state, parentPid }) => state === "Z" && parentPid === evidence.subreaperPid,
           ),
         ).toBe(true);
-        expect(evidence.reapedGroupProbeError).toBe(2); // ESRCH after waitpid reaps the zombies.
+        expect(evidence.reapedGroupProbeError).toBe(NodeOS.constants.errno.ESRCH);
       } finally {
         NodeFS.rmSync(cwd, { recursive: true, force: true });
       }
