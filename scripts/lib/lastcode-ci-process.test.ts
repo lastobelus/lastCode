@@ -25,9 +25,15 @@ function writeControllerDeathFixture(cwd: string) {
   );
 }
 
+function liveGroupMembers(members: readonly { state: string | undefined }[]) {
+  // Zombies have stopped executing; their adopter, rather than CI, owns reaping.
+  // Missing state stays live so failed inspection cannot pass cleanup acceptance.
+  return members.filter(({ state }) => state?.startsWith("Z") !== true);
+}
+
 describe("CI process ownership", () => {
   it.skipIf(NodeProcess.platform !== "linux")(
-    "records controller-death cleanup before orphan reaping",
+    "recognizes terminated orphans before their process group is reaped",
     async () => {
       const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-subreaper-"));
       try {
@@ -54,6 +60,7 @@ describe("CI process ownership", () => {
           subreaperPid: number;
           groupProbeError: number | null;
           reapedGroupProbeError: number | null;
+          before: Array<{ state: string }>;
           members: Array<{ pid: number; parentPid: number; state: string }>;
         };
         expect(evidence.controllerExit).toBe(-9);
@@ -65,6 +72,8 @@ describe("CI process ownership", () => {
             ({ state, parentPid }) => state === "Z" && parentPid === evidence.subreaperPid,
           ),
         ).toBe(true);
+        expect(liveGroupMembers(evidence.before)).not.toEqual([]);
+        expect(liveGroupMembers(evidence.members)).toEqual([]);
         expect(evidence.reapedGroupProbeError).toBe(NodeOS.constants.errno.ESRCH);
       } finally {
         NodeFS.rmSync(cwd, { recursive: true, force: true });
@@ -94,7 +103,11 @@ describe("CI process ownership", () => {
             .map(([pid, parentPid, group, state]) => ({ pid, parentPid, group, state })),
         };
       };
-      const recordEvidence = (phase: string, probeError?: unknown) => {
+      const recordEvidence = (
+        phase: string,
+        snapshot: ReturnType<typeof groupState>,
+        probeError?: unknown,
+      ) => {
         NodeProcess.stderr.write(
           `CI controller-death process evidence ${JSON.stringify({
             phase,
@@ -103,7 +116,7 @@ describe("CI process ownership", () => {
             descendantPid,
             groupProbeError:
               probeError instanceof Error && "code" in probeError ? probeError.code : null,
-            ...groupState(),
+            ...snapshot,
           })}\n`,
         );
       };
@@ -122,7 +135,7 @@ describe("CI process ownership", () => {
           const descendant = /descendant-ready:(\d+)\r?\n/u.exec(output)?.[1];
           if (descendant && workerPid !== undefined && descendantPid === undefined) {
             descendantPid = Number(descendant);
-            recordEvidence("before-controller-death");
+            recordEvidence("before-controller-death", groupState());
             ownedController.kill("SIGKILL");
           }
         });
@@ -130,8 +143,8 @@ describe("CI process ownership", () => {
           ownedController.once("error", reject);
           ownedController.once("close", () => resolve());
         });
-        // All descendants inherit this pipe. close proves cleanup completed,
-        // even though the controller itself exited at the ready milestone.
+        // Inherited pipe closure marks termination. Orphan zombies can keep
+        // kill(-group, 0) successful until their adopter reaps them.
         expect(output).toContain("descendant-ready");
         expect(workerPid).toBeDefined();
         let probeError: unknown;
@@ -140,8 +153,12 @@ describe("CI process ownership", () => {
         } catch (error) {
           probeError = error;
         }
-        recordEvidence("after-output-pipe-close", probeError);
-        expect(probeError).toBeDefined();
+        const stopped = groupState();
+        recordEvidence("after-output-pipe-close", stopped, probeError);
+        expect(stopped.error).toBeUndefined();
+        expect(stopped.status).toBe(0);
+        expect(stopped.members).toBeDefined();
+        expect(liveGroupMembers(stopped.members!)).toEqual([]);
       } finally {
         controller?.kill("SIGKILL");
         if (workerPid !== undefined) {
