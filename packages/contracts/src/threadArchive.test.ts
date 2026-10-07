@@ -37,9 +37,14 @@ describe("owned archive family", () => {
       thread("released", "root", { independent: true }),
       thread("released-child", "released"),
       thread("archived", "root", { archived: true }),
+      thread("live-below-archive", "archived"),
     ];
     const family = getOwnedThreadFamily(threads, ThreadId.make("root"));
-    expect(family.children.map((child) => child.id)).toEqual(["child", "grandchild"]);
+    expect(family.children.map((child) => child.id)).toEqual([
+      "child",
+      "grandchild",
+      "live-below-archive",
+    ]);
     expect(family.directChildren.map((child) => child.id)).toEqual(["child"]);
   });
 

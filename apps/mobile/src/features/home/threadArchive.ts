@@ -38,13 +38,11 @@ export function resolveThreadArchiveFamily(
   threads: readonly EnvironmentThreadShell[],
   thread: EnvironmentThreadShell,
 ) {
-  const family = getOwnedThreadFamily(
-    threads
-      .filter((candidate) => candidate.environmentId === thread.environmentId)
-      .map((candidate) => ({ ...candidate, creationSource: candidate.source.creationSource })),
-    thread.id,
-  );
-  const byId = new Map(family.children.map((child) => [child.id, child]));
+  const familyThreads = threads
+    .filter((candidate) => candidate.environmentId === thread.environmentId)
+    .map((candidate) => ({ ...candidate, creationSource: candidate.source.creationSource }));
+  const family = getOwnedThreadFamily(familyThreads, thread.id);
+  const byId = new Map(familyThreads.map((child) => [child.id, child]));
   const keptIds = new Set(family.promotableChildren.map((child) => child.id));
   const isKept = (child: (typeof family.children)[number]): boolean => {
     const visited = new Set<string>();

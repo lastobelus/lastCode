@@ -20,6 +20,7 @@ import {
   createAtomCommandScheduler,
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
+  createEnvironmentQueryAtomFamily,
 } from "./runtime.ts";
 import {
   type ThreadCommandInput,
@@ -118,6 +119,7 @@ import {
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { presentThreadShell } from "./models.ts";
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
@@ -529,6 +531,16 @@ export function createThreadEnvironmentAtoms<R, E>(
   };
   const optimistic = createOptimisticThreadLifecycle(snapshotAtom);
   return {
+    archiveFamilyAtom: createEnvironmentQueryAtomFamily(runtime, {
+      label: "environment-data:queries:thread:archive-family",
+      staleTimeMs: 0,
+      execute: (input: { readonly threadId: ThreadId }) =>
+        Effect.gen(function* () {
+          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+          const shells = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily, input);
+          return shells.map((shell) => presentThreadShell(supervisor.target.environmentId, shell));
+        }),
+    }),
     ...commands,
     snapshotAtom: optimistic.snapshotAtom,
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>

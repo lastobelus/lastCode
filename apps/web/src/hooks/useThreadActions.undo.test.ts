@@ -10,6 +10,7 @@ import { makeThreadFixture } from "../test-fixtures";
 
 const familyState = vi.hoisted(() => ({ threads: [] as ReturnType<typeof makeThreadFixture>[] }));
 const archiveDialog = vi.hoisted(() => vi.fn());
+const archiveFamilyQuery = vi.hoisted(() => vi.fn());
 vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
 
 const commands = vi.hoisted(() => ({
@@ -26,7 +27,10 @@ const router = vi.hoisted(() => ({
   navigate: vi.fn(async () => {}),
   state: { matches: [{ params: {} as Record<string, string> }] },
 }));
-vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
+vi.mock("../state/use-atom-query-runner", () => ({
+  useAtomQueryRunner: (family: unknown) =>
+    family === threadEnvironment.archiveFamilyAtom ? archiveFamilyQuery : vi.fn(),
+}));
 vi.mock("../state/session", async (original) => ({
   ...(await original<typeof import("../state/session")>()),
   readEnvironmentScope: () => true,
@@ -100,6 +104,10 @@ function currentUndo() {
 beforeEach(() => {
   familyState.threads = [];
   archiveDialog.mockReset();
+  archiveFamilyQuery.mockReset().mockImplementation(async () => ({
+    _tag: "Success",
+    value: familyState.threads,
+  }));
   vi.useFakeTimers();
   for (const command of Object.values(commands)) {
     command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
@@ -249,6 +257,67 @@ describe("archive family confirmation", () => {
     });
     await useThreadActions().archiveThread(target);
     expect(useThreadUndoNotice.getState().notice).toBeNull();
+  });
+
+  it.each([false, true])(
+    "reads hidden intermediate owners before archive (bulk=%s)",
+    async (bulk) => {
+      const { child, nested } = seedFamily();
+      const inactiveOwner = { ...child, archivedAt: "2026-01-01T00:00:00.000Z" };
+      const liveNested = { ...nested, hasPendingApprovals: true };
+      familyState.threads = [liveNested];
+      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [inactiveOwner, liveNested] });
+      archiveDialog.mockImplementation(async (request) => {
+        expect(request.children.map((thread: { id: string }) => thread.id)).toEqual([nested.id]);
+        expect(await request.submit("stop_and_archive")).toBeNull();
+        return "stop_and_archive";
+      });
+      const actions = useThreadActions();
+      if (bulk) await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]);
+      else await actions.archiveThread(target);
+      expect(archiveFamilyQuery).toHaveBeenCalledWith({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      });
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: target.threadId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [nested.id],
+        },
+      });
+    },
+  );
+
+  it.each([false, true])("blocks mutations when the family read fails (bulk=%s)", async (bulk) => {
+    archiveFamilyQuery.mockResolvedValue({
+      _tag: "Failure",
+      cause: Cause.fail(new Error("Family unavailable")),
+    });
+    const actions = useThreadActions();
+    const result = bulk
+      ? (await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]))
+          ?.mutationFailure
+      : await actions.archiveThread(target);
+    expect(result?._tag).toBe("Failure");
+    expect(commands.archive).not.toHaveBeenCalled();
+    expect(archiveDialog).not.toHaveBeenCalled();
+  });
+
+  it("reads every bulk family before dispatching any participant", async () => {
+    archiveFamilyQuery.mockResolvedValueOnce({ _tag: "Success", value: [] }).mockResolvedValueOnce({
+      _tag: "Failure",
+      cause: Cause.fail(new Error("Second family unavailable")),
+    });
+    const outcome = await useThreadActions().archiveThreads([
+      { threadRef: target, threadKey: "undo-env:thread" },
+      { threadRef: { ...target, threadId: ThreadId.make("second") }, threadKey: "undo-env:second" },
+    ]);
+    expect(outcome?.mutationFailure?._tag).toBe("Failure");
+    expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    expect(commands.archive).not.toHaveBeenCalled();
+    expect(archiveDialog).not.toHaveBeenCalled();
   });
 });
 

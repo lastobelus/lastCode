@@ -3920,28 +3920,16 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
-      const unfinishedArchive = yield* orchestrator
-        .dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make("runtime-layer-archive-queued-unfinished"),
-          threadId,
-        })
-        .pipe(Effect.flip);
-      assert.equal(unfinishedArchive._tag, "OrchestratorDispatchError");
-      assert.isNull((yield* orchestrator.getThreadProjection(threadId)).thread.archivedAt);
-      yield* orchestrator.dispatch({
-        type: "run.interrupt",
-        commandId: CommandId.make("runtime-layer-archive-queued-stop"),
-        threadId,
-        runId: activeRun.id,
-        holdQueue: true,
-      });
-
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
       });
+      const stopping = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(stopping.thread.archivedAt);
+      assert.equal(stopping.thread.archivePending?.status, "stopping");
+      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "cancelled");
+      assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
       yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const archived = yield* orchestrator.getThreadProjection(threadId);

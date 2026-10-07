@@ -16,6 +16,9 @@ const state = vi.hoisted(() => ({
   dropBusy: false,
   scopes: new Map<string, Set<string>>(),
   shells: [] as EnvironmentThreadShell[],
+  archiveFamily: undefined as EnvironmentThreadShell[] | undefined,
+  archiveFamilyError: undefined as Error | undefined,
+  archiveFamilyReads: [] as { environmentId: string; input: { threadId: string } }[],
   requests: [] as {
     action: string;
     environmentId: string;
@@ -88,6 +91,15 @@ vi.mock("../../state/atom-registry", () => ({
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => command,
+}));
+vi.mock("../../state/use-atom-query-runner", () => ({
+  useAtomQueryRunner:
+    () => async (request: { environmentId: string; input: { threadId: string } }) => {
+      state.archiveFamilyReads.push(request);
+      return state.archiveFamilyError === undefined
+        ? AsyncResult.success(state.archiveFamily ?? state.shells)
+        : AsyncResult.failure(Cause.fail(state.archiveFamilyError));
+    },
 }));
 // Stubbed at the direct dependency: the real outbox pulls the Expo file-system
 // storage into a test that only reads which threads are queued.
@@ -177,12 +189,63 @@ beforeEach(() => {
   ]);
   state.requests = [];
   state.shells = [];
+  state.archiveFamily = undefined;
+  state.archiveFamilyError = undefined;
+  state.archiveFamilyReads = [];
   state.dialogs = [];
   state.alerts = [];
   state.afterRequest = undefined;
 });
 
 afterEach(() => vi.unstubAllEnvs());
+
+describe("archive family reads", () => {
+  it("confirms a live descendant reached through an inactive owner", async () => {
+    const root = makeThread();
+    const intermediate = makeThread({
+      id: ThreadId.make("inactive-owner"),
+      archivedAt: "2026-09-02T00:00:00.000Z",
+      lineage: { parentThreadId: root.id, rootThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    const descendant = makeThread({
+      id: ThreadId.make("live-descendant"),
+      hasPendingApprovals: true,
+      lineage: {
+        parentThreadId: intermediate.id,
+        rootThreadId: root.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    state.shells = [root, descendant];
+    state.archiveFamily = [root, intermediate, descendant];
+    const archiving = useThreadListActions().archiveThread(root);
+    await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+    expect(state.requests).toEqual([]);
+    state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
+    await archiving;
+    expect(state.archiveFamilyReads).toEqual([
+      { environmentId: root.environmentId, input: { threadId: root.id } },
+    ]);
+    expect(state.requests).toEqual([
+      expect.objectContaining({
+        action: "archive",
+        environmentId: root.environmentId,
+        input: {
+          threadId: root.id,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [descendant.id],
+        },
+      }),
+    ]);
+  });
+
+  it("reports a failed family read and dispatches nothing", async () => {
+    state.archiveFamilyError = new Error("Family unavailable");
+    await useThreadListActions().archiveThread(makeThread());
+    expect(state.requests).toEqual([]);
+    expect(state.alerts).toEqual([{ title: "Could not archive thread", buttons: undefined }]);
+  });
+});
 
 describe("thread list operation permissions", () => {
   it.each(mutationCases)(

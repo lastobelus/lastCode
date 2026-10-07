@@ -321,6 +321,7 @@ export interface ThreadManagementServiceShape {
     readonly location?: "active" | "archive";
   }) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
+  readonly getThreadArchiveFamily: Orchestrator.OrchestratorV2["Service"]["getThreadArchiveFamily"];
   readonly listProjectThreads: (input: {
     readonly projectId: ProjectId;
     readonly includeSubagents: boolean;
@@ -551,12 +552,14 @@ const make = Effect.gen(function* () {
               "providerSessions",
               "providerThreads",
             ]);
+            // A stopped projection may still have an adapter finalizer closing.
+            // Include every binding, plus native mirrors' owned session references.
             const sessions = new Set([
-              ...context.providerSessions
-                .filter((session) => session.status !== "stopped" && session.status !== "error")
-                .map((session) => session.id),
+              ...context.providerSessions.map((session) => session.id),
               ...context.providerThreads.flatMap((providerThread) =>
-                providerThread.providerSessionId === null ? [] : [providerThread.providerSessionId],
+                providerThread.appThreadId !== threadId || providerThread.providerSessionId === null
+                  ? []
+                  : [providerThread.providerSessionId],
               ),
             ]);
             for (const providerSessionId of sessions)
@@ -951,6 +954,7 @@ const make = Effect.gen(function* () {
     getProjectThread,
     getShellSnapshot: orchestrator.getShellSnapshot,
     getThreadShell: orchestrator.getThreadShell,
+    getThreadArchiveFamily: orchestrator.getThreadArchiveFamily,
     listProjectThreads,
     sendToThread,
     waitForThread,

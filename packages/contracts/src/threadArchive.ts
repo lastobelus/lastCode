@@ -21,9 +21,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
     if (
       parent === null ||
       thread.lineage.relationshipToParent !== "subagent" ||
-      thread.lineage.independent === true ||
-      thread.archivedAt !== null ||
-      thread.deletedAt != null
+      thread.lineage.independent === true
     )
       continue;
     const siblings = byParent.get(parent) ?? [];
@@ -36,7 +34,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
     for (const child of byParent.get(id) ?? []) {
       if (visited.has(child.id)) continue;
       visited.add(child.id);
-      children.push(child);
+      if (child.archivedAt === null && child.deletedAt == null) children.push(child);
       visit(child.id);
     }
   };

@@ -54,6 +54,16 @@ describe("thread family archive confirmation", () => {
       lineage: { rootThreadId: root.id, parentThreadId: parent, relationshipToParent: "subagent" },
     });
 
+  it("keeps promotion available for protected descendants behind inactive intermediates", () => {
+    const first = child("first");
+    const inactive = { ...child("inactive", first.id), archivedAt: "2026-09-02T00:00:00.000Z" };
+    const protectedChild = { ...child("protected", inactive.id), persistent: true };
+    const family = resolveThreadArchiveFamily([root, first, inactive, protectedChild], root);
+    expect(family.children.map(({ id }) => id)).toEqual([first.id, protectedChild.id]);
+    expect(family.canKeepSeparately).toBe(true);
+    expect(family.canStopAndArchive).toBe(false);
+  });
+
   it("requires confirmation for recursive work and attention without pulling in other environments", () => {
     const first = child("first");
     const nested = { ...child("nested", first.id), hasPendingApprovals: true };

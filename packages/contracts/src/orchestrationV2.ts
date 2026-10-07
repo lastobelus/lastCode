@@ -3390,6 +3390,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   recoverThread: "orchestration.recoverThread",
   repairThread: "orchestration.repairThread",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
+  getThreadArchiveFamily: "orchestration.getThreadArchiveFamily",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnItem: "orchestration.getTurnItem",
@@ -3752,6 +3753,10 @@ export const OrchestrationV2RpcSchemas = {
   getArchivedShellSnapshot: {
     input: Schema.Struct({}),
     output: OrchestrationV2ArchivedShellSnapshot,
+  },
+  getThreadArchiveFamily: {
+    input: Schema.Struct({ threadId: ThreadId }),
+    output: Schema.Array(OrchestrationV2ThreadShell),
   },
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,

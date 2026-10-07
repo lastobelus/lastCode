@@ -9,6 +9,7 @@ import {
   ThreadId,
   type OrchestrationV2Command,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -18,12 +19,15 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as Stream from "effect/Stream";
 import { Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+import { executeAtomQuery } from "./runtime.ts";
+import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
@@ -80,16 +84,31 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
   ],
 };
 
-const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
+const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
+  archiveFamily: readonly OrchestrationV2ThreadShell[] = SNAPSHOT.threads,
+  archiveFamilyError?: Error,
+) {
+  const familyReads: { threadId: ThreadId }[] = [];
   const requests = yield* Queue.unbounded<{
     command: OrchestrationV2Command;
     reply: Deferred.Deferred<{ sequence: number }, Error>;
   }>();
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: { environmentId: ENVIRONMENT_ID },
+    state: yield* SubscriptionRef.make({
+      ...AVAILABLE_CONNECTION_STATE,
+      phase: "connected",
+      desired: true,
+    }),
     session: yield* SubscriptionRef.make(
       Option.some({
         client: {
+          [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: (input: { threadId: ThreadId }) => {
+            familyReads.push(input);
+            return archiveFamilyError === undefined
+              ? Effect.succeed(archiveFamily)
+              : Effect.fail(archiveFamilyError);
+          },
           [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
             Effect.gen(function* () {
               const reply = yield* Deferred.make<{ sequence: number }, Error>();
@@ -105,6 +124,8 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
       Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
         run: (_environmentId, effect) =>
           Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        followStream: (_environmentId, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       } as EnvironmentRegistry.EnvironmentRegistry["Service"]),
       Layer.succeed(
         Crypto.Crypto,
@@ -121,8 +142,77 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const visibleAtom = commands.snapshotAtom(ENVIRONMENT_ID);
   registry.mount(visibleAtom);
-  return { registry, commands, snapshotAtom, visibleAtom, requests };
+  return { registry, commands, snapshotAtom, visibleAtom, requests, familyReads };
 });
+
+it.effect("reads a scoped complete family without replacing the active shell snapshot", () =>
+  Effect.gen(function* () {
+    const intermediateId = ThreadId.make("inactive-owner");
+    const liveChildId = ThreadId.make("live-child");
+    const root = SNAPSHOT.threads[0]!;
+    const shells = [
+      root,
+      {
+        ...root,
+        id: intermediateId,
+        archivedAt: NOW,
+        lineage: {
+          parentThreadId: root.id,
+          rootThreadId: root.id,
+          relationshipToParent: "subagent" as const,
+        },
+      },
+      {
+        ...root,
+        id: liveChildId,
+        status: "running" as const,
+        lineage: {
+          parentThreadId: intermediateId,
+          rootThreadId: root.id,
+          relationshipToParent: "subagent" as const,
+        },
+      },
+    ];
+    const h = yield* makeHarness(shells);
+    const result = yield* Effect.promise(() =>
+      executeAtomQuery(
+        h.registry,
+        h.commands.archiveFamilyAtom({
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+        { reportFailure: false },
+      ),
+    );
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(result.value.map(({ id, environmentId }) => ({ id, environmentId }))).toEqual(
+      shells.map(({ id }) => ({ id, environmentId: ENVIRONMENT_ID })),
+    );
+    expect(result.value.find(({ id }) => id === liveChildId)?.runtime?.status).toBe("running");
+    expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
+    expect(h.registry.get(h.visibleAtom)).toBe(SNAPSHOT);
+  }),
+);
+
+it.effect("fails the family query rather than returning the local active-only snapshot", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness([], new Error("Family unavailable"));
+    const result = yield* Effect.promise(() =>
+      executeAtomQuery(
+        h.registry,
+        h.commands.archiveFamilyAtom({
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID },
+        }),
+        { reportFailure: false },
+      ),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
+    expect(h.registry.get(h.visibleAtom)).toBe(SNAPSHOT);
+  }),
+);
 
 describe("remote thread lifecycle commands", () => {
   const actions = [

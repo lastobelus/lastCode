@@ -1707,6 +1707,15 @@ const WsOrchestrationV2GetThreadProjectionRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2GetThreadArchiveFamilyRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
+  {
+    payload: OrchestrationV2RpcSchemas.getThreadArchiveFamily.input,
+    success: OrchestrationV2RpcSchemas.getThreadArchiveFamily.output,
+    error: Schema.Union([OrchestrationV2GetThreadProjectionError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2GetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getWorkflowScript,
   {
@@ -2088,6 +2097,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsThreadRepairRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
+  WsOrchestrationV2GetThreadArchiveFamilyRpc,
   WsOrchestrationV2LaunchThreadRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,

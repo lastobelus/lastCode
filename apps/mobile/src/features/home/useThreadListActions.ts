@@ -18,6 +18,7 @@ import { readEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import {
   beginPendingThreadOrder,
   getPendingThreadOrder,
@@ -126,6 +127,10 @@ function useThreadActionExecutor(
   archivedThreads?: readonly EnvironmentThreadShell[],
 ) {
   const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
+  const loadArchiveFamily = useAtomQueryRunner(threadEnvironment.archiveFamilyAtom, {
+    reportFailure: false,
+    refresh: true,
+  });
   const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
   const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const settleMutation = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
@@ -173,7 +178,18 @@ function useThreadActionExecutor(
             );
             return false;
           }
-          const family = resolveThreadArchiveFamily(shells, thread);
+          const familyResult = await loadArchiveFamily({
+            environmentId: thread.environmentId,
+            input: { threadId: thread.id },
+          });
+          if (familyResult._tag === "Failure") {
+            Alert.alert(
+              actionFailureTitle(action),
+              actionFailureMessage(action, familyResult.cause),
+            );
+            return false;
+          }
+          const family = resolveThreadArchiveFamily(familyResult.value, thread);
           const childDisposition = family.requiresConfirmation
             ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
                 Alert.alert(
@@ -264,6 +280,7 @@ function useThreadActionExecutor(
     },
     [
       archiveMutation,
+      loadArchiveFamily,
       archivedThreads,
       deleteMutation,
       onCompleted,

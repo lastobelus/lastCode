@@ -75,15 +75,15 @@ import {
   type ArchiveChildDisposition,
 } from "../components/ThreadArchiveDialog";
 
-function readArchiveFamily(target: ScopedThreadRef) {
-  const threads = readThreadShells()
+function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target: ScopedThreadRef) {
+  const familyThreads = threads
     .filter((thread) => thread.environmentId === target.environmentId)
     .map((thread) => ({ ...thread, creationSource: thread.source.creationSource }));
-  const family = getOwnedThreadFamily(threads, target.threadId);
+  const family = getOwnedThreadFamily(familyThreads, target.threadId);
   const keptIds = new Set(
     family.promotableChildren.flatMap((child) => [
       child.id,
-      ...getOwnedThreadFamily(threads, child.id).children.map((descendant) => descendant.id),
+      ...getOwnedThreadFamily(familyThreads, child.id).children.map((descendant) => descendant.id),
     ]),
   );
   return {
@@ -420,6 +420,10 @@ export function useThreadActions() {
   const loadSessionState = useAtomQueryRunner(environmentSession.sessionStateAtom, {
     reportFailure: false,
   });
+  const loadArchiveFamily = useAtomQueryRunner(threadEnvironment.archiveFamilyAtom, {
+    reportFailure: false,
+    refresh: true,
+  });
   const refreshVcsStatus = useAtomCommand(vcsEnvironment.refreshStatus, {
     reportFailure: false,
   });
@@ -512,9 +516,18 @@ export function useThreadActions() {
         currentRouteThreadRef?.threadId === threadRef.threadId &&
         currentRouteThreadRef.environmentId === threadRef.environmentId;
       let action: ReturnType<typeof ThreadUndo.begin> | undefined;
-      const family = readArchiveFamily(threadRef);
-      const activeChildren = family.children.filter(archiveChildNeedsAttention);
-      const expectedChildThreadIds = family.children.map((child) => child.id);
+      // Bulk actions already read every family before gathering one shared choice.
+      const familyResult = opts.familyChoice
+        ? null
+        : await loadArchiveFamily({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId },
+          });
+      if (familyResult?._tag === "Failure") return familyResult;
+      const family =
+        familyResult === null ? null : resolveArchiveFamily(familyResult.value, threadRef);
+      const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
+      const expectedChildThreadIds = family?.children.map((child) => child.id) ?? [];
       const mutate = (childDisposition?: ArchiveChildDisposition) => {
         action?.finish();
         action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
@@ -523,7 +536,7 @@ export function useThreadActions() {
           input: {
             threadId: threadRef.threadId,
             ...(opts.familyChoice ??
-              (family.children.length > 0
+              (family !== null && family.children.length > 0
                 ? {
                     childDisposition: childDisposition ?? "stop_and_archive",
                     expectedChildThreadIds,
@@ -533,10 +546,7 @@ export function useThreadActions() {
         });
       };
       let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
-      if (
-        !opts.familyChoice &&
-        (activeChildren.length > 0 || family.protectedChildren.length > 0)
-      ) {
+      if (family !== null && (activeChildren.length > 0 || family.protectedChildren.length > 0)) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
           children: family.children,
@@ -558,7 +568,7 @@ export function useThreadActions() {
       } else {
         if (!opts.confirmed && !opts.familyChoice && confirmThreadArchive) {
           const confirmed = await readLocalApi()?.dialogs.confirm(
-            `Archive thread "${thread.title}"${family.children.length > 0 ? ` and its ${family.children.length} subagents` : ""}?`,
+            `Archive thread "${thread.title}"${family !== null && family.children.length > 0 ? ` and its ${family.children.length} subagents` : ""}?`,
           );
           if (!confirmed) {
             action?.finish();
@@ -604,6 +614,7 @@ export function useThreadActions() {
     },
     [
       archiveThreadMutation,
+      loadArchiveFamily,
       confirmThreadArchive,
       getCurrentRouteThreadRef,
       markThreadVisited,
@@ -614,10 +625,20 @@ export function useThreadActions() {
 
   const archiveThreads = useCallback(
     async (selected: ReadonlyArray<{ threadKey: string; threadRef: ScopedThreadRef }>) => {
-      const families = selected.map((entry) => ({
-        ...entry,
-        family: readArchiveFamily(entry.threadRef),
-      }));
+      const families = [];
+      for (const entry of selected) {
+        const result = await loadArchiveFamily({
+          environmentId: entry.threadRef.environmentId,
+          input: { threadId: entry.threadRef.threadId },
+        });
+        if (result._tag === "Failure")
+          return {
+            archivedThreadKeys: [],
+            mutationFailure: result,
+            followupFailures: [],
+          };
+        families.push({ ...entry, family: resolveArchiveFamily(result.value, entry.threadRef) });
+      }
       // A selected descendant is handled by its selected ancestor's family operation.
       const entries = families.filter(
         (entry) =>
@@ -694,7 +715,7 @@ export function useThreadActions() {
       }
       return outcome ?? null;
     },
-    [archiveThread, confirmThreadArchive],
+    [archiveThread, confirmThreadArchive, loadArchiveFamily],
   );
 
   const setThreadPersistence = useCallback(

@@ -300,7 +300,7 @@ describe("V2 environment commands", () => {
           expectedChildThreadIds: ["child"],
         },
       ]);
-    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+    }).pipe(Effect.provide(layerTestCrypto)),
   );
 
   it.effect("resolves run ordinal zero to the persisted thread-start checkpoint", () =>

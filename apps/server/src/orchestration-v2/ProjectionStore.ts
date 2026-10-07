@@ -3606,6 +3606,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 JOIN orchestration_v2_projection_threads AS child
                   ON parent.thread_id = CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT)
                 WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
                   AND child.deleted_at IS NULL
                   AND (parent.deleted_at IS NOT NULL OR (parent.archived_at IS NOT NULL AND child.archived_at IS NULL))
               `;
@@ -4318,6 +4319,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
           JOIN family ON CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT) = family.thread_id
           WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
         )
         SELECT thread_id FROM family
       `.pipe(
@@ -6011,7 +6013,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               for (const { thread } of state.projections.values()) {
                 if (
                   thread.lineage.parentThreadId === id &&
-                  thread.lineage.relationshipToParent === "subagent"
+                  thread.lineage.relationshipToParent === "subagent" &&
+                  thread.lineage.independent !== true
                 )
                   ids.add(thread.id);
               }
@@ -6136,6 +6139,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     ({ thread: child }) =>
                       child.lineage.parentThreadId === projection.thread.id &&
                       child.lineage.relationshipToParent === "subagent" &&
+                      child.lineage.independent !== true &&
                       child.deletedAt === null &&
                       (projection.thread.deletedAt !== null ||
                         (projection.thread.archivedAt !== null && child.archivedAt === null)),
