@@ -549,6 +549,7 @@ it.effect(
   "repair accepts a full-access client but refuses limited clients and stale agents",
   () => {
     let launches = 0;
+    let targetRuntimeMode: "auto" | "full-access" = "full-access";
     return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
       const call = (invocation: McpInvocationContext.McpInvocationScope) =>
@@ -565,10 +566,19 @@ it.effect(
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.provideService(McpSchema.McpServerClient, client),
           );
+      const escalation = yield* call(clientScope("auto"));
+      expect(declaredFailure(escalation)).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+      });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "auto";
       const limited = yield* call(clientScope("auto"));
       expect(declaredFailure(limited)).toMatchObject({ code: "capability_denied" });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "full-access";
       const stale = yield* call(scope);
       expect(declaredFailure(stale)).toMatchObject({ code: "parent_not_active" });
+      expect(launches).toBe(0);
       const accepted = yield* call(clientScope("full-access"));
       expect(accepted.isError).toBe(false);
       expect(accepted.structuredContent).toEqual({ threadId: "repair-conversation" });
@@ -593,7 +603,7 @@ it.effect(
                 Effect.succeed({
                   id: ThreadId.make("repair-target"),
                   projectId: "repair-project",
-                  runtimeMode: "full-access",
+                  runtimeMode: targetRuntimeMode,
                   interactionMode: "default",
                   archivedAt: null,
                   deletedAt: null,
@@ -604,7 +614,7 @@ it.effect(
                 Effect.succeed({
                   thread: {
                     id: ThreadId.make("repair-target"),
-                    runtimeMode: "full-access",
+                    runtimeMode: targetRuntimeMode,
                     interactionMode: "default",
                   },
                 } as never),

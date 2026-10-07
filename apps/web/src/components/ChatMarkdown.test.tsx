@@ -64,6 +64,7 @@ vi.mock("../state/entities", () => ({
   readThreadShell: () => null,
   useProjects: () => [],
   useServerConfigs: () => new Map(),
+  readEnvironmentSupportsServerBrowser: () => true,
 }));
 vi.mock("../remoteOpen", () => ({
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }),

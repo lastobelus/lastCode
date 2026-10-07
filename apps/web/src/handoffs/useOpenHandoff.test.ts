@@ -22,6 +22,7 @@ import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "~/preview
 vi.mock("~/state/entities", () => ({
   readThreadShell: () => ({ projectId: "project", worktreePath: "/workspace" }),
   readProjects: () => [],
+  readEnvironmentSupportsServerBrowser: () => true,
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
