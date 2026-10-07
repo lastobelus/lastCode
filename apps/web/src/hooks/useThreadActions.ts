@@ -110,6 +110,23 @@ export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveB
   }
 }
 
+function archiveThreadPreflightError(
+  thread: EnvironmentThreadShell,
+  childCount: number,
+  retry: boolean,
+) {
+  if (thread.persistent === true)
+    return new Error(
+      "This thread is persistent. Remove its persistent protection before archiving it.",
+    );
+  if (!retry && !threadRuntimeCanArchive(thread.runtime) && childCount === 0)
+    return new ThreadArchiveBlockedError({
+      environmentId: thread.environmentId,
+      threadId: thread.id,
+    });
+  return null;
+}
+
 export function shouldDeleteWorktreeClientSide(input: {
   readonly shouldDeleteWorktree: boolean;
   readonly supportsDurableWorktreeCleanup: boolean;
@@ -538,25 +555,12 @@ export function useThreadActions() {
         thread = owner;
       }
       const family = familyResult === null ? (opts.familySnapshot ?? null) : familyResult.value;
-      if (thread.persistent === true) {
-        return AsyncResult.failure(
-          Cause.fail(
-            new Error(
-              "This thread is persistent. Remove its persistent protection before archiving it.",
-            ),
-          ),
-        );
-      }
-      if (!retry && !threadRuntimeCanArchive(thread.runtime) && !family?.childThreadIds.length) {
-        return AsyncResult.failure(
-          Cause.fail(
-            new ThreadArchiveBlockedError({
-              environmentId: threadRef.environmentId,
-              threadId: threadRef.threadId,
-            }),
-          ),
-        );
-      }
+      const preflightError = archiveThreadPreflightError(
+        thread,
+        family?.childThreadIds.length ?? 0,
+        retry,
+      );
+      if (preflightError) return AsyncResult.failure(Cause.fail(preflightError));
 
       const expectedChildThreadIds = family?.childThreadIds ?? [];
       const mutate = (childDisposition?: ThreadArchiveChildDisposition) => {
@@ -730,6 +734,19 @@ export function useThreadActions() {
               other.family.childThreadIds.includes(entry.threadRef.threadId),
           ),
       );
+      for (const { owner, family } of entries) {
+        const error = archiveThreadPreflightError(
+          owner,
+          family.childThreadIds.length,
+          owner.archivePending?.status === "failed",
+        );
+        if (error)
+          return {
+            archivedThreadKeys: [],
+            mutationFailure: AsyncResult.failure(Cause.fail(error)),
+            followupFailures: [],
+          };
+      }
       const children = [
         ...new Map(
           entries.flatMap(({ threadRef, family }) =>

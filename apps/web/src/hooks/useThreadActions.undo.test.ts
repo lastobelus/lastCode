@@ -415,12 +415,12 @@ describe("stranded archive retry navigation", () => {
 });
 
 describe("archive family confirmation", () => {
-  function workingRoot() {
+  function workingRoot(status: "preparing" | "starting" | "running" = "running") {
     return makeThreadFixture({
       id: target.threadId,
       environmentId: target.environmentId,
       runtime: {
-        status: "running",
+        status,
         activeRunId: null,
         providerInstanceId: ProviderInstanceId.make("codex"),
         providerName: "codex",
@@ -574,6 +574,121 @@ describe("archive family confirmation", () => {
     },
   );
 
+  it.each(
+    (["preparing", "starting", "running"] as const).flatMap((status) =>
+      [false, true].map((earlierFamily) => ({ status, earlierFamily })),
+    ),
+  )(
+    "preflights $status standalone work before bulk consent (earlier family=$earlierFamily)",
+    async ({ status, earlierFamily }) => {
+      familyState.confirmArchive = true;
+      const owner = workingRoot(status);
+      const eligible = makeThreadFixture({
+        id: ThreadId.make("eligible-root"),
+        environmentId: target.environmentId,
+      });
+      const child = makeThreadFixture({
+        id: ThreadId.make("eligible-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: eligible.id,
+          parentThreadId: eligible.id,
+          relationshipToParent: "subagent",
+        },
+        attention: { kind: "question", raisedAt: "2026-01-01T00:00:00.000Z" },
+      });
+      // Only the scoped server read knows the selected standalone owner is working.
+      familyState.threads = [{ ...owner, runtime: null }, eligible];
+      archiveFamilyQuery.mockImplementation(async ({ input }) => ({
+        _tag: "Success",
+        value: input.threadId === owner.id ? [owner] : [eligible, child],
+      }));
+      const selected = [...(earlierFamily ? [eligible] : []), owner].map((thread) => ({
+        threadRef: { environmentId: thread.environmentId, threadId: thread.id },
+        threadKey: `${thread.environmentId}:${thread.id}`,
+      }));
+      const outcome = await useThreadActions().archiveThreads(selected);
+      expect(outcome?.archivedThreadKeys).toEqual([]);
+      expect(outcome?.mutationFailure?._tag).toBe("Failure");
+      if (outcome?.mutationFailure?._tag !== "Failure")
+        throw new Error("Expected preflight refusal");
+      expect(Cause.squash(outcome.mutationFailure.cause)).toMatchObject({
+        message: "Cannot archive while the provider is active.",
+      });
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(selected.length);
+      expect(archiveConfirm).not.toHaveBeenCalled();
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(commands.archive).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["stop_and_archive", "promote"] as const)(
+    "allows a working bulk family and its selected working child through preflight (%s)",
+    async (choice) => {
+      const owner = workingRoot();
+      const child = {
+        ...workingRoot(),
+        id: ThreadId.make("selected-working-child"),
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent" as const,
+        },
+      };
+      familyState.threads = [owner, child];
+      archiveDialog.mockImplementation(async (request) => {
+        expect(commands.archive).not.toHaveBeenCalled();
+        expect(request.children.map((thread: { id: string }) => thread.id)).toEqual([child.id]);
+        expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      const selected = [owner, child].map((thread) => ({
+        threadRef: {
+          environmentId: thread.environmentId,
+          threadId: thread.id,
+        },
+        threadKey: `${thread.environmentId}:${thread.id}`,
+      }));
+      const outcome = await useThreadActions().archiveThreads(selected);
+      expect(outcome?.mutationFailure).toBeNull();
+      expect(outcome?.archivedThreadKeys).toEqual(
+        choice === "promote"
+          ? [selected[0]!.threadKey]
+          : selected.map(({ threadKey }) => threadKey),
+      );
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+      expect(archiveDialog).toHaveBeenCalledOnce();
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: { threadId: owner.id, childDisposition: choice, expectedChildThreadIds: [child.id] },
+      });
+    },
+  );
+
+  it("preserves a failed standalone archive retry during bulk preflight", async () => {
+    const owner = {
+      ...workingRoot(),
+      archivePending: {
+        threadId: target.threadId,
+        commandId: CommandId.make("failed-standalone-archive"),
+        status: "failed" as const,
+      },
+    };
+    familyState.threads = [owner];
+    const outcome = await useThreadActions().archiveThreads([
+      { threadRef: target, threadKey: "undo-env:thread" },
+    ]);
+    expect(outcome?.mutationFailure).toBeNull();
+    expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: {
+        threadId: owner.id,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [],
+      },
+    });
+  });
+
   it("cancels a working owner family without stopping any work", async () => {
     const root = workingRoot();
     const child = makeThreadFixture({
@@ -642,20 +757,27 @@ describe("archive family confirmation", () => {
     });
   });
 
-  it.each(["missing", "persistent"] as const)(
-    "blocks archive when the authoritative owner is %s",
-    async (kind) => {
-      const owner = { ...workingRoot(), runtime: null };
-      familyState.threads = [owner];
-      archiveFamilyQuery.mockResolvedValue({
-        _tag: "Success",
-        value: kind === "missing" ? [] : [{ ...owner, persistent: true }],
-      });
-      expect((await useThreadActions().archiveThread(target))._tag).toBe("Failure");
-      expect(archiveDialog).not.toHaveBeenCalled();
-      expect(commands.archive).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    ["missing", false],
+    ["missing", true],
+    ["persistent", false],
+    ["persistent", true],
+  ] as const)("blocks archive when the authoritative owner is %s (bulk=%s)", async (kind, bulk) => {
+    const owner = { ...workingRoot(), runtime: null };
+    familyState.threads = [owner];
+    archiveFamilyQuery.mockResolvedValue({
+      _tag: "Success",
+      value: kind === "missing" ? [] : [{ ...owner, persistent: true }],
+    });
+    const actions = useThreadActions();
+    const result = bulk
+      ? (await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]))
+          ?.mutationFailure
+      : await actions.archiveThread(target);
+    expect(result?._tag).toBe("Failure");
+    expect(archiveDialog).not.toHaveBeenCalled();
+    expect(commands.archive).not.toHaveBeenCalled();
+  });
 
   it.each([
     [false, false],
