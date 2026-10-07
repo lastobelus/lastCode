@@ -15,8 +15,9 @@ import {
   checkpointSchedulerPid,
   checkpointFailureMessage,
   checkpointIncidentFingerprint,
-  changedGitlink,
+  changedGitlinks,
   consumeCheckpointIntervalRequest,
+  initializedGitlink,
   latestFailedCheckpointRun,
   projectActionTrustAllowlist,
   reconcilePrimaryProjectActions,
@@ -495,9 +496,53 @@ describe("LastCode checkpoint supervisor", () => {
   });
 
   it("detects every changed submodule gitlink", () => {
-    const rawDiff = ":160000 160000 1111111 2222222 M\0.repos/example\0";
-    expect(changedGitlink(rawDiff)).toBe(".repos/example");
-    expect(changedGitlink(":100644 100644 1111111 2222222 M\0README.md\0")).toBeNull();
+    const rawDiff = [
+      ":160000 160000 1111111 2222222 M",
+      ".repos/example",
+      ":000000 160000 0000000 3333333 A",
+      ".repos/added",
+      ":160000 000000 4444444 0000000 D",
+      ".repos/removed",
+      ":160000 160000 5555555 5555555 R100",
+      ".repos/old",
+      ".repos/new",
+      ":100644 100644 1111111 2222222 M",
+      "README.md",
+      "",
+    ].join("\0");
+    expect(changedGitlinks(rawDiff)).toEqual([
+      ".repos/example",
+      ".repos/added",
+      ".repos/removed",
+      ".repos/old",
+      ".repos/new",
+    ]);
+    expect(changedGitlinks(":100644 100644 1111111 2222222 M\0README.md\0")).toEqual([]);
+  });
+
+  it("blocks checkout refresh only for submodules with local content", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-gitlinks-"));
+    try {
+      NodeFS.mkdirSync(NodePath.join(directory, ".repos", "empty"), { recursive: true });
+      NodeFS.mkdirSync(NodePath.join(directory, ".repos", "finder"));
+      NodeFS.writeFileSync(NodePath.join(directory, ".repos", "finder", ".DS_Store"), "");
+      NodeFS.mkdirSync(NodePath.join(directory, ".repos", "initialized"));
+      NodeFS.writeFileSync(
+        NodePath.join(directory, ".repos", "initialized", ".git"),
+        "gitdir: x\n",
+      );
+      const diff = (...paths) =>
+        paths.map((path) => `:160000 160000 1111111 2222222 M\0${path}\0`).join("");
+
+      expect(
+        initializedGitlink(directory, diff(".repos/empty", ".repos/finder", ".repos/missing")),
+      ).toBeNull();
+      expect(initializedGitlink(directory, diff(".repos/empty", ".repos/initialized"))).toBe(
+        ".repos/initialized",
+      );
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses a guarded native checkout to preserve ignored local content", async () => {

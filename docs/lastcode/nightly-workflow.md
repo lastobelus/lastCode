@@ -528,7 +528,8 @@ supervisor also refreshes the repository's primary `lastcode/main` checkout from
 so the supervisor verifies the checkout is clean and on `lastcode/main`, fetches
 the promoted branch, and verifies both guards and the original commit again. It
 records the previous commit under `refs/lastcode/primary-checkout-backups/`, rejects
-any promoted submodule-gitlink change, and runs one native Git checkout with a
+a promoted gitlink change for any submodule with local content (an uninitialized
+submodule's pointer changes nothing on disk), and runs one native Git checkout with a
 command-scoped reference-transaction guard. While Git holds its own ref locks, that
 guard requires the `lastcode/main` update to start at the previously verified commit
 and confirms that `HEAD` still names `lastcode/main`. The checkout disables ignored-

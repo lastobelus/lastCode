@@ -10,6 +10,8 @@ import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 export const DEFAULT_TIMEOUT_MS = 60 * 60_000;
 export const POLL_INTERVAL_MS = 10_000;
+export const STARTUP_GRACE_MS = 30_000;
+const STARTUP_POLL_MS = 2_000;
 export const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 
 export type SupervisorState = {
@@ -116,7 +118,14 @@ export async function waitForCheckpoint(
   deps: WaitDependencies,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<SupervisorState> {
-  const initialDaemon = deps.daemonStatus();
+  let initialDaemon = deps.daemonStatus();
+  const attachedAt = deps.now();
+  // Starting the service can briefly unload its launchd job, so an Action armed right after the
+  // start request may see no job at all for a moment.
+  while (initialDaemon.state === "unavailable" && deps.now() - attachedAt < STARTUP_GRACE_MS) {
+    await deps.sleep(STARTUP_POLL_MS);
+    initialDaemon = deps.daemonStatus();
+  }
   if (initialDaemon.state === "unavailable") {
     throw new CheckpointWaitError(
       "probe-failed",
