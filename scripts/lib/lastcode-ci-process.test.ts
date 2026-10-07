@@ -13,11 +13,40 @@ describe("CI process ownership", () => {
     async () => {
       const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-controller-"));
       let workerPid: number | undefined;
+      let descendantPid: number | undefined;
       let controller: NodeChildProcess.ChildProcess | undefined;
+      const groupState = () => {
+        const snapshot = NodeChildProcess.spawnSync("ps", ["-A", "-o", "pid=,ppid=,pgid=,stat="], {
+          encoding: "utf8",
+          timeout: 5_000,
+        });
+        return {
+          status: snapshot.status,
+          error: snapshot.error?.message,
+          members: snapshot.stdout
+            ?.split("\n")
+            .map((line) => line.trim().split(/\s+/u))
+            .filter((fields) => Number(fields[2]) === workerPid)
+            .map(([pid, parentPid, group, state]) => ({ pid, parentPid, group, state })),
+        };
+      };
+      const recordEvidence = (phase: string, probeError?: unknown) => {
+        NodeProcess.stderr.write(
+          `CI controller-death process evidence ${JSON.stringify({
+            phase,
+            controllerPid: controller?.pid,
+            workerPid,
+            descendantPid,
+            groupProbeError:
+              probeError instanceof Error && "code" in probeError ? probeError.code : null,
+            ...groupState(),
+          })}\n`,
+        );
+      };
       try {
         NodeFS.writeFileSync(
           NodePath.join(cwd, "descendant.mjs"),
-          "process.on('SIGTERM', () => {}); process.stdout.write('descendant-ready\\n'); setInterval(() => {}, 1000);",
+          "process.on('SIGTERM', () => {}); console.log('descendant-ready:' + process.pid); setInterval(() => {}, 1000);",
         );
         NodeFS.writeFileSync(
           NodePath.join(cwd, "launcher.mjs"),
@@ -38,9 +67,14 @@ describe("CI process ownership", () => {
         const ownedController = controller;
         ownedController.stdout!.on("data", (data: Buffer) => {
           output += data.toString();
-          const pid = /worker-pid:(\d+)/.exec(output)?.[1];
+          const pid = /worker-pid:(\d+)\r?\n/u.exec(output)?.[1];
           if (pid) workerPid = Number(pid);
-          if (output.includes("descendant-ready")) ownedController.kill("SIGKILL");
+          const descendant = /descendant-ready:(\d+)\r?\n/u.exec(output)?.[1];
+          if (descendant && workerPid !== undefined && descendantPid === undefined) {
+            descendantPid = Number(descendant);
+            recordEvidence("before-controller-death");
+            ownedController.kill("SIGKILL");
+          }
         });
         await new Promise<void>((resolve, reject) => {
           ownedController.once("error", reject);
@@ -50,7 +84,14 @@ describe("CI process ownership", () => {
         // even though the controller itself exited at the ready milestone.
         expect(output).toContain("descendant-ready");
         expect(workerPid).toBeDefined();
-        expect(() => process.kill(-workerPid!, 0)).toThrow();
+        let probeError: unknown;
+        try {
+          process.kill(-workerPid!, 0);
+        } catch (error) {
+          probeError = error;
+        }
+        recordEvidence("after-output-pipe-close", probeError);
+        expect(probeError).toBeDefined();
       } finally {
         controller?.kill("SIGKILL");
         if (workerPid !== undefined) {
