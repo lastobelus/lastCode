@@ -5,6 +5,7 @@ import {
   PreviewAutomationEvaluateInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
+  PreviewAutomationProfiles,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
@@ -57,13 +58,25 @@ const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
 
 const PreviewStatusTool = Tool.make("preview_status", {
   description:
-    "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
+    "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, measured CSS-pixel size, and actual profileId/profileName when the desktop supports profiles. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
   parameters: PreviewAutomationTabTargetInput,
   success: PreviewAutomationStatus,
   failure: PreviewAutomationError,
   dependencies,
 })
   .annotate(Tool.Title, "Get preview status")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const PreviewProfilesTool = Tool.make("preview_profiles", {
+  description:
+    "List existing browser profiles (id, name, kind) and the configured defaultProfileId on this agent session's desktop host. Names may repeat; select a stable ID when they do. Profiles are desktop-local; their cookie jars are isolated per environment. This tool does not create profiles, change the default, or open a tab.",
+  success: PreviewAutomationProfiles,
+  failure: PreviewAutomationError,
+  dependencies,
+})
+  .annotate(Tool.Title, "List browser profiles")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -95,7 +108,7 @@ const PreviewStopThreadTool = Tool.make("preview_stop_thread", {
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
-      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab.",
+      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. To select an existing cookie jar without changing the default, use exactly one of profileName (exact unique name) or profileId from preview_profiles. Existing tabs retain their profile; a profile mismatch creates a new tab unless an exact tabId was supplied, which fails. Unknown or ambiguous profiles fail.",
     parameters: PreviewAutomationOpenInput,
     success: PreviewAutomationStatus,
     failure: PreviewAutomationError,
@@ -274,6 +287,7 @@ export const PreviewToolkit = Toolkit.make(
   PreviewHostTool,
   PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,
@@ -293,6 +307,7 @@ export const PreviewStandardToolkit = Toolkit.make(
   PreviewHostTool,
   PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,

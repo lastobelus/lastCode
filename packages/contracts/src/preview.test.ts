@@ -34,6 +34,17 @@ const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
 describe("PreviewAutomationOpenInput", () => {
+  it("accepts either an explicit profile ID or an exact name", () => {
+    expect(decodeOpenInput({ profileId: "work-id" })).toEqual({ profileId: "work-id" });
+    expect(decodeOpenInput({ profileName: "Work" })).toEqual({ profileName: "Work" });
+  });
+
+  it("rejects conflicting profile selectors and blank selectors", () => {
+    expect(() => decodeOpenInput({ profileId: "work-id", profileName: "Work" })).toThrow();
+    expect(() => decodeOpenInput({ profileName: " " })).toThrow();
+    expect(() => decodeOpenInput({ profileId: "" })).toThrow();
+  });
+
   it("accepts the inline preview visibility flag", () => {
     expect(decodeOpenInput({ open: false })).toEqual({ open: false });
   });

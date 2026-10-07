@@ -16,6 +16,19 @@ the user from continuing to use LastCode. Create a dedicated tab with
 hide or repurpose a tab the user is inspecting. Keep foreground application control and human
 acceptance subject to the machine interaction policy.
 
+For a signed-in browser identity, call `preview_profiles` to list the connected
+desktop's existing profiles and configured default. Pass either an exact unique
+`profileName` or stable `profileId` to `preview_open`, for example
+`preview_open({ open: false, reuseExistingTab: false, profileName: "Work" })`.
+This selects the new tab's cookie jar without changing the user's default.
+Unknown profiles and duplicate names fail; use an ID to disambiguate. Reused tabs
+keep their profile: an explicit mismatch opens a new tab when `tabId` is omitted,
+or fails when an exact `tabId` was supplied. Check the returned `profileId` and
+`profileName`; `preview_status` reports these too. Profile selection requires a
+desktop app that advertises support, and never falls back on an older host.
+New tabs retain the user's configured viewport, including Fill panel. To use a
+fixed size for evidence, explicitly call `preview_resize` on the returned tab.
+
 A newly created blank tab may briefly report `available: false`; navigation
 waits for its browser to become ready. This is different from a managed server
 that fails to start. For managed hosting, run the server in the foreground,

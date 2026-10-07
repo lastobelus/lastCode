@@ -3,6 +3,7 @@ import {
   PreviewAutomationClientDisconnectedError,
   PreviewAutomationControlInterruptedError,
   PreviewAutomationExecutionError,
+  PreviewAutomationProfileError,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
@@ -205,6 +206,22 @@ const classifyResponseError = (
     cause: error,
   };
   switch (error._tag) {
+    case "PreviewAutomationProfileError": {
+      const detail = error.detail;
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "reason" in detail &&
+        (detail.reason === "unknown" ||
+          detail.reason === "ambiguous" ||
+          detail.reason === "tab-mismatch") &&
+        "detail" in detail &&
+        typeof detail.detail === "string"
+      ) {
+        return new PreviewAutomationProfileError({ reason: detail.reason, detail: detail.detail });
+      }
+      return new PreviewAutomationMalformedResponseError(context);
+    }
     case "PreviewAutomationRecordingDesktopUpdateRequiredError":
       return new PreviewAutomationRecordingDesktopUpdateRequiredError({
         threadId: context.threadId,

@@ -7,6 +7,7 @@ import {
   type PreviewAutomationStreamEvent,
   type PreviewOpenInput,
   type PreviewAutomationOpenInput,
+  type PreviewAutomationRequest,
   type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -171,7 +172,11 @@ afterEach(async () => {
 });
 
 describe("PreviewAutomationHosts open", () => {
-  async function runOpen(input: PreviewAutomationOpenInput, requestId = "handoff-open") {
+  async function runOpen(
+    input: PreviewAutomationOpenInput,
+    requestId = "handoff-open",
+    requestOverrides: Partial<PreviewAutomationRequest> = {},
+  ) {
     const response = deferred<PreviewAutomationResponse>();
     mocks.respond.mockImplementationOnce(async ({ input: responseInput }) =>
       response.resolve(responseInput),
@@ -181,13 +186,224 @@ describe("PreviewAutomationHosts open", () => {
         requestsAtom,
         AsyncResult.success({
           ...requestEvent,
-          request: { ...requestEvent.request, requestId, input, timeoutMs: 50 },
+          request: {
+            ...requestEvent.request,
+            requestId,
+            input,
+            timeoutMs: 50,
+            operation:
+              input.profileId !== undefined || input.profileName !== undefined
+                ? "openWithProfile"
+                : "open",
+            ...requestOverrides,
+          },
         }),
       );
       await response.promise;
     });
     return response.promise;
   }
+
+  it("lists profiles and the resolved default without opening or changing settings", async () => {
+    const response = await runOpen({}, "profiles", { operation: "profiles" });
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        defaultProfileId: "work",
+        profiles: [
+          { id: "default", name: "Default", kind: "persistent" },
+          { id: "incognito", name: "Incognito", kind: "incognito" },
+          { id: "work", name: "Work", kind: "persistent" },
+        ],
+      },
+    });
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.setClientSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([{ profileName: "Default" }, { profileId: "default" }, { profileId: "incognito" }])(
+    "opens a new tab with an explicit profile without changing the default: %o",
+    async (selection) => {
+      const profileId = "profileId" in selection ? selection.profileId : "default";
+      mocks.open.mockResolvedValueOnce(AsyncResult.success({ ...snapshot, profileId }));
+      const response = await runOpen({ ...selection, open: false, reuseExistingTab: false });
+      expect(mocks.open).toHaveBeenCalledExactlyOnceWith({
+        environmentId,
+        input: { threadId, viewport, profileId },
+      });
+      expect(response).toMatchObject({
+        ok: true,
+        result: { profileId, profileName: profileId === "incognito" ? "Incognito" : "Default" },
+      });
+      expect(mocks.setClientSettings).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([{ profileName: "work" }, { profileId: "missing" }])(
+    "rejects an unknown exact profile without creating or navigating a tab: %o",
+    async (selection) => {
+      const response = await runOpen({ ...selection, open: false });
+      expect(response).toMatchObject({
+        ok: false,
+        error: { _tag: "PreviewAutomationProfileError", detail: { reason: "unknown" } },
+      });
+      expect(response.error?.message).toContain("preview_profiles");
+      expect(mocks.open).not.toHaveBeenCalled();
+      expect(mocks.navigate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects duplicate names with the available IDs and accepts a specific ID", async () => {
+    mocks.getClientSettings.mockResolvedValueOnce({
+      ...savedSettings,
+      browserProfiles: [
+        ...savedSettings.browserProfiles,
+        { id: "work-2", name: "Work", kind: "persistent" },
+      ],
+    });
+    const response = await runOpen({ profileName: "Work", open: false });
+    expect(response).toMatchObject({
+      ok: false,
+      error: { _tag: "PreviewAutomationProfileError", detail: { reason: "ambiguous" } },
+    });
+    expect(response.error?.message).toContain('"work", "work-2"');
+    expect(mocks.open).not.toHaveBeenCalled();
+    mocks.open.mockResolvedValueOnce(AsyncResult.success({ ...snapshot, profileId: "work-2" }));
+    expect(await runOpen({ profileId: "work-2", open: false }, "by-id")).toMatchObject({
+      ok: true,
+      result: { profileId: "work-2", profileName: "Work" },
+    });
+  });
+
+  it("creates a new tab when the implicitly reused tab has another profile", async () => {
+    applyPreviewServerSnapshot(threadRef, snapshot);
+    const newSnapshot = { ...snapshot, tabId: "other-profile-tab", profileId: "default" };
+    mocks.list.mockResolvedValueOnce(AsyncResult.success({ ...emptyList, sessions: [snapshot] }));
+    mocks.open.mockResolvedValueOnce(AsyncResult.success(newSnapshot));
+    expect(
+      await runOpen({ profileName: "Default", open: false }, "different-profile", {
+        tabId: snapshot.tabId,
+        tabIdExplicit: false,
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { tabId: newSnapshot.tabId, profileId: "default", profileName: "Default" },
+    });
+    expect(mocks.open).toHaveBeenCalledOnce();
+    expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]?.profileId).toBe("work");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a profile mismatch on an exact tab without changing it", async () => {
+    applyPreviewServerSnapshot(threadRef, snapshot);
+    const response = await runOpen(
+      { profileId: "default", open: false, url: "https://example.test/" },
+      "mismatch",
+      {
+        tabId: snapshot.tabId,
+        tabIdExplicit: true,
+      },
+    );
+    expect(response).toMatchObject({
+      ok: false,
+      error: { _tag: "PreviewAutomationProfileError", detail: { reason: "tab-mismatch" } },
+    });
+    expect(response.error?.message).toContain("reuseExistingTab=false");
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]?.profileId).toBe("work");
+  });
+
+  it.each([
+    { _tag: "fill" },
+    { _tag: "freeform", width: 900, height: 600 },
+    { _tag: "preset", presetId: "iphone-12-pro", width: 390, height: 844 },
+  ] as const)(
+    "keeps the configured viewport on a newly opened agent tab: %o",
+    async (configuredViewport) => {
+      mocks.getClientSettings.mockResolvedValueOnce({
+        ...savedSettings,
+        browserDefaultViewport: configuredViewport,
+      });
+      mocks.open.mockResolvedValueOnce(
+        AsyncResult.success({ ...snapshot, viewport: configuredViewport }),
+      );
+      const response = await runOpen({ profileName: "Work", open: false, reuseExistingTab: false });
+      expect(mocks.open).toHaveBeenCalledExactlyOnceWith({
+        environmentId,
+        input: { threadId, viewport: configuredViewport, profileId: "work" },
+      });
+      expect(response).toMatchObject({ ok: true, result: { viewportSetting: configuredViewport } });
+      expect(mocks.resize).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves the reused tab's Fill viewport unchanged", async () => {
+    applyPreviewServerSnapshot(threadRef, { ...snapshot, viewport: { _tag: "fill" } });
+    const response = await runOpen({ profileName: "Work", open: false }, "reused-fill", {
+      tabId: snapshot.tabId,
+      tabIdExplicit: true,
+    });
+    expect(response).toMatchObject({ ok: true, result: { viewportSetting: { _tag: "fill" } } });
+    expect(mocks.resize).not.toHaveBeenCalled();
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing exact tab instead of creating a replacement with the requested profile", async () => {
+    const response = await runOpen({ profileName: "Work", open: false }, "missing-tab", {
+      tabId: "missing-tab",
+      tabIdExplicit: true,
+    });
+    expect(response).toMatchObject({
+      ok: false,
+      error: { _tag: "PreviewAutomationTabNotFoundError" },
+    });
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { profileId: undefined, expectedId: "default", expectedName: "Default" },
+    { profileId: "deleted-profile", expectedId: "deleted-profile", expectedName: null },
+  ])(
+    "reports a tab's stored profile rather than the current default: %o",
+    async ({ profileId, expectedId, expectedName }) => {
+      applyPreviewServerSnapshot(threadRef, { ...snapshot, profileId });
+      const response = await runOpen({}, "status-profile", {
+        operation: "status",
+        tabId: snapshot.tabId,
+      });
+      expect(response).toMatchObject({
+        ok: true,
+        result: { profileId: expectedId, profileName: expectedName },
+      });
+      expect(mocks.open).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reuses an exact tab with the matching profile", async () => {
+    applyPreviewServerSnapshot(threadRef, snapshot);
+    expect(
+      await runOpen({ profileName: "Work", open: false }, "matching", {
+        tabId: snapshot.tabId,
+        tabIdExplicit: true,
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { tabId: snapshot.tabId, profileId: "work", profileName: "Work" },
+    });
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("preserves the reused tab profile when selection is omitted", async () => {
+    const existing = { ...snapshot, profileId: "default" };
+    applyPreviewServerSnapshot(threadRef, existing);
+    expect(await runOpen({ open: false }, "unspecified", { tabId: snapshot.tabId })).toMatchObject({
+      ok: true,
+      result: { profileId: "default", profileName: "Default" },
+    });
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
 
   it("records an explicit offscreen open once even when auto-show is disabled", async () => {
     mocks.getClientSettings.mockResolvedValueOnce({
@@ -283,7 +499,7 @@ describe("PreviewAutomationHosts open", () => {
     await expect(response.promise).resolves.toMatchObject({
       requestId: "open-request",
       ok: true,
-      result: { available: false, tabId: snapshot.tabId },
+      result: { available: false, tabId: snapshot.tabId, profileId: "work", profileName: "Work" },
     });
     expect(readThreadPreviewState(threadRef).snapshot).toEqual(snapshot);
     expect(mocks.setClientSettings).not.toHaveBeenCalled();
@@ -458,7 +674,7 @@ describe("PreviewAutomationHosts ownership", () => {
     });
     await expect(response.promise).resolves.toMatchObject({
       ok: true,
-      result: { available: false, tabId: snapshot.tabId },
+      result: { available: false, tabId: snapshot.tabId, profileId: "work", profileName: "Work" },
     });
   });
 });
