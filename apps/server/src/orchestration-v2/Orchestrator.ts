@@ -32,6 +32,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
+  type ThreadArchiveChildDisposition,
   OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -439,6 +440,20 @@ function hasUnfinishedArchiveWork(
     projection.providerTurns.some(
       (turn) => turn.status === "running" && ownedProviderThreadIds.has(turn.providerThreadId),
     )
+  );
+}
+
+function archiveShellNeedsConfirmation(thread: OrchestrationV2ThreadShell) {
+  return (
+    ["preparing", "queued", "starting", "running", "waiting", "failed"].includes(thread.status) ||
+    thread.activityRunStatus != null ||
+    thread.pendingRuntimeRequest !== null ||
+    thread.hasActionableProposedPlan ||
+    thread.attention != null ||
+    (thread.pendingBackgroundTasks?.length ?? 0) > 0 ||
+    (thread.recovery != null && thread.recovery.status !== "recovered") ||
+    thread.actionResume?.outcome === "running" ||
+    thread.archivePending != null
   );
 }
 
@@ -11127,7 +11142,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const archiveParticipants = (
     threads: ReadonlyArray<OrchestrationV2ThreadShell>,
     rootId: ThreadId,
-    disposition: "stop_and_archive" | "promote",
+    disposition: ThreadArchiveChildDisposition,
   ) => {
     const family = getOwnedThreadFamily(threads, rootId);
     const retained = new Set<ThreadId>();
@@ -11335,6 +11350,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
     )
       return yield* reject("A conversation in this family is already being archived.");
+    // An idle snapshot is not consent to stop work that appeared before this
+    // command. Recheck under the family locks before recording any shutdown.
+    if (command.childDisposition === "archive_if_idle" && family.children.length > 0) {
+      for (const thread of shells) {
+        if (!familyIds.has(thread.id)) continue;
+        if (archiveShellNeedsConfirmation(thread))
+          return yield* reject(
+            "This family now has work that needs attention. Review the archive choices again.",
+          );
+        const controls = yield* projectionStore
+          .getThreadRecords(thread.id, [
+            "runs",
+            "runtimeRequests",
+            "providerThreads",
+            "providerTurns",
+          ])
+          .pipe(mapDispatchError(command));
+        if (hasUnfinishedArchiveWork(controls))
+          return yield* reject(
+            "This family now has work that needs attention. Review the archive choices again.",
+          );
+      }
+    }
     // Shutdown and ownership release complete after this command. Check every
     // target while the requesting caller's limit is in scope, before stopping.
     for (const thread of shells) {

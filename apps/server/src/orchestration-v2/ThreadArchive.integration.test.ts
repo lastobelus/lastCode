@@ -164,6 +164,277 @@ const archiveModeLimits = [
   { runtimeMode: "full-access", interactionMode: "plan", mode: "interaction" },
 ] as const;
 
+/** An idle snapshot from real delegated history, with a nested runless native mirror. */
+const idleArchiveFamily = Effect.gen(function* () {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const ids = yield* family;
+  const now = yield* DateTime.now;
+  for (const id of [ids.parent, ids.child, ids.grandchild]) {
+    const projection = yield* orchestrator.getThreadProjection(id);
+    for (const run of projection.runs)
+      yield* projections.apply({
+        id: EventId.make(`idle-family-run:${run.id}`),
+        type: "run.updated",
+        threadId: id,
+        occurredAt: now,
+        payload: { ...run, status: "completed", completedAt: now },
+      });
+    for (const attempt of projection.attempts)
+      yield* projections.apply({
+        id: EventId.make(`idle-family-attempt:${attempt.id}`),
+        type: "run-attempt.updated",
+        threadId: id,
+        occurredAt: now,
+        payload: { ...attempt, status: "completed", completedAt: now },
+      });
+    for (const node of projection.nodes)
+      yield* projections.apply({
+        id: EventId.make(`idle-family-node:${node.id}`),
+        type: "node.updated",
+        threadId: id,
+        occurredAt: now,
+        payload: { ...node, status: "completed", completedAt: now },
+      });
+    for (const task of projection.subagents)
+      yield* projections.apply({
+        id: EventId.make(`idle-family-task:${task.id}`),
+        type: "subagent.updated",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          ...task,
+          status: "completed",
+          result: "Published fixture result",
+          completionDelivery: { state: "disposed", observedByRunId: null },
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    for (const item of projection.turnItems)
+      yield* projections.apply({
+        id: EventId.make(`idle-family-item:${item.id}`),
+        type: "turn-item.updated",
+        threadId: id,
+        occurredAt: now,
+        payload: { ...item, status: "completed", completedAt: now, updatedAt: now },
+      });
+  }
+  yield* orchestrator.dispatch({
+    type: "thread.pull-request.watch",
+    commandId: CommandId.make("idle-family-end-watch"),
+    threadId: ids.parent,
+    ...pullRequest(1),
+    watching: false,
+  });
+  const native = ThreadId.make("idle-family-runless-native");
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("idle-family-create-native"),
+    threadId: native,
+    projectId: ProjectId.make("project:thread-stop"),
+    title: "Idle nested native mirror",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "agent",
+    creationSource: "provider",
+  });
+  const thread = (yield* orchestrator.getThreadProjection(native)).thread;
+  yield* projections.apply({
+    id: EventId.make("idle-family-native-lineage"),
+    type: "thread.metadata-updated",
+    threadId: native,
+    occurredAt: now,
+    payload: {
+      ...thread,
+      lineage: {
+        parentThreadId: ids.grandchild,
+        relationshipToParent: "subagent",
+        rootThreadId: ids.parent,
+      },
+    },
+  });
+  const snapshot = yield* orchestrator.getThreadArchiveFamily(ids.parent);
+  assert.lengthOf(snapshot, 4);
+  for (const shell of snapshot) {
+    assert.include(["idle", "completed"], shell.status);
+    assert.isNull(shell.pendingRuntimeRequest);
+    assert.isFalse(shell.hasActionableProposedPlan);
+    assert.isNull(shell.attention ?? null);
+    assert.isEmpty(shell.pendingBackgroundTasks ?? []);
+  }
+  return { ...ids, native, snapshot };
+});
+
+it.effect.each([
+  "child work",
+  "owner work",
+  "question",
+  "approval",
+  "native turn",
+  "attention",
+  "background",
+  "watch",
+] as const)(
+  "automatic archive rechecks an idle snapshot before stopping newly pending %s",
+  (change) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild, native, snapshot } = yield* idleArchiveFamily;
+      const childIds = snapshot.filter((shell) => shell.id !== parent).map((shell) => shell.id);
+      const now = yield* DateTime.now;
+      if (change === "child work" || change === "owner work")
+        yield* send(
+          change === "child work" ? child : parent,
+          "work-after-idle-snapshot",
+          "start_immediately",
+        );
+      if (change === "question" || change === "approval") {
+        const owner = yield* orchestrator.getThreadProjection(grandchild);
+        yield* projections.apply({
+          id: EventId.make("idle-snapshot-new-runtime-request"),
+          type: "runtime-request.updated",
+          threadId: native,
+          occurredAt: now,
+          payload: {
+            id: RuntimeRequestId.make("idle-snapshot-new-runtime-request"),
+            nodeId: owner.runs[0]!.rootNodeId!,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: change === "question" ? "user_input" : "command",
+            status: "pending",
+            responseCapability: { type: "not_resumable", reason: "fixture request" },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        });
+      }
+      if (change === "native turn") {
+        const owner = yield* orchestrator.getThreadProjection(grandchild);
+        const providerThreadId = ProviderThreadId.make("idle-snapshot-native-provider-thread");
+        yield* projections.apply({
+          id: EventId.make("idle-snapshot-native-provider-thread"),
+          type: "provider-thread.updated",
+          threadId: native,
+          occurredAt: now,
+          payload: {
+            ...owner.providerThreads[0]!,
+            id: providerThreadId,
+            appThreadId: native,
+            ownerNodeId: null,
+            providerSessionId: null,
+          },
+        });
+        yield* projections.apply({
+          id: EventId.make("idle-snapshot-native-provider-turn"),
+          type: "provider-turn.updated",
+          threadId: native,
+          occurredAt: now,
+          payload: {
+            id: ProviderTurnId.make("idle-snapshot-native-provider-turn"),
+            providerThreadId,
+            nodeId: owner.runs[0]!.rootNodeId!,
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        });
+      }
+      if (change === "attention") {
+        yield* orchestrator.dispatch({
+          type: "thread.attention.set",
+          commandId: CommandId.make("idle-snapshot-attention"),
+          threadId: grandchild,
+          attention: { kind: "question", raisedAt: DateTime.formatIso(now) },
+        });
+      }
+      if (change === "background") {
+        const nested = yield* orchestrator.getThreadProjection(grandchild);
+        yield* projections.apply({
+          id: EventId.make("idle-snapshot-background-work"),
+          type: "provider-thread.updated",
+          threadId: grandchild,
+          occurredAt: now,
+          payload: {
+            ...nested.providerThreads[0]!,
+            pendingBackgroundTasks: [
+              { taskId: "idle-snapshot-background-command", kind: "command" },
+            ],
+          },
+        });
+      }
+      if (change === "watch") yield* watch(parent, 12);
+
+      assert.deepEqual(
+        (yield* orchestrator.getThreadArchiveFamily(parent))
+          .filter((shell) => shell.id !== parent)
+          .map((shell) => shell.id),
+        childIds,
+      );
+      if (change === "question" || change === "approval" || change === "native turn")
+        assert.isEmpty((yield* orchestrator.getThreadProjection(native)).runs);
+      const before = yield* Effect.forEach(snapshot, (shell) =>
+        orchestrator.getThreadProjection(shell.id),
+      );
+      const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      const refusal = yield* orchestrator
+        .dispatch({
+          ...archive(parent, childIds),
+          commandId: CommandId.make("idle-snapshot-automatic-archive"),
+          childDisposition: "archive_if_idle",
+        })
+        .pipe(Effect.flip);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      assert.include(String(refusal.cause), "Review the archive choices again");
+      assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+      assert.deepEqual(
+        yield* Effect.forEach(snapshot, (shell) => orchestrator.getThreadProjection(shell.id)),
+        before,
+      );
+      const explicit = archive(parent, childIds);
+      yield* orchestrator.dispatch(explicit);
+      yield* threads.executeArchive({ threadId: parent, requestId: explicit.commandId });
+      for (const shell of snapshot) {
+        const archived = yield* orchestrator.getThreadProjection(shell.id);
+        assert.isNotNull(archived.thread.archivedAt);
+        assert.isNull(archived.thread.archivePending);
+        assert.isUndefined(archived.thread.lineage.independent);
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("automatic archive accepts a genuinely idle recursive family", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const { parent, snapshot } = yield* idleArchiveFamily;
+    const command = {
+      ...archive(
+        parent,
+        snapshot.filter((shell) => shell.id !== parent).map((shell) => shell.id),
+      ),
+      commandId: CommandId.make("genuinely-idle-family-archive"),
+      childDisposition: "archive_if_idle" as const,
+    };
+    yield* orchestrator.dispatch(command);
+    yield* threads.executeArchive({ threadId: parent, requestId: command.commandId });
+    for (const shell of snapshot) {
+      const projection = yield* orchestrator.getThreadProjection(shell.id);
+      assert.isNotNull(projection.thread.archivedAt);
+      assert.isNull(projection.thread.archivePending);
+      assert.isFalse(projection.turnItems.some((item) => item.type === "run_interrupt_request"));
+    }
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect.each(["preparing", "starting", "running", "waiting"] as const)(
   "ordinary standalone archive refuses %s work without stopping it",
   (status) =>

@@ -20,6 +20,7 @@ import {
   EnvironmentId,
   getOwnedThreadFamily,
   type ScopedThreadRef,
+  type ThreadArchiveChildDisposition,
   ThreadId,
   sessionGrantsScope,
 } from "@t3tools/contracts";
@@ -76,10 +77,7 @@ import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
-import {
-  requestThreadArchiveDialog,
-  type ArchiveChildDisposition,
-} from "../components/ThreadArchiveDialog";
+import { requestThreadArchiveDialog } from "../components/ThreadArchiveDialog";
 
 function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target: ScopedThreadRef) {
   const familyThreads = threads
@@ -507,7 +505,7 @@ export function useThreadActions() {
         onArchived?: () => void;
         confirmed?: boolean;
         familyChoice?: {
-          childDisposition: ArchiveChildDisposition;
+          childDisposition: ThreadArchiveChildDisposition;
           expectedChildThreadIds: ThreadId[];
         };
         familyOwner?: EnvironmentThreadShell;
@@ -530,8 +528,8 @@ export function useThreadActions() {
       const familyChoice = retry && !opts.familyOwner ? undefined : opts.familyChoice;
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
-      let archivedChildDisposition: ArchiveChildDisposition =
-        familyChoice?.childDisposition ?? "stop_and_archive";
+      let archivedChildDisposition: ThreadArchiveChildDisposition =
+        familyChoice?.childDisposition ?? "archive_if_idle";
       let action: ReturnType<typeof ThreadUndo.begin> | undefined;
       // Bulk actions already read every family before gathering one shared choice.
       const familyResult = familyChoice
@@ -583,9 +581,9 @@ export function useThreadActions() {
 
       const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
       const expectedChildThreadIds = family?.children.map((child) => child.id) ?? [];
-      const mutate = (childDisposition?: ArchiveChildDisposition) => {
+      const mutate = (childDisposition?: ThreadArchiveChildDisposition) => {
         archivedChildDisposition =
-          familyChoice?.childDisposition ?? childDisposition ?? "stop_and_archive";
+          familyChoice?.childDisposition ?? childDisposition ?? "archive_if_idle";
         action?.finish();
         action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
         return archiveThreadMutation({
@@ -593,9 +591,9 @@ export function useThreadActions() {
           input: {
             threadId: threadRef.threadId,
             ...(familyChoice ??
-              (family !== null && family.children.length > 0
+              (family !== null
                 ? {
-                    childDisposition: childDisposition ?? "stop_and_archive",
+                    childDisposition: childDisposition ?? "archive_if_idle",
                     expectedChildThreadIds,
                   }
                 : {})),
@@ -608,7 +606,8 @@ export function useThreadActions() {
         family !== null &&
         (activeChildren.length > 0 ||
           family.protectedChildren.length > 0 ||
-          (!threadRuntimeCanArchive(thread.runtime) && family.children.length > 0))
+          ((!threadRuntimeCanArchive(thread.runtime) || archiveChildNeedsAttention(thread)) &&
+            family.children.length > 0))
       ) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
@@ -777,7 +776,7 @@ export function useThreadActions() {
           >
         | undefined;
       const completedThreadKeys = new Set<string>();
-      const perform = async (choice: ArchiveChildDisposition) => {
+      const perform = async (choice: ThreadArchiveChildDisposition) => {
         const attempt = await archiveSelectedThreadEntries({
           entries: entries.filter((entry) => !completedThreadKeys.has(entry.threadKey)),
           archive: ({ threadRef, family, owner }, onArchived) =>
@@ -809,7 +808,8 @@ export function useThreadActions() {
         protectedCount > 0 ||
         entries.some(
           ({ owner, family }) =>
-            !threadRuntimeCanArchive(owner.runtime) && family.children.length > 0,
+            (!threadRuntimeCanArchive(owner.runtime) || archiveChildNeedsAttention(owner)) &&
+            family.children.length > 0,
         )
       ) {
         const choice = await requestThreadArchiveDialog({
@@ -836,7 +836,7 @@ export function useThreadActions() {
           !(await readLocalApi()?.dialogs.confirm(`Archive ${entries.length} threads?`))
         )
           return null;
-        await perform("stop_and_archive");
+        await perform("archive_if_idle");
       }
       return outcome ?? null;
     },

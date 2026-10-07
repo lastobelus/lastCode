@@ -2,10 +2,14 @@ import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   archiveRetryThreadId,
+  archiveChildNeedsAttention,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type ThreadArchiveChildDisposition,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useCallback, useRef } from "react";
@@ -154,11 +158,11 @@ function useThreadActionExecutor(
       try {
         let archiveInput: {
           threadId: EnvironmentThreadShell["id"];
-          childDisposition: "stop_and_archive" | "promote";
+          childDisposition: ThreadArchiveChildDisposition;
           expectedChildThreadIds: EnvironmentThreadShell["id"][];
         } = {
           threadId: thread.id,
-          childDisposition: "stop_and_archive",
+          childDisposition: "archive_if_idle",
           expectedChildThreadIds: [],
         };
         if (action === "archive") {
@@ -216,30 +220,32 @@ function useThreadActionExecutor(
             return false;
           }
 
-          const childDisposition = family.requiresConfirmation
-            ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
-                Alert.alert(
-                  `Archive "${thread.title || "Untitled thread"}"?`,
-                  family.message,
-                  [
-                    { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
-                    ...(family.canKeepSeparately
-                      ? [{ text: "Keep running separately", onPress: () => resolve("promote") }]
-                      : []),
-                    ...(family.canStopAndArchive
-                      ? [
-                          {
-                            text: "Stop and archive",
-                            style: "destructive" as const,
-                            onPress: () => resolve("stop_and_archive"),
-                          },
-                        ]
-                      : []),
-                  ],
-                  { cancelable: true, onDismiss: () => resolve(null) },
-                );
-              })
-            : "stop_and_archive";
+          const childDisposition =
+            family.requiresConfirmation ||
+            (family.children.length > 0 && archiveChildNeedsAttention(thread))
+              ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
+                  Alert.alert(
+                    `Archive "${thread.title || "Untitled thread"}"?`,
+                    family.message,
+                    [
+                      { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
+                      ...(family.canKeepSeparately
+                        ? [{ text: "Keep running separately", onPress: () => resolve("promote") }]
+                        : []),
+                      ...(family.canStopAndArchive
+                        ? [
+                            {
+                              text: "Stop and archive",
+                              style: "destructive" as const,
+                              onPress: () => resolve("stop_and_archive"),
+                            },
+                          ]
+                        : []),
+                    ],
+                    { cancelable: true, onDismiss: () => resolve(null) },
+                  );
+                })
+              : "archive_if_idle";
           if (childDisposition === null) return false;
           archiveInput = {
             threadId: thread.id,

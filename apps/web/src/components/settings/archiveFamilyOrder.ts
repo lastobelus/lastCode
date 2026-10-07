@@ -6,6 +6,42 @@ type ArchivedFamilyThread = {
     | undefined;
 };
 
+type ArchivedRestoreThread = ArchivedFamilyThread & {
+  readonly archivedAt: unknown;
+  readonly deletedAt: unknown;
+};
+
+/** Resolve family restores from one environment-scoped index for the archive snapshot. */
+export function createArchivedThreadRestoreTarget<T extends ArchivedRestoreThread>(
+  snapshots: readonly {
+    readonly environmentId: string;
+    readonly snapshot: { readonly threads: readonly T[] };
+  }[],
+) {
+  const ownersByEnvironment = new Map(
+    snapshots.map(({ environmentId, snapshot }) => [
+      environmentId,
+      new Map(snapshot.threads.map((thread) => [thread.id, thread])),
+    ]),
+  );
+  return (
+    thread: Omit<ArchivedFamilyThread, "id"> & {
+      readonly id: T["id"];
+      readonly environmentId: string;
+    },
+  ): T["id"] => {
+    const cohort = thread.archivedWith;
+    if (cohort == null || cohort.threadId === thread.id) return thread.id;
+    const owner = ownersByEnvironment.get(thread.environmentId)?.get(cohort.threadId);
+    return owner &&
+      owner.deletedAt === null &&
+      owner.archivedAt !== null &&
+      owner.archivedWith?.commandId === cohort.commandId
+      ? owner.id
+      : thread.id;
+  };
+}
+
 /** Keep each archived cohort beneath its owner, preserving the supplied order. */
 export function groupArchivedThreadFamilies<T extends ArchivedFamilyThread>(threads: readonly T[]) {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));

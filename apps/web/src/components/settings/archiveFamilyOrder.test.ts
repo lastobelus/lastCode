@@ -1,5 +1,78 @@
 import { describe, expect, it } from "vite-plus/test";
-import { groupArchivedThreadFamilies } from "./archiveFamilyOrder";
+import {
+  createArchivedThreadRestoreTarget,
+  groupArchivedThreadFamilies,
+} from "./archiveFamilyOrder";
+
+describe("archived family restore target", () => {
+  const owner = {
+    id: "owner",
+    archivedAt: "2026-10-07T00:00:00.000Z",
+    deletedAt: null,
+    archivedWith: { threadId: "owner", commandId: "family" },
+  };
+  const child = { ...owner, id: "child", environmentId: "environment-a" };
+  type RestoreOwner = Omit<typeof owner, "archivedAt" | "deletedAt"> & {
+    readonly archivedAt: string | null;
+    readonly deletedAt: string | null;
+  };
+  const snapshots = (threads: readonly RestoreOwner[], environmentId = child.environmentId) => [
+    { environmentId, snapshot: { threads } },
+  ];
+
+  it("restores the present living archived owner for a matching cohort", () => {
+    const restoreTarget = createArchivedThreadRestoreTarget(snapshots([owner]));
+    expect(restoreTarget(child)).toBe(owner.id);
+    expect(restoreTarget({ ...owner, environmentId: child.environmentId })).toBe(owner.id);
+    expect(restoreTarget({ ...child, archivedWith: undefined })).toBe(child.id);
+  });
+
+  it.each([
+    { reason: "missing", threads: [] },
+    { reason: "deleted", threads: [{ ...owner, deletedAt: owner.archivedAt }] },
+    { reason: "unarchived", threads: [{ ...owner, archivedAt: null }] },
+    {
+      reason: "different cohort",
+      threads: [{ ...owner, archivedWith: { ...owner.archivedWith, commandId: "other-cohort" } }],
+    },
+  ])("restores the selected child when its owner is $reason", ({ threads }) => {
+    const restoreTarget = createArchivedThreadRestoreTarget(snapshots(threads));
+    expect(restoreTarget(child)).toBe(child.id);
+  });
+
+  it("keeps same-id owners separate across environments and refreshes targets with snapshots", () => {
+    const otherEnvironment = "environment-b";
+    const restoreTarget = createArchivedThreadRestoreTarget([
+      ...snapshots([{ ...owner, deletedAt: owner.archivedAt }]),
+      ...snapshots([owner], otherEnvironment),
+    ]);
+    expect(restoreTarget(child)).toBe(child.id);
+    expect(restoreTarget({ ...child, environmentId: otherEnvironment })).toBe(owner.id);
+    expect(createArchivedThreadRestoreTarget(snapshots([owner]))(child)).toBe(owner.id);
+    expect(createArchivedThreadRestoreTarget(snapshots([]))(child)).toBe(child.id);
+  });
+
+  it("does not rescan archived owners for repeated row labels and restore actions", () => {
+    let idReads = 0;
+    const threads = Array.from({ length: 2_000 }, (_, index) => ({
+      ...owner,
+      get id() {
+        idReads += 1;
+        return `owner-${index}`;
+      },
+      archivedWith: { threadId: `owner-${index}`, commandId: "family" },
+    }));
+    const restoreTarget = createArchivedThreadRestoreTarget(snapshots(threads));
+    for (let index = 0; index < threads.length; index += 1) {
+      const target = {
+        ...child,
+        archivedWith: { threadId: `owner-${index}`, commandId: "family" },
+      };
+      for (let read = 0; read < 3; read += 1) expect(restoreTarget(target)).toBe(`owner-${index}`);
+    }
+    expect(idReads).toBeLessThanOrEqual(threads.length * 4);
+  });
+});
 
 describe("archived family ordering", () => {
   it("keeps each cohort together while retaining root and child ordering", () => {

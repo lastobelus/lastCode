@@ -3,7 +3,9 @@ import * as NodeV8 from "node:v8";
 import {
   CommandId,
   EventId,
+  NodeId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnItemId,
@@ -37,6 +39,59 @@ const layerTest = OrchestrationEventStore.layer.pipe(
 const layer = it.layer(layerTest);
 
 layer("OrchestrationEventStore", (it) => {
+  it.effect("retains parent and native-child shell targets in replay and live buffers", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* OrchestrationEventStore.OrchestrationEventStore;
+        const afterSequence = yield* store.latestApplicationSequence;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("native-parent");
+        const childThreadId = ThreadId.make("native-child");
+        const event: OrchestrationV2DomainEvent = {
+          id: EventId.make("native-update-replay"),
+          type: "subagent.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: NodeId.make("native-task"),
+            threadId,
+            runId: null,
+            parentNodeId: NodeId.make("parent-node"),
+            origin: "provider_native",
+            createdBy: "agent",
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerThreadId: null,
+            childThreadId,
+            nativeTaskRef: null,
+            prompt: "x".repeat(1024 * 1024),
+            title: "Native work",
+            model: null,
+            status: "running",
+            result: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+          },
+        };
+        const [replayed] = yield* store.appendAgentEvents({ events: [event] });
+        const pull = yield* Stream.toPull(
+          store.streamProjectedApplicationEvents({
+            afterSequence,
+            project: toShellApplicationEvent,
+          }),
+        );
+        const expected = (sequence: number) =>
+          [{ sequence, event: { threadId }, relatedThreadId: childThreadId }] as const;
+        assert.deepEqual(yield* pull, expected(replayed!.sequence));
+        const [live] = yield* store.appendAgentEvents({
+          events: [{ ...event, id: EventId.make("native-update-live") }],
+        });
+        yield* store.publishCommitted([live!]);
+        assert.deepEqual(yield* pull, expected(live!.sequence));
+      }),
+    ),
+  );
   it.effect("retains only shell metadata from oversized replay and live application events", () =>
     Effect.scoped(
       Effect.gen(function* () {

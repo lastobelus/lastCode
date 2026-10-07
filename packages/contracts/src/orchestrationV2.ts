@@ -123,7 +123,13 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
 
-export const ThreadArchiveChildDisposition = Schema.Literals(["stop_and_archive", "promote"]);
+/** Idle archive is not consent to stop newly active work; the server rechecks before accepting it. */
+export const ThreadArchiveChildDisposition = Schema.Literals([
+  "archive_if_idle",
+  "stop_and_archive",
+  "promote",
+]);
+export type ThreadArchiveChildDisposition = typeof ThreadArchiveChildDisposition.Type;
 export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
 export const ThreadArchiveParticipant = Schema.Struct({
   threadId: ThreadId,
@@ -2043,6 +2049,12 @@ export const OrchestrationV2ShellSnapshot = Schema.Struct({
 });
 export type OrchestrationV2ShellSnapshot = typeof OrchestrationV2ShellSnapshot.Type;
 
+const relatedThreadShellFields = {
+  /** Additional active-shell targets of the same event, applied before advancing its sequence. */
+  relatedThreads: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadShell)),
+  relatedRemovedThreadIds: Schema.optionalKey(Schema.Array(ThreadId)),
+};
+
 export const OrchestrationV2ShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("synchronized"),
@@ -2072,12 +2084,14 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
     sequence: NonNegativeInt,
     location: Schema.Literals(["active", "archive"]),
     thread: OrchestrationV2ThreadShell,
+    ...relatedThreadShellFields,
   }),
   Schema.Struct({
     kind: Schema.Literal("thread.removed"),
     sequence: NonNegativeInt,
     location: Schema.Literals(["active", "archive"]),
     threadId: ThreadId,
+    ...relatedThreadShellFields,
   }),
 ]);
 export type OrchestrationV2ShellStreamItem = typeof OrchestrationV2ShellStreamItem.Type;

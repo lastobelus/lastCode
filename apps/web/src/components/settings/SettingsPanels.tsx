@@ -103,7 +103,10 @@ import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { derivePhysicalProjectKey } from "../../logicalProject";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-import { groupArchivedThreadFamilies } from "./archiveFamilyOrder";
+import {
+  createArchivedThreadRestoreTarget,
+  groupArchivedThreadFamilies,
+} from "./archiveFamilyOrder";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -3425,20 +3428,8 @@ export function ArchivedThreadsPanel() {
     refresh: refreshArchivedThreads,
   } = useArchivedThreadSnapshots(environmentIds);
   const isLoadingArchive = !isScopeReady || isLoadingSnapshots;
-  const restoreThreadId = useCallback(
-    (thread: EnvironmentThreadShell) => {
-      const cohort = thread.archivedWith;
-      if (cohort == null || cohort.threadId === thread.id) return thread.id;
-      const owner = archivedSnapshots
-        .find((entry) => entry.environmentId === thread.environmentId)
-        ?.snapshot.threads.find((candidate) => candidate.id === cohort.threadId);
-      return owner &&
-        owner.deletedAt === null &&
-        owner.archivedAt !== null &&
-        owner.archivedWith?.commandId === cohort.commandId
-        ? owner.id
-        : thread.id;
-    },
+  const restoreThreadId = useMemo(
+    () => createArchivedThreadRestoreTarget(archivedSnapshots),
     [archivedSnapshots],
   );
 

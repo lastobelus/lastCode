@@ -131,6 +131,7 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
+  attachRelatedThreadShellItems,
   buildActiveShellSnapshot,
   coalesceShellApplicationEvents,
   coalesceStoredThreadEvents,
@@ -1018,7 +1019,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
-      return yield* Effect.forEach(
+      const items = yield* Effect.forEach(
         coalesceShellApplicationEvents(events),
         (stored) =>
           Effect.gen(function* () {
@@ -1030,6 +1031,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           }),
         { concurrency: 8 },
       );
+      return attachRelatedThreadShellItems(items);
     });
 
     const toShellStream = <E, R>(stream: Stream.Stream<ShellApplicationEvent, E, R>) =>
@@ -1153,10 +1155,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
 
       const loaded = yield* loadProjectMetadataSnapshot(highWater);
       const replay = toShellStream(
-        applicationEvents.readApplicationEvents({
-          afterSequence: input.afterSequence,
-          throughSequence: highWater,
-        }),
+        applicationEvents
+          .readApplicationEvents({
+            afterSequence: input.afterSequence,
+            throughSequence: highWater,
+          })
+          .pipe(Stream.map(toShellApplicationEvent)),
       );
       return composeShellStreamWithEnrichment({
         initial: initialEnrichmentItems(loaded),

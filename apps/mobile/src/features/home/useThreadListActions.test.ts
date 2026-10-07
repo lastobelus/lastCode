@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   shells: [] as EnvironmentThreadShell[],
   archiveFamily: undefined as EnvironmentThreadShell[] | undefined,
   archiveFamilyError: undefined as Error | undefined,
+  archiveMutationError: undefined as Error | undefined,
   archiveFamilyReads: [] as { environmentId: string; input: { threadId: string } }[],
   archiveSupport: true as boolean | undefined,
   alertMessages: [] as string[],
@@ -169,6 +170,8 @@ vi.mock("../../state/threads", () => ({
           return AsyncResult.failure(Cause.fail(new Error("Thread operation denied")));
         }
         state.afterRequest?.();
+        if (action === "archive" && state.archiveMutationError)
+          return AsyncResult.failure(Cause.fail(state.archiveMutationError));
         return AsyncResult.success(undefined);
       },
     ]),
@@ -213,6 +216,7 @@ beforeEach(() => {
   state.shells = [];
   state.archiveFamily = undefined;
   state.archiveFamilyError = undefined;
+  state.archiveMutationError = undefined;
   state.archiveFamilyReads = [];
   state.archiveSupport = true;
   state.alertMessages = [];
@@ -327,13 +331,98 @@ describe("archive family reads", () => {
         action: "archive",
         input: {
           threadId: local.id,
-          childDisposition: "stop_and_archive",
+          childDisposition: "archive_if_idle",
           expectedChildThreadIds: [],
         },
       }),
     ]);
     expect(state.alerts).toEqual([]);
   });
+
+  it("archives idle owned children without granting stop consent", async () => {
+    const root = makeThread();
+    const child = makeThread({
+      id: ThreadId.make("idle-child"),
+      lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    state.shells = [root];
+    state.archiveFamily = [root, child];
+    await useThreadListActions().archiveThread(root);
+    expect(state.alerts).toEqual([]);
+    expect(state.requests).toEqual([
+      expect.objectContaining({
+        action: "archive",
+        input: {
+          threadId: root.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [child.id],
+        },
+      }),
+    ]);
+  });
+
+  it("reports newly active family rejection without resubmitting stop consent", async () => {
+    const root = makeThread();
+    const child = makeThread({
+      id: ThreadId.make("idle-child"),
+      lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    state.shells = [root];
+    state.archiveFamily = [root, child];
+    state.archiveMutationError = new Error(
+      "This family now has work that needs attention. Review the archive choices again.",
+    );
+    await useThreadListActions().archiveThread(root);
+    expect(state.requests).toEqual([
+      expect.objectContaining({
+        action: "archive",
+        input: {
+          threadId: root.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [child.id],
+        },
+      }),
+    ]);
+    await vi.waitFor(() =>
+      expect(state.alertMessages[0]).toContain("Review the archive choices again"),
+    );
+    expect(state.archiveFamilyReads).toHaveLength(1);
+  });
+
+  it.each(["question", "failed"] as const)(
+    "offers explicit choices for owner %s with idle children",
+    async (attention) => {
+      const root = makeThread({
+        hasPendingUserInput: attention === "question",
+        runtime: attention === "failed" ? { ...workingRuntime, status: "failed" } : null,
+      });
+      const child = makeThread({
+        id: ThreadId.make("idle-child"),
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      state.shells = [root];
+      state.archiveFamily = [root, child];
+      const archiving = useThreadListActions().archiveThread(root);
+      await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+      expect(state.requests).toEqual([]);
+      state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
+      await archiving;
+      expect(state.requests).toEqual([
+        expect.objectContaining({
+          action: "archive",
+          input: {
+            threadId: root.id,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [child.id],
+          },
+        }),
+      ]);
+    },
+  );
 
   it.each(["missing", "persistent"] as const)(
     "blocks archive when the authoritative owner is %s",

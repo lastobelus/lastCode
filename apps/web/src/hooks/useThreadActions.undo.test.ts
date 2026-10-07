@@ -11,6 +11,7 @@ import { makeThreadFixture } from "../test-fixtures";
 const familyState = vi.hoisted(() => ({
   threads: [] as ReturnType<typeof makeThreadFixture>[],
   archiveSupport: true as boolean | undefined,
+  confirmArchive: false,
   unsupportedEnvironments: new Set<string>(),
 }));
 const newThread = vi.hoisted(() => vi.fn());
@@ -47,7 +48,9 @@ vi.mock("react", async (original) => ({
   useRef: (value: unknown) => ({ current: value }),
 }));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
-vi.mock("./useSettings", () => ({ useClientSettings: () => false }));
+const archiveConfirm = vi.hoisted(() => vi.fn());
+vi.mock("./useSettings", () => ({ useClientSettings: () => familyState.confirmArchive }));
+vi.mock("../localApi", () => ({ readLocalApi: () => ({ dialogs: { confirm: archiveConfirm } }) }));
 vi.mock("./useHandleNewThread", () => ({ useNewThreadHandler: () => newThread }));
 vi.mock("../composerDraftStore", () => ({ useComposerDraftStore: () => vi.fn() }));
 vi.mock("../terminalUiStateStore", () => ({ useTerminalUiStateStore: () => vi.fn() }));
@@ -114,6 +117,8 @@ function currentUndo() {
 beforeEach(() => {
   familyState.threads = [];
   familyState.archiveSupport = true;
+  familyState.confirmArchive = false;
+  archiveConfirm.mockReset().mockResolvedValue(true);
   familyState.unsupportedEnvironments.clear();
   newThread.mockReset().mockResolvedValue(undefined);
   archiveDialog.mockReset();
@@ -488,7 +493,11 @@ describe("archive family confirmation", () => {
     expect(archiveDialog).not.toHaveBeenCalled();
     expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
       environmentId: target.environmentId,
-      input: { threadId: target.threadId },
+      input: {
+        threadId: target.threadId,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [],
+      },
     });
   });
 
@@ -504,6 +513,127 @@ describe("archive family confirmation", () => {
       expect((await useThreadActions().archiveThread(target))._tag).toBe("Failure");
       expect(archiveDialog).not.toHaveBeenCalled();
       expect(commands.archive).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "idle family archive never grants stop consent (bulk=%s, genericConfirm=%s)",
+    async (bulk, genericConfirm) => {
+      familyState.confirmArchive = genericConfirm;
+      const root = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+      const child = makeThreadFixture({
+        id: ThreadId.make("idle-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [root, child];
+      const actions = useThreadActions();
+      if (bulk) await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]);
+      else await actions.archiveThread(target);
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(archiveConfirm).toHaveBeenCalledTimes(genericConfirm ? 1 : 0);
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(1);
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: root.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [child.id],
+        },
+      });
+    },
+  );
+
+  it.each([false, true])(
+    "keeps an idle archive rejection visible without granting stop consent (bulk=%s)",
+    async (bulk) => {
+      const root = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
+      const child = makeThreadFixture({
+        id: ThreadId.make("idle-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [root, child];
+      commands.archive.mockResolvedValue({
+        _tag: "Failure",
+        cause: Cause.fail(new Error("Family activity changed; confirm again")),
+      });
+      const actions = useThreadActions();
+      if (bulk) {
+        const outcome = await actions.archiveThreads([
+          { threadRef: target, threadKey: "undo-env:thread" },
+        ]);
+        expect(outcome?.mutationFailure?._tag).toBe("Failure");
+        expect(outcome?.archivedThreadKeys).toEqual([]);
+      } else expect((await actions.archiveThread(target))._tag).toBe("Failure");
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: root.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [child.id],
+        },
+      });
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(useThreadUndoNotice.getState().notice).toBeNull();
+    },
+  );
+
+  it.each([
+    [false, "question"],
+    [true, "question"],
+    [false, "failed"],
+    [true, "failed"],
+  ] as const)(
+    "offers explicit choices for owner attention with idle children (bulk=%s, attention=%s)",
+    async (bulk, attention) => {
+      const root = {
+        ...workingRoot(),
+        runtime:
+          attention === "failed" ? { ...workingRoot().runtime!, status: "failed" as const } : null,
+        hasPendingUserInput: attention === "question",
+      };
+      const child = makeThreadFixture({
+        id: ThreadId.make("idle-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [root, child];
+      archiveDialog.mockImplementation(async (request) => {
+        expect(request.activeChildren).toEqual([]);
+        expect(commands.archive).not.toHaveBeenCalled();
+        expect(await request.submit("stop_and_archive")).toBeNull();
+        return "stop_and_archive";
+      });
+      const actions = useThreadActions();
+      if (bulk) await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]);
+      else await actions.archiveThread(target);
+      expect(archiveDialog).toHaveBeenCalledTimes(1);
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: root.id,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [child.id],
+        },
+      });
     },
   );
 

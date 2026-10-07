@@ -36,7 +36,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Archiving a thread with subagents requires an explicit childDisposition and the exact expectedChildThreadIds. stop_and_archive stops the family; promote keeps app-owned subagent families separately and stops native provider subagents. This does not schedule a future action.",
+    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Archiving a thread with subagents requires an explicit childDisposition and the exact expectedChildThreadIds. archive_if_idle refuses if the family has work needing attention; stop_and_archive confirms stopping the family; promote keeps app-owned subagent families separately and stops native provider subagents. This does not schedule a future action.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
