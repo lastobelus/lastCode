@@ -51,8 +51,13 @@ export function makeSubagentChildThread(input: {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
+  const {
+    creatorThreadId: _creatorThreadId,
+    creatorGrouping: _creatorGrouping,
+    ...parentThread
+  } = input.parentThread;
   return {
-    ...input.parentThread,
+    ...parentThread,
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     id: input.childThreadId,
@@ -63,6 +68,8 @@ export function makeSubagentChildThread(input: {
     providerInstanceId: input.providerInstanceId,
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
+    persistent: false,
+    annotation: null,
     lineage: {
       parentThreadId: input.parentThread.id,
       relationshipToParent: "subagent",
