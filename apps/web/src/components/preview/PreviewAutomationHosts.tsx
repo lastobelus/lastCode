@@ -7,7 +7,7 @@ import {
   FILL_PREVIEW_VIEWPORT,
   DEFAULT_BROWSER_PROFILE_ID,
   PreviewAutomationProfileError,
-  PREVIEW_AUTOMATION_OPERATIONS,
+  PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS,
   type EnvironmentId,
   type PreviewAutomationNavigateInput,
   type PreviewAutomationOpenInput,
@@ -340,7 +340,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
     () => ({
       clientId: automationClientId,
       environmentId,
-      supportedOperations: [...PREVIEW_AUTOMATION_OPERATIONS],
+      supportedOperations: [...PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS],
+      supportsProfileSelection: true,
     }),
     [automationClientId, environmentId],
   );

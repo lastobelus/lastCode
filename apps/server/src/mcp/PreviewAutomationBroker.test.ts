@@ -868,6 +868,55 @@ it.effect("prefers a focused host over unrelated extra capabilities for a new se
   ),
 );
 
+it.effect.each([true, false, undefined])(
+  "negotiates profile operations without extending an older host's operation list (capability: %s)",
+  (supportsProfileSelection) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const requests = requestsFrom(
+          yield* broker.connect(
+            makeHost({
+              supportedOperations: ["status"],
+              ...(supportsProfileSelection === undefined ? {} : { supportsProfileSelection }),
+            }),
+          ),
+        );
+        yield* Stream.runForEach(requests, (request) =>
+          broker.respond({
+            clientId: "client-1",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: request.operation,
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "status",
+        );
+        for (const operation of ["profiles", "openWithProfile"] as const) {
+          if (supportsProfileSelection === true) {
+            expect(yield* broker.invoke<string>({ scope, operation, input: {} })).toBe(operation);
+          } else {
+            const error = yield* broker
+              .invoke<void>({ scope, operation, input: {} })
+              .pipe(Effect.flip);
+            expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+          }
+        }
+        const resizeError = yield* broker
+          .invoke<void>({ scope, operation: "resize", input: {} })
+          .pipe(Effect.flip);
+        expect(resizeError).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "status",
+        );
+      }),
+    ),
+);
+
 it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
   "does not route %s to legacy hosts that did not advertise support",
   (operation) =>
@@ -896,7 +945,11 @@ it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
         const broker = yield* makeBroker;
         const capableRequests = requestsFrom(
           yield* broker.connect(
-            makeHost({ clientId: "client-capable", supportedOperations: [operation] }),
+            makeHost({
+              clientId: "client-capable",
+              supportedOperations: operation === "resize" ? [operation] : [],
+              ...(operation === "resize" ? {} : { supportsProfileSelection: true }),
+            }),
           ),
         );
         const legacyRequests = requestsFrom(
@@ -955,7 +1008,11 @@ it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
 
         const capableRequests = requestsFrom(
           yield* broker.connect(
-            makeHost({ clientId: "client-capable", supportedOperations: [operation] }),
+            makeHost({
+              clientId: "client-capable",
+              supportedOperations: operation === "resize" ? [operation] : [],
+              ...(operation === "resize" ? {} : { supportsProfileSelection: true }),
+            }),
           ),
         );
         yield* Stream.runForEach(capableRequests, (request) =>
@@ -1518,7 +1575,9 @@ it.effect("returns profile selection advice from the desktop as a typed error", 
     Effect.gen(function* () {
       const broker = yield* makeBroker;
       const requests = requestsFrom(
-        yield* broker.connect(makeHost({ supportedOperations: ["openWithProfile"] })),
+        yield* broker.connect(
+          makeHost({ supportedOperations: ["open"], supportsProfileSelection: true }),
+        ),
       );
       yield* Stream.runForEach(requests, (request) =>
         broker.respond({

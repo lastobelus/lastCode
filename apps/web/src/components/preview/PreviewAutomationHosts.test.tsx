@@ -1,6 +1,7 @@
 import {
   DEFAULT_CLIENT_SETTINGS,
   EnvironmentId,
+  PreviewAutomationHost,
   ThreadId,
   type ClientSettings,
   type PreviewAutomationResponse,
@@ -12,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
+import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -34,6 +36,8 @@ import { PreviewAutomationHosts } from "./PreviewAutomationHosts";
 const mocks = vi.hoisted(() => ({
   getClientSettings: vi.fn<() => Promise<ClientSettings | null>>(),
   setClientSettings: vi.fn(),
+  automationRequests:
+    vi.fn<(target: { environmentId: EnvironmentId; input: PreviewAutomationHost }) => void>(),
   open: vi.fn(async (_target: { environmentId: EnvironmentId; input: PreviewOpenInput }) =>
     AsyncResult.success(snapshot),
   ),
@@ -57,7 +61,13 @@ vi.mock("~/state/environments", () => ({
 }));
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
-    automationRequests: () => requestsAtom,
+    automationRequests: (target: {
+      environmentId: EnvironmentId;
+      input: PreviewAutomationHost;
+    }) => {
+      mocks.automationRequests(target);
+      return requestsAtom;
+    },
     list: () => listAtom,
     open: mocks.open,
     resize: mocks.resize,
@@ -169,6 +179,61 @@ afterEach(async () => {
   __resetClientSettingsPersistenceForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+// Frozen protocol-2 registration shape from before profile selection. Do not
+// build this enum from current constants: that would conceal wire regressions.
+const protocol2AutomationHost = Schema.Struct({
+  clientId: Schema.String,
+  environmentId: Schema.String,
+  supportedOperations: Schema.optional(
+    Schema.Array(
+      Schema.Literals([
+        "status",
+        "open",
+        "navigate",
+        "snapshot",
+        "click",
+        "type",
+        "press",
+        "scroll",
+        "evaluate",
+        "waitFor",
+        "recordingStart",
+        "recordingStop",
+        "resize",
+        "setColorScheme",
+      ]),
+    ),
+  ),
+});
+const decodeProtocol2AutomationHost = Schema.decodeUnknownSync(protocol2AutomationHost);
+const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
+
+it("registers with pre-profile protocol-2 servers while advertising profiles to new servers", () => {
+  const registration = mocks.automationRequests.mock.calls[0]?.[0];
+  expect(registration).toBeDefined();
+  const historicalHost = decodeProtocol2AutomationHost(registration?.input);
+  expect(historicalHost.environmentId).toBe(environmentId);
+  expect(historicalHost.supportedOperations).toEqual([
+    "status",
+    "open",
+    "navigate",
+    "snapshot",
+    "click",
+    "type",
+    "press",
+    "scroll",
+    "evaluate",
+    "waitFor",
+    "recordingStart",
+    "recordingStop",
+    "resize",
+    "setColorScheme",
+  ]);
+  expect(historicalHost).not.toHaveProperty("supportsProfileSelection");
+  const currentHost = decodeAutomationHost(registration?.input);
+  expect(currentHost.supportsProfileSelection).toBe(true);
 });
 
 describe("PreviewAutomationHosts open", () => {

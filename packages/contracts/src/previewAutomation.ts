@@ -39,11 +39,16 @@ export const PREVIEW_AUTOMATION_V1_OPERATIONS = [
   "recordingStop",
 ] as const;
 
-/** Advertised by current desktop hosts for mixed-version routing. */
-export const PREVIEW_AUTOMATION_OPERATIONS = [
+/** Stable advertisement accepted by protocol-2 servers' closed host-operation enum. */
+export const PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS = [
   ...PREVIEW_AUTOMATION_V1_OPERATIONS,
   "resize",
   "setColorScheme",
+] as const;
+
+/** All request operations. Profile operations are negotiated separately on the host. */
+export const PREVIEW_AUTOMATION_OPERATIONS = [
+  ...PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS,
   "profiles",
   "openWithProfile",
 ] as const;
@@ -612,6 +617,11 @@ export const PreviewAutomationHost = Schema.Struct({
    * a newer server safely coexist with an older desktop during rollout.
    */
   supportedOperations: Schema.optional(Schema.Array(PreviewAutomationOperation)),
+  /**
+   * Advertises profiles/openWithProfile without extending supportedOperations,
+   * which older protocol-2 servers decode with a closed operation enum.
+   */
+  supportsProfileSelection: Schema.optional(Schema.Boolean),
 });
 export type PreviewAutomationHost = typeof PreviewAutomationHost.Type;
 

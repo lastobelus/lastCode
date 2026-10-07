@@ -393,7 +393,12 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       clientId,
       connectionId,
       environmentId: host.environmentId,
-      supportedOperations: new Set(host.supportedOperations ?? PREVIEW_AUTOMATION_V1_OPERATIONS),
+      supportedOperations: new Set([
+        ...(host.supportedOperations ?? PREVIEW_AUTOMATION_V1_OPERATIONS),
+        ...(host.supportsProfileSelection === true
+          ? (["profiles", "openWithProfile"] as const)
+          : []),
+      ]),
       focused: false,
       liveTabs: [],
       focusOrder: 0,

@@ -170,6 +170,31 @@ describe("preview automation tab targeting", () => {
 });
 
 describe("PreviewAutomationHost", () => {
+  it("decodes profile capability separately from the supported operation set", () => {
+    for (const supportsProfileSelection of [true, false]) {
+      expect(
+        decodeAutomationHost({
+          clientId: "current",
+          environmentId: "environment-1",
+          supportedOperations: ["status", "resize"],
+          supportsProfileSelection,
+        }),
+      ).toEqual({
+        clientId: "current",
+        environmentId: "environment-1",
+        supportedOperations: ["status", "resize"],
+        supportsProfileSelection,
+      });
+    }
+    expect(() =>
+      decodeAutomationHost({
+        clientId: "invalid",
+        environmentId: "environment-1",
+        supportsProfileSelection: "true",
+      }),
+    ).toThrow();
+  });
+
   it("accepts legacy hosts and current operation advertisements", () => {
     expect(decodeAutomationHost({ clientId: "legacy", environmentId: "environment-1" })).toEqual({
       clientId: "legacy",
