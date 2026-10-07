@@ -31,56 +31,44 @@ function liveGroupMembers(members: readonly { state: string | undefined }[]) {
   return members.filter(({ state }) => state?.startsWith("Z") !== true);
 }
 
-describe("CI process ownership", () => {
-  it.skipIf(NodeProcess.platform !== "linux")(
-    "recognizes terminated orphans before their process group is reaped",
-    async () => {
-      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-subreaper-"));
-      try {
-        writeControllerDeathFixture(cwd);
-        const output = await new Promise<string>((resolve, reject) => {
-          NodeChildProcess.execFile(
-            "python3",
-            [
-              NodePath.join(import.meta.dirname, "fixtures/ci-controller-subreaper.py"),
-              process.execPath,
-            ],
-            { cwd, timeout: 20_000 },
-            (error, stdout, stderr) => {
-              if (error) reject(new Error(`Subreaper fixture failed: ${stderr}`, { cause: error }));
-              else resolve(stdout);
-            },
-          );
-        });
-        NodeProcess.stderr.write(`CI controlled orphan-reaping evidence ${output}`);
-        const evidence = JSON.parse(output) as {
-          controllerExit: number;
-          workerPid: number;
-          descendantPid: number;
-          subreaperPid: number;
-          groupProbeError: number | null;
-          reapedGroupProbeError: number | null;
-          before: Array<{ state: string }>;
-          members: Array<{ pid: number; parentPid: number; state: string }>;
-        };
-        expect(evidence.controllerExit).toBe(-9);
-        expect(evidence.groupProbeError).toBeNull();
-        expect(evidence.members.find(({ pid }) => pid === evidence.workerPid)?.state).toBe("Z");
-        expect(evidence.members.find(({ pid }) => pid === evidence.descendantPid)?.state).toBe("Z");
-        expect(
-          evidence.members.every(
-            ({ state, parentPid }) => state === "Z" && parentPid === evidence.subreaperPid,
-          ),
-        ).toBe(true);
-        expect(liveGroupMembers(evidence.before)).not.toEqual([]);
-        expect(liveGroupMembers(evidence.members)).toEqual([]);
-        expect(evidence.reapedGroupProbeError).toBe(NodeOS.constants.errno.ESRCH);
-      } finally {
-        NodeFS.rmSync(cwd, { recursive: true, force: true });
-      }
-    },
-  );
+async function assertControllerDeathWithSubreaper(cwd: string) {
+  const output = await new Promise<string>((resolve, reject) => {
+    NodeChildProcess.execFile(
+      "python3",
+      [NodePath.join(import.meta.dirname, "fixtures/ci-controller-subreaper.py"), process.execPath],
+      { cwd, timeout: 20_000 },
+      (error, stdout, stderr) => {
+        if (error) reject(new Error(`Subreaper fixture failed: ${stderr}`, { cause: error }));
+        else resolve(stdout);
+      },
+    );
+  });
+  NodeProcess.stderr.write(`CI controlled orphan-reaping evidence ${output}`);
+  const evidence = JSON.parse(output) as {
+    controllerExit: number;
+    workerPid: number;
+    descendantPid: number;
+    subreaperPid: number;
+    groupProbeError: number | null;
+    reapedGroupProbeError: number | null;
+    before: Array<{ state: string }>;
+    members: Array<{ pid: number; parentPid: number; state: string }>;
+  };
+  expect(evidence.controllerExit).toBe(-9);
+  expect(evidence.groupProbeError).toBeNull();
+  expect(evidence.members.find(({ pid }) => pid === evidence.workerPid)?.state).toBe("Z");
+  expect(evidence.members.find(({ pid }) => pid === evidence.descendantPid)?.state).toBe("Z");
+  expect(
+    evidence.members.every(
+      ({ state, parentPid }) => state === "Z" && parentPid === evidence.subreaperPid,
+    ),
+  ).toBe(true);
+  expect(liveGroupMembers(evidence.before)).not.toEqual([]);
+  expect(liveGroupMembers(evidence.members)).toEqual([]);
+  expect(evidence.reapedGroupProbeError).toBe(NodeOS.constants.errno.ESRCH);
+}
 
+describe("CI process ownership", () => {
   it.skipIf(NodeProcess.platform === "win32")(
     "finishes descendant cleanup after its controller dies",
     async () => {
@@ -122,6 +110,11 @@ describe("CI process ownership", () => {
       };
       try {
         writeControllerDeathFixture(cwd);
+        if (NodeProcess.platform === "linux") {
+          // Pipe EOF can precede the zombie transition. Wait on owned children.
+          await assertControllerDeathWithSubreaper(cwd);
+          return;
+        }
         controller = NodeChildProcess.spawn(process.execPath, ["controller.mjs"], {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
