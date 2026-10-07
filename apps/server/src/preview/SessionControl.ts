@@ -62,18 +62,20 @@ export class SessionControl {
     this.onGenerationChange();
   }
 
-  private async action<A>(allowed: () => boolean, run: () => Promise<A>) {
+  private async action<A>(allowed: () => boolean, run: () => Promise<A>, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     this.assertOpen();
     if (!allowed()) throw new BrowserControlInterrupted("You do not control this browser tab.");
     const epoch = this.epoch;
     return this.enqueue(async () => {
+      signal?.throwIfAborted();
       this.assertOpen();
       if (epoch !== this.epoch || !allowed()) throw new BrowserControlInterrupted();
       return run();
     });
   }
 
-  agent<A>(agentId: string, run: () => Promise<A>) {
+  agent<A>(agentId: string, run: () => Promise<A>, signal?: AbortSignal) {
     if (this.agentId !== agentId)
       return Promise.reject(
         new BrowserControlInterrupted("This tab belongs to another agent.", "agentMismatch"),
@@ -82,7 +84,7 @@ export class SessionControl {
       return Promise.reject(
         new BrowserControlInterrupted("A human controls this tab.", "humanControl"),
       );
-    return this.action(() => this.agentId === agentId && this.owner === null, run);
+    return this.action(() => this.agentId === agentId && this.owner === null, run, signal);
   }
 
   /**

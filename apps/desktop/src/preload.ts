@@ -312,6 +312,20 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    browserSurfaceResponse: (response) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL, response),
+    onBrowserSurfaceRequest: (listener) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        input: Parameters<typeof listener>[0],
+      ) => listener(input);
+      ipcRenderer.on(IpcChannels.DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL, wrappedListener);
+      return () =>
+        ipcRenderer.removeListener(
+          IpcChannels.DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL,
+          wrappedListener,
+        );
+    },
     browserCommand: (input) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_COMMAND_CHANNEL, input),
     onBrowserEvent: (listener) => {

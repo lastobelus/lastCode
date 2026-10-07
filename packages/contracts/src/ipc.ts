@@ -1,4 +1,9 @@
-import type { DesktopBrowserCommand, DesktopBrowserEvent } from "./desktopBrowser.ts";
+import type {
+  DesktopBrowserCommand,
+  DesktopBrowserEvent,
+  DesktopBrowserSurfaceRequest,
+  DesktopBrowserSurfaceResponse,
+} from "./desktopBrowser.ts";
 import * as Schema from "effect/Schema";
 
 import { SnapShotSource } from "./chatAttachment.ts";
@@ -1377,6 +1382,8 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  onBrowserSurfaceRequest: (listener: (input: DesktopBrowserSurfaceRequest) => void) => () => void;
+  browserSurfaceResponse: (input: DesktopBrowserSurfaceResponse) => Promise<void>;
   browserCommand: (input: {
     readonly desktopHostId: string;
     readonly command: DesktopBrowserCommand;

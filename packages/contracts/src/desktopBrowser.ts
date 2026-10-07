@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { PreviewAutomationProfiles } from "./previewAutomation.ts";
+import { PreviewViewportSetting } from "./preview.ts";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -16,11 +17,40 @@ const TabKey = {
   tabId: TrimmedNonEmptyString,
 };
 
+const SurfaceViewport = Schema.Struct({
+  width: Schema.Int.check(Schema.isGreaterThan(0)),
+  height: Schema.Int.check(Schema.isGreaterThan(0)),
+});
+const SurfaceResponse = {
+  requestId: Schema.String,
+  viewport: Schema.NullOr(SurfaceViewport),
+  reason: Schema.optionalKey(Schema.Literals(["guest-unavailable", "layout-timeout"])),
+};
+const SurfaceRequest = {
+  type: Schema.Literal("surface"),
+  ...TabKey,
+  requestId: Schema.String,
+  leaseId: Schema.String,
+  action: Schema.Literals(["acquire", "release"]),
+  viewport: Schema.optionalKey(PreviewViewportSetting),
+  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+};
+
+/** Native renderer readiness, shared by the local and remote browser transports. */
+export const DesktopBrowserSurfaceRequest = Schema.Struct({
+  ...SurfaceRequest,
+  runtimeTabId: Schema.String,
+});
+export type DesktopBrowserSurfaceRequest = typeof DesktopBrowserSurfaceRequest.Type;
+export const DesktopBrowserSurfaceResponse = Schema.Struct(SurfaceResponse);
+export type DesktopBrowserSurfaceResponse = typeof DesktopBrowserSurfaceResponse.Type;
+
 /** Desktop -> server. */
 export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("surfaceReady"), ...TabKey, ...SurfaceResponse }),
   Schema.Struct({
     type: Schema.Literal("resolvedUrl"),
     requestId: Schema.String,
@@ -50,6 +80,7 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  Schema.Struct(SurfaceRequest),
   Schema.Struct({
     type: Schema.Literal("resolveUrl"),
     requestId: Schema.String,
@@ -75,9 +106,20 @@ export type DesktopBrowserCommand = typeof DesktopBrowserCommand.Type;
 
 export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrowserTransportError>()(
   "DesktopBrowserTransportError",
-  { reason: Schema.Literals(["host-unavailable", "download-transfer-failed"]) },
+  {
+    reason: Schema.Literals([
+      "host-unavailable",
+      "download-transfer-failed",
+      "layout-timeout",
+      "guest-unavailable",
+    ]),
+  },
 ) {
   override get message(): string {
+    if (this.reason === "layout-timeout")
+      return "The desktop browser did not finish applying its viewport before the readiness deadline.";
+    if (this.reason === "guest-unavailable")
+      return "The desktop browser surface is not attached or stopped rendering.";
     return this.reason === "host-unavailable"
       ? "The selected desktop browser host is unavailable."
       : "The desktop browser download could not be transferred to this environment.";

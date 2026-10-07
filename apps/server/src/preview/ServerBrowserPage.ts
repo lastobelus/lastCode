@@ -49,7 +49,11 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
   if (cause instanceof ServerBrowserOperationError) return cause;
   const message = cause instanceof Error ? cause.message : String(cause);
   const firstLine = message.split("\n")[0] ?? message;
-  if (cause instanceof Error && cause.name === "TimeoutError") {
+  if (
+    cause instanceof Error &&
+    (cause.name === "TimeoutError" ||
+      /Desktop browser \S+ exceeded its [\d.]+ms deadline\./.test(message))
+  ) {
     return new ServerBrowserOperationError("PreviewAutomationTimeoutError", firstLine);
   }
   if (
@@ -64,6 +68,98 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
 };
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_READ_TIMEOUT_MS = 10_000;
+const DEFAULT_CAPTURE_TIMEOUT_MS = 3_000;
+
+type ReadOptions = {
+  readonly timeoutMs?: number | undefined;
+  readonly signal?: AbortSignal | undefined;
+};
+type ReadStage = <T>(stage: string, operation: (timeoutMs: number) => Promise<T>) => Promise<T>;
+
+/** Shares one deadline across parallel and sequential stages, revoking later stages on expiry. */
+export const withReadBudget = async <T>(
+  options: ReadOptions,
+  operation: (read: ReadStage) => Promise<T>,
+  maximumTimeoutMs = DEFAULT_READ_TIMEOUT_MS,
+): Promise<T> => {
+  const timeoutMs =
+    options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
+      ? Math.max(1, Math.min(options.timeoutMs, maximumTimeoutMs))
+      : DEFAULT_READ_TIMEOUT_MS;
+  const interrupted = (stage?: string) =>
+    options.signal?.reason instanceof BrowserControlInterrupted
+      ? options.signal.reason
+      : new ServerBrowserOperationError(
+          "PreviewAutomationControlInterruptedError",
+          stage === undefined
+            ? "Browser read was interrupted."
+            : `Browser read was interrupted during ${stage}.`,
+          stage === undefined ? undefined : { stage },
+        );
+  // Reject before snapshot setup can revoke the last usable element refs.
+  if (options.signal?.aborted) throw interrupted();
+  const deadline = Date.now() + timeoutMs;
+  const pending = new Set<() => void>();
+  let closed = false;
+  const read: ReadStage = (stage, start) =>
+    new Promise((resolve, reject) => {
+      const timedOut = () =>
+        new ServerBrowserOperationError(
+          "PreviewAutomationTimeoutError",
+          `Browser read timed out after ${timeoutMs}ms during ${stage}.`,
+          { stage, timeoutMs },
+        );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (complete: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        pending.delete(onAbort);
+        complete();
+      };
+      const onAbort = () => finish(() => reject(interrupted(stage)));
+      if (closed || options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        finish(() => reject(timedOut()));
+        return;
+      }
+      pending.add(onAbort);
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => finish(() => reject(timedOut())), remainingMs);
+      const fail = (cause: unknown) =>
+        finish(() =>
+          reject(
+            Date.now() >= deadline || (cause instanceof Error && cause.name === "TimeoutError")
+              ? timedOut()
+              : cause,
+          ),
+        );
+      try {
+        // CDP and Playwright cannot cancel an individual in-flight call. Keep both
+        // handlers attached after expiry, without terminating the shared page.
+        start(remainingMs).then(
+          (value) => finish(() => (Date.now() >= deadline ? reject(timedOut()) : resolve(value))),
+          fail,
+        );
+      } catch (cause) {
+        fail(cause);
+      }
+    });
+  try {
+    return await operation(read);
+  } finally {
+    // A failed parallel stage must also release its siblings' timers/listeners.
+    closed = true;
+    for (const cancel of pending) cancel();
+  }
+};
 
 const pageRefs = new WeakMap<Page, { generation: string; refs: Map<string, string> }>();
 // A compact runtime namespace prevents old refs from aliasing after a server restart.
@@ -131,10 +227,14 @@ const targetPoint = async (
   locator: Locator | null,
   input: { readonly x?: number | undefined; readonly y?: number | undefined },
   timeout: number,
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
   if (locator === null) return { x: input.x ?? 0, y: input.y ?? 0 };
   await locator.scrollIntoViewIfNeeded({ timeout });
+  signal?.throwIfAborted();
   const box = await locator.boundingBox({ timeout });
+  signal?.throwIfAborted();
   if (box) return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const viewport = page.viewportSize();
   return { x: (viewport?.width ?? 0) / 2, y: (viewport?.height ?? 0) / 2 };
@@ -150,81 +250,130 @@ const SNAPSHOT_SCRIPT = `(() => {
   };
 })()`;
 
+type CaptureOptions = ReadOptions & {
+  readonly format: "png" | "jpeg";
+  readonly quality?: number;
+  readonly scale: number;
+};
+
+const viewportSizeWithinBudget = async (page: Page, cdp: CDPSession, read: ReadStage) => {
+  const viewport = page.viewportSize();
+  if (viewport) return viewport;
+  const { cssVisualViewport } = await read("Page.getLayoutMetrics", () =>
+    cdp.send("Page.getLayoutMetrics"),
+  );
+  return {
+    width: Math.max(1, Math.round(cssVisualViewport.clientWidth)),
+    height: Math.max(1, Math.round(cssVisualViewport.clientHeight)),
+  };
+};
+
+/** CDP-attached pages keep the native viewport, which Playwright represents as null. */
+export const viewportSize = (page: Page, cdp: CDPSession) =>
+  withReadBudget({}, (read) => viewportSizeWithinBudget(page, cdp, read));
+
 // Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
-export const captureViewport = async (
+const captureViewportWithinBudget = async (
   page: Page,
   cdp: CDPSession,
-  options: { readonly format: "png" | "jpeg"; readonly quality?: number; readonly scale: number },
+  options: CaptureOptions,
+  read: ReadStage,
 ) => {
-  let clip;
-  if (options.scale < 1) {
-    const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
-    const { cssVisualViewport } = await cdp.send("Page.getLayoutMetrics");
-    clip = {
-      x: cssVisualViewport.pageX,
-      y: cssVisualViewport.pageY,
-      ...viewport,
-      scale: options.scale,
-    };
-  }
-  const { data } = await cdp.send("Page.captureScreenshot", {
-    format: options.format,
-    ...(options.quality === undefined ? {} : { quality: options.quality }),
-    ...(clip ? { clip } : {}),
-  });
+  const metrics =
+    options.scale < 1
+      ? await read("Page.getLayoutMetrics", () => cdp.send("Page.getLayoutMetrics"))
+      : undefined;
+  const clip = metrics && {
+    x: metrics.cssVisualViewport.pageX,
+    y: metrics.cssVisualViewport.pageY,
+    ...(page.viewportSize() ?? {
+      width: Math.max(1, Math.round(metrics.cssVisualViewport.clientWidth)),
+      height: Math.max(1, Math.round(metrics.cssVisualViewport.clientHeight)),
+    }),
+    scale: options.scale,
+  };
+  const { data } = await read("Page.captureScreenshot", () =>
+    cdp.send("Page.captureScreenshot", {
+      format: options.format,
+      ...(options.quality === undefined ? {} : { quality: options.quality }),
+      ...(clip ? { clip } : {}),
+    }),
+  );
   return data;
 };
 
-export const snapshot = async (input: {
+export const captureViewport = (page: Page, cdp: CDPSession, options: CaptureOptions) =>
+  withReadBudget(
+    { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS },
+    (read) => captureViewportWithinBudget(page, cdp, options, read),
+  );
+
+export const snapshot = (input: {
   readonly page: Page;
   readonly cdp: CDPSession;
   readonly renderScale: number;
   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
-}): Promise<PreviewAutomationSnapshot> => {
-  const viewport = input.page.viewportSize() ?? { width: 1280, height: 800 };
-  const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
-  const state = refsFor(input.page);
-  invalidateRefs(input.page);
-  const generation = state.generation;
-  const [page, tree, data] = await Promise.all([
-    input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
-      Pick<
-        PreviewAutomationSnapshot,
-        "url" | "title" | "loading" | "visibleText" | "interactiveElements"
-      >
-    >,
-    input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
-  ]);
-  if (state.generation !== generation) {
-    throw new ServerBrowserOperationError(
-      "PreviewAutomationExecutionError",
-      "The page changed while capturing its snapshot. Take another snapshot.",
-    );
-  }
-  const accessibilityTree = tree
-    .slice(0, MAX_VISIBLE_TEXT_LENGTH)
-    .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
-      const ref = `t3-${generation}-${nativeRef}`;
-      state.refs.set(ref, nativeRef);
-      return `[ref=${ref}]`;
-    });
-  return {
-    ...page,
-    accessibilityTree,
-    consoleEntries: [...input.consoleEntries],
-    networkEntries: [...input.networkEntries],
-    actionTimeline: [...input.actionTimeline],
-    screenshot: {
-      mimeType: "image/png",
-      data,
-      width: Math.round(viewport.width * input.renderScale * scale),
-      height: Math.round(viewport.height * input.renderScale * scale),
-    },
-  };
-};
+  readonly timeoutMs?: number | undefined;
+  readonly includeImage?: boolean | undefined;
+  readonly signal?: AbortSignal | undefined;
+}): Promise<PreviewAutomationSnapshot> =>
+  withReadBudget(input, async (read) => {
+    const viewport = await viewportSizeWithinBudget(input.page, input.cdp, read);
+    const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
+    const state = refsFor(input.page);
+    invalidateRefs(input.page);
+    const generation = state.generation;
+    const [page, tree, data] = await Promise.all([
+      read(
+        "snapshot metadata",
+        () =>
+          input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
+            Pick<
+              PreviewAutomationSnapshot,
+              "url" | "title" | "loading" | "visibleText" | "interactiveElements"
+            >
+          >,
+      ),
+      read("accessibility tree", (timeoutMs) =>
+        input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: timeoutMs }),
+      ),
+      input.includeImage === false
+        ? undefined
+        : captureViewportWithinBudget(input.page, input.cdp, { format: "png", scale }, read),
+    ]);
+    if (state.generation !== generation) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        "The page changed while capturing its snapshot. Take another snapshot.",
+      );
+    }
+    const accessibilityTree = tree
+      .slice(0, MAX_VISIBLE_TEXT_LENGTH)
+      .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
+        const ref = `t3-${generation}-${nativeRef}`;
+        state.refs.set(ref, nativeRef);
+        return `[ref=${ref}]`;
+      });
+    return {
+      ...page,
+      accessibilityTree,
+      consoleEntries: [...input.consoleEntries],
+      networkEntries: [...input.networkEntries],
+      actionTimeline: [...input.actionTimeline],
+      ...(data === undefined
+        ? {}
+        : {
+            screenshot: {
+              mimeType: "image/png" as const,
+              data,
+              width: Math.round(viewport.width * input.renderScale * scale),
+              height: Math.round(viewport.height * input.renderScale * scale),
+            },
+          }),
+    };
+  });
 
 /**
  * A click whose handler opens a dialog does not finish until the dialog is
@@ -234,11 +383,16 @@ export const click = async (
   page: Page,
   input: PreviewAutomationClickInput,
   pointer: PointerReporter = noPointer,
+  signal?: AbortSignal,
 ): Promise<{ readonly x: number; readonly y: number }> => {
+  signal?.throwIfAborted();
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const locator = targetLocator(page, input);
-  const point = await targetPoint(page, locator, input, timeout);
+  const point = await withReadBudget({ timeoutMs: timeout, signal }, (read) =>
+    read("target layout", () => targetPoint(page, locator, input, timeout, signal)),
+  );
   await pointer(point, "click");
+  signal?.throwIfAborted();
   const options = { button: input.button ?? "left", clickCount: input.clickCount ?? 1 } as const;
   const clicked =
     locator === null
@@ -257,7 +411,8 @@ export const click = async (
   return point;
 };
 
-export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
+export const type = async (page: Page, input: PreviewAutomationTypeInput, signal?: AbortSignal) => {
+  signal?.throwIfAborted();
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const locator = targetLocator(page, input);
   if (locator !== null && input.clear) {
@@ -306,6 +461,7 @@ export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
       undefined,
       { timeout },
     ));
+  signal?.throwIfAborted();
   if (focused !== true) {
     throw new ServerBrowserOperationError(
       "PreviewAutomationTargetNotEditableError",
@@ -314,8 +470,10 @@ export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
   }
   if (input.clear) {
     await page.keyboard.press("ControlOrMeta+A");
+    signal?.throwIfAborted();
     await page.keyboard.press("Delete");
   }
+  signal?.throwIfAborted();
   await page.keyboard.insertText(input.text);
 };
 
@@ -324,10 +482,13 @@ export const hover = async (
   page: Page,
   input: PreviewAutomationHoverInput,
   pointer: PointerReporter = noPointer,
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const locator = targetLocator(page, input);
-  await pointer(await targetPoint(page, locator, input, timeout), "move");
+  await pointer(await targetPoint(page, locator, input, timeout, signal), "move");
+  signal?.throwIfAborted();
   if (locator === null) {
     await page.mouse.move(input.x ?? 0, input.y ?? 0);
     return;
@@ -338,6 +499,7 @@ export const hover = async (
 export const select = async (
   page: Page,
   input: PreviewAutomationSelectInput,
+  signal?: AbortSignal,
 ): Promise<PreviewAutomationSelectResult> => {
   const locator = targetLocator(page, input)!;
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -354,6 +516,7 @@ export const select = async (
     undefined,
     { timeout },
   );
+  signal?.throwIfAborted();
   const values =
     options &&
     input.values.map(
@@ -375,11 +538,14 @@ export const drag = async (
   page: Page,
   input: PreviewAutomationDragInput,
   pointer: PointerReporter = noPointer,
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const source = targetLocator(page, { locator: input.source })!;
   const target = targetLocator(page, { locator: input.target })!;
-  await pointer(await targetPoint(page, source, {}, timeout), "move");
+  await pointer(await targetPoint(page, source, {}, timeout, signal), "move");
+  signal?.throwIfAborted();
   // The cursor travels with the drag; the page sees one continuous gesture.
   const dropped = source.dragTo(target, { timeout });
   const end = await target.boundingBox({ timeout }).catch(() => null);
@@ -392,18 +558,30 @@ export const setInputFiles = async (
   page: Page,
   input: PreviewAutomationUploadInput,
   files: Parameters<Locator["setInputFiles"]>[0] = [...input.paths],
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
   const locator = targetLocator(page, input);
   if (locator === null) return false;
   await locator.setInputFiles(files, { timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS });
   return true;
 };
 
-export const press = async (page: Page, input: PreviewAutomationPressInput) => {
+export const press = async (
+  page: Page,
+  input: PreviewAutomationPressInput,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
   await page.keyboard.press([...(input.modifiers ?? []), input.key].join("+"));
 };
 
-export const scroll = async (page: Page, input: PreviewAutomationScrollInput) => {
+export const scroll = async (
+  page: Page,
+  input: PreviewAutomationScrollInput,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
   const delta = [input.deltaX ?? 0, input.deltaY ?? 0] as const;
   const locator = targetLocator(page, input);
   if (locator === null) {
@@ -414,12 +592,25 @@ export const scroll = async (page: Page, input: PreviewAutomationScrollInput) =>
   await locator.evaluate((element, [x, y]) => element.scrollBy(x, y), delta);
 };
 
-export const evaluate = async (cdp: CDPSession, input: PreviewAutomationEvaluateInput) => {
-  const result = await cdp.send("Runtime.evaluate", {
-    expression: input.expression,
-    awaitPromise: input.awaitPromise ?? true,
-    returnByValue: input.returnByValue ?? true,
-  });
+export const evaluate = async (
+  cdp: CDPSession,
+  input: PreviewAutomationEvaluateInput,
+  options: ReadOptions = {},
+) => {
+  const result = await withReadBudget(
+    options,
+    (read) =>
+      read("Runtime.evaluate", (timeoutMs) =>
+        cdp.send("Runtime.evaluate", {
+          expression: input.expression,
+          awaitPromise: input.awaitPromise ?? true,
+          returnByValue: input.returnByValue ?? true,
+          timeout: timeoutMs,
+        }),
+      ),
+    // awaitPromise is deliberate user work; honor the broker's explicit remaining budget.
+    Number.POSITIVE_INFINITY,
+  );
   if (result.exceptionDetails) {
     throw new ServerBrowserOperationError(
       "PreviewAutomationExecutionError",
@@ -439,36 +630,48 @@ export const evaluate = async (cdp: CDPSession, input: PreviewAutomationEvaluate
   return value;
 };
 
-export const waitFor = async (page: Page, input: PreviewAutomationWaitForInput) => {
-  const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
-  const locator = targetLocator(page, input);
-  const { text, urlIncludes } = input;
-  const checks: Array<() => Promise<boolean>> = [];
-  // Like the desktop host: the selector must match an element, visible or not.
-  if (locator !== null) checks.push(async () => (await locator.count()) > 0);
-  if (text !== undefined) {
-    // A navigation can destroy the context mid-check; that counts as not yet.
-    checks.push(() =>
-      page
-        .evaluate(`(document.body?.innerText ?? "").includes(${JSON.stringify(text)})`)
-        .then((found) => found === true)
-        .catch(() => false),
-    );
-  }
-  if (urlIncludes !== undefined) checks.push(async () => page.url().includes(urlIncludes));
-  for (;;) {
-    const results = await Promise.all(checks.map((check) => check()));
-    if (results.every(Boolean)) return;
-    if (Date.now() >= deadline) {
-      throw new ServerBrowserOperationError(
-        "PreviewAutomationTimeoutError",
-        `Waited ${timeoutMs}ms without every condition holding.`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
-  }
-};
+export const waitFor = async (
+  page: Page,
+  input: PreviewAutomationWaitForInput,
+  options: ReadOptions = {},
+) =>
+  withReadBudget(
+    { ...options, timeoutMs: input.timeoutMs ?? options.timeoutMs },
+    async (read) => {
+      const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const deadline = Date.now() + timeoutMs;
+      const locator = targetLocator(page, input);
+      const { text, urlIncludes } = input;
+      const checks: Array<() => Promise<boolean>> = [];
+      // Like the desktop host: the selector must match an element, visible or not.
+      if (locator !== null) checks.push(async () => (await locator.count()) > 0);
+      if (text !== undefined) {
+        // A navigation can destroy the context mid-check; that counts as not yet.
+        checks.push(() =>
+          page
+            .evaluate(`(document.body?.innerText ?? "").includes(${JSON.stringify(text)})`)
+            .then((found) => found === true)
+            .catch(() => false),
+        );
+      }
+      if (urlIncludes !== undefined) checks.push(async () => page.url().includes(urlIncludes));
+      for (;;) {
+        const results = await Promise.all(checks.map((check) => read("wait condition", check)));
+        if (results.every(Boolean)) return;
+        if (Date.now() >= deadline) {
+          throw new ServerBrowserOperationError(
+            "PreviewAutomationTimeoutError",
+            `Waited ${timeoutMs}ms without every condition holding.`,
+          );
+        }
+        await read(
+          "wait interval",
+          () => new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS)),
+        );
+      }
+    },
+    Number.POSITIVE_INFINITY,
+  );
 
 const NET_ERROR_CODES: Readonly<Record<string, number>> = {
   ERR_FAILED: -2,

@@ -4,6 +4,7 @@ import {
   WS_METHODS,
   type AuthEnvironmentScope,
   DesktopBrowserEventInput,
+  type PreviewEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -21,6 +22,11 @@ const state = vi.hoisted(() => ({
   streams: [] as Stream.Stream<unknown>[],
   browserCommand: vi.fn(async () => undefined),
   sendEvent: vi.fn(async () => undefined),
+  previewEvents: [] as PreviewEvent[],
+  applyPreviewEvent: vi.fn(),
+  readPreviewState: vi.fn(() => ({ serverEpoch: null })),
+  recordHandoff: vi.fn(),
+  forgetHandoff: vi.fn(),
 }));
 
 const primary = EnvironmentId.make("primary");
@@ -46,8 +52,14 @@ vi.mock("~/state/session", async () => {
 vi.mock("~/state/preview", () => ({ previewEnvironment: { browserEvent: {} } }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => state.sendEvent }));
 vi.mock("~/connection/runtime", () => ({ connectionAtomRuntime: {} }));
-vi.mock("~/previewStateStore", () => ({}));
-vi.mock("~/components/preview/serverBrowserHandoff", () => ({}));
+vi.mock("~/previewStateStore", () => ({
+  applyPreviewServerEvent: state.applyPreviewEvent,
+  readThreadPreviewState: state.readPreviewState,
+}));
+vi.mock("~/components/preview/serverBrowserHandoff", () => ({
+  recordServerBrowserHandoff: state.recordHandoff,
+  forgetServerBrowserHandoff: state.forgetHandoff,
+}));
 vi.mock("./desktopBrowserTransport", () => ({
   getDesktopBrowserHostId: (environmentId: EnvironmentId) => `host-${environmentId}`,
 }));
@@ -57,7 +69,7 @@ vi.mock("@t3tools/client-runtime/rpc", () => ({
       ? Stream.fromIterable([
           { type: "cdp", threadId: "thread-1", tabId: "tab-1", message: "page-command" },
         ])
-      : Stream.empty,
+      : Stream.suspend(() => Stream.fromIterable(state.previewEvents)),
 }));
 
 // Run the component's real command stream; only the environment/atom plumbing
@@ -97,6 +109,11 @@ beforeEach(() => {
   state.streams = [];
   state.browserCommand.mockClear();
   state.sendEvent.mockClear();
+  state.previewEvents = [];
+  state.applyPreviewEvent.mockClear();
+  state.readPreviewState.mockClear();
+  state.recordHandoff.mockClear();
+  state.forgetHandoff.mockClear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", {
     desktopBridge: {
@@ -110,6 +127,53 @@ beforeEach(() => {
     },
   });
 });
+
+it.effect(
+  "lets the root host apply primary preview events while preserving remote state and handoffs",
+  () =>
+    Effect.gen(function* () {
+      const opened: PreviewEvent = {
+        type: "opened",
+        threadId: "background-thread",
+        tabId: "background-tab",
+        serverEpoch: "server",
+        revision: 1,
+        createdAt: "2026-10-07T00:00:00.000Z",
+        snapshot: {
+          threadId: "background-thread",
+          tabId: "background-tab",
+          runtime: "server",
+          navStatus: { _tag: "Idle" },
+          canGoBack: false,
+          canGoForward: false,
+          updatedAt: "2026-10-07T00:00:00.000Z",
+        },
+      };
+      const { snapshot: _snapshot, ...openedEnvelope } = opened;
+      state.previewEvents = [opened, { ...openedEnvelope, type: "closed", revision: 2 }];
+      const { DesktopCdpRelay } = yield* Effect.promise(() => import("./DesktopCdpRelay"));
+      yield* Effect.promise(() =>
+        act(async () => {
+          renderer = create(createElement(DesktopCdpRelay));
+        }),
+      );
+      yield* Effect.all(state.streams.map(Stream.runDrain));
+      expect(state.applyPreviewEvent).toHaveBeenCalledTimes(2);
+      expect(
+        state.applyPreviewEvent.mock.calls.every(([ref]) => ref.environmentId === remote),
+      ).toBe(true);
+      expect(state.readPreviewState).toHaveBeenCalledTimes(2);
+      expect(state.recordHandoff).toHaveBeenCalledWith(
+        { environmentId: primary, threadId: opened.threadId },
+        opened.snapshot,
+      );
+      expect(state.recordHandoff).toHaveBeenCalledWith(
+        { environmentId: remote, threadId: opened.threadId },
+        opened.snapshot,
+      );
+      expect(state.forgetHandoff).toHaveBeenCalledTimes(2);
+    }),
+);
 
 afterEach(async () => {
   await act(async () => renderer?.unmount());

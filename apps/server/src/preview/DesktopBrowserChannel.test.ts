@@ -13,6 +13,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
@@ -88,6 +89,87 @@ const connectHost = (
   });
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect("waits for the owning surface acknowledgement and returns its actual viewport", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const first = yield* connectHost(channel, "socket-a", "host-a");
+      yield* connectHost(channel, "socket-b", "host-b");
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      const request = yield* channel
+        .surface(
+          { ...key, desktopHostId: "host-a" },
+          {
+            action: "acquire",
+            leaseId: "lease-a",
+            viewport: { _tag: "freeform", width: 390, height: 844 },
+          },
+        )
+        .pipe(Effect.forkScoped);
+      const command = yield* Queue.take(first.commands);
+      if (command.type !== "surface") throw new Error("Expected surface request");
+      const response = {
+        type: "surfaceReady" as const,
+        ...key,
+        requestId: command.requestId,
+        viewport: { width: 390, height: 844 },
+      };
+      yield* channel.receiveEvent("socket-b", "host-b", response);
+      expect(request.pollUnsafe()).toBeUndefined();
+      yield* channel.receiveEvent("socket-a", "host-a", response);
+      expect(yield* Fiber.join(request)).toEqual({ width: 390, height: 844 });
+      const release = yield* channel
+        .surface(
+          { ...key, desktopHostId: "host-a" },
+          {
+            action: "release",
+            leaseId: "lease-a",
+          },
+        )
+        .pipe(Effect.forkScoped);
+      const released = yield* Queue.take(first.commands);
+      if (released.type !== "surface") throw new Error("Expected surface release");
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        ...response,
+        requestId: released.requestId,
+        viewport: null,
+      });
+      expect(yield* Fiber.join(release)).toBeNull();
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("releases a timed-out acquire and ignores its late acknowledgement", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      const request = yield* channel
+        .surface(
+          { ...key, desktopHostId: "host-a" },
+          {
+            action: "acquire",
+            leaseId: "expired-lease",
+          },
+          100,
+        )
+        .pipe(Effect.flip, Effect.forkScoped);
+      const acquire = yield* Queue.take(host.commands);
+      if (acquire.type !== "surface") throw new Error("Expected acquire");
+      yield* TestClock.adjust("100 millis");
+      expect(yield* Fiber.join(request)).toMatchObject({ reason: "layout-timeout" });
+      expect(yield* Queue.take(host.commands)).toMatchObject({
+        type: "surface",
+        action: "release",
+        leaseId: "expired-lease",
+      });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "surfaceReady",
+        ...key,
+        requestId: acquire.requestId,
+        viewport: { width: 1280, height: 800 },
+      });
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-a" })).toBe(true);
+    }).pipe(Effect.scoped),
+  );
   it.effect("rejects a different socket owner and keeps equal tab IDs on separate hosts", () =>
     Effect.gen(function* () {
       const channel = yield* remoteChannel;

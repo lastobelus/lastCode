@@ -1,4 +1,8 @@
-import { browserCommand, installBrowserEventForwarding } from "./methods/desktopBrowser.ts";
+import {
+  browserCommand,
+  browserSurfaceResponse,
+  installBrowserEventForwarding,
+} from "./methods/desktopBrowser.ts";
 import * as Effect from "effect/Effect";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
@@ -87,6 +91,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* PreviewIpc.installPreviewEventForwarding();
   yield* installBrowserEventForwarding;
   yield* ipc.handle(browserCommand);
+  yield* ipc.handle(browserSurfaceResponse);
 
   yield* ipc.handle(AppActivationIpc.setReady);
   yield* ipc.handle(AppActivationIpc.complete);
