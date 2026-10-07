@@ -5,6 +5,7 @@ import * as NodeChildProcess from "node:child_process";
 
 import {
   createBuildIntelDependencies,
+  resolveRemoteInstallableTag,
   runSelectedIntelBuild,
   selectIntelBuild,
 } from "./lastcode-build-intel-package.ts";
@@ -103,12 +104,32 @@ export function resolveLatestRemoteInstallable(remote = "origin"): {
 
 export async function buildLatestIntelPackage(
   input: {
+    readonly tag?: string;
+    readonly commit?: string;
+    readonly resolveExact?: typeof resolveRemoteInstallableTag;
     readonly resolveLatest?: typeof resolveLatestRemoteInstallable;
     readonly select?: typeof selectIntelBuild;
     readonly run?: typeof runSelectedIntelBuild;
   } = {},
 ) {
-  const target = (input.resolveLatest ?? resolveLatestRemoteInstallable)();
+  let target: { readonly tag: string; readonly commit: string };
+  if (input.tag !== undefined || input.commit !== undefined) {
+    if (
+      typeof input.tag !== "string" ||
+      input.tag.trim() !== input.tag ||
+      parseInstallableTag(input.tag) === null ||
+      typeof input.commit !== "string" ||
+      !fullCommitPattern.test(input.commit)
+    ) {
+      fail("An exact installable tag and full event commit are required.");
+    }
+    target = (input.resolveExact ?? resolveRemoteInstallableTag)(input.tag);
+    if (target.tag !== input.tag || target.commit !== input.commit) {
+      fail(`Published tag ${input.tag} does not match event commit ${input.commit}.`);
+    }
+  } else {
+    target = (input.resolveLatest ?? resolveLatestRemoteInstallable)();
+  }
   const withoutLocalLock = <T>(operation: () => T): T => operation();
   const request = (input.select ?? selectIntelBuild)(target.tag, {
     resolveTag: () => target,
@@ -122,7 +143,14 @@ export async function buildLatestIntelPackage(
 }
 
 if (import.meta.main) {
-  buildLatestIntelPackage()
+  buildLatestIntelPackage(
+    process.env.LASTCODE_INSTALLABLE_TAG || process.env.LASTCODE_INSTALLABLE_COMMIT
+      ? {
+          tag: process.env.LASTCODE_INSTALLABLE_TAG ?? "",
+          commit: process.env.LASTCODE_INSTALLABLE_COMMIT ?? "",
+        }
+      : {},
+  )
     .then((result) => console.log(`[daily-intel] Result ${JSON.stringify(result)}`))
     .catch((error: unknown) => {
       console.error(`[daily-intel] ${error instanceof Error ? error.message : String(error)}`);
