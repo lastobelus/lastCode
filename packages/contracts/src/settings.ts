@@ -96,6 +96,27 @@ export const LegacySidebarScale = Schema.Int.check(
 export type LegacySidebarScale = typeof LegacySidebarScale.Type;
 export const DEFAULT_LEGACY_SIDEBAR_SCALE: LegacySidebarScale = 100;
 
+export const MIN_THREAD_PROVIDER_BADGE_SIZE = 10;
+export const MAX_THREAD_PROVIDER_BADGE_SIZE = 100;
+export const ThreadProviderBadgeSize = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_SIZE,
+    maximum: MAX_THREAD_PROVIDER_BADGE_SIZE,
+  }),
+);
+export type ThreadProviderBadgeSize = typeof ThreadProviderBadgeSize.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_SIZE: ThreadProviderBadgeSize = 80;
+export const MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY = 0;
+export const MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY = 100;
+export const ThreadProviderBadgeTransparency = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+    maximum: MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+  }),
+);
+export type ThreadProviderBadgeTransparency = typeof ThreadProviderBadgeTransparency.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY: ThreadProviderBadgeTransparency = 0;
+
 export const LegacySidebarThreadGroupingStyle = Schema.Literals(["minimal", "typed-groups"]);
 export type LegacySidebarThreadGroupingStyle = typeof LegacySidebarThreadGroupingStyle.Type;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
@@ -531,6 +552,13 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showThreadProviderBadge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  threadProviderBadgeSize: ThreadProviderBadgeSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_SIZE)),
+  ),
+  threadProviderBadgeTransparency: ThreadProviderBadgeTransparency.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY)),
+  ),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -1917,6 +1945,9 @@ export const ClientSettingsPatch = Schema.Struct({
   scrollbarMargin: Schema.optionalKey(ScrollbarMargin),
   roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
   showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
+  showThreadProviderBadge: Schema.optionalKey(Schema.Boolean),
+  threadProviderBadgeSize: Schema.optionalKey(ThreadProviderBadgeSize),
+  threadProviderBadgeTransparency: Schema.optionalKey(ThreadProviderBadgeTransparency),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

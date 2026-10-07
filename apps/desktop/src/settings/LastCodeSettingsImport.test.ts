@@ -95,6 +95,9 @@ describe("LastCodeSettingsImport", () => {
     Reflect.deleteProperty(sourceClient, "showThreadWorktreeIndicators");
     Reflect.deleteProperty(sourceClient, "legacySidebarScale");
     Reflect.deleteProperty(sourceClient, "roundedProjectIcons");
+    Reflect.deleteProperty(sourceClient, "showThreadProviderBadge");
+    Reflect.deleteProperty(sourceClient, "threadProviderBadgeSize");
+    Reflect.deleteProperty(sourceClient, "threadProviderBadgeTransparency");
     sourceClient.favorites = [
       { provider: codex, model: "gpt-source" },
       { provider: sourceCustom, model: "source-model" },
@@ -111,6 +114,9 @@ describe("LastCodeSettingsImport", () => {
       roundedProjectIcons: true,
       environmentIconColors: { primary: "#2563eb", remote: "#7c3aed" },
       showLocalEnvironmentIcon: true,
+      showThreadProviderBadge: false,
+      threadProviderBadgeSize: 55,
+      threadProviderBadgeTransparency: 35,
       favorites: [{ provider: lastCodeCustom, model: "lastcode-model" }],
       providerModelPreferences: {
         [lastCodeCustom]: { hiddenModels: [], modelOrder: ["lastcode-model"] },
@@ -228,6 +234,9 @@ describe("LastCodeSettingsImport", () => {
       remote: "#7c3aed",
     });
     assert.equal(importedClient.showLocalEnvironmentIcon, true);
+    assert.equal(importedClient.showThreadProviderBadge, false);
+    assert.equal(importedClient.threadProviderBadgeSize, 55);
+    assert.equal(importedClient.threadProviderBadgeTransparency, 35);
     assert.deepEqual(importedClient.favorites, [
       { provider: "lastcode_custom", model: "lastcode-model" },
       { provider: "codex", model: "gpt-source" },

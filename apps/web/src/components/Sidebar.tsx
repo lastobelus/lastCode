@@ -1,3 +1,8 @@
+import {
+  ConnectedSidebarEnvironmentIcon,
+  useSidebarProviderBadgePreferences,
+  type SidebarProviderBadgePreferences,
+} from "./sidebar/SidebarEnvironmentIcon";
 import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
 import { setThreadChangeRequestSnapshot } from "./ThreadStatusIndicators";
@@ -250,11 +255,7 @@ import {
 } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
-import {
-  ConnectedEnvironmentIcon,
-  resolveEnvironmentIconColor,
-  showV2ThreadCardEnvironmentIcon,
-} from "../environmentIcons";
+import { resolveEnvironmentIconColor, showV2ThreadCardEnvironmentIcon } from "../environmentIcons";
 import {
   deriveProviderEntriesByEnvironment,
   shouldShowInstanceBadge,
@@ -367,6 +368,7 @@ function terminalProcessLabel(count: number): string {
 function SidebarProviderStack(props: {
   thread: SidebarThreadSummary;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
+  omitCurrent?: boolean;
 }) {
   const stack = resolveThreadProviderStack(props.thread);
   const currentInstanceId = stack[stack.length - 1]!;
@@ -390,7 +392,9 @@ function SidebarProviderStack(props: {
     />
   );
   if (stack.length === 1) {
-    return <span className="inline-flex shrink-0 items-center">{current}</span>;
+    return props.omitCurrent ? null : (
+      <span className="inline-flex shrink-0 items-center">{current}</span>
+    );
   }
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5">
@@ -408,7 +412,9 @@ function SidebarProviderStack(props: {
           />
         );
       })}
-      <span className="relative z-10 inline-flex items-center">{current}</span>
+      {props.omitCurrent ? null : (
+        <span className="relative z-10 inline-flex items-center">{current}</span>
+      )}
     </span>
   );
 }
@@ -997,6 +1003,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   environmentLabel: string | null;
   environmentKnown: boolean;
   showLocalEnvironmentIcon: boolean;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
@@ -1750,6 +1757,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {pinIndicator}
             <ThreadDashboardIndicator items={thread.dashboardItems} />
             {terminalStatusIcon}
+            {props.providerBadgePreferences.enabled ? (
+              <span
+                aria-hidden
+                className="pointer-events-none mr-1 inline-flex shrink-0 items-center gap-1.5"
+              >
+                <SidebarProviderStack
+                  thread={thread}
+                  providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  omitCurrent={providerEntry !== null && !showInstanceBadge}
+                />
+                <ConnectedSidebarEnvironmentIcon
+                  environmentId={thread.environmentId}
+                  context="v2-row"
+                  color={environmentIconColor}
+                  className="size-3.5"
+                  provider={providerEntry}
+                  badgeSize={props.providerBadgePreferences.size}
+                  badgeTransparency={props.providerBadgePreferences.transparency}
+                />
+              </span>
+            ) : null}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
                 Regenerating title
@@ -2184,22 +2212,35 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
-                {thread.lineage.relationshipToParent !== "subagent" &&
-                showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon) ? (
+                {props.providerBadgePreferences.enabled ? (
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                    omitCurrent={providerEntry !== null && !showInstanceBadge}
+                  />
+                ) : null}
+                {props.providerBadgePreferences.enabled ||
+                (thread.lineage.relationshipToParent !== "subagent" &&
+                  showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon)) ? (
                   <span className="inline-flex shrink-0 items-center">
-                    <ConnectedEnvironmentIcon
+                    <ConnectedSidebarEnvironmentIcon
                       aria-hidden
                       environmentId={thread.environmentId}
                       context="v2-row"
                       color={environmentIconColor}
                       className="size-3.5"
+                      provider={props.providerBadgePreferences.enabled ? providerEntry : null}
+                      badgeSize={props.providerBadgePreferences.size}
+                      badgeTransparency={props.providerBadgePreferences.transparency}
                     />
                   </span>
                 ) : null}
-                <SidebarProviderStack
-                  thread={thread}
-                  providerEntryByInstanceId={props.providerEntryByInstanceId}
-                />
+                {!props.providerBadgePreferences.enabled ? (
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  />
+                ) : null}
               </span>
             </div>
           </div>
@@ -2232,6 +2273,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   environmentLabel: string | null;
   environmentKnown: boolean;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
+  providerBadgePreferences: SidebarProviderBadgePreferences;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -2357,6 +2399,18 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
                 {thread.title}
               </span>
               <ThreadDashboardIndicator items={thread.dashboardItems} />
+              {props.providerBadgePreferences.enabled ? (
+                <ConnectedSidebarEnvironmentIcon
+                  aria-hidden
+                  environmentId={thread.environmentId}
+                  context="v2-row"
+                  color={environmentIconColor}
+                  className="mr-1 size-3.5"
+                  provider={providerEntry}
+                  badgeSize={props.providerBadgePreferences.size}
+                  badgeTransparency={props.providerBadgePreferences.transparency}
+                />
+              ) : null}
               <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
                 {threadTimeLabel(thread)}
               </span>
@@ -2412,6 +2466,7 @@ export default function Sidebar() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
+  const providerBadgePreferences = useSidebarProviderBadgePreferences();
   const {
     settleThread,
     unsettleThread,
@@ -5289,6 +5344,7 @@ export default function Sidebar() {
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         environmentKnown={environmentLabelById.has(thread.environmentId)}
                         configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
+                        providerBadgePreferences={providerBadgePreferences}
                         providerEntryByInstanceId={
                           providerEntriesByEnvironment.get(thread.environmentId) ??
                           EMPTY_PROVIDER_ENTRIES
@@ -5440,6 +5496,7 @@ export default function Sidebar() {
                             }
                             environmentKnown={environmentLabelById.has(thread.environmentId)}
                             showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                            providerBadgePreferences={providerBadgePreferences}
                             configuredEnvironmentIconColor={
                               environmentIconColors[thread.environmentId]
                             }
