@@ -967,6 +967,104 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         ],
       );
 
+      const nativeCommand = {
+        type: "message.dispatch" as const,
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        commandId: CommandId.make("runtime-native-steer"),
+        threadId,
+        messageId: MessageId.make("runtime-native-steer"),
+        text: "Pause cooperatively after the current tool finishes.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "steer_active_native" as const, targetRunId: run.id },
+      };
+      yield* orchestrator.dispatch(nativeCommand);
+      assert.deepEqual(
+        (yield* outbox.listByCommandId(nativeCommand.commandId)).map((effect) => effect.request),
+        [
+          {
+            type: "provider-turn.steer",
+            nativeOnly: true,
+            providerSessionId: providerSession.id,
+            providerThreadId: providerThread.id,
+            providerTurnId: providerTurn.id,
+            messageId: nativeCommand.messageId,
+          },
+        ],
+      );
+      for (const variant of ["selection", "interrupting", "unsupported", "stale"] as const) {
+        const commandId = CommandId.make(`runtime-native-rejected-${variant}`);
+        if (variant === "interrupting" || variant === "unsupported") {
+          sessionSpy.mockReturnValue(
+            Effect.succeed(
+              Option.some({
+                providerSession: {
+                  ...providerSession,
+                  capabilities: {
+                    ...CodexProviderCapabilitiesV2,
+                    turns: {
+                      ...CodexProviderCapabilitiesV2.turns,
+                      activeSteeringInterruptsTools: variant === "interrupting",
+                      supportsActiveSteering: variant !== "unsupported",
+                    },
+                  },
+                },
+              } as ProviderAdapterV2SessionRuntime),
+            ),
+          );
+        }
+        const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+        yield* orchestrator
+          .dispatch({
+            ...nativeCommand,
+            commandId,
+            messageId: MessageId.make(`runtime-native-rejected-${variant}`),
+            ...(variant === "selection"
+              ? { modelSelection: { ...modelSelection, model: "other-model" } }
+              : {}),
+            ...(variant === "stale"
+              ? {
+                  dispatchMode: {
+                    type: "steer_active_native" as const,
+                    targetRunId: RunId.make("stale-run"),
+                  },
+                }
+              : {}),
+          })
+          .pipe(Effect.flip);
+        assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+        assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+        sessionSpy.mockReturnValue(
+          Effect.succeed(Option.some({ providerSession } as ProviderAdapterV2SessionRuntime)),
+        );
+      }
+
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-native-turn-completed"),
+        events: [
+          {
+            id: EventId.make("runtime-native-turn-completed"),
+            type: "provider-turn.updated",
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...providerTurn, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      const noRunningTurnId = CommandId.make("runtime-native-no-running-turn");
+      const noRunningTurnSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* orchestrator
+        .dispatch({
+          ...nativeCommand,
+          commandId: noRunningTurnId,
+          messageId: MessageId.make("runtime-native-no-running-turn"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), noRunningTurnSequence);
+      assert.deepEqual(yield* outbox.listByCommandId(noRunningTurnId), []);
+
       yield* eventSink.write({
         commandId: CommandId.make("runtime-delivery-intent-completed"),
         events: [
@@ -988,6 +1086,20 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           },
         ],
       });
+      const completedNativeId = CommandId.make("runtime-native-completed");
+      const completedSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* orchestrator
+        .dispatch({
+          ...nativeCommand,
+          commandId: completedNativeId,
+          messageId: MessageId.make("runtime-native-completed"),
+          deliveryIntent: "restart",
+        })
+        .pipe(Effect.flip);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), completedSequence);
+      assert.deepEqual(yield* outbox.listByCommandId(completedNativeId), []);
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+
       const nextCommandId = CommandId.make("runtime-delivery-intent-next");
       yield* orchestrator.dispatch({
         type: "message.dispatch",

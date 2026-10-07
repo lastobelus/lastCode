@@ -204,6 +204,41 @@ it.each(["suspect", "stale", "recovering", "failed"] as const)(
 const layer = it.layer(CommandPolicy.layer);
 
 layer("CommandPolicyV2", (it) => {
+  it.effect("native-only steering never falls back to interruption", () =>
+    Effect.gen(function* () {
+      const policy = yield* CommandPolicy.CommandPolicyV2;
+      const input = {
+        commandId,
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        nativeOnly: true,
+      };
+      assert.equal(
+        yield* policy.decideSteeringExecution({ ...input, capabilities: baseCapabilities }),
+        "active_steering",
+      );
+      for (const unsafe of [
+        { forceRestart: true, capabilities: baseCapabilities },
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsActiveSteering: false },
+          })),
+        },
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, activeSteeringInterruptsTools: true },
+          })),
+        },
+      ]) {
+        const error = yield* policy
+          .decideSteeringExecution({ ...input, ...unsafe })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, CommandPolicy.CommandPolicyCapabilityUnsupportedError);
+      }
+    }),
+  );
   it.effect("prefers direct active steering when the provider supports it", () =>
     Effect.gen(function* () {
       const policy = yield* CommandPolicy.CommandPolicyV2;

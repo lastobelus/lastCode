@@ -542,6 +542,7 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     readonly message: string;
     readonly commandId: CommandId;
     readonly messageId: MessageId;
+    readonly steerNative?: boolean;
     readonly sourceThreadId?: ThreadId;
     readonly trackRequestCorrelation?: true;
     readonly rejectWaitForThreadId?: ThreadId;
@@ -577,6 +578,13 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
   const message = yield* decodeThreadSendMessage(input.message).pipe(
     Effect.mapError((cause) => new ThreadSendMessageError({ cause })),
   );
+  const activeRunId = resolution.thread.activeRunId;
+  if (input.steerNative && activeRunId == null) {
+    return yield* new ThreadCliError({
+      operation: "native steering",
+      cause: new Error("The target thread has no active run to steer."),
+    });
+  }
   yield* source.dispatch({
     type: "message.dispatch",
     commandId: input.commandId,
@@ -584,7 +592,10 @@ export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
     messageId: input.messageId,
     text: message,
     attachments: [],
-    dispatchMode: { type: "queue_after_active" },
+    dispatchMode:
+      input.steerNative && activeRunId != null
+        ? { type: "steer_active_native", targetRunId: activeRunId }
+        : { type: "queue_after_active" },
     createdBy: input.sourceThreadId ? "agent" : "user",
     creationSource: "server",
     ...(input.sourceThreadId !== undefined && input.sourceThreadId !== resolution.thread.id
@@ -957,6 +968,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
   message: string,
   waitForCompletion: boolean,
   timeoutMs: number,
+  steerNative: boolean,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveThreadInspectionConfig(flags, logLevel);
@@ -1041,6 +1053,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
               message,
               commandId,
               messageId,
+              steerNative,
               ...(currentThreadId ? { sourceThreadId: ThreadId.make(currentThreadId) } : {}),
               ...(waitForCompletion ? { trackRequestCorrelation: true as const } : {}),
               ...(waitForCompletion && currentThreadId
@@ -1271,6 +1284,12 @@ const sendCommand = Command.make("send", {
     Flag.withDescription("Wait for the exact tracked turn to finish."),
     Flag.withDefault(false),
   ),
+  steerNative: Flag.Boolean("steer-native").pipe(
+    Flag.withDescription(
+      "Deliver to the active turn without interrupting, restarting, or queuing.",
+    ),
+    Flag.withDefault(false),
+  ),
   timeout: Flag.String("timeout").pipe(
     Flag.withDescription("Maximum wait duration (for example, '10 minutes')."),
     Flag.withDefault("10 minutes"),
@@ -1282,7 +1301,7 @@ const sendCommand = Command.make("send", {
       Effect.map(Duration.toMillis),
       Effect.flatMap(decodeThreadWaitTimeoutMs),
       Effect.flatMap((timeoutMs) =>
-        runThreadSend(flags, flags.thread, flags.message, flags.wait, timeoutMs),
+        runThreadSend(flags, flags.thread, flags.message, flags.wait, timeoutMs, flags.steerNative),
       ),
       Effect.provide(FetchHttpClient.layer),
     ),

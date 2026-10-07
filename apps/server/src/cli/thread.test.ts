@@ -6,6 +6,7 @@ import {
   ThreadId,
   EnvironmentId,
   MessageId,
+  RunId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
@@ -592,6 +593,76 @@ it.effect("prepares and dispatches an exact accepted send using the target threa
         senderThreadId: "thread-source",
       },
     ]);
+  }),
+);
+
+it.effect(
+  "delivers a native steer to the observed active run without requesting a selection change",
+  () =>
+    Effect.gen(function* () {
+      const { source } = runnerSource();
+      const dispatched: unknown[] = [];
+      yield* sendThreadOutput(
+        {
+          descriptor: source.descriptor,
+          shell: {
+            ...source.shell,
+            threads: source.shell.threads.map((thread) => ({
+              ...thread,
+              activeRunId: RunId.make("run-active"),
+            })),
+          },
+          dispatch: (command) => Effect.sync(() => dispatched.push(command)),
+        },
+        {
+          identifier: "thread-runner",
+          message: "Pause after your current operation.",
+          commandId: CommandId.make("command-native-steer"),
+          messageId: MessageId.make("message-native-steer"),
+          steerNative: true,
+        },
+      );
+      assert.deepStrictEqual(dispatched, [
+        {
+          type: "message.dispatch",
+          commandId: "command-native-steer",
+          threadId: "thread-runner",
+          messageId: "message-native-steer",
+          text: "Pause after your current operation.",
+          attachments: [],
+          dispatchMode: { type: "steer_active_native", targetRunId: "run-active" },
+          createdBy: "user",
+          creationSource: "server",
+        },
+      ]);
+    }),
+);
+
+it.effect("rejects a native steer to an idle thread without creating a queued turn", () =>
+  Effect.gen(function* () {
+    const { source } = runnerSource();
+    let dispatchCount = 0;
+    const result = yield* Effect.result(
+      sendThreadOutput(
+        {
+          descriptor: source.descriptor,
+          shell: source.shell,
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatchCount += 1;
+            }),
+        },
+        {
+          identifier: "thread-runner",
+          message: "Pause after your current operation.",
+          commandId: CommandId.make("command-idle-steer"),
+          messageId: MessageId.make("message-idle-steer"),
+          steerNative: true,
+        },
+      ),
+    );
+    assert.strictEqual(result._tag, "Failure");
+    assert.strictEqual(dispatchCount, 0);
   }),
 );
 

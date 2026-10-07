@@ -4503,6 +4503,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
+    readonly nativeOnly?: boolean;
   }) =>
     Effect.gen(function* () {
       const targetRun = input.projection.runs.find(
@@ -4618,6 +4619,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const providerInstanceChanged =
         targetRun.providerInstanceId !== input.modelSelection.instanceId;
+      if (input.nativeOnly && selectionChanged) {
+        return yield* new OrchestratorDispatchError({
+          commandId: input.command.commandId,
+          commandType: input.command.type,
+          cause: "Cooperative steering cannot change the active turn's model selection.",
+        });
+      }
       const selectionTransition =
         selectionChanged && !providerInstanceChanged
           ? yield* providerAdapters.get(targetRun.providerInstanceId).pipe(
@@ -4739,6 +4747,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: input.command.threadId,
           providerInstanceId: targetRun.providerInstanceId,
           capabilities: session.providerSession.capabilities,
+          nativeOnly: input.nativeOnly,
           forceRestart:
             input.forceRestart ||
             selectionMustApplyNow ||
@@ -4788,6 +4797,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: input.command.threadId,
             request: {
               type: "provider-turn.steer",
+              ...(input.nativeOnly ? { nativeOnly: true as const } : {}),
               providerSessionId,
               providerThreadId: providerThread.id,
               providerTurnId: providerTurn.id,
@@ -5584,7 +5594,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               payload: { ...sourcePlan, status: "completed" },
             });
 
-      if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
+      if (
+        dispatchMode.type === "steer_active" ||
+        dispatchMode.type === "steer_active_native" ||
+        dispatchMode.type === "restart_active"
+      ) {
         yield* dispatchSteerIntoRun({
           command,
           events,
@@ -5610,6 +5624,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {}
             : { senderThreadId: command.senderThreadId }),
           forceRestart: dispatchMode.type === "restart_active",
+          nativeOnly: dispatchMode.type === "steer_active_native",
         });
         return;
       }

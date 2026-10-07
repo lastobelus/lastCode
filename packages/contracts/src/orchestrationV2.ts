@@ -3015,6 +3015,8 @@ export const OrchestrationV2Command = Schema.Union([
         workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
       }),
       Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: RunId }),
+      /** Cooperative delivery only: never queue, restart, or interrupt tools. */
+      Schema.Struct({ type: Schema.Literal("steer_active_native"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("queue_after_active") }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),

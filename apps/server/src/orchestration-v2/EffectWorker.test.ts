@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -83,6 +84,7 @@ function layerExecutorFor(input: {
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
+  readonly steer?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["steer"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -91,7 +93,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
-        steer: () => Effect.void,
+        steer: input.steer ?? (() => Effect.void),
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -164,6 +166,49 @@ function layerExecutorFor(input: {
     ),
   );
 }
+
+it.effect("native-only steering cannot start a follow-up when completion wins delivery", () =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+      Effect.provide(
+        layerExecutorFor({
+          events,
+          steer: () =>
+            Effect.fail(
+              new ProviderTurnControlService.ProviderTurnControlError({
+                threadId,
+                operation: "steer",
+                providerTurnId,
+                turnCompleted: true,
+              }),
+            ),
+          threads: {
+            getThreadRecords: () => Effect.die("strict steering must not read follow-up state"),
+            dispatch: () => Effect.die("strict steering must not dispatch a follow-up"),
+          },
+        }),
+      ),
+    );
+    const now = yield* DateTime.now;
+    const effect = restartEffect(now, { type: "detach" });
+    const error = yield* executor
+      .execute({
+        ...effect,
+        request: {
+          type: "provider-turn.steer",
+          nativeOnly: true,
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+          messageId: MessageId.make("native-only-steer"),
+        },
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, EffectWorker.OrchestrationEffectExecutionError);
+    assert.deepEqual(yield* Ref.get(events), []);
+  }),
+);
 
 it("does not retry pure interrupt races where the turn is already gone", () => {
   assert.isTrue(
