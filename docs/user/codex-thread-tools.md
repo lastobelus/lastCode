@@ -48,6 +48,17 @@ their nested `waitHandle` can be passed back to `lastcode-thread wait`. A
 whether the request completed or, for dispatch, whether acceptance was observed. Plain `send`
 does not create wait state and its accepted JSON cannot be used as a wait handle.
 
+Messages normally queue behind an active turn. Add `--steer-native` to ask an already
+running agent to cooperate immediately, for example to finish its current operation and
+pause safely. LastCode rejects the request if the active run changes, its provider cannot
+steer without interrupting tools, or the thread is idle. It never substitutes a queued
+turn or an interruption. This option uses the running turn's existing model and settings.
+
+With `--steer-native --wait`, the result follows that running turn, which can finish before
+receiving the request. A completed result alone does not prove cooperation. Require a
+unique acknowledgement in its response and verify the thread is idle before taking an
+action that depends on a safe pause. Timeouts leave the agent running.
+
 The bundled thread command is currently available on POSIX Node hosts and packaged macOS.
 Windows and packaged Linux AppImage Codex sessions still receive LastCode thread and home
 identity, but do not receive a `lastcode-thread` launcher. Windows has no POSIX launcher;
