@@ -695,7 +695,10 @@ type SweepCase =
   | "deleted-shared-session-live"
   | "deleted-shared-session-stopped-live"
   | "deleted-shared-session-error-released"
-  | "deleted-event"
+  | "deleted-canonical-event"
+  | "deleted-event-after-capture"
+  | "deleted-out-of-order-event"
+  | "deleted-unrelated-events"
   | "process"
   | "process-unknown"
   | "process-started"
@@ -717,9 +720,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const sql = yield* SqlClient.SqlClient;
   const config = yield* ServerConfig.ServerConfig;
   for (const query of [
-    "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, aggregate_id TEXT, event_type TEXT)",
+    "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, stream_id TEXT, event_type TEXT, occurred_at TEXT, application_event_version INTEGER NOT NULL DEFAULT 1)",
+    "CREATE INDEX idx_orchestration_events_agent_stream_sequence ON orchestration_events(stream_id, sequence) WHERE application_event_version = 2 AND aggregate_kind = 'thread'",
     "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT)",
     "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, payload_json TEXT, deleted_at TEXT)",
+    // Migrated legacy events remain empty while canonical events receive new activity.
     "CREATE TABLE orchestration_v2_events (thread_id TEXT, occurred_at TEXT)",
     "CREATE TABLE orchestration_v2_projection_runs (thread_id TEXT, status TEXT)",
     "CREATE TABLE orchestration_v2_projection_subagents (thread_id TEXT, child_thread_id TEXT, status TEXT)",
@@ -850,8 +855,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${deletedThreadId}, ${projectId}, ${payload}, 'deleted')`;
     if (mode === "deleted-pending" || mode === "deleted-visible-pending" || wholeSharedDeleted)
       yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${deletedThreadId}, 'running')`;
-    if (mode === "deleted-event")
-      yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${DateTime.formatIso(at(1))})`;
+    if (mode === "deleted-canonical-event" || mode === "deleted-out-of-order-event") {
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
+      if (mode === "deleted-out-of-order-event")
+        yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2)`;
+    }
+    if (mode === "deleted-unrelated-events") {
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2)`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', 'unrelated-thread', 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('project', ${threadId}, 'project.updated', ${DateTime.formatIso(at(1))}, 2)`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 1)`;
+    }
   }
   if (mode.startsWith("session") || sharedSession) {
     const sessionStatus = mode.includes("session-error")
@@ -957,6 +971,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     updatedAt: "2026-05-01T00:00:00.000Z",
   };
   let reads = 0;
+  let deletedEventInserted = false;
   const sessionLookups = new Map<string, number>();
   let providerEventInserted = false;
   const targetedReads: ThreadId[] = [];
@@ -1079,7 +1094,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           if (reads === 2 && mode === "whole-shared-session-error-ownership-changed")
             acquireManagerOwnership();
           if (reads === 1 && mode === "initial-revision-changed")
-            yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated')`;
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2)`;
           const threads =
             options?.location === "archive" ||
             (deleted && mode !== "deleted-visible-pending") ||
@@ -1110,6 +1125,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getThreadShell: (requestedId) =>
         Effect.gen(function* () {
           targetedReads.push(requestedId);
+          if (targetedReads.length === 1 && mode === "deleted-event-after-capture") {
+            yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
+            deletedEventInserted = true;
+          }
           if (
             targetedReads.length === 1 &&
             (mode === "shared-session-error-ownership-changed" ||
@@ -1133,17 +1152,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           if (targetedReads.length === 1 && mode === "revision-changed") {
             yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
             yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES ('unrelated-new-deleted', ${projectId}, '{"not":"a-thread"}', 'deleted')`;
-            yield* sql`INSERT INTO orchestration_events VALUES (1, 'project', ${projectId}, 'project.updated')`;
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'project', ${projectId}, 'project.updated', 2)`;
           }
           if (targetedReads.length === 1 && mode === "unrelated-streaming")
-            yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated')`;
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated', 2)`;
           if (targetedReads.length === 1 && mode === "provider-binding-changed") {
             const payload = providerPayload("changed-session", "error", f.repository);
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('changed-session', 'error', ${payload})`;
                 yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('changed-session', ${threadId})`;
-                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', 'changed-session', 'provider-session.attached')`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.attached', 2)`;
               }),
             );
             providerEventInserted = true;
@@ -1153,7 +1172,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET payload_json = ${payload} WHERE provider_session_id = 'changed-session'`;
-                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', 'changed-session', 'provider-session.updated')`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2)`;
               }),
             );
             providerEventInserted = true;
@@ -1185,7 +1204,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET status = 'ready', payload_json = ${payload} WHERE provider_session_id = ${sessionId}`;
-                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', ${sessionId}, 'provider-session.updated')`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2)`;
               }),
             );
             providerEventInserted = true;
@@ -1269,6 +1288,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "eligible" ||
     mode === "archived" ||
     mode === "deleted" ||
+    mode === "deleted-unrelated-events" ||
     mode === "whole-policy" ||
     releasedErrorSession ||
     mode === "shared-session-stopped" ||
@@ -1324,6 +1344,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(reads, 1);
     assert.equal(dependencyInspections(), 0);
   }
+  if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   if (stoppedSession && !wholeSession)
@@ -1403,7 +1424,10 @@ it.effect.each([
   "deleted-shared-session-live",
   "deleted-shared-session-stopped-live",
   "deleted-shared-session-error-released",
-  "deleted-event",
+  "deleted-canonical-event",
+  "deleted-event-after-capture",
+  "deleted-out-of-order-event",
+  "deleted-unrelated-events",
   "process",
   "process-unknown",
   "process-started",

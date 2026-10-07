@@ -11,6 +11,7 @@ import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProc
 
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
+import * as DependencyMounts from "./DependencyMounts.ts";
 
 const decodeRuntimeState = Schema.decodeUnknownSync(
   Schema.fromJsonString(PersistedServerRuntimeState),
@@ -176,7 +177,7 @@ const hasLiveRuntime = async (worktreePath: string): Promise<boolean> => {
   return false;
 };
 
-const measure = async (root: string): Promise<number | null> => {
+const measure = async (root: string, device: number): Promise<number | null> => {
   const deadline = performance.now() + 30_000;
   const pending = [{ target: root, depth: 0 }];
   let entries = 1;
@@ -188,6 +189,7 @@ const measure = async (root: string): Promise<number | null> => {
       batch.map(async ({ target, depth }) => {
         if (depth > 64 || performance.now() > deadline) return false;
         const stat = await NodeFSP.lstat(target);
+        if (stat.dev !== device) return false;
         if (!stat.isFile() && !stat.isDirectory() && !stat.isSymbolicLink()) return false;
         if (stat.isDirectory() || stat.nlink === 1) bytes += stat.blocks * 512;
         if (!Number.isSafeInteger(bytes)) return false;
@@ -209,6 +211,7 @@ const measure = async (root: string): Promise<number | null> => {
 const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const processCwds = yield* ProcessWorkingDirectories;
+  const mountPoints = yield* DependencyMounts.MountPoints;
   const validate = Effect.fn("GeneratedDependencies.validate")(function* (input: DependencyInput) {
     const worktreePath = NodePath.resolve(input.worktreePath);
     const managedWorktreesRoot = NodePath.resolve(input.managedWorktreesRoot);
@@ -322,9 +325,13 @@ const make = Effect.gen(function* () {
   const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
     const current = yield* validate(input);
     if (current === null) return null;
+    const mounts = yield* mountPoints;
+    if (mounts === null || DependencyMounts.containsMount(current.dependencyPath, mounts))
+      return null;
     const estimatedReclaimedBytes = yield* Effect.tryPromise({
       try: async () => {
-        const bytes = await measure(current.dependencyPath);
+        const parent = await NodeFSP.lstat(current.worktreePath);
+        const bytes = await measure(current.dependencyPath, parent.dev);
         const after = await NodeFSP.lstat(current.dependencyPath);
         return bytes !== null &&
           after.isDirectory() &&
@@ -378,11 +385,16 @@ const make = Effect.gen(function* () {
     // Leases stay held, and no candidate queues behind another lengthy removal.
     const processes = yield* processCwds;
     if (processes === null) return [];
+    // One fresh mount snapshot covers the entire cohort, including same-device
+    // bind mounts added anywhere below an install since its size was measured.
+    const mounts = yield* mountPoints;
+    if (mounts === null) return [];
     const removed = yield* Effect.forEach(
       validated,
       ({ current, inspection, canRemove }) =>
         Effect.gen(function* () {
           if (
+            DependencyMounts.containsMount(current.dependencyPath, mounts) ||
             processes.some(
               (cwd) =>
                 NodePath.resolve(cwd) === current.worktreePath ||

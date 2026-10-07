@@ -308,8 +308,9 @@ export const make = Effect.gen(function* () {
       latestEventAt: string | null;
     }>`
         SELECT t.payload_json, p.workspace_root AS "workspaceRoot",
-          (SELECT MAX(e.occurred_at) FROM orchestration_v2_events e
-            WHERE e.thread_id = t.thread_id) AS "latestEventAt"
+          (SELECT MAX(e.occurred_at) FROM orchestration_events e
+            WHERE e.aggregate_kind = 'thread' AND e.stream_id = t.thread_id
+              AND e.application_event_version = 2) AS "latestEventAt"
         FROM orchestration_v2_projection_threads t
         JOIN projection_projects p ON p.project_id = t.project_id
         WHERE t.deleted_at IS NOT NULL
