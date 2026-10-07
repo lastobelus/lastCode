@@ -7,7 +7,71 @@ import * as NodeProcess from "node:process";
 import { describe, expect, it } from "vite-plus/test";
 import { runCiProcess } from "./lastcode-ci-process.ts";
 
+function writeControllerDeathFixture(cwd: string) {
+  NodeFS.writeFileSync(
+    NodePath.join(cwd, "descendant.mjs"),
+    "process.on('SIGTERM', () => {}); console.log('descendant-ready:' + process.pid); setInterval(() => {}, 1000);",
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(cwd, "launcher.mjs"),
+    "import { spawn } from 'node:child_process'; spawn(process.execPath, ['descendant.mjs'], { stdio: 'inherit' }); setInterval(() => {}, 1000);",
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(cwd, "controller.mjs"),
+    [
+      `import { runCiProcess } from ${JSON.stringify(new URL("./lastcode-ci-process.ts", import.meta.url).href)};`,
+      "await runCiProcess({ cwd: process.cwd(), command: process.execPath, args: ['launcher.mjs'], signal: new AbortController().signal, onSpawn: pid => console.log('worker-pid:' + pid) });",
+    ].join("\n"),
+  );
+}
+
 describe("CI process ownership", () => {
+  it.skipIf(NodeProcess.platform !== "linux")(
+    "records controller-death cleanup before orphan reaping",
+    async () => {
+      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-subreaper-"));
+      try {
+        writeControllerDeathFixture(cwd);
+        const output = await new Promise<string>((resolve, reject) => {
+          NodeChildProcess.execFile(
+            "python3",
+            [
+              NodePath.join(import.meta.dirname, "fixtures/ci-controller-subreaper.py"),
+              process.execPath,
+            ],
+            { cwd, timeout: 20_000 },
+            (error, stdout, stderr) => {
+              if (error) reject(new Error(`Subreaper fixture failed: ${stderr}`, { cause: error }));
+              else resolve(stdout);
+            },
+          );
+        });
+        NodeProcess.stderr.write(`CI controlled orphan-reaping evidence ${output}`);
+        const evidence = JSON.parse(output) as {
+          controllerExit: number;
+          workerPid: number;
+          descendantPid: number;
+          subreaperPid: number;
+          groupProbeError: number | null;
+          reapedGroupProbeError: number | null;
+          members: Array<{ pid: number; parentPid: number; state: string }>;
+        };
+        expect(evidence.controllerExit).toBe(-9);
+        expect(evidence.groupProbeError).toBeNull();
+        expect(evidence.members.find(({ pid }) => pid === evidence.workerPid)?.state).toBe("Z");
+        expect(evidence.members.find(({ pid }) => pid === evidence.descendantPid)?.state).toBe("Z");
+        expect(
+          evidence.members.every(
+            ({ state, parentPid }) => state === "Z" && parentPid === evidence.subreaperPid,
+          ),
+        ).toBe(true);
+        expect(evidence.reapedGroupProbeError).toBe(2); // ESRCH after waitpid reaps the zombies.
+      } finally {
+        NodeFS.rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(NodeProcess.platform === "win32")(
     "finishes descendant cleanup after its controller dies",
     async () => {
@@ -44,21 +108,7 @@ describe("CI process ownership", () => {
         );
       };
       try {
-        NodeFS.writeFileSync(
-          NodePath.join(cwd, "descendant.mjs"),
-          "process.on('SIGTERM', () => {}); console.log('descendant-ready:' + process.pid); setInterval(() => {}, 1000);",
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(cwd, "launcher.mjs"),
-          "import { spawn } from 'node:child_process'; spawn(process.execPath, ['descendant.mjs'], { stdio: 'inherit' }); setInterval(() => {}, 1000);",
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(cwd, "controller.mjs"),
-          [
-            `import { runCiProcess } from ${JSON.stringify(new URL("./lastcode-ci-process.ts", import.meta.url).href)};`,
-            "await runCiProcess({ cwd: process.cwd(), command: process.execPath, args: ['launcher.mjs'], signal: new AbortController().signal, onSpawn: pid => console.log('worker-pid:' + pid) });",
-          ].join("\n"),
-        );
+        writeControllerDeathFixture(cwd);
         controller = NodeChildProcess.spawn(process.execPath, ["controller.mjs"], {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
