@@ -99,6 +99,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
           activeProviderThreadId: null,
           subagentPromotion: null,
           dashboardItems: [],
+          actionResume: null,
           lineage: {
             parentThreadId: input.sourceProjection.thread.id,
             relationshipToParent: "fork",

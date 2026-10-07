@@ -210,6 +210,43 @@ it("keeps dashboard requests on their parent for both subagent kinds", () => {
   }
 });
 
+it("keeps a running Project Action on its parent for both subagent kinds", () => {
+  const parentThread = {
+    ...makeParentThread(),
+    actionResume: {
+      runId: "action:parent-ci",
+      threadId: parentThreadId,
+      projectId: makeParentThread().projectId,
+      actionId: "quick-ci",
+      actionName: "Run Quick CI",
+      terminalId: "terminal:parent-ci",
+      outcome: "running" as const,
+      delivery: "armed" as const,
+      startedAt: DateTime.formatIso(snoozedAt),
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+    },
+  };
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const child = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isNull(child.actionResume);
+    assert.equal(parentThread.actionResume.outcome, "running");
+    assert.equal(parentThread.actionResume.threadId, parentThreadId);
+  }
+});
+
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {
     const artifacts = makeSubagentConversationArtifacts({

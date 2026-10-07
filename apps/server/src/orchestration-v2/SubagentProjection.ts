@@ -69,6 +69,7 @@ export function makeSubagentChildThread(input: {
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
     dashboardItems: [],
+    actionResume: null,
     persistent: false,
     annotation: null,
     lineage: {
