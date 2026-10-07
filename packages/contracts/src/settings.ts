@@ -4,6 +4,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  EnvironmentId,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
@@ -76,6 +77,41 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_LEGACY_SIDEBAR_SCALE = 50;
+export const MAX_LEGACY_SIDEBAR_SCALE = 100;
+export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
+export const LegacySidebarScale = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_LEGACY_SIDEBAR_SCALE,
+    maximum: MAX_LEGACY_SIDEBAR_SCALE,
+  }),
+);
+export type LegacySidebarScale = typeof LegacySidebarScale.Type;
+export const DEFAULT_LEGACY_SIDEBAR_SCALE: LegacySidebarScale = 100;
+
+export const MIN_THREAD_PROVIDER_BADGE_SIZE = 10;
+export const MAX_THREAD_PROVIDER_BADGE_SIZE = 100;
+export const ThreadProviderBadgeSize = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_SIZE,
+    maximum: MAX_THREAD_PROVIDER_BADGE_SIZE,
+  }),
+);
+export type ThreadProviderBadgeSize = typeof ThreadProviderBadgeSize.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_SIZE: ThreadProviderBadgeSize = 80;
+export const MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY = 0;
+export const MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY = 100;
+export const ThreadProviderBadgeTransparency = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+    maximum: MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+  }),
+);
+export type ThreadProviderBadgeTransparency = typeof ThreadProviderBadgeTransparency.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY: ThreadProviderBadgeTransparency = 0;
+
+export const LegacySidebarThreadGroupingStyle = Schema.Literals(["minimal", "typed-groups"]);
+export type LegacySidebarThreadGroupingStyle = typeof LegacySidebarThreadGroupingStyle.Type;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
@@ -239,6 +275,9 @@ const LegacyConfirmQuit = Schema.Boolean.pipe(
 
 const QuitConfirmationModeSetting = Schema.Union([QuitConfirmationMode, LegacyConfirmQuit]);
 
+export const EnvironmentIconColor = TrimmedNonEmptyString.check(Schema.isPattern(/^#[\da-f]{6}$/i));
+export type EnvironmentIconColor = typeof EnvironmentIconColor.Type;
+
 /**
  * A user-chosen font family (a single name or a comma-separated list). Empty
  * means "use the app default"; clients compose their own fallback stacks.
@@ -365,6 +404,12 @@ export const ClientSettingsSchema = Schema.Struct({
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  compactLegacySidebarStatuses: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  showThreadWorktreeIndicators: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -373,6 +418,9 @@ export const ClientSettingsSchema = Schema.Struct({
   diffLayout: DiffLayout.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_DIFF_LAYOUT))),
   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
+  ),
+  environmentIconColors: Schema.Record(EnvironmentId, EnvironmentIconColor).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
@@ -465,6 +513,21 @@ export const ClientSettingsSchema = Schema.Struct({
   // time, so manual placement there is ignored (and kept) while it is on.
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("minimal")),
+  ),
+  legacySidebarScale: LegacySidebarScale.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
+  ),
+  roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showThreadProviderBadge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  threadProviderBadgeSize: ThreadProviderBadgeSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_SIZE)),
+  ),
+  threadProviderBadgeTransparency: ThreadProviderBadgeTransparency.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY)),
   ),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
@@ -1844,9 +1907,12 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffFilesCollapsed: Schema.optionalKey(Schema.Boolean),
+  compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
+  showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
+  environmentIconColors: Schema.optionalKey(Schema.Record(EnvironmentId, EnvironmentIconColor)),
   glassOpacity: Schema.optionalKey(GlassOpacity),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
@@ -1891,8 +1957,15 @@ export const ClientSettingsPatch = Schema.Struct({
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
+  legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
+  legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
+  showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
+  showThreadProviderBadge: Schema.optionalKey(Schema.Boolean),
+  threadProviderBadgeSize: Schema.optionalKey(ThreadProviderBadgeSize),
+  threadProviderBadgeTransparency: Schema.optionalKey(ThreadProviderBadgeTransparency),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

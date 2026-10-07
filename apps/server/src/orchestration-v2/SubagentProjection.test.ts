@@ -114,6 +114,69 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
   });
 });
 
+it("starts native and app-owned subagents without the parent's protection or annotation", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const parentThread = {
+      ...makeParentThread(),
+      persistent: true,
+      annotation: {
+        body: "Parent note",
+        anchorMessageId: MessageId.make("message:parent-note"),
+        createdAt: DateTime.formatIso(parentCreatedAt),
+        updatedAt: DateTime.formatIso(parentCreatedAt),
+        resolvedAt: null,
+      },
+    } satisfies OrchestrationV2AppThread;
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Independent helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isFalse(childThread.persistent);
+    assert.isNull(childThread.annotation);
+    assert.isTrue(parentThread.persistent);
+    assert.equal(parentThread.annotation.body, "Parent note");
+  }
+});
+
+it("does not inherit the parent's ordinary creator history or placement for either subagent kind", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const parentThread = {
+      ...makeParentThread(),
+      createdBy: "agent" as const,
+      creationSource: "mcp" as const,
+      creatorThreadId: ThreadId.make("thread:ordinary-creator"),
+      creatorGrouping: "grouped" as const,
+    };
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isFalse("creatorThreadId" in childThread);
+    assert.isFalse("creatorGrouping" in childThread);
+    assert.equal(childThread.lineage.parentThreadId, parentThread.id);
+    assert.equal(childThread.lineage.relationshipToParent, "subagent");
+    assert.equal(childThread.creationSource, creationSource);
+    assert.equal(parentThread.creatorThreadId, "thread:ordinary-creator");
+    assert.equal(parentThread.creatorGrouping, "grouped");
+  }
+});
+
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {
     const artifacts = makeSubagentConversationArtifacts({

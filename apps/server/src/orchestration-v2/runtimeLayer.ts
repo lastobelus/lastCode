@@ -352,6 +352,7 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
 );
 
 export const layer = Layer.mergeAll(
+  layerEventSinkProvided,
   layerOrchestratorProvided,
   layerThreadManagementProvided,
   layerEffectWorkerProvided,

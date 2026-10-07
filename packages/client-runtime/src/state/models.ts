@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
@@ -87,6 +88,8 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 }
 
 export interface EnvironmentThreadShell {
+  readonly creatorThreadId?: ThreadId;
+  readonly creatorGrouping?: "grouped" | "independent";
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -146,6 +149,21 @@ export interface EnvironmentThreadShell {
   readonly deletedAt: string | null;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly source: OrchestrationV2ThreadShell;
+}
+
+type ThreadShellVisibility =
+  | Pick<EnvironmentThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">
+  | Pick<OrchestrationV2ThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">;
+
+export function threadShellIsCleanupRecovery(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt !== null && thread.worktreeCleanup != null;
+}
+
+/** Deleted threads stay reachable until their worktree cleanup is resolved. */
+export function threadShellIsVisible(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt === null
+    ? thread.archivedAt === null
+    : threadShellIsCleanupRecovery(thread);
 }
 
 function iso(value: DateTime.Utc): string {
@@ -228,6 +246,8 @@ export function presentThreadShell(
           assistantMessageId: null,
         } satisfies ThreadRunSummary);
   return {
+    ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
+    ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
     environmentId,
     id: thread.id,
     projectId: thread.projectId,
@@ -288,6 +308,7 @@ export function presentThreadShell(
             startedAt: iso(thread.titleRegeneration.startedAt),
           },
     deletedAt: nullableIso(thread.deletedAt),
+    annotation: threadAnnotationOf(thread),
     actionResume: thread.actionResume ?? null,
     source: thread,
   };
