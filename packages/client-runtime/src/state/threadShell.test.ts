@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   CommandId,
+  MessageId,
   ProjectId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
@@ -50,6 +51,102 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
 }
 
 describe("v2 thread shell lists", () => {
+  it.each(["ordinary", "subagent"] as const)(
+    "omits copied parent annotations from %s shells and retains independent live note changes",
+    (kind) => {
+      const { registry, threads, snapshotAtom } = makeHarness();
+      const parentId = ThreadId.make("parent");
+      const annotation = {
+        body: "Parent note",
+        anchorMessageId: MessageId.make("parent-message"),
+        createdAt: "2026-06-19T00:00:00.000Z",
+        updatedAt: "2026-06-19T00:00:00.000Z",
+        resolvedAt: "2026-06-19T00:00:00.000Z",
+      };
+      const child = {
+        ...v2ThreadShell,
+        annotation,
+        ...(kind === "ordinary"
+          ? { creatorThreadId: parentId, creatorGrouping: "independent" as const }
+          : {
+              lineage: {
+                ...v2ThreadShell.lineage,
+                parentThreadId: parentId,
+                relationshipToParent: "subagent" as const,
+              },
+            }),
+      };
+      let snapshot: OrchestrationV2ShellSnapshot = { ...v2ShellSnapshot, threads: [child] };
+      registry.set(snapshotAtom(environmentId), snapshot);
+      const dispose = registry.mount(threads.threadShellsAtom);
+      const selectedShellAtom = threads.threadShellAtom({ environmentId, threadId: child.id });
+      const disposeSelection = registry.mount(selectedShellAtom);
+      try {
+        const before = registry.get(threads.threadShellsAtom)[0];
+        expect(before?.annotation).toBeNull();
+        expect(registry.get(selectedShellAtom)?.annotation).toBeNull();
+        expect(before?.source.annotation).toBe(annotation);
+        const updatedAt = "2026-06-21T00:00:00.000Z";
+        for (const [index, resolvedAt] of [null, updatedAt, null].entries()) {
+          const independent = { ...annotation, body: "Child note", updatedAt, resolvedAt };
+          snapshot = applyShellStreamEvent(snapshot, {
+            kind: "thread.updated",
+            location: "active",
+            sequence: index + 1,
+            thread: { ...child, annotation: independent },
+          });
+          registry.set(snapshotAtom(environmentId), snapshot);
+          expect(registry.get(threads.threadShellsAtom)[0]?.annotation).toEqual(independent);
+          expect(registry.get(selectedShellAtom)?.annotation).toEqual(independent);
+        }
+      } finally {
+        disposeSelection();
+        dispose();
+        registry.dispose();
+      }
+    },
+  );
+
+  it("preserves root notes, notes created with a child, and ambiguous annotation dates", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const annotation = {
+      body: "Independent note",
+      anchorMessageId: MessageId.make("own-message"),
+      createdAt: "2026-06-19T00:00:00.000Z",
+      updatedAt: "2026-06-19T00:00:00.000Z",
+      resolvedAt: null,
+    };
+    const creatorThreadId = ThreadId.make("parent");
+    const shells = [
+      { ...v2ThreadShell, id: ThreadId.make("root"), annotation },
+      {
+        ...v2ThreadShell,
+        id: ThreadId.make("same-time"),
+        creatorThreadId,
+        annotation: { ...annotation, createdAt: DateTime.formatIso(v2ThreadShell.createdAt) },
+      },
+      {
+        ...v2ThreadShell,
+        id: ThreadId.make("ambiguous-date"),
+        creatorThreadId,
+        annotation: { ...annotation, updatedAt: "invalid" },
+      },
+    ];
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: shells });
+    const dispose = registry.mount(threads.threadShellsAtom);
+    try {
+      const presented = registry.get(threads.threadShellsAtom);
+      for (const shell of shells) {
+        expect(presented.find((value) => value.id === shell.id)?.annotation).toEqual(
+          shell.annotation,
+        );
+      }
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it("retains promotion progress and cancellation through live shell updates", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const dispose = registry.mount(threads.threadShellsAtom);

@@ -38,20 +38,6 @@ export const legacySidebarSubagentGroupKey = (parentKey: string) => `${parentKey
 export const legacySidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
-/** Unchanged notes predating a child were copied from its parent; later child writes remain independent. */
-export function legacySidebarThreadAnnotation(thread: SidebarThreadSummary) {
-  const annotation = thread.annotation ?? null;
-  if (
-    annotation === null ||
-    (thread.lineage.relationshipToParent !== "subagent" && thread.creatorThreadId === undefined)
-  )
-    return annotation;
-  const createdAt = Date.parse(thread.createdAt);
-  const noteCreatedAt = Date.parse(annotation.createdAt);
-  const noteUpdatedAt = Date.parse(annotation.updatedAt);
-  return noteCreatedAt < createdAt && noteUpdatedAt <= createdAt ? null : annotation;
-}
-
 export function legacySidebarSubagentStatusLabel(
   thread: SidebarThreadSummary,
   status: ThreadStatusPill | null,

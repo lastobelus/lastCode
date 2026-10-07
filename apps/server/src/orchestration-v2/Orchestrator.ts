@@ -62,6 +62,7 @@ import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -2504,10 +2505,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt) ||
         String(b.id).localeCompare(String(a.id)),
     )[0];
-    const anchorMessageId = latestUser?.id ?? thread.annotation?.anchorMessageId;
+    const previousAnnotation = threadAnnotationOf(thread);
+    const anchorMessageId = latestUser?.id ?? previousAnnotation?.anchorMessageId;
     if (
       anchorMessageId === undefined ||
-      (command.type !== "thread.annotation.upsert" && thread.annotation == null)
+      (command.type !== "thread.annotation.upsert" && previousAnnotation === null)
     ) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -2516,16 +2518,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const annotation = {
-      body: command.type === "thread.annotation.upsert" ? command.body : thread.annotation!.body,
+      body: command.type === "thread.annotation.upsert" ? command.body : previousAnnotation!.body,
       anchorMessageId,
-      createdAt: thread.annotation?.createdAt ?? nowIso,
+      createdAt: previousAnnotation?.createdAt ?? nowIso,
       updatedAt: nowIso,
       resolvedAt:
         command.type === "thread.annotation.resolve"
           ? nowIso
           : command.type === "thread.annotation.reopen"
             ? null
-            : (thread.annotation?.resolvedAt ?? null),
+            : (previousAnnotation?.resolvedAt ?? null),
     };
     yield* emitThread(
       command.type === "thread.annotation.upsert"

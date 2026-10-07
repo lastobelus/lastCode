@@ -273,7 +273,6 @@ import {
   legacySidebarIsAgentCreated,
   legacySidebarSubagentStatusLabel,
   legacySidebarSubagentGroupKey,
-  legacySidebarThreadAnnotation,
   type LegacySidebarFamilyItem,
   type LegacySidebarFamilyRow,
 } from "./legacySidebarFamilies.logic";
@@ -639,7 +638,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
-  const annotation = legacySidebarThreadAnnotation(thread);
+  const annotation = thread.annotation ?? null;
   const hasActiveAnnotation = annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
@@ -1229,7 +1228,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         }
                       >
                         {isAgentCreated ? <SparklesIcon aria-hidden className="size-3" /> : null}
-                        {isAgentCreated ? (
+                        {isAgentCreated && !props.compactStatusIndicators ? (
                           <span className="hidden @sm/legacy-sidebar:inline">Agent-created</span>
                         ) : null}
                         {relationshipUnavailableLabel ? (
