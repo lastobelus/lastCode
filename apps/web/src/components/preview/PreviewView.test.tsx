@@ -19,7 +19,8 @@ const mocks = vi.hoisted(() => ({
     async (_ref: ScopedThreadRef, _url: string): Promise<boolean> => false,
   ),
   preparedRecoveryUrl: null as string | null,
-  environmentUrl: "http://172.25.85.75:3773" as string | null,
+  // Synthetic private address exercises WSL host mapping.
+  environmentUrl: "http://172.16.0.2:3773" as string | null,
   restarted: false,
   serverRuntime: false,
   serverNavigate: vi.fn((_url: string) => true),
@@ -34,7 +35,7 @@ const mocks = vi.hoisted(() => ({
     | { _tag: "LoadFailed"; url: string; code: number; description: string },
   navigate: vi.fn(async (_tabId: string, _url: string): Promise<void> => undefined),
   rememberPreviewUrl: vi.fn(),
-  readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
+  readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.16.0.2:3773" })),
   readEnvironmentScope: vi.fn(() => true),
   setAnnotationSendEnabled: vi.fn(async (): Promise<void> => undefined),
   cancelPickElement: vi.fn(async () => undefined),
@@ -421,7 +422,7 @@ describe("PreviewView navigation", () => {
   beforeEach(() => {
     mocks.recoverHostedPreview.mockReset().mockResolvedValue(false);
     mocks.preparedRecoveryUrl = null;
-    mocks.environmentUrl = "http://172.25.85.75:3773";
+    mocks.environmentUrl = "http://172.16.0.2:3773";
     mocks.restarted = false;
     mocks.serverRuntime = false;
     mocks.serverNavigate.mockReset().mockReturnValue(true);
@@ -629,7 +630,7 @@ describe("PreviewView navigation", () => {
         root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
       );
       expect(mocks.preparationPurposes).toEqual([]);
-      mocks.environmentUrl = "http://managed-server.example:3773";
+      mocks.environmentUrl = "http://172.16.0.2:3773";
       await act(() =>
         root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
       );
@@ -1134,7 +1135,7 @@ describe("PreviewView navigation", () => {
     await vi.waitFor(() =>
       expect(mocks.navigate).toHaveBeenCalledWith(
         TEST_RUNTIME_TAB_ID,
-        "http://172.25.85.75:5173/app?mode=test#top",
+        "http://172.16.0.2:5173/app?mode=test#top",
       ),
     );
     expect(mocks.rememberPreviewUrl).toHaveBeenCalledWith(
@@ -1142,7 +1143,7 @@ describe("PreviewView navigation", () => {
         environmentId: "environment-1",
         threadId: "thread-1",
       },
-      "http://172.25.85.75:5173/app?mode=test#top",
+      "http://172.16.0.2:5173/app?mode=test#top",
     );
     await vi.waitFor(() =>
       expect(mocks.recordVisitForThread).toHaveBeenCalledWith(
