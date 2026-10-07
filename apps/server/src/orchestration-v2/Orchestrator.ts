@@ -11100,6 +11100,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause,
       });
+    if (
+      root.creationSource === "provider" &&
+      root.lineage.relationshipToParent === "subagent" &&
+      root.lineage.independent !== true &&
+      root.lineage.parentThreadId !== null
+    ) {
+      const nativeShell = shells.find((thread) => thread.id === root.id);
+      const ownerShell = shells.find((thread) => thread.id === root.lineage.parentThreadId);
+      const ownerContext = yield* projectionStore
+        .getThreadProviderContext(root.lineage.parentThreadId)
+        .pipe(mapDispatchError(command));
+      const activeStatuses = ["preparing", "starting", "running", "waiting"];
+      if (
+        activeStatuses.includes(nativeShell?.status ?? "idle") ||
+        activeStatuses.includes(ownerShell?.activityRunStatus ?? ownerShell?.status ?? "idle") ||
+        ownerContext.providerSessions.some((session) => activeStatuses.includes(session.status))
+      )
+        return yield* reject(
+          "Archive the parent thread to stop and archive this running native subagent.",
+        );
+    }
     if (root.deletedAt !== null || root.archivedAt !== null)
       return yield* reject("This conversation is no longer available to archive.");
     if (
@@ -11361,8 +11382,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
-    yield* dispatchThreadMutation(command, events, effects);
     const cohort = root.archivedWith;
+    if (cohort !== undefined && cohort !== null && cohort.threadId !== root.id) {
+      const parent = yield* projectionStore
+        .getThreadShell(cohort.threadId)
+        .pipe(mapDispatchError(command));
+      if (parent?.archivedAt != null)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Restore the parent thread to reopen this family",
+        });
+    }
+    yield* dispatchThreadMutation(command, events, effects);
     if (cohort?.threadId !== root.id) return;
     for (const child of yield* archiveFamilyShells(command)) {
       if (
@@ -12202,6 +12234,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const ids = [
               ...new Set([
                 ...family,
+                ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
                 ...(root?.archivePending?.archiveThreadIds ?? []),
                 ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
               ]),

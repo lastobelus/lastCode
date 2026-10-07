@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -251,6 +252,19 @@ it.effect(
         assert.isNotNull(projection.thread.archivedAt);
         assert.equal(projection.thread.archivedWith?.commandId, command.commandId);
       }
+      for (const id of [child, grandchild]) {
+        const error = yield* Effect.flip(
+          orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make(`restore-child:${id}`),
+            threadId: id,
+          }),
+        );
+        assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
+        assert.equal(error.cause, "Restore the parent thread to reopen this family");
+      }
+      for (const id of [parent, child, grandchild])
+        assert.isNotNull((yield* orchestrator.getThreadProjection(id)).thread.archivedAt);
       yield* orchestrator.dispatch({
         type: "thread.unarchive",
         commandId: CommandId.make("restore-family"),
@@ -314,6 +328,17 @@ it.effect(
         (yield* orchestrator.getThreadProjection(grandchild)).runs[0]?.status,
         "starting",
       );
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      assert.equal(childProjection.thread.forkedFrom?.type, "node");
+      yield* projections.apply({
+        id: EventId.make("released-child-finished"),
+        type: "run.updated",
+        threadId: child,
+        occurredAt: now,
+        payload: { ...childProjection.runs[0]!, status: "completed", completedAt: now },
+      });
+      assert.notInclude(yield* projections.getRecoveryThreadIds("subagent-results"), child);
     }).pipe(Effect.provide(testLayer)),
 );
 
@@ -365,6 +390,115 @@ it.effect("archive RPC stays pending and returns a visible failure when shutdown
       assert.equal(projection.thread.archivePending?.status, "failed");
       assert.isTrue(projection.runs.every((run) => run.status === "cancelled"));
     }
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("shows runless native task activity and requires archiving its runtime owner", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { parent, child, grandchild } = yield* family;
+    const nativeId = ThreadId.make("runless-native-child");
+    yield* createWatchingThread(nativeId, 5);
+    const native = (yield* orchestrator.getThreadProjection(nativeId)).thread;
+    const parentProjection = yield* orchestrator.getThreadProjection(parent);
+    const now = yield* DateTime.now;
+    const mirror = {
+      ...native,
+      creationSource: "provider" as const,
+      pullRequests: [],
+      lineage: {
+        parentThreadId: parent,
+        relationshipToParent: "subagent" as const,
+        rootThreadId: parent,
+      },
+    };
+    const nativeEvent = {
+      id: EventId.make("runless-native-lineage"),
+      type: "thread.metadata-updated" as const,
+      threadId: nativeId,
+      occurredAt: now,
+      payload: mirror,
+    };
+    const taskEvent = {
+      id: EventId.make("runless-native-task"),
+      type: "subagent.updated" as const,
+      threadId: parent,
+      occurredAt: now,
+      payload: {
+        ...parentProjection.subagents[0]!,
+        id: NodeId.make("runless-native-task"),
+        origin: "provider_native" as const,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        childThreadId: nativeId,
+        providerThreadId: null,
+        status: "running" as const,
+        startedAt: now,
+      },
+    };
+    yield* projections.apply(nativeEvent);
+    yield* projections.apply(taskEvent);
+    const projection = yield* orchestrator.getThreadProjection(nativeId);
+    assert.lengthOf(projection.runs, 0);
+    assert.lengthOf(projection.providerThreads, 0);
+    assert.lengthOf(projection.providerTurns, 0);
+    for (const shell of [
+      yield* projections.getThreadShell(nativeId),
+      (yield* projections.getShellSnapshot()).threads.find((thread) => thread.id === nativeId),
+    ]) {
+      assert.equal(shell?.status, "running");
+      assert.isNull(shell?.latestRunId);
+      assert.isNull(shell?.activeRunId);
+    }
+    const replayShell = yield* Effect.gen(function* () {
+      const replay = yield* ProjectionStore.ProjectionStoreV2;
+      yield* replay.apply({
+        id: EventId.make("native-parent-replay"),
+        type: "thread.created",
+        threadId: parent,
+        occurredAt: now,
+        payload: parentProjection.thread,
+      });
+      yield* replay.apply({ ...nativeEvent, type: "thread.created" });
+      yield* replay.apply(taskEvent);
+      return yield* replay.getThreadShell(nativeId);
+    }).pipe(Effect.provide(ProjectionStore.layerMemory));
+    assert.equal(replayShell?.status, "running");
+    assert.isNull(replayShell?.latestRunId);
+    const rejection = yield* Effect.flip(orchestrator.dispatch(archive(nativeId, [])));
+    assert.equal(
+      rejection.cause,
+      "Archive the parent thread to stop and archive this running native subagent.",
+    );
+    assert.isNull((yield* projections.getThreadShell(nativeId))?.archivedAt);
+    assert.equal((yield* orchestrator.getThreadProjection(parent)).runs[0]?.status, "starting");
+    const missingChoice = yield* Effect.exit(
+      orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("runless-native-no-consent"),
+        threadId: parent,
+      }),
+    );
+    assert.isTrue(Exit.isFailure(missingChoice));
+    yield* projections.apply({
+      ...taskEvent,
+      id: EventId.make("runless-native-completed"),
+      payload: { ...taskEvent.payload, status: "completed", completedAt: now },
+    });
+    assert.equal((yield* projections.getThreadShell(nativeId))?.status, "completed");
+    // A completed child still shares a runtime with its working owner.
+    assert.isTrue(
+      Exit.isFailure(
+        yield* Effect.exit(
+          orchestrator.dispatch({
+            ...archive(nativeId, []),
+            commandId: CommandId.make("runless-native-owner-still-active"),
+          }),
+        ),
+      ),
+    );
+    yield* orchestrator.dispatch(archive(parent, [child, grandchild, nativeId]));
+    assert.equal((yield* projections.getThreadShell(nativeId))?.archivePending?.status, "stopping");
   }).pipe(Effect.provide(testLayer)),
 );
 

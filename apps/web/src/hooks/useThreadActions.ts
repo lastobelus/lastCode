@@ -76,12 +76,22 @@ import {
 } from "../components/ThreadArchiveDialog";
 
 function readArchiveFamily(target: ScopedThreadRef) {
-  return getOwnedThreadFamily(
-    readThreadShells()
-      .filter((thread) => thread.environmentId === target.environmentId)
-      .map((thread) => ({ ...thread, creationSource: thread.source.creationSource })),
-    target.threadId,
+  const threads = readThreadShells()
+    .filter((thread) => thread.environmentId === target.environmentId)
+    .map((thread) => ({ ...thread, creationSource: thread.source.creationSource }));
+  const family = getOwnedThreadFamily(threads, target.threadId);
+  const keptIds = new Set(
+    family.promotableChildren.flatMap((child) => [
+      child.id,
+      ...getOwnedThreadFamily(threads, child.id).children.map((descendant) => descendant.id),
+    ]),
   );
+  return {
+    ...family,
+    canPromote:
+      family.promotableChildren.length > 0 &&
+      family.protectedChildren.every((child) => keptIds.has(child.id)),
+  };
 }
 
 function archiveChildNeedsAttention(thread: EnvironmentThreadShell) {
@@ -531,7 +541,7 @@ export function useThreadActions() {
           title: `Archive "${thread.title}"?`,
           children: family.children,
           activeChildren,
-          canPromote: family.promotableChildren.length > 0,
+          canPromote: family.canPromote,
           nativeCount: family.nativeChildren.length,
           protectedCount: family.protectedChildren.length,
           submit: async (selected) => {
@@ -661,7 +671,11 @@ export function useThreadActions() {
           children,
           activeChildren,
           protectedCount,
-          canPromote: entries.some(({ family }) => family.promotableChildren.length > 0),
+          canPromote:
+            entries.some(({ family }) => family.promotableChildren.length > 0) &&
+            entries.every(
+              ({ family }) => family.protectedChildren.length === 0 || family.canPromote,
+            ),
           nativeCount: entries.reduce(
             (count, { family }) => count + family.nativeChildren.length,
             0,

@@ -14,6 +14,13 @@ export function threadCanArchive(runtime: ThreadRuntimeSummary | null | undefine
   return threadRuntimeCanArchive(runtime);
 }
 
+/** Restore a cascaded archive through its owner; provenance alone does not imply a shared archive. */
+export function threadUnarchiveTargetId(
+  thread: Pick<EnvironmentThreadShell, "id" | "archivedWith">,
+) {
+  return thread.archivedWith?.threadId ?? thread.id;
+}
+
 /** Snapshot the environment's owned children so confirmation and command agree. */
 export function resolveThreadArchiveFamily(
   threads: readonly EnvironmentThreadShell[],
@@ -84,6 +91,7 @@ export function resolveThreadArchiveFamily(
           ? "Persistent subagents cannot be archived. Keep running separately preserves them."
           : "Persistent subagents cannot be archived or kept separately. Remove their persistent protection before archiving this thread."
         : null,
+      "Reopening restores archived threads. Stopped work won't restart; promoted threads stay separate.",
     ]
       .filter(Boolean)
       .join("\n\n"),

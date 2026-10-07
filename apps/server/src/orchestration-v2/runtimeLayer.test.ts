@@ -2914,6 +2914,25 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
             });
           });
         for (const threadId of threadIds) yield* watchFrom(threadId);
+        // Released ownership keeps a conversation's existing watch independent.
+        const promotedId = threadIds[1]!;
+        const promoted = yield* orchestrator.getThreadProjection(promotedId);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        yield* projections.apply({
+          id: EventId.make("pr-watch-promoted-lineage"),
+          type: "thread.metadata-updated",
+          threadId: promotedId,
+          occurredAt: DateTime.makeUnsafe("2026-10-02T12:00:00.000Z"),
+          payload: {
+            ...promoted.thread,
+            lineage: {
+              rootThreadId: threadIds[0]!,
+              parentThreadId: threadIds[0]!,
+              relationshipToParent: "subagent",
+              independent: true,
+            },
+          },
+        });
         const rateLimited = new PullRequestOperationError({
           operation: "getChangeRequest",
           detail: "github requests are paused until the rate limit resets",

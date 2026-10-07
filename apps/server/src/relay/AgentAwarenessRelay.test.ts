@@ -689,6 +689,26 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
+  it.effect("publishes promoted conversations as independent activity", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* Ref.set(
+        currentShell,
+        shell({
+          lineage: {
+            rootThreadId: ThreadId.make("former-parent"),
+            parentThreadId: ThreadId.make("former-parent"),
+            relationshipToParent: "subagent",
+            independent: true,
+          },
+        }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]?.state?.phase, "running");
+    }),
+  );
+
   it.effect("confirms a first completed state and respects disabling during confirmation", () =>
     Effect.gen(function* () {
       const { relay, secrets, currentShell, publications } = yield* makeTestRelay();

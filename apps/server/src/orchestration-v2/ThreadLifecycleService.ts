@@ -87,6 +87,8 @@ export class ThreadLifecycleService extends Context.Service<
     readonly archive: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
+      readonly childDisposition?: "stop_and_archive" | "promote";
+      readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly unarchive: (input: {
       readonly commandId: CommandId;
@@ -163,8 +165,7 @@ const make = Effect.gen(function* () {
     archive: (input) =>
       dispatch("archive", input.threadId, {
         type: "thread.archive",
-        commandId: input.commandId,
-        threadId: input.threadId,
+        ...input,
       }),
     unarchive: (input) =>
       dispatch("unarchive", input.threadId, {

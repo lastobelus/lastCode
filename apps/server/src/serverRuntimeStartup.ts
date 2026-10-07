@@ -282,7 +282,8 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
     const shell = yield* threads.getShellSnapshot();
     const existingThread = shell.threads.find(
       (thread) =>
-        thread.projectId === project.id && thread.lineage.relationshipToParent !== "subagent",
+        thread.projectId === project.id &&
+        (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true),
     );
     if (existingThread === undefined) {
       const serverSettings = yield* ServerSettings.ServerSettingsService;

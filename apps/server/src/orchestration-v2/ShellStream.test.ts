@@ -25,6 +25,7 @@ import {
   shellStreamItemsFromInitialSnapshot,
   shellStreamItemsFromResumeSnapshot,
   skipUnchangedThreadShells,
+  toShellApplicationEvent,
 } from "./ShellStream.ts";
 
 function project(sequence: number, id: string): ApplicationStoredEvent {
@@ -80,6 +81,16 @@ describe("buildActiveShellSnapshot", () => {
 });
 
 describe("coalesceShellApplicationEvents", () => {
+  it("refreshes a runless native child's shell when its owning task changes", () => {
+    expect(
+      toShellApplicationEvent(
+        storedThreadEvent(7, "parent", {
+          type: "subagent.updated",
+          payload: { origin: "provider_native", childThreadId: ThreadId.make("native-child") },
+        }),
+      ),
+    ).toEqual(thread(7, "native-child"));
+  });
   it("keeps the newest event per aggregate and preserves sequence order", () => {
     expect(
       coalesceShellApplicationEvents([

@@ -51,7 +51,17 @@ export function toShellApplicationEvent(stored: ApplicationStoredEvent): ShellAp
         type: stored.type,
         sequence: stored.sequence,
       }
-    : { sequence: stored.sequence, event: { threadId: stored.event.threadId } };
+    : {
+        sequence: stored.sequence,
+        event: {
+          threadId:
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.origin === "provider_native" &&
+            stored.event.payload.childThreadId !== null
+              ? stored.event.payload.childThreadId
+              : stored.event.threadId,
+        },
+      };
 }
 
 /** Keep only the newest shell-relevant event per project/thread aggregate. */

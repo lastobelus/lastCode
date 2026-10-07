@@ -1,8 +1,12 @@
-import { EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
-import { resolveThreadArchiveFamily, threadCanArchive } from "./threadArchive";
+import {
+  resolveThreadArchiveFamily,
+  threadCanArchive,
+  threadUnarchiveTargetId,
+} from "./threadArchive";
 import { makeThreadShellFixture } from "../../test-fixtures";
 
 function runtime(
@@ -66,6 +70,21 @@ describe("thread family archive confirmation", () => {
     expect(family.children.map((thread) => thread.id)).toEqual([first.id, nested.id]);
     expect(family.message).toContain("1 subagent is still working or needs your attention");
     expect(family.message).toContain("nested · Needs Approval");
+    expect(family.message).toContain("Stopped work won't restart; promoted threads stay separate.");
+  });
+
+  it("restores a cascade through its archived owner while preserving individually archived children", () => {
+    const archivedChild = { ...child("archived-child"), archivedAt: "2026-10-06T00:00:00.000Z" };
+    expect(threadUnarchiveTargetId(archivedChild)).toBe(archivedChild.id);
+    expect(
+      threadUnarchiveTargetId({
+        ...archivedChild,
+        archivedWith: { threadId: root.id, commandId: CommandId.make("archive-family") },
+      }),
+    ).toBe(root.id);
+    expect(threadUnarchiveTargetId({ ...archivedChild, archivedWith: null })).toBe(
+      archivedChild.id,
+    );
   });
 
   it("allows keeping persistent descendants only under an independently runnable branch", () => {

@@ -76,6 +76,19 @@ viewing. Discarding an unsent draft from the sidebar works the same way: Undo br
 back its text and attachments. `mod+z` triggers the most recent Undo when no text field is focused; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
 
+When a thread has subagents that are working or need your attention, archiving
+asks how to handle them. **Stop and archive** stops and archives the whole owned
+family, including nested subagents. **Keep running separately** makes delegated
+conversations independent and preserves their work and pending requests. Provider
+subagents that depend on an archived owner's session must stop with that owner.
+Forks and conversations merely grouped under their creator are unaffected.
+
+Persistent subagents must be kept separately or have their protection removed
+before the family can be archived. If stopping fails, the family remains visible;
+some work may already have stopped. Undo or restoring the archived family brings
+its conversations back without restarting work. Promoted conversations remain
+independent.
+
 On web and desktop, you can also drag files from your computer onto any thread row:
 the thread opens and the files are attached in its composer, ready for
 your next message. The same per-message file limits apply as when attaching

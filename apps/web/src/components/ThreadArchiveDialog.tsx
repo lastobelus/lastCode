@@ -147,7 +147,9 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
           ) : null}
           {request.protectedCount > 0 ? (
             <p className="text-sm text-muted-foreground">
-              Persistent subagents are protected. Keep them separately to archive this thread.
+              {request.canPromote
+                ? "Persistent subagents are protected. Keep them separately to archive this thread."
+                : "Persistent subagents are protected and cannot run separately. Remove their protection before archiving this family."}
             </p>
           ) : null}
           <p className="text-sm text-muted-foreground">

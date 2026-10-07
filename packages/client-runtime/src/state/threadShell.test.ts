@@ -96,6 +96,31 @@ describe("v2 thread shell lists", () => {
     }
   });
 
+  it("exposes native activity without an app run or provider thread", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const native = {
+      ...v2ThreadShell,
+      creationSource: "provider" as const,
+      latestRunId: null,
+      activeRunId: null,
+      activeProviderThreadId: null,
+      activityRunStatus: null,
+      pendingBackgroundTasks: [],
+      status: "running" as const,
+    };
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [native] });
+    const dispose = registry.mount(threads.threadShellsAtom);
+    try {
+      const presented = registry.get(threads.threadShellsAtom)[0];
+      expect(presented?.runtime?.status).toBe("running");
+      expect(presented?.runtime?.activeRunId).toBeNull();
+      expect(presented?.latestRun).toBeNull();
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it.each(["ordinary", "subagent"] as const)(
     "omits copied parent annotations from %s shells and retains independent live note changes",
     (kind) => {

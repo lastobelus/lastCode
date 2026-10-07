@@ -29,7 +29,11 @@ import {
   threadDropLifecycle,
 } from "../threads/threadOrder";
 import { getThreadListV2OrderedSection } from "../threads/threadListV2";
-import { resolveThreadArchiveFamily, threadCanArchive } from "./threadArchive";
+import {
+  resolveThreadArchiveFamily,
+  threadCanArchive,
+  threadUnarchiveTargetId,
+} from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 /** Version skew: never send settle/unsettle to a server that predates them
@@ -233,7 +237,10 @@ function useThreadActionExecutor(
                             : deleteMutation
                       )({
                         environmentId: thread.environmentId,
-                        input: { threadId: thread.id },
+                        input: {
+                          threadId:
+                            action === "unarchive" ? threadUnarchiveTargetId(thread) : thread.id,
+                        },
                       }),
                 (result) => result._tag === "Success",
               );
