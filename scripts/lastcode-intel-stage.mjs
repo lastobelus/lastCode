@@ -313,13 +313,17 @@ export function readRemoteInstalledVersion(host, runCommand = run) {
 }
 
 export async function stageIntelUpdate(options, dependencies = {}) {
-  const maximumVersion = options.maximumVersionHost
+  validateMaximumVersionOptions(options);
+  const maximumVersion = Object.hasOwn(options, "maximumVersionHost")
     ? await (dependencies.readRemoteInstalledVersion ?? readRemoteInstalledVersion)(
         options.maximumVersionHost,
       )
-    : undefined;
-  const maximum = maximumVersion === undefined ? undefined : parseInstalledVersion(maximumVersion);
-  if (maximumVersion !== undefined && !maximum) {
+    : options.maximumVersion;
+  const hasMaximum =
+    Object.hasOwn(options, "maximumVersion") || Object.hasOwn(options, "maximumVersionHost");
+  const maximum =
+    typeof maximumVersion === "string" ? parseInstalledVersion(maximumVersion) : undefined;
+  if (hasMaximum && !maximum) {
     fail(
       `Maximum version '${maximumVersion}' from ${options.maximumVersionHost} is not a LastCode nightly.`,
     );
@@ -485,6 +489,28 @@ async function stageIntelUpdateLocked(
   }
 }
 
+function validateMaximumVersionOptions(options) {
+  const explicit = Object.hasOwn(options, "maximumVersion");
+  const remote = Object.hasOwn(options, "maximumVersionHost");
+  if (explicit && remote) {
+    fail("Maximum version and maximum-version host are mutually exclusive.");
+  }
+  if (
+    explicit &&
+    (typeof options.maximumVersion !== "string" ||
+      options.maximumVersion.trim() !== options.maximumVersion ||
+      !parseInstalledVersion(options.maximumVersion))
+  ) {
+    fail("Maximum version must be a nonempty LastCode nightly.");
+  }
+  if (
+    remote &&
+    (typeof options.maximumVersionHost !== "string" || !options.maximumVersionHost.trim())
+  ) {
+    fail("Maximum-version host must be a nonempty SSH host name or alias.");
+  }
+}
+
 export function parseStageOptions(argv) {
   const command = argv[0];
   if (command !== "stage" && command !== "status") fail("Expected 'stage' or 'status'.");
@@ -496,6 +522,7 @@ export function parseStageOptions(argv) {
         "--app",
         "--current-version",
         "--home-dir",
+        "--maximum-version",
         "--maximum-version-host",
         "--repository",
       ].includes(arg)
@@ -503,14 +530,16 @@ export function parseStageOptions(argv) {
       fail(`Unknown argument '${arg}'.`);
     }
     const value = argv[index + 1];
-    if (!value) fail(`Missing value for ${arg}.`);
+    if (!value || value.startsWith("--")) fail(`Missing value for ${arg}.`);
     if (arg === "--app") options.appPath = NodePath.resolve(value);
     else if (arg === "--current-version") options.currentVersion = value;
     else if (arg === "--home-dir") options.homeDirectory = NodePath.resolve(value);
+    else if (arg === "--maximum-version") options.maximumVersion = value;
     else if (arg === "--maximum-version-host") options.maximumVersionHost = value;
     else options.repository = value;
     index += 1;
   }
+  validateMaximumVersionOptions(options);
   return options;
 }
 

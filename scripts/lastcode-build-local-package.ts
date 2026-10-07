@@ -10,6 +10,7 @@ import { acquirePortableLock } from "./lastcode-lock.mjs";
 
 import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 import { resolveExistingBuild } from "./lastcode-local-update.mjs";
+import type { IntelBuildTriggerResult } from "./lib/lastcode-intel-build-trigger.mjs";
 
 const TAG = /^lastcode\/(?:checkpoint|revision)\/v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+(?:\.\d+)?$/u;
 const TOKEN = /^local-[0-9a-f-]{36}$/u;
@@ -29,6 +30,7 @@ export type LocalBuildResult = {
   readonly manifestPath: string;
   readonly dmgPath: string;
   readonly dmgSha256: string;
+  readonly intelTrigger?: IntelBuildTriggerResult;
 };
 export type LocalBuildDeps = {
   readonly git: (root: string, args: ReadonlyArray<string>) => string;
@@ -316,13 +318,14 @@ async function main(argv: ReadonlyArray<string>): Promise<void> {
     lastCodeAction.result({
       outcome: "success",
       reason: "built",
-      summary: `Local package ${built.checkpointTag} is ready`,
+      summary: `Local package ${built.checkpointTag} is ready${built.intelTrigger?.status === "failed" ? "; Intel dispatch failed" : ""}`,
       subject: { type: "local-build", id: built.checkpointTag, revision: request.commit },
       facts: {
         outputDir: built.outputDir,
         dmgPath: built.dmgPath,
         manifestPath: built.manifestPath,
         dmgSha256: built.dmgSha256,
+        ...(built.intelTrigger ? { intelTrigger: JSON.stringify(built.intelTrigger) } : {}),
       },
     });
   } finally {

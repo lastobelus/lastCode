@@ -157,6 +157,7 @@ describe("local build package action", () => {
   });
   it("runs the canonical helper and verifies the selected target before and after", async () => {
     const calls: string[][] = [];
+    const intelTrigger = { status: "failed" as const, tag, commit, error: "GitHub unavailable" };
     const build = await runLocalBuild("/repo", {
       git: () => commit,
       readRequest: () => request(),
@@ -165,13 +166,15 @@ describe("local build package action", () => {
         calls.push([...args]);
         return {
           code: 0,
-          stdout: `LASTCODE_LOCAL_UPDATE_RESULT=${JSON.stringify(buildPayload())}`,
+          stdout: `LASTCODE_LOCAL_UPDATE_RESULT=${JSON.stringify(buildPayload({ intelTrigger }))}`,
           stderr: "",
         };
       },
       verifyResult: () => {},
     });
     expect(build.outputDir).toBe("/builds/x");
+    expect(build.status).toBe("built");
+    expect(build.intelTrigger).toEqual(intelTrigger);
     expect(calls[0]?.some((value) => value.endsWith("/scripts/lastcode-local-update.mjs"))).toBe(
       true,
     );

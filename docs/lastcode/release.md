@@ -405,11 +405,29 @@ deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
 immutable artifact.
 
-The agent-facing action remains explicitly selected. A separate daily GitHub
-workflow resolves the newest immutable installable tag, then uses the same exact
-tag, commit, request-token dispatch, and release validation path. If that Intel
-release already exists, the artifact workflow validates and reuses it without
-rebuilding. Installation remains a separate artifact-consumer decision.
+The agent-facing action remains explicitly selected. The hosted Intel dispatcher
+also runs when a checkpoint or revision tag is published, including publication
+outside the daily schedule. It verifies the exact event tag's advertised commit
+and builds that target even if a newer tag exists. The daily schedule continues
+to select the newest installable tag. Both paths use the same exact tag, commit,
+request-token dispatch, and release validation. Once triggered, hosted work
+continues independently of the publishing machine. A complete matching Intel
+release is validated and reused without rebuilding. Manual dispatcher runs can
+also specify `installable_tag` and `installable_commit`; both are required
+together and must match the published remote tag. Leaving both blank selects
+the newest installable.
+
+To request matching Intel work after every verified local package, including
+cached artifact reuse, create `~/.lastcode/automation/intel-build-trigger.json`
+with `{"schemaVersion":1,"enabled":true}`. The opt-in hook verifies the published
+tag against the local artifact's commit and reuses an active exact-target
+dispatcher or requests one hosted run. It never waits for Intel packaging,
+installs, or restarts an app. Missing configuration or `enabled:false` disables
+the hook. Dispatch failure leaves the local package built and is reported in
+the build result's `intelTrigger` field, command output, and local-build Action
+evidence. Set `enabled:false` or remove the configuration to stop requesting
+Intel work after local builds.
+Installation remains a separate artifact-consumer decision.
 
 ### Intel artifact-consumer staging
 
@@ -418,6 +436,7 @@ prerelease without stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
+pnpm lastcode:intel-stage stage --maximum-version 1.2.3-nightly.20260821.7
 pnpm lastcode:intel-stage stage --maximum-version-host version-source.example
 pnpm lastcode:intel-stage status
 ```
@@ -441,9 +460,16 @@ nightly, staging stops before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
+`--maximum-version <nightly>` supplies the ceiling directly and performs no SSH
+read. It accepts a bare checkpoint or revision nightly version, such as
+`1.2.3-nightly.20260821.7` or `1.2.3-nightly.20260821.7.2`. The explicit ceiling
+and `--maximum-version-host` are mutually exclusive. A missing or invalid
+ceiling fails before staging changes anything; lowering a valid ceiling clears
+a pending candidate above it.
+
 Stage results include `currentVersion`, `maximumVersion` (or `null` without a
-version source), and `availableVersion` (or `null` without an eligible release).
-When the version source is newer but there is neither a newer eligible release
+ceiling), and `availableVersion` (or `null` without an eligible release).
+When the ceiling is newer but there is neither a newer eligible release
 nor a newer pending candidate, the status is `waiting-for-release` rather than
 `up-to-date`.
 An available intermediate update still returns `staged` or `pending`; its
