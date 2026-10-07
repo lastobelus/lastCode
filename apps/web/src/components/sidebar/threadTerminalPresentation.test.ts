@@ -42,16 +42,16 @@ describe("thread terminal hover labels", () => {
         [preview],
       ),
     ).toEqual([
-      { terminalId: "preview-terminal", label: "node (preview till Oct 5, 1802)" },
+      { terminalId: "preview-terminal", label: "node (preview sleeps Oct 5, 1802)" },
       { terminalId: "test-terminal", label: "vitest" },
     ]);
   });
 
   it("identifies a stopped preview whose recovery lifetime can still be cancelled", () => {
-    expect(threadTerminalProcessLabels([], [preview])).toEqual([
+    expect(threadTerminalProcessLabels([], [{ ...preview, status: "sleeping" }])).toEqual([
       {
         terminalId: "preview-terminal",
-        label: "localhost:5173 (preview till Oct 5, 1802; stopped)",
+        label: "localhost:5173 (preview reopens when viewed)",
       },
     ]);
   });
@@ -60,7 +60,7 @@ describe("thread terminal hover labels", () => {
     expect(threadTerminalProcessLabels([], [{ ...preview, status: "starting" }])).toEqual([
       {
         terminalId: "preview-terminal",
-        label: "localhost:5173 (preview till Oct 5, 1802; starting)",
+        label: "localhost:5173 (preview starting)",
       },
     ]);
   });

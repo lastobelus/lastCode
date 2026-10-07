@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -65,13 +66,14 @@ export async function openUrlInPreview<E>(
   input: OpenUrlInPreviewInput<E>,
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const prepared = await prepareHostedPreview(input.threadRef, input.url);
-  return openPreparedUrlInPreview(input, prepared.url);
+  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl);
 }
 
 /** Open an already recovered destination while retaining the authored URL. */
 export async function openPreparedUrlInPreview<E>(
   input: OpenUrlInPreviewInput<E>,
   destinationUrl: string,
+  navigationUrl?: string,
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
@@ -86,7 +88,10 @@ export async function openPreparedUrlInPreview<E>(
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: runtime === "server" && desktopHostId === undefined ? input.url : destinationUrl,
+      url: hostedPreviewNavigationUrl(
+        { url: destinationUrl, ...(navigationUrl === undefined ? {} : { navigationUrl }) },
+        runtime === "server" && desktopHostId === undefined ? input.url : destinationUrl,
+      ),
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.

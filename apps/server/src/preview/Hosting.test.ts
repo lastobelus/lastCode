@@ -13,6 +13,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as Duration from "effect/Duration";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 import {
@@ -306,8 +307,10 @@ function hostingLayer(
   scannedServers: ReadonlyArray<DiscoveredLocalServer> = [],
   attributeTerminal = true,
   fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>,
+  httpLayer: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer,
 ) {
   const dependencies = Layer.mergeAll(
+    httpLayer,
     NodeServices.layer,
     ServerConfig.layer(config),
     terminalLayer(harness),
@@ -324,6 +327,7 @@ function failFirstExpiredStateWriteLayer(
   failedWrite: Deferred.Deferred<void>,
   releaseFailure: Deferred.Deferred<void>,
   persistedEmptyState: Deferred.Deferred<void>,
+  sleeping = false,
 ) {
   return Layer.effect(
     FileSystem.FileSystem,
@@ -333,7 +337,10 @@ function failFirstExpiredStateWriteLayer(
         get(target, property) {
           if (property === "writeFileString") {
             return (filePath: string, data: string, options?: { readonly mode?: number }) => {
-              if (!failedOnce && data.includes('"status":"expired"')) {
+              if (
+                !failedOnce &&
+                data.includes(sleeping ? '"status":"sleeping"' : '"status":"expired"')
+              ) {
                 failedOnce = true;
                 return Deferred.succeed(failedWrite, undefined).pipe(
                   Effect.andThen(Deferred.await(releaseFailure)),
@@ -356,7 +363,12 @@ function failFirstExpiredStateWriteLayer(
                 .writeFileString(filePath, data, options)
                 .pipe(
                   Effect.tap(() =>
-                    data.includes('"leases":[]')
+                    (
+                      sleeping
+                        ? data.match(/"status":"sleeping"/g)?.length === 2 &&
+                          !data.includes('"cleanupPending":true')
+                        : data.includes('"leases":[]')
+                    )
                       ? Deferred.succeed(persistedEmptyState, undefined)
                       : Effect.void,
                   ),
@@ -584,6 +596,7 @@ describe("PreviewHosting", () => {
         }),
       ).pipe(Layer.provide(ProcessRunner.layer));
       const dependencies = Layer.mergeAll(
+        FetchHttpClient.layer,
         ServerConfig.layer(config),
         terminalsLayer,
         discoveryLayer(true, [], testTerminalHarness()),
@@ -1796,6 +1809,113 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect.each([
+    { failPersist: false, failClose: false },
+    { failPersist: true, failClose: false },
+    { failPersist: true, failClose: true },
+  ])(
+    "stops an interrupted sleeping restart while preserving its durable handoff (%j)",
+    ({ failPersist, failClose }) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-interrupted-sleeping-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const saved = leaseFixture({ status: "sleeping" });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [saved] }),
+        );
+        const wrote = yield* Deferred.make<void>();
+        const waitingForReadiness = yield* Deferred.make<void>();
+        let persistFailed = false;
+        const fileSystem = Layer.succeed(
+          FileSystem.FileSystem,
+          new Proxy(fs, {
+            get(target, property) {
+              if (property === "writeFileString")
+                return (filePath: string, data: string, options?: { readonly mode?: number }) => {
+                  if (failPersist && !persistFailed && data.includes('"cleanupPending":true')) {
+                    persistFailed = true;
+                    return Effect.fail(
+                      new PlatformError.PlatformError(
+                        new PlatformError.SystemError({
+                          _tag: "PermissionDenied",
+                          module: "FileSystem",
+                          method: "writeFileString",
+                          pathOrDescriptor: filePath,
+                          description: "synthetic interrupted cleanup persistence failure",
+                        }),
+                      ),
+                    );
+                  }
+                  return target.writeFileString(filePath, data, options);
+                };
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          }),
+        );
+        const harness = testTerminalHarness({
+          failClose,
+          onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
+        });
+        const discovery = Layer.mock(PortScanner.PortDiscovery)({
+          scan: () => Effect.succeed([]),
+          subscribe: () => Deferred.succeed(waitingForReadiness, undefined).pipe(Effect.asVoid),
+          retain: Effect.void,
+        });
+        const layer = PreviewHosting.layer.pipe(
+          Layer.provide(fileSystem),
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              FetchHttpClient.layer,
+              ServerConfig.layer(config),
+              terminalLayer(harness),
+              discovery,
+            ),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pending = yield* Effect.forkScoped(
+              hosting.recover({ threadId: saved.threadId, leaseId: saved.id, url: saved.url }),
+            );
+            yield* Deferred.await(wrote);
+            yield* Deferred.await(waitingForReadiness);
+            yield* Fiber.interrupt(pending);
+            const exit = yield* Fiber.await(pending);
+            assert.isTrue(Exit.isFailure(exit));
+            if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+            assert.isAtLeast(harness.closes.length, 1);
+            assert.isTrue(
+              harness.closes.every(
+                (close) =>
+                  close.threadId === saved.threadId && close.terminalId === saved.terminalId,
+              ),
+            );
+            assert.equal(persistFailed, failPersist);
+            if (!failClose) assert.deepEqual(harness.summaries, []);
+            const retained = (yield* hosting.list(saved.threadId))[0];
+            assert.equal(retained?.status, "sleeping");
+            assert.equal(retained?.id, saved.id);
+            assert.equal(retained?.handedOffAt, saved.handedOffAt);
+            assert.equal(retained?.command, saved.command);
+            assert.equal(retained?.cleanupPending, failClose);
+            assert.include(yield* hosting.protectedWorkspacePaths(), saved.cwd);
+            const persisted = yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`);
+            assert.include(persisted, '"status":"sleeping"');
+          }).pipe(Effect.provide(layer)),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect("does not clean up an existing lease when recovery is interrupted", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(1_000);
@@ -1850,7 +1970,7 @@ describe("PreviewHosting", () => {
   );
 
   it.effect(
-    "recovers a persisted lease after service restart without extending or duplicating it",
+    "recovers a persisted lease after service restart with a fresh run window and no duplicate",
     () =>
       Effect.gen(function* () {
         yield* TestClock.setTime(1_000);
@@ -1904,7 +2024,11 @@ describe("PreviewHosting", () => {
             });
             assert.isNotNull(result);
             assert.equal(result?.id, lease.id);
-            assert.equal(result?.expiresAt, lease.expiresAt);
+            assert.equal(
+              Date.parse(result!.expiresAt) - Date.parse(lease.expiresAt),
+              60 * 60 * 1_000,
+            );
+            assert.equal(result?.handedOffAt, lease.handedOffAt);
             const repeated = yield* hosting.recover({
               threadId: "thread-1",
               leaseId: lease.id,
@@ -1915,7 +2039,10 @@ describe("PreviewHosting", () => {
           }).pipe(Effect.provide(secondLayer)),
         );
 
-        assert.equal(recovered?.expiresAt, lease.expiresAt);
+        assert.equal(
+          Date.parse(recovered!.expiresAt) - Date.parse(lease.expiresAt),
+          60 * 60 * 1_000,
+        );
         assert.equal(restarted.opens.length, 1);
         assert.equal(restarted.writes.length, 1);
         assert.deepEqual(restarted.opens[0], {
@@ -1928,7 +2055,238 @@ describe("PreviewHosting", () => {
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
-  it.effect("automatically closes only its terminal at expiry and refuses later recovery", () =>
+  it.effect(
+    "retains a sleeping handoff after failed restart and recovers it after server restart",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-sleeping-recovery-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const saved = leaseFixture({ status: "sleeping", env: { FIXTURE_MODE: "preserved" } });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [saved] }),
+        );
+        const broken = testTerminalHarness({ failWrite: true });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* Effect.result(
+              hosting.recover({ threadId: saved.threadId, leaseId: saved.id, url: saved.url }),
+            );
+            assert.equal(result._tag, "Failure");
+            assert.equal((yield* hosting.list())[0]?.status, "sleeping");
+            assert.include(yield* hosting.protectedWorkspacePaths(), saved.cwd);
+          }).pipe(Effect.provide(hostingLayer(config, broken))),
+        );
+        yield* TestClock.adjust(Duration.days(90));
+        const restarted = testTerminalHarness();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const result = yield* hosting.recover({
+              threadId: saved.threadId,
+              leaseId: saved.id,
+              url: saved.url,
+            });
+            assert.equal(result?.id, saved.id);
+            assert.equal(result?.handedOffAt, saved.handedOffAt);
+            assert.equal(result?.status, "active");
+            assert.deepEqual(restarted.opens[0]?.env, saved.env);
+            assert.equal(restarted.writes[0]?.data, `${saved.command}\n`);
+            assert.isAbove(Date.parse(result!.expiresAt), Date.parse(saved.expiresAt));
+          }).pipe(Effect.provide(hostingLayer(config, restarted))),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("retains a sleeping handoff when its port is occupied by an unowned listener", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-sleeping-collision-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const saved = leaseFixture({ status: "sleeping" });
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [saved] }),
+      );
+      const listeners: DiscoveredLocalServer[] = [
+        {
+          host: "localhost",
+          port: 5173,
+          url: saved.url,
+          processName: "node",
+          pid: 555,
+          terminal: null,
+        },
+      ];
+      const harness = testTerminalHarness();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const result = yield* Effect.result(
+            hosting.recover({ threadId: saved.threadId, leaseId: saved.id, url: saved.url }),
+          );
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") assert.include(result.failure.message, "does not own");
+          assert.deepEqual(harness.opens, []);
+          assert.deepEqual(harness.writes, []);
+          assert.equal((yield* hosting.list())[0]?.id, saved.id);
+          assert.include(yield* hosting.protectedWorkspacePaths(), saved.cwd);
+          listeners.splice(0);
+          assert.equal(
+            (yield* hosting.recover({
+              threadId: saved.threadId,
+              leaseId: saved.id,
+              url: saved.url,
+            }))?.status,
+            "active",
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness, true, listeners))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("requires an explicit development credential before retaining browser auth", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-dev-auth-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const harness = testTerminalHarness();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const input = {
+            threadId: "thread-1",
+            command: "dev-command",
+            cwd: "/workspace",
+            url: PREVIEW_URL,
+            browserAuth: "t3-dev" as const,
+          };
+          const rejected = yield* Effect.result(hosting.launch(input));
+          assert.equal(rejected._tag, "Failure");
+          assert.deepEqual(harness.opens, []);
+          const saved = yield* hosting.launch({
+            ...input,
+            env: { T3CODE_DEV_AUTH_TOKEN: "fixture-dev-credential" },
+          });
+          assert.equal(saved.browserAuth, "t3-dev");
+          assert.notProperty(PreviewHosting.toPreviewHostingLeaseSummary(saved), "browserAuth");
+          assert.notInclude(
+            JSON.stringify(PreviewHosting.toPreviewHostingLeaseSummary(saved)),
+            "fixture-dev-credential",
+          );
+          const changed = yield* Effect.result(
+            hosting.launch({
+              threadId: input.threadId,
+              command: input.command,
+              cwd: input.cwd,
+              url: input.url,
+              env: saved.env,
+            }),
+          );
+          assert.equal(changed._tag, "Failure");
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "only issues private browser credentials for an explicitly requested owned recovery",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-owned-auth-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        let issued = 0;
+        const httpLayer = FetchHttpClient.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FetchHttpClient.Fetch, () => {
+              issued += 1;
+              return Promise.resolve(
+                Response.json({
+                  id: `grant-${issued}`,
+                  credential: `ephemeral-${issued}`,
+                  expiresAt: "2026-10-07T22:00:00.000Z",
+                }),
+              );
+            }),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const saved = yield* hosting.launch({
+              threadId: "thread-1",
+              command: "dev-command",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+              browserAuth: "t3-dev",
+              env: { T3CODE_DEV_AUTH_TOKEN: "private-stable-development-credential" },
+            });
+            const input = {
+              threadId: ThreadId.make(saved.threadId),
+              leaseId: PreviewHostingLeaseId.make(saved.id),
+              url: saved.url,
+            };
+            assert.equal(
+              yield* hosting.recoverForBrowser({
+                ...input,
+                threadId: ThreadId.make("other-thread"),
+                bootstrap: true,
+              }),
+              null,
+            );
+            assert.equal(
+              yield* hosting.recoverForBrowser({
+                ...input,
+                url: "http://localhost:5173/other",
+                bootstrap: true,
+              }),
+              null,
+            );
+            assert.notProperty(yield* hosting.recoverForBrowser(input), "bootstrapToken");
+            assert.equal(issued, 0);
+            const first = yield* hosting.recoverForBrowser({ ...input, bootstrap: true });
+            const second = yield* hosting.recoverForBrowser({ ...input, bootstrap: true });
+            assert.equal(first?.bootstrapToken, "ephemeral-1");
+            assert.equal(second?.bootstrapToken, "ephemeral-2");
+            assert.notProperty(first, "restarted");
+            assert.notProperty(second, "restarted");
+            const listed = (yield* hosting.list(saved.threadId)).map(
+              PreviewHosting.toPreviewHostingLeaseSummary,
+            );
+            assert.notInclude(JSON.stringify(listed), "private-stable");
+            assert.notInclude(JSON.stringify(listed), "ephemeral");
+            yield* hosting.stopThread(saved.threadId);
+            assert.equal(yield* hosting.recoverForBrowser({ ...input, bootstrap: true }), null);
+            assert.equal(issued, 2);
+          }).pipe(
+            Effect.provide(
+              hostingLayer(config, testTerminalHarness(), true, [], true, undefined, httpLayer),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("sleeps only its terminal and retains the handoff until explicit stop", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(10_000);
       const fs = yield* FileSystem.FileSystem;
@@ -1978,15 +2336,36 @@ describe("PreviewHosting", () => {
           ]);
           assert.deepEqual(harness.summaries, [ordinaryTerminal]);
           assert.isFalse(yield* hosting.ownsTerminal("thread-1", lease.terminalId));
-          assert.deepEqual(yield* hosting.list("thread-1"), []);
-          assert.isNull(
-            yield* hosting.recover({
-              threadId: "thread-1",
-              leaseId: lease.id,
+          assert.equal((yield* hosting.list("thread-1"))[0]?.status, "sleeping");
+          assert.deepEqual(yield* hosting.protectedWorkspacePaths(), ["/workspace"]);
+          yield* TestClock.adjust(Duration.days(90));
+          assert.equal(harness.writes.length, 1);
+          const conflicting = yield* Effect.result(
+            hosting.launch({
+              threadId: "thread-2",
+              command: "unrelated-command",
+              cwd: "/unrelated",
               url: PREVIEW_URL,
             }),
           );
-          assert.equal(harness.writes.length, 1);
+          assert.equal(conflicting._tag, "Failure");
+          const recovered = yield* hosting.recoverForBrowser({
+            threadId: ThreadId.make("thread-1"),
+            leaseId: PreviewHostingLeaseId.make(lease.id),
+            url: PREVIEW_URL,
+          });
+          assert.equal(recovered?.leaseId, lease.id);
+          assert.equal(recovered?.restarted, true);
+          assert.equal(recovered?.handedOffAt, lease.handedOffAt);
+          assert.equal(recovered?.status, "active");
+          assert.isAbove(Date.parse(recovered!.expiresAt), Date.parse(lease.expiresAt));
+          assert.equal(harness.writes.length, 2);
+          yield* hosting.stopThread("thread-1");
+          assert.deepEqual(yield* hosting.list("thread-1"), []);
+          assert.deepEqual(yield* hosting.protectedWorkspacePaths(), []);
+          assert.isNull(
+            yield* hosting.recover({ threadId: "thread-1", leaseId: lease.id, url: PREVIEW_URL }),
+          );
           assert.equal(
             yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
             '{"version":1,"leases":[]}\n',
@@ -2054,12 +2433,11 @@ describe("PreviewHosting", () => {
             harness.closes.filter((close) => close.threadId === "thread-1").length,
             1,
           );
-          assert.isNull(
-            yield* hosting.recover({
-              threadId: "thread-2",
-              leaseId: second.id,
-              url: second.url,
-            }),
+          assert.equal((yield* hosting.list("thread-2"))[0]?.status, "sleeping");
+          assert.equal(
+            (yield* hosting.recover({ threadId: "thread-2", leaseId: second.id, url: second.url }))
+              ?.status,
+            "active",
           );
         }).pipe(Effect.provide(layer)),
       );
@@ -2095,7 +2473,7 @@ describe("PreviewHosting", () => {
         true,
         [],
         true,
-        failFirstExpiredStateWriteLayer(failedWrite, releaseFailure, persistedEmptyState),
+        failFirstExpiredStateWriteLayer(failedWrite, releaseFailure, persistedEmptyState, true),
       );
 
       yield* Effect.scoped(
@@ -2133,7 +2511,10 @@ describe("PreviewHosting", () => {
             new Set(harness.closes.map((close) => close.terminalId)),
             new Set([first.terminalId, second.terminalId]),
           );
-          assert.deepEqual(yield* hosting.list(), []);
+          assert.deepEqual(
+            (yield* hosting.list()).map((lease) => lease.status),
+            ["sleeping", "sleeping"],
+          );
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
@@ -2190,15 +2571,13 @@ describe("PreviewHosting", () => {
           yield* Effect.yieldNow;
           yield* Deferred.succeed(releaseClose, undefined);
 
-          assert.isNull(yield* Fiber.join(first));
-          assert.isNull(yield* Fiber.join(second));
+          assert.equal((yield* Fiber.join(first))?.status, "active");
+          assert.equal((yield* Fiber.join(second))?.status, "active");
+          assert.equal(harness.writes.length, 2);
           assert.deepEqual(harness.closes, [
             { threadId: "thread-1", terminalId: lease.terminalId },
           ]);
-          assert.equal(
-            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
-            '{"version":1,"leases":[]}\n',
-          );
+          assert.equal((yield* hosting.list())[0]?.id, lease.id);
         }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),

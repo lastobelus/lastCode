@@ -7,9 +7,12 @@ import {
   PreviewHostingLeaseId,
   type PreviewHostingLeaseSummary as ContractPreviewHostingLeaseSummary,
   type PreviewHostingLeaseMetadata,
+  type PreviewHostingRecoverInput,
+  type PreviewHostingRecoverResult,
   type TerminalOpenInput,
   type DiscoveredLocalServer,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -25,11 +28,13 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { HttpClient } from "effect/http";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as HostingAuth from "./HostingAuth.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 export const PREVIEW_HOSTING_LEASE_MS = 24 * 60 * 60 * 1_000;
@@ -39,7 +44,7 @@ const STATE_VERSION = 1;
 const HOSTING_STATE_FILE = "preview-hosting.json";
 const READINESS_MESSAGE_MAX_CHARS = 1_024;
 
-const LeaseStatus = Schema.Literals(["starting", "active", "expired"]);
+const LeaseStatus = Schema.Literals(["starting", "active", "sleeping", "expired"]);
 const EnvironmentOverrides = Schema.Record(
   Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).check(Schema.isMaxLength(128)),
   Schema.String.check(Schema.isMaxLength(8_192)),
@@ -53,11 +58,13 @@ export const PreviewHostingLease = Schema.Struct({
   cwd: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
   env: Schema.optional(EnvironmentOverrides),
+  browserAuth: Schema.optional(Schema.Literal("t3-dev")),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   url: Schema.String.check(Schema.isMaxLength(PREVIEW_URL_MAX_LENGTH)),
   handedOffAt: Schema.String,
   expiresAt: Schema.String,
   status: LeaseStatus,
+  cleanupPending: Schema.optional(Schema.Boolean),
 });
 export type PreviewHostingLease = typeof PreviewHostingLease.Type;
 
@@ -117,6 +124,7 @@ export class PreviewHosting extends Context.Service<
       readonly cwd: string;
       readonly worktreePath?: string | null;
       readonly env?: TerminalOpenInput["env"];
+      readonly browserAuth?: "t3-dev";
       readonly providerInstanceId?: TerminalOpenInput["providerInstanceId"];
       readonly url: string;
     }) => Effect.Effect<PreviewHostingLease, PreviewHostingError | TerminalManager.TerminalError>;
@@ -127,6 +135,12 @@ export class PreviewHosting extends Context.Service<
     }) => Effect.Effect<
       PreviewHostingLease | null,
       PreviewHostingError | TerminalManager.TerminalError
+    >;
+    readonly recoverForBrowser: (
+      input: PreviewHostingRecoverInput,
+    ) => Effect.Effect<
+      PreviewHostingRecoverResult,
+      PreviewHostingError | TerminalManager.TerminalError | HostingAuth.PreviewHostingAuthError
     >;
     readonly list: (
       threadId?: string,
@@ -206,6 +220,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const terminals = yield* TerminalManager.TerminalManager;
   const discovery = yield* PortScanner.PortDiscovery;
+  const httpClient = yield* HttpClient.HttpClient;
   const statePath = path.join(config.stateDir, HOSTING_STATE_FILE);
   const persistLock = yield* Semaphore.make(1);
   const leaseLocks = yield* SynchronizedRef.make(
@@ -246,6 +261,7 @@ const make = Effect.gen(function* () {
         lease.threadId.trim().length === 0 ||
         lease.terminalId.trim().length === 0 ||
         lease.command.trim().length === 0 ||
+        (lease.browserAuth === "t3-dev" && !lease.env?.T3CODE_DEV_AUTH_TOKEN?.trim()) ||
         !path.isAbsolute(lease.cwd) ||
         (lease.worktreePath !== null && !path.isAbsolute(lease.worktreePath)) ||
         normalizeLocalHttpUrl(lease.url) !== lease.url ||
@@ -283,23 +299,17 @@ const make = Effect.gen(function* () {
     (leases: ReadonlyArray<PreviewHostingLeaseMetadata>) => Effect.Effect<void>
   >();
 
-  const activeLeases = (
-    leases: ReadonlyArray<PreviewHostingLease>,
-    currentTime: number,
-    threadId?: string,
-  ) =>
+  const retainedLeases = (leases: ReadonlyArray<PreviewHostingLease>, threadId?: string) =>
     leases
       .filter(
         (lease) =>
-          lease.status !== "expired" &&
-          Date.parse(lease.expiresAt) > currentTime &&
-          (threadId === undefined || lease.threadId === threadId),
+          lease.status !== "expired" && (threadId === undefined || lease.threadId === threadId),
       )
       .toSorted((left, right) => left.expiresAt.localeCompare(right.expiresAt));
 
   const leaseSummaries = (leases: ReadonlyArray<PreviewHostingLease>) =>
-    Effect.map(DateTime.now, (now) =>
-      activeLeases(leases, DateTime.toEpochMillis(now)).map((lease) => ({
+    Effect.succeed(
+      retainedLeases(leases).map((lease) => ({
         ...toPreviewHostingLeaseSummary(lease),
         terminalId: lease.terminalId,
       })),
@@ -469,10 +479,7 @@ const make = Effect.gen(function* () {
         };
         yield* discovery.subscribe({ configuredUrls: [lease.url], initialSnapshot: [] }, listener);
         yield* discovery.retain;
-        const currentTime = yield* nowMillis;
-        const remainingLeaseMs = Math.max(0, Date.parse(lease.expiresAt) - currentTime);
-        timeoutMs = Math.min(READY_TIMEOUT_MS, remainingLeaseMs);
-        if (timeoutMs === 0) return Option.none<DiscoveredLocalServer | null>();
+        timeoutMs = READY_TIMEOUT_MS;
         return yield* Deferred.await(ready).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
       }),
     );
@@ -488,7 +495,7 @@ const make = Effect.gen(function* () {
     const summary = yield* terminalSummary(lease);
     const servers = yield* discovery.scan([lease.url]);
     const server = servers.find((entry) => discoveryUrl(entry.url) === discoveryUrl(lease.url));
-    if (server === undefined) return;
+    if (server === undefined) return summary;
 
     const ownsRunningSubprocess = summary?.status === "running" && summary.hasRunningSubprocess;
     const serverOwner = server.terminal;
@@ -503,6 +510,7 @@ const make = Effect.gen(function* () {
         detail: "Preview URL is already served by a process this preview terminal does not own.",
       });
     }
+    return summary;
   });
 
   const openInput = (lease: PreviewHostingLease): TerminalOpenInput => ({
@@ -516,12 +524,13 @@ const make = Effect.gen(function* () {
       : { providerInstanceId: lease.providerInstanceId }),
   });
 
-  const launchCommandIfNeeded = (lease: PreviewHostingLease) =>
+  const launchCommandIfNeeded = (lease: PreviewHostingLease, onLaunchStarted: () => void) =>
     Effect.gen(function* () {
       const summary = yield* terminalSummary(lease);
       const latest = yield* findLease(lease.id);
       if (latest === null || latest.status === "expired") return false;
       if (summary?.status === "running" && summary.hasRunningSubprocess) return true;
+      yield* Effect.sync(onLaunchStarted);
       yield* terminals.open(openInput(lease));
       yield* terminals.write({
         threadId: lease.threadId,
@@ -543,13 +552,22 @@ const make = Effect.gen(function* () {
       const currentTime = yield* nowMillis;
       let latest = yield* findLease(lease.id);
       if (latest === null) return;
-      if (Date.parse(latest.expiresAt) > currentTime && latest.status !== "expired") return;
-      if (latest.status !== "expired") {
-        latest = { ...latest, status: "expired" };
+      if (
+        latest.status !== "expired" &&
+        !latest.cleanupPending &&
+        (latest.status === "sleeping" || Date.parse(latest.expiresAt) > currentTime)
+      )
+        return;
+      if (latest.status !== "expired" && !latest.cleanupPending) {
+        latest = { ...latest, status: "sleeping", cleanupPending: true };
         yield* setLease(latest, false);
       }
       yield* closeOwnedTerminal(latest).pipe(
-        Effect.tap(() => removeLease(latest!.id)),
+        Effect.tap(() =>
+          latest!.status === "expired"
+            ? removeLease(latest!.id)
+            : setLease({ ...latest!, cleanupPending: false }, false),
+        ),
         Effect.catch((error) =>
           Effect.logWarning("failed to close expired preview terminal", {
             threadId: latest!.threadId,
@@ -560,72 +578,145 @@ const make = Effect.gen(function* () {
       );
     });
 
-  const ensureLeaseReady = (leaseId: string) =>
-    withLeaseLock(
-      leaseId,
-      Effect.gen(function* () {
-        const lease = yield* findLease(leaseId);
-        if (lease === null) return null;
-        const currentTime = yield* nowMillis;
-        if (lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime) {
-          yield* expireLocked(lease);
-          return null;
-        }
-
-        const startsHandoff = lease.status === "starting";
-        yield* verifyLaunchOwnership(lease);
-        if (!(yield* launchCommandIfNeeded(lease))) {
-          const latest = yield* findLease(lease.id);
-          if (latest !== null) yield* expireLocked(latest);
-          return null;
-        }
-        if ((yield* waitForReady(lease)) === null) {
-          const latest = yield* findLease(lease.id);
-          if (latest !== null) yield* expireLocked(latest);
-          return null;
-        }
-        const afterReady = yield* findLease(lease.id);
-        const completedAt = yield* nowMillis;
-        if (
-          afterReady === null ||
-          afterReady.status === "expired" ||
-          Date.parse(afterReady.expiresAt) <= completedAt
-        ) {
-          if (afterReady !== null) yield* expireLocked(afterReady);
-          return null;
-        }
-        const readyTerminal = yield* terminalSummary(lease);
-        if (readyTerminal?.status !== "running" || !readyTerminal.hasRunningSubprocess) {
-          return yield* failReadiness(
-            lease,
-            "HTTP responded, but the preview command is no longer running.",
+  const stopRecoveryLocked = Effect.fnUntraced(function* (leaseId: string) {
+    const sleeping = yield* persistLock.withPermit(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const current = yield* SynchronizedRef.get(leasesRef);
+          const latest = current.find((lease) => lease.id === leaseId);
+          if (latest === undefined || latest.status === "starting" || latest.status === "expired")
+            return null;
+          const pending = { ...latest, status: "sleeping" as const, cleanupPending: true };
+          const next = current.map((lease) => (lease.id === leaseId ? pending : lease));
+          yield* persistState(next).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to persist preview recovery cleanup", {
+                error: error.message,
+              }),
+            ),
           );
-        }
-        const handedOffAt = startsHandoff ? completedAt : Date.parse(afterReady.handedOffAt);
-        const active = {
-          ...afterReady,
-          ...(startsHandoff
-            ? {
-                handedOffAt: DateTime.formatIso(DateTime.makeUnsafe(handedOffAt)),
-                expiresAt: DateTime.formatIso(
-                  DateTime.makeUnsafe(handedOffAt + PREVIEW_HOSTING_LEASE_MS),
-                ),
-              }
-            : {}),
-          status: "active" as const,
-        };
-        const committed = yield* changeLeases((leases) => {
-          const latest = leases.find((entry) => entry.id === lease.id);
-          if (latest === undefined || latest.status === "expired") return [null, leases];
-          return [active, leases.map((entry) => (entry.id === lease.id ? active : entry))];
-        });
-        if (committed === null) {
-          const latest = yield* findLease(lease.id);
-          if (latest !== null) yield* expireLocked(latest);
-        }
-        return committed;
-      }),
+          // A disk failure must not skip the owned close or its in-memory retry.
+          yield* SynchronizedRef.set(leasesRef, next);
+          yield* publishLeases(next);
+          yield* Queue.offer(wakeups, undefined);
+          return pending;
+        }),
+      ),
     );
+    if (sleeping !== null) yield* expireLocked(sleeping);
+  });
+
+  const ensureLeaseReady = (leaseId: string) =>
+    Effect.suspend(() => {
+      let launchedRecovery = false;
+      return withLeaseLock(
+        leaseId,
+        Effect.gen(function* () {
+          let lease = yield* findLease(leaseId);
+          if (lease === null) return null;
+          const currentTime = yield* nowMillis;
+          if (lease.status === "expired") {
+            yield* expireLocked(lease);
+            return null;
+          }
+          if (
+            lease.cleanupPending ||
+            (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= currentTime)
+          ) {
+            yield* expireLocked(lease);
+            lease = yield* findLease(leaseId);
+            if (lease === null || lease.status === "expired") return null;
+            if (lease.cleanupPending) {
+              yield* closeOwnedTerminal(lease);
+              lease = { ...lease, cleanupPending: false };
+              yield* setLease(lease);
+            }
+          }
+
+          const startsHandoff = lease.status === "starting";
+          const previousTerminal = yield* verifyLaunchOwnership(lease);
+          const startsRun =
+            lease.status === "sleeping" ||
+            previousTerminal?.status !== "running" ||
+            !previousTerminal.hasRunningSubprocess;
+          if (
+            !(yield* launchCommandIfNeeded(lease, () => {
+              launchedRecovery = !startsHandoff;
+            }))
+          ) {
+            const latest = yield* findLease(lease.id);
+            if (latest !== null) yield* expireLocked(latest);
+            return null;
+          }
+          if ((yield* waitForReady(lease)) === null) {
+            const latest = yield* findLease(lease.id);
+            if (latest !== null) yield* expireLocked(latest);
+            return null;
+          }
+          const afterReady = yield* findLease(lease.id);
+          const completedAt = yield* nowMillis;
+          if (afterReady === null || afterReady.status === "expired") {
+            if (afterReady !== null) yield* expireLocked(afterReady);
+            return null;
+          }
+          const readyTerminal = yield* terminalSummary(lease);
+          if (readyTerminal?.status !== "running" || !readyTerminal.hasRunningSubprocess) {
+            return yield* failReadiness(
+              lease,
+              "HTTP responded, but the preview command is no longer running.",
+            );
+          }
+          const handedOffAt = startsHandoff ? completedAt : Date.parse(afterReady.handedOffAt);
+          const active = {
+            ...afterReady,
+            ...(startsHandoff
+              ? {
+                  handedOffAt: DateTime.formatIso(DateTime.makeUnsafe(handedOffAt)),
+                }
+              : {}),
+            ...(startsHandoff || startsRun
+              ? {
+                  expiresAt: DateTime.formatIso(
+                    DateTime.makeUnsafe(completedAt + PREVIEW_HOSTING_LEASE_MS),
+                  ),
+                }
+              : {}),
+            cleanupPending: false,
+            status: "active" as const,
+          };
+          const committed = yield* changeLeases((leases) => {
+            const latest = leases.find((entry) => entry.id === lease.id);
+            if (latest === undefined || latest.status === "expired") return [null, leases];
+            return [active, leases.map((entry) => (entry.id === lease.id ? active : entry))];
+          });
+          if (committed === null) {
+            const latest = yield* findLease(lease.id);
+            if (latest !== null) yield* expireLocked(latest);
+          }
+          return committed;
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              yield* stopRecoveryLocked(leaseId).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("failed to clean up preview recovery", { cause }),
+                ),
+              );
+              return yield* error;
+            }),
+          ),
+          Effect.onExit((exit) =>
+            launchedRecovery && Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+              ? stopRecoveryLocked(leaseId).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("failed to clean up interrupted preview recovery", { cause }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
+      );
+    });
 
   const cleanupFailedLaunch = (lease: PreviewHostingLease) =>
     withLeaseLock(
@@ -745,6 +836,16 @@ const make = Effect.gen(function* () {
                   detail: "Preview command and working directory are required.",
                 });
               }
+              if (input.browserAuth === "t3-dev" && !input.env?.T3CODE_DEV_AUTH_TOKEN?.trim()) {
+                return yield* new PreviewHostingError({
+                  operation: "validate",
+                  statePath,
+                  threadId: input.threadId,
+                  url: normalizedUrl,
+                  detail:
+                    "T3 development browser auth requires T3CODE_DEV_AUTH_TOKEN in the preview environment overrides.",
+                });
+              }
               if (
                 !path.isAbsolute(input.cwd) ||
                 (input.worktreePath != null && !path.isAbsolute(input.worktreePath))
@@ -766,7 +867,6 @@ const make = Effect.gen(function* () {
                 Effect.map((leases) =>
                   leases
                     .filter((lease) => lease.status !== "expired")
-                    .filter((lease) => Date.parse(lease.expiresAt) > createdAtMillis)
                     .toSorted((left, right) => right.handedOffAt.localeCompare(left.handedOffAt)),
                 ),
               );
@@ -791,6 +891,7 @@ const make = Effect.gen(function* () {
                   sameLease.cwd !== cwd ||
                   sameLease.worktreePath !== worktreePath ||
                   sameLease.providerInstanceId !== input.providerInstanceId ||
+                  sameLease.browserAuth !== input.browserAuth ||
                   !sameEnvironment(sameLease.env, input.env)
                 ) {
                   return yield* new PreviewHostingError({
@@ -827,6 +928,7 @@ const make = Effect.gen(function* () {
                 cwd,
                 worktreePath,
                 ...(input.env === undefined ? {} : { env: input.env }),
+                ...(input.browserAuth === undefined ? {} : { browserAuth: input.browserAuth }),
                 ...(input.providerInstanceId === undefined
                   ? {}
                   : { providerInstanceId: input.providerInstanceId }),
@@ -880,7 +982,6 @@ const make = Effect.gen(function* () {
       const normalizedUrl = normalizeLocalHttpUrl(input.url);
       if (normalizedUrl === null) return null;
       const leases = yield* SynchronizedRef.get(leasesRef);
-      const currentTime = yield* nowMillis;
       const lease = leases.find(
         (entry) =>
           entry.threadId === input.threadId &&
@@ -888,7 +989,7 @@ const make = Effect.gen(function* () {
           entry.url === normalizedUrl,
       );
       if (lease === undefined) return null;
-      if (lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime) {
+      if (lease.status === "expired") {
         yield* withLeaseLock(lease.id, expireLocked(lease));
         return null;
       }
@@ -898,9 +999,8 @@ const make = Effect.gen(function* () {
   const list: PreviewHosting["Service"]["list"] = (threadId) =>
     Effect.gen(function* () {
       if (startupError !== null) return yield* startupError;
-      const currentTime = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
-      return activeLeases(leases, currentTime, threadId);
+      return retainedLeases(leases, threadId);
     });
 
   const subscribe: PreviewHosting["Service"]["subscribe"] = (listener) =>
@@ -1008,7 +1108,10 @@ const make = Effect.gen(function* () {
   const expireDueLeases = Effect.fn("PreviewHosting.expireDueLeases")(function* () {
     const currentTime = yield* nowMillis;
     const due = (yield* SynchronizedRef.get(leasesRef)).filter(
-      (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= currentTime,
+      (lease) =>
+        lease.status === "expired" ||
+        lease.cleanupPending ||
+        (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= currentTime),
     );
     yield* Effect.forEach(
       due,
@@ -1033,11 +1136,18 @@ const make = Effect.gen(function* () {
       const now = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
       const activeExpiry = leases
-        // Deadlines crossed while cleanup was running need another pass immediately.
-        .filter((lease) => lease.status !== "expired" && Date.parse(lease.expiresAt) > checkedAt)
+        // Sleeping handoffs retain their recipe without scheduling more work.
+        .filter(
+          (lease) =>
+            (lease.status === "active" || lease.status === "starting") &&
+            Date.parse(lease.expiresAt) > checkedAt,
+        )
         .map((lease) => Date.parse(lease.expiresAt));
       const failedCleanupPending = leases.some(
-        (lease) => lease.status === "expired" || Date.parse(lease.expiresAt) <= now,
+        (lease) =>
+          lease.status === "expired" ||
+          lease.cleanupPending ||
+          (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= now),
       );
       const activeDelayMs =
         activeExpiry.length === 0 ? undefined : Math.max(0, Math.min(...activeExpiry) - now);
@@ -1055,9 +1165,39 @@ const make = Effect.gen(function* () {
   yield* expireDueLeases();
   yield* Effect.forkScoped(expiryWorker);
 
+  const recoverForBrowser: PreviewHosting["Service"]["recoverForBrowser"] = Effect.fn(
+    "PreviewHosting.recoverForBrowser",
+  )(function* (input) {
+    const previous = yield* findLease(input.leaseId);
+    const ownedPrevious =
+      previous?.threadId === input.threadId && previous.url === input.url ? previous : null;
+    const previousTerminal = ownedPrevious === null ? null : yield* terminalSummary(ownedPrevious);
+    const now = yield* nowMillis;
+    const restarted =
+      ownedPrevious !== null &&
+      (ownedPrevious.status === "sleeping" ||
+        ownedPrevious.cleanupPending === true ||
+        Date.parse(ownedPrevious.expiresAt) <= now ||
+        previousTerminal?.status !== "running" ||
+        !previousTerminal.hasRunningSubprocess);
+    const lease = yield* recover(input);
+    if (lease === null) return null;
+    const bootstrapToken = input.bootstrap
+      ? yield* HostingAuth.prepareBrowserCredential(lease).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        )
+      : undefined;
+    return {
+      ...toPreviewHostingLeaseSummary(lease),
+      ...(restarted ? { restarted: true } : {}),
+      ...(bootstrapToken === undefined ? {} : { bootstrapToken }),
+    };
+  });
+
   return PreviewHosting.of({
     launch,
     recover,
+    recoverForBrowser,
     list,
     subscribe,
     ownsTerminal,

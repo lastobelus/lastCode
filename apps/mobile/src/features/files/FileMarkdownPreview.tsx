@@ -10,7 +10,7 @@ import {
   type NodeStyleOverrides,
   type PartialMarkdownTheme,
 } from "react-native-nitro-markdown";
-import { RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
+import { Alert, RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
 
 import { MediaVideoPlayer } from "../../components/MediaVideoPlayer";
 
@@ -241,7 +241,7 @@ export function FileMarkdownPreview(props: {
   const connection = Option.getOrNull(preparedConnection);
   const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(props.environmentId, connection);
   const prepareMediaUrl = useCallback(
-    (href: string) => {
+    (href: string, purpose: "navigation" | "resource" = "resource") => {
       const threadRef =
         props.threadId === null
           ? null
@@ -251,6 +251,7 @@ export function FileMarkdownPreview(props: {
           ? null
           : {
               threadRef,
+              purpose,
               environmentUrl: connection.httpBaseUrl,
               knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
               list: async () => {
@@ -261,13 +262,17 @@ export function FileMarkdownPreview(props: {
                 if (result._tag === "Failure") throw squashAtomCommandFailure(result);
                 return result.value;
               },
-              recover: async (lease: PreviewHostingLeaseSummary) => {
+              recover: async (
+                lease: PreviewHostingLeaseSummary,
+                options: { readonly bootstrap: boolean },
+              ) => {
                 const result = await recoverHostedPreviewLease({
                   environmentId: props.environmentId,
                   input: {
                     threadId: threadRef.threadId,
                     leaseId: lease.leaseId,
                     url: lease.url,
+                    bootstrap: options.bootstrap,
                   },
                 });
                 if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -289,7 +294,14 @@ export function FileMarkdownPreview(props: {
   );
   const onLinkPress = useCallback(
     (href: string) => {
-      void prepareMediaUrl(href).then((url) => tryOpenExternalUrl(url, "markdown-link"));
+      void prepareMediaUrl(href, "navigation")
+        .then((url) => tryOpenExternalUrl(url, "markdown-link"))
+        .catch(() =>
+          Alert.alert(
+            "Preview unavailable",
+            "The preview could not be restored. Tap the link to retry.",
+          ),
+        );
     },
     [prepareMediaUrl],
   );

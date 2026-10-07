@@ -1,4 +1,4 @@
-import { DesktopBrowserCommandInput } from "@t3tools/contracts";
+import { DesktopBrowserCommandInput, DesktopBrowserSurfaceResponse } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -15,6 +15,18 @@ export const browserCommand = DesktopIpc.makeIpcMethod({
   handler: (input) =>
     Effect.flatMap(DesktopBrowserHost.DesktopBrowserHost, (host) =>
       host.handleRemoteCommand(input),
+    ),
+});
+
+export const browserSurfaceResponse = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL,
+  payload: DesktopBrowserSurfaceResponse,
+  result: Schema.Void,
+  handler: (response, event) =>
+    Effect.flatMap(DesktopBrowserHost.DesktopBrowserHost, (host) =>
+      Effect.sync(() => {
+        if (event) host.surfaceResponse(response, event.sender.id);
+      }),
     ),
 });
 

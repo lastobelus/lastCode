@@ -51,6 +51,11 @@
         "src/preview/Annotation.css!",
         "scripts/picker-frames.smoke.mjs",
         "scripts/picker-electron-capture.smoke.mjs",
+        // The browser surface smoke command bundles these entries by filename.
+        "scripts/browser-surface.smoke.mjs",
+        "scripts/browser-surface.fixture.mjs",
+        "scripts/browser-surface.preload.mjs",
+        "scripts/browser-surface.renderer.mjs",
       ],
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.

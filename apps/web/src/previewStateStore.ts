@@ -1,3 +1,4 @@
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 /**
  * Per-thread preview UI state.
  *
@@ -6,14 +7,20 @@
  * is the one place that must enumerate every live preview tab.
  */
 import { useAtomValue } from "@effect/atom-react";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import {
+  parseScopedThreadKey,
+  scopeThreadRef,
+  scopedThreadKey,
+} from "@t3tools/client-runtime/environment";
 import {
   type DesktopPreviewColorScheme,
   type DesktopPreviewFavicon,
+  type EnvironmentId,
   type PreviewEvent,
   type PreviewListResult,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
+  ThreadId,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
@@ -98,6 +105,8 @@ const activePreviewSessionsAtom = Atom.make((get) => {
 }).pipe(Atom.withLabel("preview:active-sessions"));
 
 const changedPreviewThreadKeys = new Set<string>();
+const previewServerEpochs = new Map<EnvironmentId, string>();
+const retiredPreviewServerEpochs = new Map<EnvironmentId, Set<string>>();
 
 function syncActivePreviewThread(threadKey: string, state: ThreadPreviewState): void {
   const active = Object.keys(state.sessions).length > 0;
@@ -135,6 +144,11 @@ function updateThreadPreviewState(
 }
 
 const dedupeRecentUrls = (existing: string[], url: string): string[] => {
+  try {
+    url = stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
+  } catch {
+    /* Relative input is normalized by navigation. */
+  }
   const next = [url, ...existing.filter((entry) => entry !== url)];
   return next.slice(0, PREVIEW_RECENT_URL_LIMIT);
 };
@@ -183,6 +197,42 @@ export function useActivePreviewSessions(): Record<string, ThreadPreviewState> {
 
 export function readThreadPreviewState(ref: ScopedThreadRef): ThreadPreviewState {
   return appAtomRegistry.get(previewStateAtom(scopedThreadKey(ref)));
+}
+
+/** A restarted primary server no longer owns the desktop pages from its previous epoch. */
+export function resetPreviewServerEpoch(
+  environmentId: EnvironmentId,
+  serverEpoch: string,
+): ScopedThreadRef[] {
+  if (isRetiredPreviewServerEpoch(environmentId, serverEpoch)) return [];
+  const retired = retiredPreviewServerEpochs.get(environmentId) ?? new Set<string>();
+  const previousEpoch = previewServerEpochs.get(environmentId);
+  if (previousEpoch !== undefined && previousEpoch !== serverEpoch) retired.add(previousEpoch);
+  previewServerEpochs.set(environmentId, serverEpoch);
+  retiredPreviewServerEpochs.set(environmentId, retired);
+  const reset: ScopedThreadRef[] = [];
+  for (const threadKey of changedPreviewThreadKeys) {
+    const ref = parseScopedThreadKey(threadKey);
+    if (!ref || ref.environmentId !== environmentId) continue;
+    const current = readThreadPreviewState(ref);
+    if (current.serverEpoch === null || current.serverEpoch === serverEpoch) continue;
+    retired.add(current.serverEpoch);
+    updateThreadPreviewState(ref, () => ({
+      ...EMPTY_THREAD_PREVIEW_STATE,
+      serverEpoch,
+      recentlySeenUrls: current.recentlySeenUrls,
+    }));
+    reset.push(ref);
+  }
+  return reset;
+}
+
+/** Retired primary-server responses cannot recreate native pages after a restart. */
+export function isRetiredPreviewServerEpoch(
+  environmentId: EnvironmentId,
+  serverEpoch: string,
+): boolean {
+  return retiredPreviewServerEpochs.get(environmentId)?.has(serverEpoch) ?? false;
 }
 
 export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEvent): void {
@@ -312,6 +362,35 @@ export function updatePreviewServerSnapshot(
   });
 }
 
+/** Reconcile one environment; return false if an event overtook its first authoritative list. */
+export function reconcilePreviewEnvironmentSessions(
+  environmentId: EnvironmentId,
+  result: PreviewListResult,
+): boolean {
+  if (isRetiredPreviewServerEpoch(environmentId, result.serverEpoch)) return true;
+  const sessionsByThread = new Map<ThreadId, PreviewSessionSnapshot[]>();
+  for (const threadKey of changedPreviewThreadKeys) {
+    const ref = parseScopedThreadKey(threadKey);
+    if (ref?.environmentId === environmentId) sessionsByThread.set(ref.threadId, []);
+  }
+  for (const snapshot of result.sessions) {
+    const threadId = ThreadId.make(snapshot.threadId);
+    const sessions = sessionsByThread.get(threadId) ?? [];
+    sessions.push(snapshot);
+    sessionsByThread.set(threadId, sessions);
+  }
+  let listLoaded = true;
+  for (const [threadId, sessions] of sessionsByThread) {
+    const ref = scopeThreadRef(environmentId, threadId);
+    reconcilePreviewServerSessions(ref, {
+      ...result,
+      sessions,
+    });
+    if (!readThreadPreviewState(ref).listLoaded) listLoaded = false;
+  }
+  return listLoaded;
+}
+
 /**
  * Replace the local session index from an authoritative preview.list result.
  * Missing tabs are removed while the current active tab is preserved whenever
@@ -321,6 +400,7 @@ export function reconcilePreviewServerSessions(
   ref: ScopedThreadRef,
   result: PreviewListResult,
 ): void {
+  if (isRetiredPreviewServerEpoch(ref.environmentId, result.serverEpoch)) return;
   updateThreadPreviewState(ref, (current) => {
     const sameServer = current.serverEpoch === result.serverEpoch;
     if (sameServer && result.revision < current.serverRevision) {
@@ -484,6 +564,8 @@ export function resetPreviewStateForTests(): void {
     appAtomRegistry.set(previewStateAtom(threadKey), EMPTY_THREAD_PREVIEW_STATE);
   }
   changedPreviewThreadKeys.clear();
+  previewServerEpochs.clear();
+  retiredPreviewServerEpochs.clear();
   appAtomRegistry.set(activePreviewThreadKeysAtom, { keys: new Set<string>() });
 }
 

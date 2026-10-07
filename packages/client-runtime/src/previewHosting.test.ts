@@ -5,6 +5,7 @@ import {
   type PreviewHostingLeaseSummary,
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { getPairingTokenFromUrl, stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 
 import * as Option from "effect/Option";
 import {
@@ -17,6 +18,8 @@ import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./connecti
 import {
   configuredPreviewEnvironmentUrl,
   HostedPreviewUrlTooLongError,
+  HostedPreviewRecoveryError,
+  hostedPreviewNavigationUrl,
   prepareHostedPreview,
   selectHostedPreview,
 } from "./previewHosting.ts";
@@ -36,6 +39,66 @@ const lease = {
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
+  it("preserves application reset and invite tokens while preparing and retargeting a bootstrap", async () => {
+    const destination =
+      "http://localhost:5173/reset?token=application-reset#token=application-invite";
+    const result = await prepareHostedPreview({
+      threadRef,
+      url: destination,
+      environmentUrl: "http://localhost:8080",
+      list: async () => [lease],
+      recover: async () => ({ ...lease, bootstrapToken: "issued-preview-credential" }),
+    });
+    expect(result.url).toBe(destination);
+    const navigation = new URL(result.navigationUrl!);
+    expect(getPairingTokenFromUrl(navigation)).toBe("issued-preview-credential");
+    expect(stripPreviewBootstrapTokenFromUrl(navigation).href).toBe(destination);
+    const redirected =
+      "http://127.0.0.1:5173/invite?token=other-application-code#token=other-invite";
+    const retargeted = new URL(hostedPreviewNavigationUrl(result, redirected));
+    expect(getPairingTokenFromUrl(retargeted)).toBe("issued-preview-credential");
+    expect(stripPreviewBootstrapTokenFromUrl(retargeted).href).toBe(redirected);
+  });
+
+  it("reopens an old sleeping handoff with a unique credential for each navigation", async () => {
+    const sleeping = { ...lease, status: "sleeping" as const };
+    let sequence = 0;
+    const recover = vi.fn(async () => ({ ...lease, bootstrapToken: `one-use-${++sequence}` }));
+    const input = {
+      threadRef,
+      url: lease.url,
+      environmentUrl: "http://localhost:8080",
+      list: async () => [sleeping],
+      recover,
+    };
+    const [first, second] = await Promise.all([
+      prepareHostedPreview(input),
+      prepareHostedPreview(input),
+    ]);
+    expect(first.url).toBe(lease.url);
+    expect(second.url).toBe(lease.url);
+    expect(first.navigationUrl).not.toEqual(second.navigationUrl);
+    expect(first.navigationUrl).toContain("one-use-1");
+    expect(second.navigationUrl).toContain("one-use-2");
+    expect(hostedPreviewNavigationUrl(first, "http://127.0.0.1:5173/other#section")).toContain(
+      "one-use-1",
+    );
+    expect(recover).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not request or expose browser authentication for a direct resource", async () => {
+    const recover = vi.fn(async () => ({ ...lease, bootstrapToken: "unexpected-secret" }));
+    const result = await prepareHostedPreview({
+      threadRef,
+      purpose: "resource",
+      url: lease.url,
+      environmentUrl: "http://localhost:8080",
+      list: async () => [lease],
+      recover,
+    });
+    expect(recover).toHaveBeenCalledWith(lease, { bootstrap: false });
+    expect(result).toEqual({ url: lease.url, managed: true, restored: true });
+  });
 
   it("restores an owning local lease and preserves the requested URL components", async () => {
     const recover = vi.fn(async () => lease);
@@ -52,7 +115,7 @@ describe("prepareHostedPreview", () => {
       managed: true,
       restored: true,
     });
-    expect(recover).toHaveBeenCalledWith(lease);
+    expect(recover).toHaveBeenCalledWith(lease, { bootstrap: true });
   });
 
   it("uses a private environment address for loopback links without changing path or query", async () => {
@@ -90,7 +153,7 @@ describe("prepareHostedPreview", () => {
       managed: true,
       restored: true,
     });
-    expect(recover).toHaveBeenCalledWith(savedLease);
+    expect(recover).toHaveBeenCalledWith(savedLease, { bootstrap: true });
   });
 
   it("does not adopt an unrelated private address even with an exact owning lease", async () => {
@@ -125,19 +188,19 @@ describe("prepareHostedPreview", () => {
     expect(recover).not.toHaveBeenCalled();
   });
 
-  it("keeps a loopback URL unchanged when the environment requires an unavailable public gateway", async () => {
+  it("keeps a loopback URL unchanged when no reachable public gateway is configured", async () => {
     const result = await prepareHostedPreview({
       threadRef,
       url: "http://localhost:5173/preview?q=1#section",
       environmentUrl: "https://server.example.com/",
       list: async () => [lease],
-      recover: async () => null,
+      recover: async () => lease,
     });
 
     expect(result).toEqual({
       url: "http://localhost:5173/preview?q=1#section",
       managed: true,
-      restored: false,
+      restored: true,
     });
   });
 
@@ -163,7 +226,7 @@ describe("prepareHostedPreview", () => {
     expect(list).not.toHaveBeenCalled();
   });
 
-  it("falls back to the exact input URL when listing or recovery fails", async () => {
+  it("leaves unknown links alone but refuses navigation when known recovery fails", async () => {
     const url = "http://localhost:5173/preview?x=%2f#part";
     const failedList = await prepareHostedPreview({
       threadRef,
@@ -174,7 +237,7 @@ describe("prepareHostedPreview", () => {
       },
       recover: async () => lease,
     });
-    const failedRecovery = await prepareHostedPreview({
+    const failedRecovery = prepareHostedPreview({
       threadRef,
       url,
       environmentUrl: "http://localhost:8080/",
@@ -185,14 +248,10 @@ describe("prepareHostedPreview", () => {
     });
 
     expect(failedList).toEqual({ url, managed: false, restored: false });
-    expect(failedRecovery).toEqual({
-      url: "http://localhost:5173/preview?x=%2f#part",
-      managed: true,
-      restored: false,
-    });
+    await expect(failedRecovery).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
   });
 
-  it("coalesces concurrent preparation for the same scoped URL", async () => {
+  it("coalesces concurrent resource preparation for the same scoped URL", async () => {
     let finishList!: (leases: (typeof lease)[]) => void;
     let listStarted!: () => void;
     const started = new Promise<void>((resolve) => (listStarted = resolve));
@@ -201,6 +260,7 @@ describe("prepareHostedPreview", () => {
       return new Promise<(typeof lease)[]>((resolve) => (finishList = resolve));
     });
     const input = {
+      purpose: "resource" as const,
       threadRef,
       url: lease.url,
       environmentUrl: "http://localhost:8080/",
@@ -210,7 +270,6 @@ describe("prepareHostedPreview", () => {
     const first = prepareHostedPreview(input);
     const second = prepareHostedPreview(input);
 
-    expect(second).toBe(first);
     await started;
     finishList([lease]);
     expect(await first).toMatchObject({ managed: true, restored: true });
@@ -232,7 +291,13 @@ describe("prepareHostedPreview", () => {
       recoveryStarted();
       return new Promise<typeof lease>((resolve) => (finishRecovery = resolve));
     });
-    const input = { threadRef, environmentUrl: "http://192.168.1.30:8080/", list, recover };
+    const input = {
+      purpose: "resource" as const,
+      threadRef,
+      environmentUrl: "http://192.168.1.30:8080/",
+      list,
+      recover,
+    };
     const urls = ["/a.png?run=1#first", "/b.png", "/c.mp4"];
     const preparations = urls.map((path) =>
       prepareHostedPreview({ ...input, url: `http://localhost:5173${path}` }),
@@ -269,7 +334,13 @@ describe("prepareHostedPreview", () => {
     };
     const list = vi.fn(async () => [lease, secondLease]);
     const recover = vi.fn(async (owned: PreviewHostingLeaseSummary) => owned);
-    const input = { threadRef, environmentUrl: "http://localhost:8080/", list, recover };
+    const input = {
+      purpose: "resource" as const,
+      threadRef,
+      environmentUrl: "http://localhost:8080/",
+      list,
+      recover,
+    };
     const result = await Promise.all([
       prepareHostedPreview({ ...input, url: "http://localhost:5173/a.png" }),
       prepareHostedPreview({ ...input, url: "http://localhost:5174/b.png" }),

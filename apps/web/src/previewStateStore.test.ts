@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 import {
   __testing,
@@ -16,9 +17,11 @@ import {
   cancelPreviewSessionClose,
   previewStateAtom,
   readThreadPreviewState,
+  reconcilePreviewEnvironmentSessions,
   reconcilePreviewServerSessions,
   rememberPreviewUrl,
   resetPreviewStateForTests,
+  resetPreviewServerEpoch,
   setActivePreviewTab,
   updatePreviewServerSnapshot,
 } from "./previewStateStore";
@@ -58,6 +61,153 @@ const applyPreviewServerEvent = (eventRef: typeof ref, event: PreviewEventDraft)
 beforeEach(() => {
   nextServerRevision = 0;
   resetPreviewStateForTests();
+});
+
+it("keeps bootstrap credentials out of recent addresses across loading and success", () => {
+  const destination =
+    "http://localhost:5173/project?token=application-code&view=qa#token=invite-code";
+  const navigationUrl = setPreviewBootstrapTokenOnUrl(new URL(destination), "one-use-secret").href;
+  applyPreviewServerSnapshot(
+    ref,
+    makeSnapshot({
+      navStatus: { _tag: "Loading", url: navigationUrl, title: "" },
+    }),
+  );
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual([destination]);
+  applyPreviewServerSnapshot(
+    ref,
+    makeSnapshot({
+      navStatus: { _tag: "Success", url: destination, title: "QA" },
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    }),
+  );
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual([destination]);
+});
+it("preserves application tokens in recent preview destinations", () => {
+  const urls = [
+    "https://app.example/reset?token=first-code",
+    "https://app.example/reset?token=second-code",
+    "https://app.example/invite#token=invite-code",
+  ];
+  for (const url of urls) rememberPreviewUrl(ref, url);
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual(urls.toReversed());
+});
+
+it("drops a restarted server's desktop pages without resetting another environment", () => {
+  const remoteRef = scopeThreadRef("remote" as EnvironmentId, ref.threadId);
+  reconcilePreviewServerSessions(ref, {
+    serverEpoch,
+    revision: 1,
+    sessions: [makeSnapshot()],
+  });
+  reconcilePreviewServerSessions(otherRef, {
+    serverEpoch,
+    revision: 1,
+    sessions: [makeSnapshot({ threadId: otherRef.threadId, tabId: "background" })],
+  });
+  reconcilePreviewServerSessions(remoteRef, {
+    serverEpoch,
+    revision: 1,
+    sessions: [makeSnapshot({ tabId: "remote-tab" })],
+  });
+
+  expect(resetPreviewServerEpoch(environmentId, "server-b")).toEqual([ref, otherRef]);
+  expect(readThreadPreviewState(ref)).toMatchObject({
+    sessions: {},
+    serverEpoch: "server-b",
+    serverRevision: 0,
+    listLoaded: false,
+  });
+  expect(readThreadPreviewState(otherRef).sessions).toEqual({});
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual(["http://localhost:5173/"]);
+  expect(readThreadPreviewState(remoteRef).snapshot?.tabId).toBe("remote-tab");
+});
+
+it("rejects completed environment and thread lists from a retired primary epoch", () => {
+  const oldSnapshot = makeSnapshot();
+  reconcilePreviewEnvironmentSessions(environmentId, {
+    serverEpoch,
+    revision: 10,
+    sessions: [oldSnapshot],
+  });
+  resetPreviewServerEpoch(environmentId, "server-b");
+  const newSnapshot = makeSnapshot({ tabId: "restarted-tab" });
+  reconcilePreviewEnvironmentSessions(environmentId, {
+    serverEpoch: "server-b",
+    revision: 1,
+    sessions: [newSnapshot],
+  });
+  const staleResult = { serverEpoch, revision: 100, sessions: [oldSnapshot] };
+  reconcilePreviewEnvironmentSessions(environmentId, staleResult);
+  reconcilePreviewServerSessions(ref, staleResult);
+  resetPreviewServerEpoch(environmentId, serverEpoch);
+  expect(readThreadPreviewState(ref)).toMatchObject({
+    serverEpoch: "server-b",
+    sessions: { "restarted-tab": newSnapshot },
+    serverRevision: 1,
+  });
+});
+
+it("hydrates unseen threads and reconciles missing tabs without overwriting newer events", () => {
+  const remoteRef = scopeThreadRef("remote" as EnvironmentId, ref.threadId);
+  reconcilePreviewServerSessions(remoteRef, {
+    serverEpoch,
+    revision: 1,
+    sessions: [makeSnapshot({ tabId: "remote-tab" })],
+  });
+  reconcilePreviewEnvironmentSessions(environmentId, {
+    serverEpoch,
+    revision: 1,
+    sessions: [makeSnapshot(), makeSnapshot({ threadId: otherRef.threadId, tabId: "background" })],
+  });
+  expect(readThreadPreviewState(otherRef).snapshot?.tabId).toBe("background");
+  applyPreviewServerEventImpl(ref, {
+    type: "opened",
+    serverEpoch,
+    revision: 3,
+    threadId: ref.threadId,
+    tabId: "newer-tab",
+    snapshot: makeSnapshot({ tabId: "newer-tab" }),
+    createdAt: "2026-10-06T00:00:00.000Z",
+  });
+  reconcilePreviewEnvironmentSessions(environmentId, {
+    serverEpoch,
+    revision: 2,
+    sessions: [makeSnapshot()],
+  });
+  expect(readThreadPreviewState(ref).snapshot?.tabId).toBe("newer-tab");
+  expect(readThreadPreviewState(otherRef).sessions).toEqual({});
+  expect(readThreadPreviewState(remoteRef).snapshot?.tabId).toBe("remote-tab");
+});
+
+it("requests another baseline when a live event overtakes the first environment list", () => {
+  const live = makeSnapshot({ tabId: "live-tab" });
+  applyPreviewServerEventImpl(ref, {
+    type: "opened",
+    serverEpoch,
+    revision: 2,
+    threadId: ref.threadId,
+    tabId: live.tabId,
+    snapshot: live,
+    createdAt: live.updatedAt,
+  });
+  expect(
+    reconcilePreviewEnvironmentSessions(environmentId, {
+      serverEpoch,
+      revision: 1,
+      sessions: [makeSnapshot()],
+    }),
+  ).toBe(false);
+  expect(readThreadPreviewState(ref).sessions).toEqual({ "live-tab": live });
+  expect(
+    reconcilePreviewEnvironmentSessions(environmentId, {
+      serverEpoch,
+      revision: 2,
+      sessions: [makeSnapshot(), live],
+    }),
+  ).toBe(true);
+  expect(Object.keys(readThreadPreviewState(ref).sessions)).toEqual(["tab_a", "live-tab"]);
+  expect(readThreadPreviewState(ref).listLoaded).toBe(true);
 });
 
 describe("previewStateStore (single-tab)", () => {

@@ -14,6 +14,7 @@ interface Props {
   onReload: () => void;
   recoveryRequest: PreviewRecoveryRequestState;
   restoringHostedPreview?: boolean;
+  managedHandoff?: boolean;
   onRequestRecovery: () => void;
 }
 
@@ -25,6 +26,7 @@ export function PreviewUnreachable({
   onReload,
   recoveryRequest,
   restoringHostedPreview = false,
+  managedHandoff = false,
   onRequestRecovery,
 }: Props) {
   const [showDetails, setShowDetails] = useState(false);
@@ -65,27 +67,31 @@ export function PreviewUnreachable({
             size="sm"
             disabled={
               restoringHostedPreview ||
-              recoveryRequest.status === "sending" ||
-              recoveryRequest.status === "sent"
+              (!managedHandoff &&
+                (recoveryRequest.status === "sending" || recoveryRequest.status === "sent"))
             }
-            onClick={onRequestRecovery}
+            onClick={managedHandoff ? onReload : onRequestRecovery}
           >
             {restoringHostedPreview
               ? "Restoring preview…"
-              : recoveryRequest.status === "sending"
-                ? "Sending request…"
-                : recoveryRequest.status === "sent"
-                  ? "Request sent"
-                  : "Ask agent to restore preview"}
+              : managedHandoff
+                ? "Retry preview"
+                : recoveryRequest.status === "sending"
+                  ? "Sending request…"
+                  : recoveryRequest.status === "sent"
+                    ? "Request sent"
+                    : "Ask agent to restore preview"}
           </Button>
           <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
             {restoringHostedPreview
               ? "LastCode is reopening this preview."
-              : recoveryRequest.status === "sent"
-                ? "The failed link and error were sent to this thread. Reload after the agent restores it."
-                : recoveryRequest.status === "error"
-                  ? recoveryRequest.error
-                  : "Send this failed link and error to the agent in this thread."}
+              : managedHandoff
+                ? "This saved preview reopens automatically. Retry when its environment is available."
+                : recoveryRequest.status === "sent"
+                  ? "The failed link and error were sent to this thread. Reload after the agent restores it."
+                  : recoveryRequest.status === "error"
+                    ? recoveryRequest.error
+                    : "Send this failed link and error to the agent in this thread."}
           </p>
         </div>
 

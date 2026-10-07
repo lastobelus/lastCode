@@ -2444,13 +2444,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           return result.value;
         },
-        recover: async (lease: PreviewHostingLeaseSummary) => {
+        recover: async (
+          lease: PreviewHostingLeaseSummary,
+          options: { readonly bootstrap: boolean },
+        ) => {
           const result = await recoverHostedPreviewLease({
             environmentId: props.environmentId,
             input: {
               threadId: props.threadId,
               leaseId: lease.leaseId,
               url: lease.url,
+              bootstrap: options.bootstrap,
             },
           });
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -2472,7 +2476,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     (url: string) => {
       const input = previewPreparationInput(url);
       return input
-        ? prepareThenOpenThreadFeedUrl(input, (preparedUrl) => preparedUrl)
+        ? prepareThenOpenThreadFeedUrl(
+            { ...input, purpose: "resource" },
+            (preparedUrl) => preparedUrl,
+          )
         : Promise.resolve(url);
     },
     [previewPreparationInput],
@@ -2718,12 +2725,22 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               setExpandedFile(
                 (current) => current ?? { kind: "pdf", uri: url, name: "Document.pdf" },
               ),
+          ).catch(() =>
+            Alert.alert(
+              "Preview unavailable",
+              "The preview could not be restored. Tap the link to retry.",
+            ),
           );
           return;
         }
         const linkUrl = presentation.href;
         void openThreadFeedMarkdownUrl(previewPreparationInput(linkUrl), linkUrl, (url) =>
           tryOpenExternalUrl(url, "markdown-link"),
+        ).catch(() =>
+          Alert.alert(
+            "Preview unavailable",
+            "The preview could not be restored. Tap the link to retry.",
+          ),
         );
       }
     },

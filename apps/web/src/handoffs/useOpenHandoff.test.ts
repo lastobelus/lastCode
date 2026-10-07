@@ -1,4 +1,7 @@
-import { HostedPreviewUrlTooLongError } from "@t3tools/client-runtime/preview-hosting";
+import {
+  HostedPreviewUrlTooLongError,
+  type PreparedHostedPreview,
+} from "@t3tools/client-runtime/preview-hosting";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -52,14 +55,25 @@ vi.mock("~/components/preview/previewBridge", () => ({
     return native.bridge;
   },
 }));
+vi.mock("~/env", () => ({
+  get isElectron() {
+    return native.bridge !== null;
+  },
+}));
+vi.mock("~/state/primaryEnvironment", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return { primaryEnvironmentIdAtom: Atom.make(EnvironmentId.make("env")) };
+});
 
 const hosting = vi.hoisted(() => ({
-  prepare: vi.fn(async (_ref: unknown, url: string) => ({
+  prepare: vi.fn(async (_ref: unknown, url: string): Promise<PreparedHostedPreview> => ({
     url,
     managed: false,
     restored: false,
   })),
 }));
+const refresh = vi.hoisted(() => ({ request: vi.fn() }));
+vi.mock("~/browser/hostedPreviewRefresh", () => ({ requestHostedPreviewRefresh: refresh.request }));
 vi.mock("~/components/preview/previewHostingRecovery", () => ({
   prepareHostedPreview: hosting.prepare,
 }));
@@ -88,6 +102,7 @@ const operations = () => ({
 const panel = () => selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
 beforeEach(() => {
   native.bridge = null;
+  refresh.request.mockClear();
   hosting.prepare.mockReset();
   hosting.prepare.mockImplementation(async (_ref, url) => ({
     url,
@@ -205,6 +220,90 @@ describe("opening a saved handoff", () => {
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(ops.createAssetUrl).not.toHaveBeenCalled();
   });
+  it("reopens a healthy managed server form without navigating or creating another tab", async () => {
+    const ops = operations();
+    const authoredUrl = "http://localhost:8123/form";
+    const destinationUrl = "http://environment.example:8123/form";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    hosting.prepare.mockResolvedValue({ url: destinationUrl, managed: true, restored: false });
+    const entry = recordHandoff(ref, { kind: "url", url: authoredUrl });
+    const healthy: PreviewSessionSnapshot = {
+      ...snapshot(authoredUrl),
+      runtime: "server",
+      desktopHostId: "another-desktop",
+      navStatus: { _tag: "Success", url: authoredUrl, title: "Unsaved form" },
+    };
+    applyPreviewServerSnapshot(ref, healthy);
+    await openHandoff(ref, entry, ops);
+    expect(hosting.prepare).toHaveBeenCalledExactlyOnceWith(ref, authoredUrl, "resource");
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(refresh.request).not.toHaveBeenCalled();
+    expect(panel().activeSurfaceId).toBe("browser:tab");
+    expect(panel().surfaces).toHaveLength(1);
+    expect(handoffBrowserTarget(ref, "tab")?.url).toBe(authoredUrl);
+  });
+  it.each(["restarted", "failed"])(
+    "queues a %s remote server handoff for its existing viewer without a duplicate tab",
+    async (reason) => {
+      const ops = operations();
+      const authoredUrl = "http://localhost:8123/form";
+      const destinationUrl = "http://environment.example:8123/form";
+      native.bridge = { navigate: vi.fn(async () => undefined) };
+      hosting.prepare.mockResolvedValue({
+        url: destinationUrl,
+        managed: true,
+        restored: true,
+        ...(reason === "restarted" ? { restarted: true } : {}),
+      });
+      const entry = recordHandoff(ref, { kind: "url", url: authoredUrl });
+      applyPreviewServerSnapshot(ref, {
+        ...snapshot(authoredUrl),
+        runtime: "server",
+        desktopHostId: "another-desktop",
+        navStatus:
+          reason === "restarted"
+            ? { _tag: "Success", url: authoredUrl, title: "Cached form" }
+            : {
+                _tag: "LoadFailed",
+                url: authoredUrl,
+                title: "",
+                code: -102,
+                description: "Server stopped",
+              },
+      });
+      await openHandoff(ref, entry, ops);
+      expect(hosting.prepare).toHaveBeenCalledExactlyOnceWith(ref, authoredUrl, "resource");
+      expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", authoredUrl);
+      expect(ops.navigatePreview).not.toHaveBeenCalled();
+      expect(native.bridge.navigate).not.toHaveBeenCalled();
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      expect(panel().surfaces).toHaveLength(1);
+      expect(readThreadHandoffs(ref)).toHaveLength(1);
+    },
+  );
+  it("retries a server tab rendered by this desktop through its native bridge", async () => {
+    const ops = operations();
+    const url = "http://localhost:8123/form";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    const entry = recordHandoff(ref, { kind: "url", url });
+    applyPreviewServerSnapshot(ref, {
+      ...snapshot(url),
+      runtime: "server",
+      desktopHostId: "local",
+      navStatus: { _tag: "LoadFailed", url, title: "", code: -102, description: "Stopped" },
+    });
+    await openHandoff(ref, entry, ops);
+    expect(native.bridge.navigate).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
+      url,
+    );
+    expect(refresh.request).not.toHaveBeenCalled();
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(ops.openPreview).not.toHaveBeenCalled();
+  });
   it("reuses and titles an origin URL normalized by the browser", async () => {
     const ops = operations();
     const entry = recordHandoff(ref, { kind: "url", url: "https://example.com" });
@@ -273,7 +372,7 @@ describe("opening a saved handoff", () => {
         },
       });
       await openHandoff(ref, entry, ops);
-      expect(hosting.prepare).toHaveBeenCalledTimes(2);
+      expect(hosting.prepare).toHaveBeenCalledTimes(4);
       expect(ops.openPreview).toHaveBeenCalledTimes(1);
       expect(panel().activeSurfaceId).toBe("browser:tab");
       expect(panel().surfaces).toHaveLength(1);
@@ -310,7 +409,7 @@ describe("opening a saved handoff", () => {
     const ops = operations();
     const destinationUrl = "http://environment.example:8123/page";
     let completeRecovery!: (value: { url: string; managed: boolean; restored: boolean }) => void;
-    hosting.prepare.mockImplementation(
+    hosting.prepare.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           completeRecovery = resolve;
@@ -325,6 +424,38 @@ describe("opening a saved handoff", () => {
     await opening;
     expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).toHaveBeenCalledTimes(1);
+  });
+  it("preserves a newer native navigation while handoff navigation access is prepared", async () => {
+    const ops = operations();
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    const url = "http://localhost:8123/form";
+    let resolveNavigation!: (value: PreparedHostedPreview) => void;
+    const navigation = new Promise<PreparedHostedPreview>((resolve) => {
+      resolveNavigation = resolve;
+    });
+    let navigationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      navigationStarted = resolve;
+    });
+    hosting.prepare
+      .mockResolvedValueOnce({ url, managed: true, restored: true, restarted: true })
+      .mockImplementationOnce(() => {
+        navigationStarted();
+        return navigation;
+      });
+    const entry = recordHandoff(ref, { kind: "url", url });
+    applyPreviewServerSnapshot(ref, snapshot(url));
+    const opening = openHandoff(ref, entry, ops);
+    await started;
+    applyPreviewServerSnapshot(ref, snapshot("https://elsewhere.example/"));
+    resolveNavigation({ url, managed: true, restored: true });
+    await opening;
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(refresh.request).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadHandoffs(ref)[0]?.sequence).toBe(entry.sequence);
   });
   it("does not open or navigate a handoff when its prepared destination exceeds the limit", async () => {
     const ops = operations();

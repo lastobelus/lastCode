@@ -668,7 +668,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   ) {
     if (window.isDestroyed()) return;
     yield* attempt({ operation: "frameCapture.setBackgroundThrottling" }, () =>
-      window.webContents.setBackgroundThrottling(enabled),
+      browserHost.setBackgroundThrottling(window.webContents, enabled),
     );
   });
   const setFrameCaptureBackgroundThrottling = Effect.fnUntraced(function* (enabled: boolean) {
@@ -686,7 +686,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         operation: "frameCapture.setBackgroundThrottling",
         webContentsId: wc.id,
       },
-      () => wc.setBackgroundThrottling(enabled),
+      () => browserHost.setBackgroundThrottling(wc, enabled),
     );
   });
   const restoreFrameCaptureWebContentsBackgroundThrottling = Effect.fnUntraced(function* (
@@ -2361,7 +2361,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       }
       if (afterAttach.serverTab) {
         yield* listenForAgentPointers;
-        browserHost.attach(afterAttach.serverTab, { webContents: wc, debugger: control.debugger });
+        browserHost.attach(
+          afterAttach.serverTab,
+          { webContents: wc, debugger: control.debugger },
+          tabId,
+        );
       }
       if (afterAttach.colorScheme !== "system") {
         yield* attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>

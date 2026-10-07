@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 import {
   handoffTargetKey,
   handoffTitle,
@@ -63,6 +64,28 @@ describe("handoff identity and ordering", () => {
 });
 
 describe("handoff persistence and provenance", () => {
+  it("saves the clean destination when a navigation snapshot contains a bootstrap token", () => {
+    const url = "http://localhost:5173/project?token=application-code&view=qa#token=invite-code";
+    const navigationUrl = setPreviewBootstrapTokenOnUrl(new URL(url), "one-use-secret").href;
+    const target = { kind: "url" as const, url: navigationUrl };
+    recordHandoff(ref, target);
+    rememberHandoffBrowser(ref, "qa-tab", target, navigationUrl);
+    expect(readThreadHandoffs(ref)[0]?.target).toEqual({ kind: "url", url });
+    expect(handoffBrowserTarget(ref, "qa-tab")).toEqual({ target: { kind: "url", url }, url });
+    updateHandoffBrowserTitle(ref, "qa-tab", "Ready for QA", url);
+    expect(readThreadHandoffs(ref)[0]?.title).toBe("Ready for QA");
+  });
+  it("preserves separate application reset and invite destinations", () => {
+    const urls = [
+      "https://app.example/reset?token=first-code",
+      "https://app.example/reset?token=second-code",
+      "https://app.example/invite#token=invite-code",
+    ];
+    for (const url of urls) recordHandoff(ref, { kind: "url", url });
+    expect(readThreadHandoffs(ref).map((entry) => entry.target)).toEqual(
+      urls.toReversed().map((url) => ({ kind: "url", url })),
+    );
+  });
   it("round trips valid records and discards malformed persisted entries", () => {
     const entries = upsertHandoff([], file, { label: "Mockup", at: 123 });
     const saved = JSON.parse(

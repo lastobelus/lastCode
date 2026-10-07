@@ -95,7 +95,7 @@ const PreviewProfilesTool = Tool.make("preview_profiles", {
 
 const PreviewHostTool = Tool.make("preview_host", {
   description:
-    "Start or recover a thread-owned local web preview in a managed terminal for 24 hours. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Opening the link in its owning thread restores a stopped server automatically within the fixed lease; viewing or recovering does not extend expiry.",
+    "Prepare a retained thread-owned local web preview in a managed terminal. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Processes sleep after 24 hours, but the saved setup and source remain until explicit stop or thread deletion. Opening the in-thread link restores a stopped server automatically for another run window. For isolated T3 dev QA, set browserAuth: t3-dev and retain a fixed T3CODE_DEV_AUTH_TOKEN in env; emit only the clean URL.",
   parameters: PreviewHostingLaunchInput,
   success: PreviewHostingLeaseSummary,
   failure: Schema.Union([
@@ -192,7 +192,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
 export const PreviewSnapshotTool = readonlyBrowserTool(
   Tool.make("preview_snapshot", {
     description:
-      "Inspect a page before interacting. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab. Returns page state, semantic elements, diagnostics, action history, and a PNG screenshot. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=false for text-only output with the same page metadata. Set save=true to also write the PNG to disk and get screenshotPath back; with includeImage=false, save=true returns only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
+      "Inspect a page before interacting. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab. Returns page state, semantic elements, diagnostics, action history, and a PNG screenshot. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=false for text-only output; server tabs skip screenshot capture unless save=true. Set save=true to also write the PNG to disk and get screenshotPath back; with includeImage=false, save=true returns only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
     parameters: Schema.Struct({
       ...PreviewAutomationTabTargetInput.fields,
       includeImage: Schema.optional(

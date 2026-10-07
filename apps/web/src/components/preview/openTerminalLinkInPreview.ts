@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
@@ -54,9 +55,8 @@ export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
   if (typeof window !== "undefined" && !window.desktopBridge) {
-    await openPreparedExternalUrl(
-      input.url,
-      async () => (await prepareHostedPreview(input.threadRef, input.url)).url,
+    await openPreparedExternalUrl(input.url, async () =>
+      hostedPreviewNavigationUrl(await prepareHostedPreview(input.threadRef, input.url)),
     );
     return;
   }
@@ -69,7 +69,7 @@ export async function openTerminalLinkInPreview<E>(
     (await resolveBrowserLinkTargetPreference()) === "app";
 
   if (!supportsPreview) {
-    input.fallbackToBrowser(prepared.url);
+    input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
     return;
   }
 
@@ -87,7 +87,10 @@ export async function openTerminalLinkInPreview<E>(
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: prepared.url,
+      url: hostedPreviewNavigationUrl(
+        prepared,
+        runtime === "server" && desktopHostId === undefined ? input.url : prepared.url,
+      ),
       // Same reason as `openUrlInPreview`: this path handles its own result
       // mapping, so the configured defaults are applied explicitly.
       viewport: browserDefaultOpenViewport(defaults),
@@ -106,7 +109,7 @@ export async function openTerminalLinkInPreview<E>(
         cause: result.cause,
       }),
     );
-    input.fallbackToBrowser(prepared.url);
+    input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
     return;
   }
   recordVisitForThread(input.threadRef, input.url);

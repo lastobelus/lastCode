@@ -2988,20 +2988,23 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.previewHostingRecover]: (input) =>
-          previewHosting
-            .recover({ threadId: input.threadId, leaseId: input.leaseId, url: input.url })
-            .pipe(
-              Effect.map((lease) =>
-                lease === null ? null : PreviewHosting.toPreviewHostingLeaseSummary(lease),
-              ),
-              Effect.mapError(
-                () =>
-                  new ContractPreviewHostingError({
-                    reason: "unavailable",
-                    message: "Preview hosting is unavailable on this server.",
-                  }),
-              ),
+          previewHosting.recoverForBrowser(input).pipe(
+            Effect.mapError(
+              (error) =>
+                new ContractPreviewHostingError({
+                  reason:
+                    error._tag === "PreviewHostingError" &&
+                    error.operation === "validate" &&
+                    error.detail?.includes("already served")
+                      ? "url_in_use"
+                      : "unavailable",
+                  message:
+                    error._tag === "PreviewHostingError" && error.operation === "validate"
+                      ? error.message
+                      : "Preview hosting is unavailable on this server.",
+                }),
             ),
+          ),
         [WS_METHODS.previewHostingStopThread]: (input) =>
           previewHosting.stopThread(input.threadId).pipe(
             Effect.mapError(

@@ -57,17 +57,27 @@ const commands = createEnvironmentSubscriptionAtomFamily(connectionAtomRuntime, 
 const previewEvents = createEnvironmentSubscriptionAtomFamily(connectionAtomRuntime, {
   label: "desktop-browser:preview-events",
   idleTtlMs: 0,
-  subscribe: ({ environmentId }: { environmentId: EnvironmentId }) =>
+  subscribe: ({
+    environmentId,
+    applyEvents,
+  }: {
+    environmentId: EnvironmentId;
+    applyEvents: boolean;
+  }) =>
     subscribe(WS_METHODS.subscribePreviewEvents, {}).pipe(
       Stream.mapEffect((event) =>
         Effect.gen(function* () {
           const ref = { environmentId, threadId: ThreadId.make(event.threadId) };
-          const epoch = readThreadPreviewState(ref).serverEpoch;
-          if (epoch !== null && epoch !== event.serverEpoch) {
-            const sessions = yield* request(WS_METHODS.previewList, { threadId: ref.threadId });
-            reconcilePreviewServerSessions(ref, sessions);
+          // The root host owns its primary server's state; relayed environments
+          // still sync here while their chat views are unmounted.
+          if (applyEvents) {
+            const epoch = readThreadPreviewState(ref).serverEpoch;
+            if (epoch !== null && epoch !== event.serverEpoch) {
+              const sessions = yield* request(WS_METHODS.previewList, { threadId: ref.threadId });
+              reconcilePreviewServerSessions(ref, sessions);
+            }
+            applyPreviewServerEvent(ref, event);
           }
-          applyPreviewServerEvent(ref, event);
           if ("snapshot" in event) void recordServerBrowserHandoff(ref, event.snapshot);
           else if (event.type === "closed") forgetServerBrowserHandoff(ref, event.tabId);
         }),
@@ -75,8 +85,14 @@ const previewEvents = createEnvironmentSubscriptionAtomFamily(connectionAtomRunt
     ),
 });
 
-function PreviewEventsRelay({ environmentId }: { environmentId: EnvironmentId }) {
-  useAtomMount(previewEvents({ environmentId, input: { environmentId } }));
+function PreviewEventsRelay({
+  environmentId,
+  applyEvents,
+}: {
+  environmentId: EnvironmentId;
+  applyEvents: boolean;
+}) {
+  useAtomMount(previewEvents({ environmentId, input: { environmentId, applyEvents } }));
   return null;
 }
 
@@ -116,7 +132,11 @@ export function DesktopCdpRelay() {
   return (
     <>
       {environments.map((environmentId) => (
-        <PreviewEventsRelay key={environmentId} environmentId={environmentId} />
+        <PreviewEventsRelay
+          key={environmentId}
+          environmentId={environmentId}
+          applyEvents={environmentId !== primaryEnvironmentId}
+        />
       ))}
       {environments
         .filter((id) => id !== primaryEnvironmentId)

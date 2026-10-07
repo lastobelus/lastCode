@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { AuthFilesystemReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -1900,7 +1901,7 @@ function ChatMarkdownDirectMedia(
   useEffect(() => {
     if (!needsPreparation || !props.threadRef) return;
     let cancelled = false;
-    void prepareHostedPreview(props.threadRef, props.src).then(
+    void prepareHostedPreview(props.threadRef, props.src, "resource").then(
       (result) => {
         if (!cancelled) setPrepared({ key: requestKey, url: result.url, failed: false });
       },
@@ -2690,7 +2691,13 @@ function useChatMarkdownState({
       void (async () => {
         const preparedSource =
           threadRef && resolveExternalWebLinkHost(source) !== null
-            ? (await prepareHostedPreview(threadRef, resolveProtocolRelativeMediaUrl(source))).url
+            ? (
+                await prepareHostedPreview(
+                  threadRef,
+                  resolveProtocolRelativeMediaUrl(source),
+                  "resource",
+                )
+              ).url
             : source;
         return resolveMarkdownMediaPreview({
           source: preparedSource,
@@ -2906,7 +2913,8 @@ function useChatMarkdownState({
     [canOperatePreview, openPreview, threadRef],
   );
   const prepareExternalMarkdownUrl = useCallback(
-    async (url: string) => (threadRef ? (await prepareHostedPreview(threadRef, url)).url : url),
+    async (url: string) =>
+      threadRef ? hostedPreviewNavigationUrl(await prepareHostedPreview(threadRef, url)) : url,
     [threadRef],
   );
   const openMarkdownFileInPreview = useCallback(

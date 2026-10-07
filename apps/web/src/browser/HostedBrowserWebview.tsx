@@ -27,6 +27,10 @@ import { resolveHostedBrowserWebviewWrapperStyle } from "./hostedBrowserWebviewS
 import { usePreviewWebviewConfig } from "./previewWebviewConfigState";
 import { useBrowserViewportResize } from "./useBrowserViewportResize";
 import {
+  createDesktopBrowserSurfaceLeaseController,
+  waitForDesktopBrowserSurface,
+} from "./desktopBrowserSurfaceLease";
+import {
   INITIAL_WEBVIEW_CRASH_RECOVERY_STATE,
   planWebviewCrashRecovery,
   type WebviewCrashRecoveryState,
@@ -152,6 +156,30 @@ export function HostedBrowserWebview(props: {
   const [webviewGeneration, setWebviewGeneration] = useState(0);
   const [recoverySrc, setRecoverySrc] = useState(initialSrc);
   const latestUrlRef = useRef(initialUrl);
+
+  useEffect(() => {
+    const bridge = window.desktopBridge?.preview;
+    if (!bridge || !serverDriven) return;
+    const controller = createDesktopBrowserSurfaceLeaseController({
+      runtimeTabId,
+      ready: (request, signal) =>
+        waitForDesktopBrowserSurface({
+          request,
+          signal,
+          wrapper: () => wrapperRef.current,
+          guest: () => webviewRef.current,
+        }),
+      respond: (response) => {
+        void bridge.browserSurfaceResponse(response).catch(() => undefined);
+      },
+    });
+    const unsubscribe = bridge.onBrowserSurfaceRequest(controller.handle);
+    return () => {
+      unsubscribe();
+      controller.dispose();
+    };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A replaced guest must relinquish its activity leases.
+  }, [runtimeTabId, serverDriven, webviewGeneration]);
 
   useEffect(() => {
     latestUrlRef.current = initialUrl;
