@@ -14,6 +14,21 @@ to `docs/lastcode/nightly-workflow.md#carry-replay-ownership`, including the
 actual upstream PR and pinned head, before review. Leave the upstream source
 history unchanged.
 
+## Keep Upstream References Quiet
+
+Preserve the upstream repository and PR or issue number, plus any existing
+pinned SHA or other hash, in the LastCode PR body and in every imported or
+adapted commit message that carries the provenance, including the final squash
+message. Use
+`https://redirect.github.com/<owner>/<repo>/pull/<number>` (or
+`/issues/<number>`) for published cross-repository links. Ordinary GitHub
+links and `owner/repo#number` shorthand create backlinks; replaying downstream
+commits during checkpoint rebases repeats those entries and can spam the
+upstream PR. Use the canonical GitHub URL returned by the API or `gh` for
+fetching, inspection, and other tool targets; the quiet URL is for published
+provenance. Do not rewrite existing historical commits or immutable checkpoint
+tags solely to change links.
+
 ## Establish the Boundary
 
 1. Read the repository `AGENTS.md` and `docs/lastcode/fork-conventions.md`.
@@ -26,9 +41,9 @@ history unchanged.
 
 ## Pin and Inspect the Candidate
 
-1. Capture the upstream PR URL, state, observed date, title, author, base, exact
-   `headRefOid`, ordered commits, changed files, checks, reviews, review threads,
-   linked issues, and closure reason when closed.
+1. Capture the canonical upstream PR URL, state, observed date, title, author,
+   base, exact `headRefOid`, ordered commits, changed files, checks, reviews,
+   review threads, linked issues, and closure reason when closed.
 2. Force-fetch `pull/<number>/head` into a dedicated remote-tracking ref so a
    previously cached ref cannot reject a legitimate upstream force-push.
    Require the fetched SHA to equal the captured `headRefOid`. Never import a
@@ -75,8 +90,8 @@ Record the adoption decision. Upstream CI is supporting evidence only.
 3. Do not merge the upstream PR branch; that drags its base history into
    LastCode.
 4. If the stack does not fit current LastCode, reimplement only the coherent
-   behavior and record the upstream PR URL, pinned SHA, and why cherry-pick was
-   unsuitable.
+   behavior and record the quiet upstream PR link, pinned SHA, and why
+   cherry-pick was unsuitable.
 
 Classify integration honestly:
 
@@ -148,8 +163,8 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
   and port only the desired delta.
 - If upstream closes unmerged, retain or remove the behavior according to
   LastCode's product decision, not the state transition alone.
-- Preserve the upstream URL and pinned SHA in the LastCode PR so future sync work
-  can explain the source.
+- Preserve the quiet upstream link and pinned SHA in the LastCode PR so future
+  sync work can explain the source.
 
 ## Handoff
 

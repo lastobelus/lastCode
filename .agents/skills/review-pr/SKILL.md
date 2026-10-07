@@ -26,6 +26,19 @@ Review and improve an existing GitHub PR.
   fixes.
 - Do not simulate external reviews.
 
+## Keep Upstream References Quiet
+
+When the PR carries an upstream PR or issue, require the PR body and any new
+fix or squash commit message to preserve the upstream repository and number,
+plus any existing pinned SHA or other hash, with a quiet link:
+`https://redirect.github.com/<owner>/<repo>/pull/<number>` (or `/issues/<number>`).
+Ordinary GitHub links and `owner/repo#number` shorthand create backlinks;
+checkpoint rebases can replay those entries and spam the upstream PR. Keep
+canonical GitHub URLs for API and `gh` targets and Git operations. Do not
+rewrite existing historical commits or immutable checkpoint tags solely to
+change links; ensure new review changes and the current PR body follow this
+rule.
+
 ## PR Resolution
 
 Collect:

@@ -92,7 +92,7 @@ function prepareBootstrap(repo: string): {
     [
       "Carry-Group: resumable-actions",
       "Carry-Fix: lastcode#actions",
-      "Carry-Upstream: https://example.invalid/upstream/actions@abc123",
+      "Carry-Upstream: https://github.com/example/upstream/pull/42",
       "Carry-Observation: recovery keeps the resolved action state",
       "Carry-Evidence: fixture://rename-delete",
       "Carry-Applies-To: upstream-a",
@@ -409,6 +409,10 @@ describe("carry replay core", () => {
       const actions = groups.find(({ group }) => group === "resumable-actions");
       const sidebar = groups.find(({ group }) => group === "legacy-sidebar");
       assert.equal(actions?.contributions[0]?.metadata["Carry-Fix"][0], "lastcode#actions");
+      assert.equal(actions?.contributions[0]?.sourceCommit, bootstrap.partition);
+      assert.deepStrictEqual(actions?.contributions[0]?.metadata["Carry-Upstream"], [
+        "https://redirect.github.com/example/upstream/pull/42",
+      ]);
       assert.equal(
         actions?.contributions[0]?.metadata["Carry-Supersedes"][0],
         "lastcode#older-actions",
@@ -425,6 +429,8 @@ describe("carry replay core", () => {
         0,
       );
       assert.equal(readCarryReplayPlan(repo)?.status, "complete");
+      assert.equal(readCarryReplayPlan(repo)?.resultHead, result.head);
+      assert.equal(completeCarryReplay(repo).head, result.head);
     } finally {
       cleanup();
     }
