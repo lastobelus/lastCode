@@ -225,12 +225,16 @@ before making it; upstream ancestry alone cannot prove this after a rebase.
 Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
 nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
-immutable tag and promotes main together with an atomic push leased against the
-selected source commit. Open PRs do not block publication or promotion. A merge
-arriving during validation makes the atomic push fail without publishing the tag
-or changing main. Selected recovery cannot disable validation or
-be automatically superseded. A changed head or source requires inspection and
-selection again. Failed validation retains the worktree and selection.
+immutable tag and source ref, then promotes main with a lease against the selected
+source commit. Open PRs do not block publication or promotion. Merges made after
+selection or during validation do not invalidate it: the tag still publishes,
+promotion waits, and the next run publishes a revision replaying those merges
+onto the repaired tag. Failure to acquire the promotion lock still fails the run
+after tag publication and requires inspection before retrying. Build that tag
+right away; the revision follows. Selected recovery cannot disable validation or
+be automatically superseded. A changed head,
+or a main that no longer descends from the selected source, requires inspection
+and selection again. Failed validation retains the worktree and selection.
 
 Use **Wait for Checkpoint** immediately after requesting the service run, and
 end the turn. After publication, use **Build Local Package** on the exact new

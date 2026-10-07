@@ -92,7 +92,7 @@ function publicationFixture(): {
 }
 
 describe("checkpoint recovery selection", () => {
-  it("atomically publishes the repaired tag and promotes its exact head", () => {
+  it("publishes the repaired tag with its source and leaves main to promotion", () => {
     const { remote, repository, selection, tag } = publicationFixture();
     const result = NodeChildProcess.spawnSync(
       "git",
@@ -101,14 +101,14 @@ describe("checkpoint recovery selection", () => {
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(git(remote, ["rev-parse", "refs/heads/lastcode/main"])).toBe(selection.head);
+    expect(git(remote, ["rev-parse", "refs/heads/lastcode/main"])).toBe(selection.sourceCommit);
     expect(git(remote, ["rev-parse", `${tag}^{commit}`])).toBe(selection.head);
     expect(git(remote, ["rev-parse", `refs/lastcode/sources/${NIGHTLY_TAG}^{commit}`])).toBe(
       selection.sourceCommit,
     );
   });
 
-  it("publishes neither ref when main advanced beyond the selected source", () => {
+  it("publishes the repaired tag even when main advanced beyond the selected source", () => {
     const { remote, repository, selection, tag } = publicationFixture();
     git(repository, ["checkout", "source"]);
     NodeFS.writeFileSync(NodePath.join(repository, "advanced.txt"), "new main work\n");
@@ -122,22 +122,13 @@ describe("checkpoint recovery selection", () => {
       recoveryPublicationArgs("origin", tag, selection),
       { cwd: repository, encoding: "utf8" },
     );
-    const remoteTag = NodeChildProcess.spawnSync(
-      "git",
-      ["--git-dir", remote, "rev-parse", "--verify", `refs/tags/${tag}`],
-      { encoding: "utf8" },
-    );
-    const remoteSource = NodeChildProcess.spawnSync(
-      "git",
-      ["--git-dir", remote, "rev-parse", "--verify", `refs/lastcode/sources/${NIGHTLY_TAG}`],
-      { encoding: "utf8" },
-    );
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("stale info");
+    expect(result.status, result.stderr).toBe(0);
     expect(git(remote, ["rev-parse", "refs/heads/lastcode/main"])).toBe(advanced);
-    expect(remoteTag.status).not.toBe(0);
-    expect(remoteSource.status).not.toBe(0);
+    expect(git(remote, ["rev-parse", `${tag}^{commit}`])).toBe(selection.head);
+    expect(git(remote, ["rev-parse", `refs/lastcode/sources/${NIGHTLY_TAG}^{commit}`])).toBe(
+      selection.sourceCommit,
+    );
   });
 
   it("reconciles a published recovery revision after an interrupted service run", () => {

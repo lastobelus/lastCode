@@ -107,16 +107,25 @@ promotion. Feature branches may remain open while daily updates advance.
 
 Each candidate is prepared from a pinned `lastcode/main` source commit.
 Promotion uses that incorporated source as its exact `--force-with-lease`
-value, rather than adopting a newer remote head at publication time. A merge
-arriving during preparation therefore rejects promotion instead of being
-replaced by a candidate that omitted it. A later run recomputes from the new
-source, including the merged work.
+value, rather than adopting a newer remote head at publication time. When a
+merge advances main during the run, the validated tag still publishes and
+promotion is deferred instead of failing the run. The merge's own service request
+then publishes a revision that replays the
+merged work onto that tag and promotes it; a newer lease alone never makes a
+stale candidate safe.
+
+Deferral requires current main to descend from the candidate's pinned source.
+A rewrite that drops that source still fails promotion after tag publication;
+inspect the new history before retrying.
+
+Lock acquisition failures still fail the run after the tag publishes. The lock
+ref cannot prove its writer is active, so contention, abandoned locks, and
+authentication or transport errors must remain visible to maintenance. Once
+the lock is available, a later run can promote the published tag or its revision.
 
 Checkpoint metadata records the exact source as `Source-Commit`. If publication
-succeeds but promotion fails while the source remains unchanged, a later run
-retries the published candidate. If main has moved, the run incorporates the
-new source before promotion; a newer lease alone cannot make a stale candidate
-safe. Immutable publication may succeed before promotion is rejected.
+succeeds but promotion does not happen while the source remains unchanged, a
+later run promotes the published candidate.
 
 Open PRs must obtain fresh validation against the current base before merging.
 After a checkpoint changes `lastcode/main`, refresh the PR branch as needed and
@@ -257,12 +266,14 @@ that transition. No application restart is required.
 
 ### Failure recovery
 
-Selected repaired-checkpoint publication also pins the source revision and
-atomically publishes with a lease against that incorporated source. Open PRs
-are irrelevant to this check. If main changes after recovery selection, the
-publication is rejected and the recovery worktree is retained. Inspect the new
-source and select recovery again so the repair includes current merged work;
-do not retry a stale selection with an updated lease alone.
+Selected repaired-checkpoint publication also pins the source revision. Merges
+after selection follow the same deferred-promotion path as ordinary candidates,
+so a repair never needs reselecting just because work merged. Only a main that
+no longer descends from the selected source (for example, after another
+promotion rewrote it) rejects the selection and retains the recovery worktree.
+The repair and selection are released only after promotion succeeds or verifies
+a descendant main update. A promotion failure retains both for inspection and
+retry without republishing the immutable tag.
 
 Before following any recovery cleanup printed by a status report, verify the
 current daemon state and ownership of the retained worktree. Preserve active
