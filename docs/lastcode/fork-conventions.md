@@ -311,11 +311,13 @@ Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
 promotion to `lastcode/main`. The daemon publishes immutable LastCode revisions
 for merged work and repairs missed merge triggers on later runs. Candidates pin
 the source they incorporate, and promotion leases against that source so a
-concurrent merge cannot be overwritten. A merge during a run never blocks it:
+concurrent merge cannot be overwritten. When a merge advances main during a run,
 the validated tag still publishes, promotion waits, and the merge's service
 request publishes a revision that replays the merge onto that tag. PRs whose
 base changes need fresh validation against the current base before merging,
-even when their head is unchanged.
+even when their head is unchanged. Failure to acquire the promotion lock still
+fails the run after tag publication, so abandoned locks and connection failures
+remain visible and can be repaired before retrying promotion.
 
 ### Inspect a specific pull request
 

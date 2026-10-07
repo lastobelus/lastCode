@@ -1804,16 +1804,9 @@ function promoteCheckpoint(
   validated: boolean,
 ): void {
   if (options.promotion === "never") return;
-  let lock: ReturnType<typeof acquireMainWriteLock>;
-  try {
-    lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
-  } catch (error) {
-    // A guarded merge holds this lock while it writes main and then requests another run.
-    console.log(
-      `[lastcode:checkpoint] Another writer holds the LastCode main write lock; leaving promotion to the next run.\n${error instanceof Error ? error.message : String(error)}`,
-    );
-    return;
-  }
+  // The lock ref does not prove its writer is still active. Propagate acquisition failures
+  // so an abandoned lock or transport failure cannot silently leave main behind the tag.
+  const lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
   try {
     git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
     const expected = git(repoRoot, [

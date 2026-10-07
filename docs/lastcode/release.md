@@ -229,8 +229,10 @@ immutable tag and source ref, then promotes main with a lease against the select
 source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
 promotion waits, and the next run publishes a revision replaying those merges
-onto the repaired tag. Build that tag right away; the revision follows. Selected
-recovery cannot disable validation or be automatically superseded. A changed head,
+onto the repaired tag. Failure to acquire the promotion lock still fails the run
+after tag publication and requires inspection before retrying. Build that tag
+right away; the revision follows. Selected recovery cannot disable validation or
+be automatically superseded. A changed head,
 or a main that no longer descends from the selected source, requires inspection
 and selection again. Failed validation retains the worktree and selection.
 

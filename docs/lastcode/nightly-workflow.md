@@ -108,11 +108,16 @@ promotion. Feature branches may remain open while daily updates advance.
 Each candidate is prepared from a pinned `lastcode/main` source commit.
 Promotion uses that incorporated source as its exact `--force-with-lease`
 value, rather than adopting a newer remote head at publication time. When a
-merge lands during the run, or a guarded merge holds the main write lock, the
-validated tag still publishes and promotion is deferred instead of failing the
+merge advances main during the run, the validated tag still publishes and
+promotion is deferred instead of failing the
 run. The merge's own service request then publishes a revision that replays the
 merged work onto that tag and promotes it; a newer lease alone never makes a
 stale candidate safe.
+
+Lock acquisition failures still fail the run after the tag publishes. The lock
+ref cannot prove its writer is active, so contention, abandoned locks, and
+authentication or transport errors must remain visible to maintenance. Once
+the lock is available, a later run can promote the published tag or its revision.
 
 Checkpoint metadata records the exact source as `Source-Commit`. If publication
 succeeds but promotion does not happen while the source remains unchanged, a

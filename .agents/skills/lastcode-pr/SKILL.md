@@ -80,6 +80,10 @@ while a checkpoint runs is safe: the validated tag still publishes and the
 merge's service request follows with a revision. Reselect a recovery only when
 main no longer descends from its selected source.
 
+Failure to acquire the promotion lock still fails the run after tag publication.
+Inspect its owner and the connection error before retrying; a lock ref alone
+does not prove an active merge.
+
 When `lastcode/main` advances, obtain fresh validation against the new base
 before merging. Refresh the PR branch as needed; validation from the previous
 base does not remain valid merely because the PR head is unchanged.

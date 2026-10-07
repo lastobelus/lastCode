@@ -677,14 +677,14 @@ describe("mandatory migration validation", () => {
 });
 
 describe("checkpoint publication with open PRs", () => {
-  it("publishes ordinary tags during a guarded merge and promotes safely after the merge releases its lock", () => {
+  it("publishes ordinary tags but reports an unavailable promotion lock, then promotes after release", () => {
     const { fixture, source, merged, queryMarker, environment } = historicalFixture();
     try {
       const lock = acquireMainWriteLock(fixture.repo, "origin", source, "merge");
       try {
         const result = checkpoint(fixture, ["--push-tags", "--promote"], environment);
-        assert.equal(result.status, 0, result.stderr || result.stdout);
-        assert.match(result.stdout, /Another writer holds the LastCode main write lock/u);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Could not acquire main write lock/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), source);
         assert.equal(
           remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
@@ -709,7 +709,7 @@ describe("checkpoint publication with open PRs", () => {
     }
   });
 
-  it("publishes selected recovery during a guarded merge and promotes it after the lock is released", () => {
+  it("publishes selected recovery but reports an unavailable promotion lock, then promotes after release", () => {
     const { fixture, source, queryMarker, environment } = historicalFixture(true);
     try {
       const failed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
@@ -738,8 +738,8 @@ describe("checkpoint publication with open PRs", () => {
       const lock = acquireMainWriteLock(fixture.repo, "origin", source, "merge");
       try {
         const result = checkpoint(fixture, ["--push-tags", "--promote"], environment);
-        assert.equal(result.status, 0, result.stderr || result.stdout);
-        assert.match(result.stdout, /Another writer holds the LastCode main write lock/u);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Could not acquire main write lock/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), source);
         assert.equal(remoteCommit(fixture.origin, tagRef), repaired);
         assert.equal(remoteCommit(fixture.origin, sourceRef), source);
@@ -758,6 +758,47 @@ describe("checkpoint publication with open PRs", () => {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  it.each(["Authentication failed", "Connection reset by peer", "remote rejected lock ref"])(
+    "reports lock acquisition failure after publishing the tag: %s",
+    (failure) => {
+      const { fixture, source, environment } = historicalFixture();
+      try {
+        const realGit = NodeChildProcess.execFileSync("which", ["git"], {
+          encoding: "utf8",
+        }).trim();
+        NodeFS.writeFileSync(
+          NodePath.join(fixture.root, "bin", "git"),
+          `#!/bin/sh
+if [ "$1" = push ]; then
+  case "$*" in
+    *:refs/lastcode/main-write-lock*)
+      echo "fatal: $FIXTURE_LOCK_FAILURE" >&2
+      exit 128
+      ;;
+  esac
+fi
+exec "${realGit}" "$@"
+`,
+          { mode: 0o755 },
+        );
+        const result = checkpoint(fixture, ["--push-tags", "--promote"], {
+          ...environment,
+          FIXTURE_LOCK_FAILURE: failure,
+        });
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Could not acquire main write lock/u);
+        assert.include(result.stderr, failure);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), source);
+        assert.equal(
+          remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+          false,
+        );
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("prepares the candidate from its pinned source when the tracking ref changes", () => {
     const { fixture, source, merged, environment } = historicalFixture();
