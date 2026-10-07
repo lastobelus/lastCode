@@ -2,7 +2,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { ChatFileAttachment, type ScopedThreadRef } from "@t3tools/contracts";
 import { isWindowsAbsolutePath, normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -63,7 +63,7 @@ function normalizedUrl(raw: string): string | undefined {
     const url = new URL(normalizePreviewUrl(raw));
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
     url.username = url.password = "";
-    return stripPairingTokenFromUrl(url).href;
+    return stripPreviewBootstrapTokenFromUrl(url).href;
   } catch {
     return undefined;
   }

@@ -1,4 +1,4 @@
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 /**
  * Per-thread preview UI state.
  *
@@ -145,7 +145,7 @@ function updateThreadPreviewState(
 
 const dedupeRecentUrls = (existing: string[], url: string): string[] => {
   try {
-    url = stripPairingTokenFromUrl(new URL(url)).href;
+    url = stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
   } catch {
     /* Relative input is normalized by navigation. */
   }

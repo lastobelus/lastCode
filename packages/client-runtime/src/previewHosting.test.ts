@@ -5,6 +5,7 @@ import {
   type PreviewHostingLeaseSummary,
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { getPairingTokenFromUrl, stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 
 import * as Option from "effect/Option";
 import {
@@ -38,6 +39,26 @@ const lease = {
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
+  it("preserves application reset and invite tokens while preparing and retargeting a bootstrap", async () => {
+    const destination =
+      "http://localhost:5173/reset?token=application-reset#token=application-invite";
+    const result = await prepareHostedPreview({
+      threadRef,
+      url: destination,
+      environmentUrl: "http://localhost:8080",
+      list: async () => [lease],
+      recover: async () => ({ ...lease, bootstrapToken: "issued-preview-credential" }),
+    });
+    expect(result.url).toBe(destination);
+    const navigation = new URL(result.navigationUrl!);
+    expect(getPairingTokenFromUrl(navigation)).toBe("issued-preview-credential");
+    expect(stripPreviewBootstrapTokenFromUrl(navigation).href).toBe(destination);
+    const redirected =
+      "http://127.0.0.1:5173/invite?token=other-application-code#token=other-invite";
+    const retargeted = new URL(hostedPreviewNavigationUrl(result, redirected));
+    expect(getPairingTokenFromUrl(retargeted)).toBe("issued-preview-credential");
+    expect(stripPreviewBootstrapTokenFromUrl(retargeted).href).toBe(redirected);
+  });
 
   it("reopens an old sleeping handoff with a unique credential for each navigation", async () => {
     const sleeping = { ...lease, status: "sleeping" as const };

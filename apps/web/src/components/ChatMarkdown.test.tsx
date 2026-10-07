@@ -385,7 +385,11 @@ describe("ChatMarkdown managed media links", () => {
         finish({ url: preparedUrl, managed: true, restored: true });
         await didOpen;
       });
-      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(
+        threadRef,
+        href,
+        "resource",
+      );
       expect(onImageExpand).toHaveBeenCalledExactlyOnceWith({
         index: 0,
         images: [
@@ -437,7 +441,11 @@ describe("ChatMarkdown embedded managed media", () => {
             <ChatMarkdown cwd="/workspace" text={`![report](${source})`} threadRef={threadRef} />,
           ),
         );
-        expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, source);
+        expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(
+          threadRef,
+          source,
+          "resource",
+        );
         expect(container.querySelector("img[src], video[src]")).toBeNull();
         await act(() => finish({ url: destination, managed: true, restored: true }));
         expect(container.querySelector("img[src], video[src]")?.getAttribute("src")).toBe(
@@ -459,6 +467,7 @@ describe("ChatMarkdown embedded managed media", () => {
             2,
             threadRef,
             source,
+            "resource",
           );
         }
       } finally {

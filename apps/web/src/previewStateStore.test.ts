@@ -6,7 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
-import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 import {
   __testing,
@@ -64,8 +64,9 @@ beforeEach(() => {
 });
 
 it("keeps bootstrap credentials out of recent addresses across loading and success", () => {
-  const destination = "http://localhost:5173/project?view=qa#details";
-  const navigationUrl = setPairingTokenOnUrl(new URL(destination), "one-use-secret").href;
+  const destination =
+    "http://localhost:5173/project?token=application-code&view=qa#token=invite-code";
+  const navigationUrl = setPreviewBootstrapTokenOnUrl(new URL(destination), "one-use-secret").href;
   applyPreviewServerSnapshot(
     ref,
     makeSnapshot({
@@ -81,6 +82,15 @@ it("keeps bootstrap credentials out of recent addresses across loading and succe
     }),
   );
   expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual([destination]);
+});
+it("preserves application tokens in recent preview destinations", () => {
+  const urls = [
+    "https://app.example/reset?token=first-code",
+    "https://app.example/reset?token=second-code",
+    "https://app.example/invite#token=invite-code",
+  ];
+  for (const url of urls) rememberPreviewUrl(ref, url);
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual(urls.toReversed());
 });
 
 it("drops a restarted server's desktop pages without resetting another environment", () => {

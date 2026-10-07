@@ -1,6 +1,6 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { create } from "zustand";
 import { readThreadPreviewState } from "~/previewStateStore";
 
@@ -22,9 +22,13 @@ export function requestHostedPreviewRefresh(ref: ScopedThreadRef, tabId: string,
   const snapshot = readThreadPreviewState(ref).sessions[tabId];
   const expectedUrl =
     snapshot && snapshot.navStatus._tag !== "Idle"
-      ? stripPairingTokenFromUrl(new URL(snapshot.navStatus.url)).href
+      ? stripPreviewBootstrapTokenFromUrl(new URL(snapshot.navStatus.url)).href
       : null;
-  const request = { id: ++sequence, url: stripPairingTokenFromUrl(new URL(url)).href, expectedUrl };
+  const request = {
+    id: ++sequence,
+    url: stripPreviewBootstrapTokenFromUrl(new URL(url)).href,
+    expectedUrl,
+  };
   useRequests.setState((state) => ({
     requests: { ...state.requests, [keyFor(ref, tabId)]: request },
   }));

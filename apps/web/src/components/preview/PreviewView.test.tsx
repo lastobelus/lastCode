@@ -532,7 +532,7 @@ describe("PreviewView navigation", () => {
       const { createRoot } = await import("react-dom/client");
       const root = createRoot(document.createElement("div") as unknown as Element);
       mocks.serverRuntime = true;
-      const original = "http://localhost:5173/qa";
+      const original = "http://localhost:5173/qa?token=application-reset#token=application-invite";
       mocks.navStatus = { _tag: "Success", url: original, title: "QA" };
       mocks.recoverHostedPreview.mockResolvedValue(true);
       const requestId = requestHostedPreviewRefresh(TEST_THREAD_REF, "tab-1", original);

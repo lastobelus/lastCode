@@ -8,7 +8,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "@t3tools/shared/remote";
+import { getPairingTokenFromUrl, setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 import {
   isLocalLoopbackHost,
   isPrivateNetworkHost,
@@ -88,7 +88,7 @@ export function hostedPreviewNavigationUrl(
   const token = prepared.navigationUrl
     ? getPairingTokenFromUrl(new URL(prepared.navigationUrl))
     : null;
-  return token ? setPairingTokenOnUrl(new URL(destination), token).href : destination;
+  return token ? setPreviewBootstrapTokenOnUrl(new URL(destination), token).href : destination;
 }
 
 const inFlightListings = new Map<string, Promise<ReadonlyArray<PreviewHostingLeaseSummary>>>();
@@ -192,7 +192,7 @@ export function prepareHostedPreview(
     if (recovered === null) throw new HostedPreviewRecoveryError();
     const navigationUrl =
       input.purpose !== "resource" && recovered.bootstrapToken
-        ? setPairingTokenOnUrl(new URL(destination), recovered.bootstrapToken).href
+        ? setPreviewBootstrapTokenOnUrl(new URL(destination), recovered.bootstrapToken).href
         : undefined;
     if (navigationUrl !== undefined && navigationUrl.length > PREVIEW_URL_MAX_LENGTH)
       throw new HostedPreviewUrlTooLongError();

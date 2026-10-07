@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 const PAIRING_TOKEN_PARAM = "token";
+const PREVIEW_RETURN_HASH_PARAM = "t3-preview-return-hash";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
@@ -152,6 +153,8 @@ export const getPairingTokenFromUrl = (url: URL): string | null => {
 };
 
 export const stripPairingTokenFromUrl = (url: URL): URL => {
+  const previewDestination = stripPreviewBootstrapTokenFromUrl(url);
+  if (previewDestination.href !== url.href) return previewDestination;
   const next = new URL(url.toString());
   const hashParams = readHashParams(next);
   if (hashParams.has(PAIRING_TOKEN_PARAM)) {
@@ -161,6 +164,31 @@ export const stripPairingTokenFromUrl = (url: URL): URL => {
     next.hash = returnHash ?? hashParams.toString();
   }
   next.searchParams.delete(PAIRING_TOKEN_PARAM);
+  return next;
+};
+
+/** Only the explicit preview bootstrap envelope owns its token; application tokens survive. */
+export const stripPreviewBootstrapTokenFromUrl = (url: URL): URL => {
+  const next = new URL(url.href);
+  const params = readHashParams(next);
+  const returnHash = params.get(PREVIEW_RETURN_HASH_PARAM);
+  if (
+    params.has(PAIRING_TOKEN_PARAM) &&
+    returnHash !== null &&
+    (returnHash === "" || returnHash.startsWith("#"))
+  ) {
+    next.hash = returnHash;
+  }
+  return next;
+};
+
+/** Wrap a destination without taking ownership of its query or fragment parameters. */
+export const setPreviewBootstrapTokenOnUrl = (url: URL, credential: string): URL => {
+  const next = stripPreviewBootstrapTokenFromUrl(url);
+  next.hash = new URLSearchParams([
+    [PAIRING_TOKEN_PARAM, credential],
+    [PREVIEW_RETURN_HASH_PARAM, next.hash],
+  ]).toString();
   return next;
 };
 

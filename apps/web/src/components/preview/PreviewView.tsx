@@ -29,7 +29,7 @@ import {
   type PreviewAdjustInput,
 } from "@t3tools/contracts";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -453,7 +453,7 @@ export function PreviewView({
     if (
       requestedHostedRefresh?.expectedUrl &&
       tabId &&
-      stripPairingTokenFromUrl(new URL(url)).href !== requestedHostedRefresh.expectedUrl
+      stripPreviewBootstrapTokenFromUrl(new URL(url)).href !== requestedHostedRefresh.expectedUrl
     ) {
       completeHostedPreviewRefresh(
         { environmentId: hostingEnvironmentId, threadId: hostingThreadId },

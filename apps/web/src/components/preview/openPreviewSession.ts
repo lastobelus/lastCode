@@ -1,4 +1,4 @@
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   EnvironmentId,
@@ -78,7 +78,7 @@ export async function openPreviewSession<E>(
       input.threadRef,
       snapshot.navStatus._tag === "Idle"
         ? input.url
-        : stripPairingTokenFromUrl(new URL(snapshot.navStatus.url)).href,
+        : stripPreviewBootstrapTokenFromUrl(new URL(snapshot.navStatus.url)).href,
     );
   }
   return result;
