@@ -2630,7 +2630,11 @@ export const CursorAdapterV2Driver: ProviderAdapterDriver<
           ...input.config,
           enabled: input.enabled,
         },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         fileSystem,
         path,
         idAllocator,
@@ -2673,7 +2677,11 @@ const layer: Layer.Layer<
     return makeCursorAdapterV2({
       instanceId: CURSOR_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_CURSOR_SETTINGS,
-      environment: hostEnvironment,
+      environment: mergeProviderInstanceEnvironment(
+        undefined,
+        hostEnvironment,
+        serverConfig.settingsPath,
+      ),
       fileSystem,
       path,
       idAllocator,
