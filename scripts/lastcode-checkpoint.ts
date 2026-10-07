@@ -2391,8 +2391,12 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       throw new Error(
         "Published recovery is not represented on main; inspect before releasing it.",
       );
-    if (!options.dryRun)
+    if (!options.dryRun) {
+      if (!isAncestor(repoRoot, selection.head, sourceCommit)) {
+        promoteCheckpoint(repoRoot, selection.head, options, selection.sourceCommit, true);
+      }
       releasePublishedRecovery(repoRoot, automationWorktree(), selectionPath, selection);
+    }
     console.log(
       "[lastcode:checkpoint] Selected recovery was already published; released its retained worktree. Run the service again to continue.",
     );
@@ -2585,7 +2589,6 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         sourceObjectRef: sourceObjectRef(publishedTag),
         sourceCommit: selection.sourceCommit,
       });
-      releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
       shadowTag = publishedTag;
     } catch (error) {
       if (pendingTag) deleteCheckpointTag(repoRoot, pendingTag);
@@ -2624,14 +2627,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     }
     const repairedSelection = selection;
     runPromotionThenShadow(
-      () =>
+      () => {
         promoteCheckpoint(
           repoRoot,
           repairedSelection.head,
           options,
           repairedSelection.sourceCommit,
           true,
-        ),
+        );
+        releasePublishedRecovery(repoRoot, worktree, selectionPath, repairedSelection);
+      },
       () =>
         runHistoricalShadowIfNeeded(repoRoot, shadowTag, replay, (record) =>
           appendCheckpointRunForOptions(options, record),

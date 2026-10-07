@@ -735,7 +735,9 @@ describe("checkpoint publication with open PRs", () => {
       );
       const tagRef = `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`;
       const sourceRef = `refs/lastcode/sources/${NIGHTLY_B}`;
+      const selectionContents = NodeFS.readFileSync(selectionPath, "utf8");
       const lock = acquireMainWriteLock(fixture.repo, "origin", source, "merge");
+      let publishedTag = "";
       try {
         const result = checkpoint(fixture, ["--push-tags", "--promote"], environment);
         assert.notEqual(result.status, 0);
@@ -743,8 +745,10 @@ describe("checkpoint publication with open PRs", () => {
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), source);
         assert.equal(remoteCommit(fixture.origin, tagRef), repaired);
         assert.equal(remoteCommit(fixture.origin, sourceRef), source);
-        assert.equal(NodeFS.existsSync(retained), false);
-        assert.equal(NodeFS.existsSync(selectionPath), false);
+        publishedTag = git(fixture.origin, ["rev-parse", tagRef]);
+        assert.equal(NodeFS.existsSync(retained), true);
+        assert.equal(git(retained, ["rev-parse", "HEAD"]), repaired);
+        assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selectionContents);
       } finally {
         lock.release();
       }
@@ -753,6 +757,10 @@ describe("checkpoint publication with open PRs", () => {
       assert.equal(retry.status, 0, retry.stderr || retry.stdout);
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), repaired);
       assert.equal(remoteCommit(fixture.origin, tagRef), repaired);
+      assert.equal(git(fixture.origin, ["rev-parse", tagRef]), publishedTag);
+      assert.equal(NodeFS.existsSync(retained), false);
+      assert.equal(NodeFS.existsSync(selectionPath), false);
+      assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
       assert.equal(NodeFS.existsSync(queryMarker), false, "recovery must not query the PR queue");
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
@@ -931,6 +939,114 @@ exec "$FIXTURE_REAL_GIT" "$@"
         assert.notMatch(result.stdout, /leaving promotion to the next run/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), rewritten);
         assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["smoke", "push"] as const)(
+    "retains selected recovery after main is rewritten during %s and promotes it after main is restored",
+    (phase) => {
+      const { fixture, source, queryMarker, environment, raceEnvironment } =
+        historicalFixture(true);
+      try {
+        const failed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
+        assert.notEqual(failed.status, 0);
+        const retained = recoveryWorktree(fixture.repo);
+        assert.equal(NodeFS.existsSync(retained), true, failed.stderr || failed.stdout);
+        write(retained, "downstream.txt", "upstream behavior\ndownstream behavior\n");
+        git(retained, ["add", "downstream.txt"]);
+        NodeChildProcess.execFileSync("git", ["rebase", "--continue"], {
+          cwd: retained,
+          env: { ...process.env, GIT_EDITOR: "true" },
+        });
+        const repaired = git(retained, ["rev-parse", "HEAD"]);
+        const selected = checkpoint(
+          fixture,
+          ["--no-fetch", "--select-recovery", repaired, "--recovery-source", source],
+          environment,
+        );
+        assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+        const selectionPath = NodePath.join(
+          git(fixture.repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+          "lastcode-recovery-selection.json",
+        );
+        const selectionContents = NodeFS.readFileSync(selectionPath, "utf8");
+        const rewritten = git(
+          fixture.origin,
+          [
+            "-c",
+            "user.name=Carry lifecycle test",
+            "-c",
+            "user.email=carry-lifecycle@localhost",
+            "commit-tree",
+            git(fixture.origin, ["rev-parse", `${source}^{tree}`]),
+            "-F",
+            "-",
+          ],
+          "Rewritten main with unrelated history\n",
+        );
+        assert.notEqual(gitResult(fixture.repo, ["cat-file", "-e", rewritten]).status, 0);
+        const result = checkpoint(fixture, ["--push-tags", "--promote"], {
+          ...raceEnvironment,
+          FIXTURE_MERGE_PHASE: phase,
+          FIXTURE_MERGE_COMMIT: rewritten,
+        });
+        assert.equal(NodeFS.existsSync(raceEnvironment.FIXTURE_MERGE_MARKER), true);
+        assert.notEqual(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stderr, /refusing stale promotion/u);
+        const tagRef = `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`;
+        const sourceRef = `refs/lastcode/sources/${NIGHTLY_B}`;
+        assert.equal(remoteCommit(fixture.origin, tagRef), repaired);
+        assert.equal(remoteCommit(fixture.origin, sourceRef), source);
+        const publishedRefs = git(fixture.origin, [
+          "for-each-ref",
+          "--format=%(refname) %(objectname)",
+          "refs/tags/lastcode/checkpoint/",
+          "refs/lastcode/sources/",
+        ]);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), rewritten);
+        assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+        assert.equal(NodeFS.existsSync(retained), true);
+        assert.equal(git(retained, ["rev-parse", "HEAD"]), repaired);
+        assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selectionContents);
+
+        const blockedRetry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
+        assert.notEqual(blockedRetry.status, 0, blockedRetry.stderr || blockedRetry.stdout);
+        assert.match(blockedRetry.stderr, /Published recovery is not represented on main/u);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), rewritten);
+        assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+        assert.equal(NodeFS.existsSync(retained), true);
+        assert.equal(git(retained, ["rev-parse", "HEAD"]), repaired);
+        assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selectionContents);
+        assert.equal(
+          git(fixture.origin, [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/tags/lastcode/checkpoint/",
+            "refs/lastcode/sources/",
+          ]),
+          publishedRefs,
+        );
+
+        git(fixture.origin, ["update-ref", "refs/heads/lastcode/main", source, rewritten]);
+        const retry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
+        assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), repaired);
+        assert.equal(
+          git(fixture.origin, [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/tags/lastcode/checkpoint/",
+            "refs/lastcode/sources/",
+          ]),
+          publishedRefs,
+        );
+        assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+        assert.equal(NodeFS.existsSync(retained), false);
+        assert.equal(NodeFS.existsSync(selectionPath), false);
+        assert.equal(NodeFS.existsSync(queryMarker), false, "recovery must not query the PR queue");
       } finally {
         NodeFS.rmSync(fixture.root, { recursive: true, force: true });
       }

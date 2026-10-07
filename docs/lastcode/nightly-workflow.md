@@ -271,6 +271,9 @@ after selection follow the same deferred-promotion path as ordinary candidates,
 so a repair never needs reselecting just because work merged. Only a main that
 no longer descends from the selected source (for example, after another
 promotion rewrote it) rejects the selection and retains the recovery worktree.
+The repair and selection are released only after promotion succeeds or verifies
+a descendant main update. A promotion failure retains both for inspection and
+retry without republishing the immutable tag.
 
 Before following any recovery cleanup printed by a status report, verify the
 current daemon state and ownership of the retained worktree. Preserve active
