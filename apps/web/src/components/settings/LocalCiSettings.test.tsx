@@ -1,4 +1,9 @@
-import { DEFAULT_SERVER_SETTINGS, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthSettingsWriteScope,
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  type AuthEnvironmentScope,
+} from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -28,6 +33,18 @@ const state = vi.hoisted(() => ({
 
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: state.environments }),
+  usePrimaryEnvironmentId: () => state.environments[0]?.environmentId ?? null,
+}));
+vi.mock("../../state/session", () => ({
+  useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
+    id !== null && scope === AuthSettingsWriteScope,
+  useEnvironmentsWithScope: (
+    environments: readonly { environmentId: EnvironmentId }[],
+    scope: AuthEnvironmentScope,
+  ) =>
+    new Set(
+      scope === AuthSettingsWriteScope ? environments.map((entry) => entry.environmentId) : [],
+    ),
 }));
 vi.mock("../../hooks/useSettings", () => ({
   usePrimarySettingsAvailable: () => true,
