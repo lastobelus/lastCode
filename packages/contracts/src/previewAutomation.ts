@@ -9,6 +9,7 @@ import {
   PreviewViewportSetting,
   PreviewViewportSize,
 } from "./preview.ts";
+import { BrowserProfile, BrowserProfileId, BrowserProfileName } from "./browserProfile.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 const BoundedUrl = Schema.String.check(Schema.isTrimmed())
@@ -38,11 +39,18 @@ export const PREVIEW_AUTOMATION_V1_OPERATIONS = [
   "recordingStop",
 ] as const;
 
-/** Advertised by current desktop hosts for mixed-version routing. */
-export const PREVIEW_AUTOMATION_OPERATIONS = [
+/** Stable advertisement accepted by protocol-2 servers' closed host-operation enum. */
+export const PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS = [
   ...PREVIEW_AUTOMATION_V1_OPERATIONS,
   "resize",
   "setColorScheme",
+] as const;
+
+/** All request operations. Profile operations are negotiated separately on the host. */
+const PREVIEW_AUTOMATION_OPERATIONS = [
+  ...PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS,
+  "profiles",
+  "openWithProfile",
 ] as const;
 
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_OPERATIONS);
@@ -63,6 +71,12 @@ const PreviewAutomationTabTargetFields = {
 export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTabTargetFields);
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
 
+export const PreviewAutomationProfiles = Schema.Struct({
+  profiles: Schema.Array(BrowserProfile),
+  defaultProfileId: BrowserProfileId,
+});
+export type PreviewAutomationProfiles = typeof PreviewAutomationProfiles.Type;
+
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
   visible: Schema.Boolean,
@@ -70,6 +84,10 @@ export const PreviewAutomationStatus = Schema.Struct({
   url: Schema.NullOr(Schema.String),
   title: Schema.NullOr(Schema.String),
   loading: Schema.Boolean,
+  /** Renderer-owned metadata; absent on desktop hosts predating profile selection. */
+  profileId: Schema.optional(Schema.NullOr(BrowserProfileId)),
+  /** Null when there is no tab or its profile has since been deleted. */
+  profileName: Schema.optional(Schema.NullOr(BrowserProfileName)),
   /** Optional for compatibility with desktop hosts predating viewport sizing. */
   viewportSetting: Schema.optional(PreviewViewportSetting),
   /** Measured guest-page viewport in CSS pixels when a webview is ready. */
@@ -79,6 +97,14 @@ export type PreviewAutomationStatus = typeof PreviewAutomationStatus.Type;
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  profileId: Schema.optional(BrowserProfileId).annotate({
+    description:
+      "Existing desktop browser profile ID from preview_profiles. Mutually exclusive with profileName. Omit both to use the configured default for new tabs; reused tabs retain their profile.",
+  }),
+  profileName: Schema.optional(BrowserProfileName).annotate({
+    description:
+      "Exact, case-sensitive existing profile name from preview_profiles. Mutually exclusive with profileId. Unknown or duplicate names fail; use profileId to disambiguate.",
+  }),
   url: Schema.optional(BoundedUrl).annotate({
     description: `Optional initial page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,
   }),
@@ -97,10 +123,18 @@ export const PreviewAutomationOpenInput = Schema.Struct({
   reuseExistingTab: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab.",
+        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab. An explicit profile mismatch creates a new tab when tabId is omitted; an exact tabId mismatch fails. Existing tabs never switch profiles.",
     }),
   ),
 })
+  .check(
+    Schema.makeFilter(
+      (input) =>
+        input.profileId === undefined ||
+        input.profileName === undefined ||
+        "Provide only one of profileId or profileName.",
+    ),
+  )
   .check(
     Schema.makeFilter(
       (input) =>
@@ -583,6 +617,11 @@ export const PreviewAutomationHost = Schema.Struct({
    * a newer server safely coexist with an older desktop during rollout.
    */
   supportedOperations: Schema.optional(Schema.Array(PreviewAutomationOperation)),
+  /**
+   * Advertises profiles/openWithProfile without extending supportedOperations,
+   * which older protocol-2 servers decode with a closed operation enum.
+   */
+  supportsProfileSelection: Schema.optional(Schema.Boolean),
 });
 export type PreviewAutomationHost = typeof PreviewAutomationHost.Type;
 
@@ -724,6 +763,9 @@ export class PreviewAutomationNoAvailableHostError extends Schema.TaggedError<Pr
   },
 ) {
   override get message(): string {
+    if (this.operation === "profiles" || this.operation === "openWithProfile") {
+      return "Browser profile selection requires an open, connected desktop app that supports preview_profiles. Update the desktop app if needed. A live agent session stays on its assigned desktop; restart the agent session after updating or changing desktops. The requested profile was not opened.";
+    }
     return `No preview automation host is available for ${this.operation} in environment ${this.environmentId}. Preview tools run in a T3 Code desktop app that is open and connected to this environment; a headless server has no browser of its own. Do not retry. To check a page, use a headless browser from the shell, such as Playwright, or curl, or ask the user to open this thread in the T3 Code desktop app.`;
   }
 }
@@ -788,6 +830,18 @@ export class PreviewAutomationExecutionError extends Schema.TaggedError<PreviewA
 ) {
   override get message(): string {
     return `Preview automation ${this.operation} failed on client ${this.clientId}.`;
+  }
+}
+
+export class PreviewAutomationProfileError extends Schema.TaggedError<PreviewAutomationProfileError>()(
+  "PreviewAutomationProfileError",
+  {
+    reason: Schema.Literals(["unknown", "ambiguous", "tab-mismatch"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
   }
 }
 
@@ -936,6 +990,7 @@ export const PreviewAutomationError = Schema.Union([
   PreviewAutomationControlInterruptedError,
   PreviewAutomationExecutionError,
   PreviewAutomationInvalidSelectorError,
+  PreviewAutomationProfileError,
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationResultTooLargeError,
   PreviewAutomationClientDisconnectedError,

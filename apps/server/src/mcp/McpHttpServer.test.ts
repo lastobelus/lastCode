@@ -1028,6 +1028,19 @@ it.effect("registers annotated tools and preserves authenticated request context
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
         environmentId,
+        supportedOperations: [
+          "status",
+          "open",
+          "openWithProfile",
+          "profiles",
+          "snapshot",
+          "click",
+          "type",
+          "press",
+          "scroll",
+          "evaluate",
+          "waitFor",
+        ],
       });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Effect.void;
@@ -1038,20 +1051,27 @@ it.effect("registers annotated tools and preserves authenticated request context
           requestId: event.request.requestId,
           ok: true,
           result:
-            event.request.operation === "snapshot"
-              ? snapshotResult
-              : event.request.operation === "evaluate"
-                ? ["Connect", "Continue"]
-                : event.request.operation === "press"
-                  ? undefined
-                  : {
-                      available: true,
-                      visible: true,
-                      tabId,
-                      url: "http://example.test/",
-                      title: "Example",
-                      loading: false,
-                    },
+            event.request.operation === "profiles"
+              ? {
+                  profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+                  defaultProfileId: "work",
+                }
+              : event.request.operation === "snapshot"
+                ? snapshotResult
+                : event.request.operation === "evaluate"
+                  ? ["Connect", "Continue"]
+                  : event.request.operation === "press"
+                    ? undefined
+                    : {
+                        available: true,
+                        visible: true,
+                        tabId,
+                        url: "http://example.test/",
+                        title: "Example",
+                        loading: false,
+                        profileId: "work",
+                        profileName: "Work",
+                      },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -1091,6 +1111,38 @@ it.effect("registers annotated tools and preserves authenticated request context
         available: true,
         tabId,
       });
+
+      const profilesTool = server.tools.find(({ tool }) => tool.name === "preview_profiles");
+      expect(profilesTool?.tool.annotations?.readOnlyHint).toBe(true);
+      expect(profilesTool?.tool.annotations?.idempotentHint).toBe(true);
+      const catalog = yield* server
+        .callTool({ name: "preview_profiles", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(catalog.isError).toBe(false);
+      expect(catalog.structuredContent).toEqual({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      expect(routedRequests.at(-1)?.operation).toBe("profiles");
+      for (const selection of [{ profileName: "Work" }, { profileId: "work" }, {}]) {
+        const opened = yield* server
+          .callTool({
+            name: "preview_open",
+            arguments: { ...selection, open: false, reuseExistingTab: false },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(opened.isError).toBe(false);
+        expect(opened.structuredContent).toMatchObject({ profileId: "work", profileName: "Work" });
+        expect(routedRequests.at(-1)?.operation).toBe(
+          Object.keys(selection).length ? "openWithProfile" : "open",
+        );
+      }
 
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })

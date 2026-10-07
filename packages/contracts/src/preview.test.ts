@@ -34,6 +34,17 @@ const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
 describe("PreviewAutomationOpenInput", () => {
+  it("accepts either an explicit profile ID or an exact name", () => {
+    expect(decodeOpenInput({ profileId: "work-id" })).toEqual({ profileId: "work-id" });
+    expect(decodeOpenInput({ profileName: "Work" })).toEqual({ profileName: "Work" });
+  });
+
+  it("rejects conflicting profile selectors and blank selectors", () => {
+    expect(() => decodeOpenInput({ profileId: "work-id", profileName: "Work" })).toThrow();
+    expect(() => decodeOpenInput({ profileName: " " })).toThrow();
+    expect(() => decodeOpenInput({ profileId: "" })).toThrow();
+  });
+
   it("accepts the inline preview visibility flag", () => {
     expect(decodeOpenInput({ open: false })).toEqual({ open: false });
   });
@@ -159,6 +170,31 @@ describe("preview automation tab targeting", () => {
 });
 
 describe("PreviewAutomationHost", () => {
+  it("decodes profile capability separately from the supported operation set", () => {
+    for (const supportsProfileSelection of [true, false]) {
+      expect(
+        decodeAutomationHost({
+          clientId: "current",
+          environmentId: "environment-1",
+          supportedOperations: ["status", "resize"],
+          supportsProfileSelection,
+        }),
+      ).toEqual({
+        clientId: "current",
+        environmentId: "environment-1",
+        supportedOperations: ["status", "resize"],
+        supportsProfileSelection,
+      });
+    }
+    expect(() =>
+      decodeAutomationHost({
+        clientId: "invalid",
+        environmentId: "environment-1",
+        supportsProfileSelection: "true",
+      }),
+    ).toThrow();
+  });
+
   it("accepts legacy hosts and current operation advertisements", () => {
     expect(decodeAutomationHost({ clientId: "legacy", environmentId: "environment-1" })).toEqual({
       clientId: "legacy",

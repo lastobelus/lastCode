@@ -2,9 +2,7 @@ import type { PreviewAutomationOpenInput, PreviewSessionSnapshot } from "@t3tool
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  DEFAULT_PREVIEW_AUTOMATION_VIEWPORT,
   explicitlySuppressesPreviewMiniPlayer,
-  previewAutomationDefaultViewport,
   previewAutomationOpenNeedsOverlay,
   shouldAutoShowPreviewForAutomationUse,
   shouldOpenPreviewMiniPlayer,
@@ -62,22 +60,6 @@ describe("preview automation open readiness", () => {
       ),
     ).toBe(true);
   });
-
-  it("gives newly-created automation tabs a stable desktop viewport", () => {
-    expect(previewAutomationDefaultViewport(false, snapshot({ _tag: "Idle" }))).toEqual(
-      DEFAULT_PREVIEW_AUTOMATION_VIEWPORT,
-    );
-  });
-
-  it("preserves reused and already-fixed browser viewports", () => {
-    expect(previewAutomationDefaultViewport(true, snapshot({ _tag: "Idle" }))).toBeNull();
-    expect(
-      previewAutomationDefaultViewport(false, {
-        ...snapshot({ _tag: "Idle" }),
-        viewport: { _tag: "freeform", width: 900, height: 600 },
-      }),
-    ).toBeNull();
-  });
 });
 
 describe("shouldOpenPreviewMiniPlayer with the floating-preview preference", () => {
@@ -115,7 +97,7 @@ describe("auto-show for existing automation tabs", () => {
   it("leaves explicit opens and background-only tabs alone", () => {
     expect(
       shouldAutoShowPreviewForAutomationUse({
-        operation: "open",
+        operation: "openWithProfile",
         autoShowFloatingPreview: true,
         presentationSuppressed: false,
       }),

@@ -72,6 +72,86 @@ describe("untraced requests", () => {
 });
 
 describe("browser API CORS", () => {
+  const makeDevHandler = () => {
+    const configLayer = Layer.effect(
+      ServerConfig.ServerConfig,
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return { ...config, devUrl: new URL("http://localhost:5173") };
+      }),
+    ).pipe(
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "http-desktop-cors-test-" })),
+    );
+    const routeLayer = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const router = yield* HttpRouter.HttpRouter;
+        yield* router.add("GET", "/api/environment", HttpServerResponse.text("ok"));
+      }),
+    );
+    return HttpRouter.toWebHandler(
+      Layer.merge(routeLayer, browserApiCorsLayer).pipe(
+        Layer.provide(configLayer),
+        Layer.provide(NodeServices.layer),
+      ),
+      { disableLogger: true },
+    );
+  };
+
+  it.each(["t3code://app", "t3code-dev://app", "lastcode://app", "lastcode-dev://app"])(
+    "permits credentialed browser negotiation from %s",
+    async (origin) => {
+      const { handler, dispose } = makeDevHandler();
+      try {
+        const preflight = await handler(
+          new Request("http://localhost:4310/api/environment", {
+            method: "OPTIONS",
+            headers: {
+              origin,
+              "access-control-request-method": "GET",
+              "access-control-request-headers": "authorization, dpop",
+            },
+          }),
+        );
+        expect(preflight.status).toBe(204);
+        expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
+        expect(preflight.headers.get("access-control-allow-credentials")).toBe("true");
+        const response = await handler(
+          new Request("http://localhost:4310/api/environment", { headers: { origin } }),
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+        expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+      } finally {
+        await dispose();
+      }
+    },
+  );
+
+  it.each([
+    "https://hostile.example",
+    "lastcode-dev://hostile",
+    "lastcode://app.hostile.example",
+    "t3code-dev://app.hostile.example",
+  ])("does not grant browser access to %s", async (origin) => {
+    const { handler, dispose } = makeDevHandler();
+    try {
+      for (const method of ["OPTIONS", "GET"]) {
+        const response = await handler(
+          new Request("http://localhost:4310/api/environment", {
+            method,
+            headers: {
+              origin,
+              ...(method === "OPTIONS" ? { "access-control-request-method": "GET" } : {}),
+            },
+          }),
+        );
+        expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      }
+    } finally {
+      await dispose();
+    }
+  });
+
   it("accepts protocol negotiation with authenticated browser headers", async () => {
     const routeLayer = Layer.effectDiscard(
       Effect.gen(function* () {

@@ -5,7 +5,9 @@ import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   FILL_PREVIEW_VIEWPORT,
-  PREVIEW_AUTOMATION_OPERATIONS,
+  DEFAULT_BROWSER_PROFILE_ID,
+  PreviewAutomationProfileError,
+  PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS,
   type EnvironmentId,
   type PreviewAutomationNavigateInput,
   type PreviewAutomationOpenInput,
@@ -54,6 +56,7 @@ import {
   browserDefaultOpenProfileId,
   browserDefaultOpenViewport,
   resolveBrowserDefaults,
+  resolveBrowserOpenProfileId,
 } from "~/browser/browserDefaults";
 import { runBrowserViewportMutation } from "~/browser/browserViewportActions";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
@@ -78,7 +81,6 @@ import {
 } from "./previewAutomationErrors";
 import {
   explicitlySuppressesPreviewMiniPlayer,
-  previewAutomationDefaultViewport,
   previewAutomationOpenNeedsOverlay,
   shouldAutoShowPreviewForAutomationUse,
   shouldOpenPreviewMiniPlayer,
@@ -249,13 +251,19 @@ const currentStatus = async (
     runtimeTabId && renderingActive
       ? await readRenderedViewport(runtimeTabId).catch(() => null)
       : null;
+  const defaults = snapshot ? await resolveBrowserDefaults() : null;
+  const profileId = snapshot ? (snapshot.profileId ?? DEFAULT_BROWSER_PROFILE_ID) : null;
+  const profileStatus = {
+    profileId,
+    profileName: defaults?.profiles.find((profile) => profile.id === profileId)?.name ?? null,
+  };
   const viewportStatus = {
     ...(viewportSetting === undefined ? {} : { viewportSetting }),
     ...(viewport === null ? {} : { viewport }),
   };
   if (runtimeTabId && tabId && previewBridge && state.desktopByTabId[tabId]) {
     const status = await previewBridge.automation.status(runtimeTabId);
-    return { ...status, tabId, visible, ...viewportStatus };
+    return { ...status, tabId, visible, ...viewportStatus, ...profileStatus };
   }
   const navStatus = snapshot?.navStatus;
   return {
@@ -266,6 +274,7 @@ const currentStatus = async (
     title: navStatus && navStatus._tag !== "Idle" ? navStatus.title : null,
     loading: navStatus?._tag === "Loading",
     ...viewportStatus,
+    ...profileStatus,
   };
 };
 
@@ -331,7 +340,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
     () => ({
       clientId: automationClientId,
       environmentId,
-      supportedOperations: [...PREVIEW_AUTOMATION_OPERATIONS],
+      supportedOperations: [...PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS],
+      supportsProfileSelection: true,
     }),
     [automationClientId, environmentId],
   );
@@ -371,6 +381,10 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
       let tabId = request.tabId ?? null;
       const browserActivity = { release: null as (() => void) | null };
       try {
+        if (request.operation === "profiles") {
+          const defaults = await resolveBrowserDefaults();
+          return { profiles: defaults.profiles, defaultProfileId: defaults.profileId };
+        }
         let state = readThreadPreviewState(threadRef);
         const needsSessionSync = needsPreviewAutomationSessionSync(state, request.tabId);
         if (needsSessionSync) {
@@ -403,7 +417,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
           }
           const readyState = readThreadPreviewState(threadRef);
           const runtimeTabId = previewRuntimeTabId(threadRef, readyState.serverEpoch, readyTabId);
-          if (request.operation !== "open") {
+          if (request.operation !== "open" && request.operation !== "openWithProfile") {
             const { autoShowFloatingPreview } = await resolveBrowserDefaults();
             if (
               shouldAutoShowPreviewForAutomationUse({
@@ -438,8 +452,11 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
         switch (request.operation) {
           case "status":
             return await currentStatus(threadRef, tabId);
-          case "open": {
+          case "open":
+          case "openWithProfile": {
             const input = request.input as PreviewAutomationOpenInput;
+            const defaults = await resolveBrowserDefaults();
+            const requestedProfileId = resolveBrowserOpenProfileId(input, defaults);
             const resolvedInputUrl = input.url
               ? resolveBrowserNavigationTarget(environmentId, {
                   kind: "url",
@@ -454,10 +471,26 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             let activeSnapshot = activeTabId
               ? (state.sessions[activeTabId] ?? state.snapshot ?? undefined)
               : undefined;
+            if (requestedProfileId !== undefined && request.tabIdExplicit && !activeTabId) {
+              throw new PreviewAutomationTargetUnavailableError(unavailableTarget);
+            }
+            if (
+              requestedProfileId !== undefined &&
+              activeSnapshot &&
+              (activeSnapshot.profileId ?? DEFAULT_BROWSER_PROFILE_ID) !== requestedProfileId
+            ) {
+              if (request.tabIdExplicit) {
+                throw new PreviewAutomationProfileError({
+                  reason: "tab-mismatch",
+                  detail: `Preview tab ${activeTabId} uses profileId ${JSON.stringify(activeSnapshot.profileId ?? DEFAULT_BROWSER_PROFILE_ID)}, not ${JSON.stringify(requestedProfileId)}. Existing tabs cannot switch profiles. Omit tabId and set reuseExistingTab=false to open a new tab with the requested profile.`,
+                });
+              }
+              activeTabId = null;
+              activeSnapshot = undefined;
+            }
             const reusedExistingTab = activeTabId !== null;
             tabId = activeTabId;
             if (!activeTabId) {
-              const defaults = await resolveBrowserDefaults();
               const result = await open({
                 environmentId,
                 input: {
@@ -466,7 +499,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                   // An agent that didn't state a size gets the user's
                   // configured default, same as a hand-opened tab.
                   viewport: browserDefaultOpenViewport(defaults),
-                  profileId: browserDefaultOpenProfileId(defaults),
+                  profileId: requestedProfileId ?? browserDefaultOpenProfileId(defaults),
                 },
               });
               if (result._tag === "Failure") {
@@ -483,38 +516,6 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               readThreadPreviewState(threadRef).serverEpoch,
               activeTabId,
             );
-            if (activeSnapshot) {
-              const defaultViewport = previewAutomationDefaultViewport(
-                reusedExistingTab,
-                activeSnapshot,
-              );
-              if (defaultViewport) {
-                const resizeResult = await runBrowserViewportMutation(
-                  activeRuntimeTabId,
-                  async () => {
-                    assertPreviewRuntimeCurrent(
-                      threadRef,
-                      activeTabId,
-                      activeRuntimeTabId,
-                      request,
-                    );
-                    return await resize({
-                      environmentId,
-                      input: {
-                        threadId: request.threadId,
-                        tabId: activeTabId,
-                        viewport: defaultViewport,
-                      },
-                    });
-                  },
-                );
-                if (resizeResult._tag === "Failure") {
-                  return raiseAtomCommandFailure(resizeResult);
-                }
-                activeSnapshot = resizeResult.value;
-                updatePreviewServerSnapshot(threadRef, resizeResult.value);
-              }
-            }
             const shouldPresentPreview = shouldOpenPreviewMiniPlayer(
               input,
               (await resolveBrowserDefaults()).autoShowFloatingPreview,
