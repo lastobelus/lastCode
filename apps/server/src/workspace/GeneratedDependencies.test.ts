@@ -500,6 +500,9 @@ type SweepCase =
   | "whole-policy"
   | "whole-removal"
   | "whole-shared-deleted-visible-pending"
+  | "whole-shared-session-live"
+  | "whole-shared-session-stopped"
+  | "whole-shared-session-detached"
   | "disabled"
   | "recent"
   | "queued"
@@ -514,10 +517,14 @@ type SweepCase =
   | "policy-changed"
   | "activity-changed"
   | "session"
+  | "shared-session-live"
+  | "shared-session-stopped"
+  | "shared-session-detached"
   | "deleted"
   | "deleted-recent"
   | "deleted-pending"
   | "deleted-visible-pending"
+  | "deleted-shared-session-live"
   | "deleted-event"
   | "process"
   | "process-unknown"
@@ -540,12 +547,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     "CREATE TABLE orchestration_v2_projection_subagents (thread_id TEXT, child_thread_id TEXT, status TEXT)",
     "CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id TEXT, status TEXT)",
     "CREATE TABLE orchestration_v2_projection_provider_threads (thread_id TEXT, status TEXT, payload_json TEXT)",
-    "CREATE TABLE orchestration_v2_projection_provider_sessions (status TEXT, payload_json TEXT)",
+    "CREATE TABLE orchestration_v2_projection_provider_sessions (provider_session_id TEXT, status TEXT, payload_json TEXT)",
+    "CREATE TABLE orchestration_v2_projection_provider_session_bindings (provider_session_id TEXT, thread_id TEXT)",
     "CREATE TABLE orchestration_v2_effect_outbox (thread_id TEXT, status TEXT)",
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
   const wholeSharedDeleted = mode === "whole-shared-deleted-visible-pending";
+  const sharedSession = mode.includes("shared-session");
+  const wholeSession = mode.startsWith("whole-shared-session");
+  const stoppedSession = mode.endsWith("-stopped");
+  const detachedSession = mode.endsWith("-detached");
   const visibleDeletedThread = wholeSharedDeleted
     ? {
         ...thread,
@@ -578,11 +590,12 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     storageCleanup: {
       ...DEFAULT_SERVER_SETTINGS.storageCleanup,
       worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
-      worktreeAfterDays: wholeSharedDeleted
-        ? 7
-        : mode === "whole-policy" || mode === "whole-removal"
-          ? 1
-          : null,
+      worktreeAfterDays:
+        wholeSharedDeleted || wholeSession
+          ? 7
+          : mode === "whole-policy" || mode === "whole-removal"
+            ? 1
+            : null,
       worktreeOnDelete: false,
       worktreeOnMerge: false,
       worktreeUnchanged: false,
@@ -613,14 +626,15 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "deleted-event")
       yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${DateTime.formatIso(at(1))})`;
   }
-  if (mode === "session") {
+  if (mode === "session" || sharedSession) {
+    const sessionStatus = stoppedSession ? "stopped" : "ready";
     const payload = encodeSession(
       decodeSession({
         id: "session",
         driver: "codex",
         providerInstanceId: "codex",
-        status: "ready",
-        cwd: f.input.worktreePath,
+        status: sessionStatus,
+        cwd: sharedSession ? f.repository : f.input.worktreePath,
         model: null,
         capabilities: CodexProviderCapabilitiesV2,
         settings: {},
@@ -629,7 +643,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         lastError: null,
       }),
     );
-    yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('ready', ${payload})`;
+    yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('session', ${sessionStatus}, ${payload})`;
+    if (sharedSession && !detachedSession)
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('session', ${threadId})`;
   }
   const project = {
     id: projectId,
@@ -728,7 +744,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     .start()
     .pipe(Effect.provideService(ServerActivation.ServerActivation, Effect.never));
   // Clean worktrees exercise removal or shared-owner protection without research guards.
-  const preserveResearch = mode !== "whole-removal" && !wholeSharedDeleted;
+  const preserveResearch = mode !== "whole-removal" && !wholeSharedDeleted && !wholeSession;
   if (preserveResearch) {
     yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "research"));
     yield* f.fs.writeFileString(
@@ -736,18 +752,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       "private research",
     );
   }
-  const cleanSource = mode === "whole-policy" || mode === "whole-removal" || wholeSharedDeleted;
+  const cleanSource =
+    mode === "whole-policy" || mode === "whole-removal" || wholeSharedDeleted || wholeSession;
   const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
   yield* worker.sweep();
-  if (mode === "whole-removal") {
+  if (mode === "whole-removal" || (wholeSession && (stoppedSession || detachedSession))) {
     assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
     assert.equal(dependencyInspections(), 0);
     return;
   }
   const expectedRemoval =
-    mode === "eligible" || mode === "archived" || mode === "deleted" || mode === "whole-policy";
+    mode === "eligible" ||
+    mode === "archived" ||
+    mode === "deleted" ||
+    mode === "whole-policy" ||
+    mode === "shared-session-stopped" ||
+    mode === "shared-session-detached";
   assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   if (preserveResearch)
@@ -765,6 +787,9 @@ it.effect.each([
   "whole-policy",
   "whole-removal",
   "whole-shared-deleted-visible-pending",
+  "whole-shared-session-live",
+  "whole-shared-session-stopped",
+  "whole-shared-session-detached",
   "disabled",
   "recent",
   "queued",
@@ -779,10 +804,14 @@ it.effect.each([
   "policy-changed",
   "activity-changed",
   "session",
+  "shared-session-live",
+  "shared-session-stopped",
+  "shared-session-detached",
   "deleted",
   "deleted-recent",
   "deleted-pending",
   "deleted-visible-pending",
+  "deleted-shared-session-live",
   "deleted-event",
   "process",
   "process-unknown",

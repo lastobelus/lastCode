@@ -196,6 +196,32 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  const hasLiveProviderSession = Effect.fn("StorageCleanup.hasLiveProviderSession")(function* (
+    worktreePath: string,
+    threadId: ThreadId,
+  ) {
+    // Shared sessions retain their first cwd; every attached thread's
+    // workspace remains protected until its session stops or detaches.
+    const boundSessions = yield* sql`
+        SELECT 1 FROM orchestration_v2_projection_provider_session_bindings binding
+        JOIN orchestration_v2_projection_provider_sessions session
+          ON session.provider_session_id = binding.provider_session_id
+        WHERE binding.thread_id = ${threadId} AND session.status != 'stopped'
+        LIMIT 1
+      `;
+    if (boundSessions.length > 0) return true;
+    const sessionRows = yield* sql<{ payload_json: string }>`
+        SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
+      `;
+    const sessions = yield* Effect.forEach(sessionRows, (row) =>
+      decodeCleanupSession(row.payload_json),
+    );
+    return sessions.some((session) => {
+      const cwd = path.resolve(session.cwd);
+      return cwd === worktreePath || inside(worktreePath, cwd);
+    });
+  });
+
   // Local threads under another project need not have a worktreePath of their own.
   const containsProjectRoot = Effect.fn("StorageCleanup.containsProjectRoot")(function* (
     worktreePath: string,
@@ -378,19 +404,7 @@ export const make = Effect.gen(function* () {
         );
         const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
           if (!(yield* candidateStillIdle())) return false;
-          const sessionRows = yield* sql<{ payload_json: string }>`
-            SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
-          `;
-          const sessions = yield* Effect.forEach(sessionRows, (row) =>
-            decodeCleanupSession(row.payload_json),
-          );
-          if (
-            sessions.some((session) => {
-              const cwd = path.resolve(session.cwd);
-              return cwd === worktreePath || inside(worktreePath, cwd);
-            })
-          )
-            return false;
+          if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
           const status = yield* git.statusDetailsLocal(worktreePath);
           if (!status.isRepo || status.branch !== thread.branch) return false;
           // Re-read policy, activity, roots, leases and durable pending state
@@ -575,21 +589,7 @@ export const make = Effect.gen(function* () {
           storageCleanupActivityAt(latest[0]!) !== storageCleanupActivityAt(thread)
         )
           return;
-        // Sessions can outlive their run and can be shared across app threads.
-        const sessionRows = yield* sql<{ payload_json: string }>`
-          SELECT payload_json FROM orchestration_v2_projection_provider_sessions
-          WHERE status != 'stopped'
-        `;
-        const sessions = yield* Effect.forEach(sessionRows, (row) =>
-          decodeCleanupSession(row.payload_json),
-        );
-        if (
-          sessions.some((session) => {
-            const cwd = path.resolve(session.cwd);
-            return cwd === worktreePath || inside(worktreePath, cwd);
-          })
-        )
-          return;
+        if (yield* hasLiveProviderSession(worktreePath, thread.id)) return;
         const finalStatus = yield* git.statusDetailsLocal(worktreePath);
         if (
           !finalStatus.isRepo ||
