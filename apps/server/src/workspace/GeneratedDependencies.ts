@@ -419,13 +419,34 @@ const make = Effect.gen(function* () {
             !(yield* isStillEligible)
           )
             return null;
+          const ready = yield* Effect.tryPromise({
+            try: async () => {
+              if (await hasLiveRuntime(current.worktreePath)) return false;
+              if (!(await realDirectoryChain(current.dependencyPath))) return false;
+              const stat = await NodeFSP.lstat(current.dependencyPath);
+              return (
+                stat.isDirectory() && stat.dev === current.device && stat.ino === current.inode
+              );
+            },
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
+          });
+          if (!ready) return null;
+          // The final application guard can await I/O. Refresh mounts afterward,
+          // independently per candidate so no sibling delays its final snapshot.
+          const finalMounts = yield* mountPoints;
+          if (
+            finalMounts === null ||
+            DependencyMounts.containsMount(current.dependencyPath, finalMounts)
+          )
+            return null;
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {
-              if (await hasLiveRuntime(current.worktreePath)) return null;
               if (!(await realDirectoryChain(current.dependencyPath))) return null;
               const stat = await NodeFSP.lstat(current.dependencyPath);
-              if (stat.dev !== current.device || stat.ino !== current.inode) return null;
+              if (!stat.isDirectory() || stat.dev !== current.device || stat.ino !== current.inode)
+                return null;
               // fs.rm unlinks internal symlinks; it does not traverse their targets.
               await NodeFSP.rm(current.dependencyPath, { recursive: true });
               return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };

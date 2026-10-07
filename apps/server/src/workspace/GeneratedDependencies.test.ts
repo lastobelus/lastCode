@@ -1393,7 +1393,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   if (mode.startsWith("final-mount-")) {
     // The mutation occurs only after both complete eligibility checks have run.
-    assert.equal(mountReads, 2);
+    assert.equal(mountReads, mode === "final-mount-unchanged" ? 3 : 2);
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 2);
     assert.equal(reads, 1);

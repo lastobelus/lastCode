@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
@@ -17,7 +18,7 @@ import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
-  return { ...original, lstat: vi.fn(original.lstat) };
+  return { ...original, lstat: vi.fn(original.lstat), rm: vi.fn(original.rm) };
 });
 
 const testLayer = (mounts: Effect.Effect<ReadonlyArray<string> | null>) =>
@@ -223,7 +224,7 @@ it.effect(
         })),
       );
       assert.lengthOf(removed, 2);
-      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4]);
+      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4, 4, 4]);
       for (const f of [fixtures[0]!, fixtures[3]!]) {
         assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
       }
@@ -306,7 +307,7 @@ it.effect("preserves an earlier cohort member invalidated by a later eligibility
       removed.map((entry) => entry.dependencyPath),
       [fixtures[1]!.dependencyPath],
     );
-    assert.equal(reads, 3);
+    assert.equal(reads, 4);
     assert.equal(
       yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
       "preserve mounted data\n",
@@ -357,6 +358,154 @@ it.effect("preserves an install invalidated while the final mount inventory is c
   );
 });
 
+it.effect.each(["root", "directory", "file", "unavailable"] as const)(
+  "preserves data when the final eligibility guard changes mounts to %s",
+  (location) => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const isStillEligible = Effect.sync(() => {
+        points =
+          location === "unavailable"
+            ? null
+            : [
+                "/",
+                location === "root"
+                  ? f.dependencyPath
+                  : location === "directory"
+                    ? f.path.dirname(f.data)
+                    : f.data,
+              ];
+        return true;
+      });
+      assert.isEmpty(
+        yield* f.cleanup.removeBatch([
+          { inspection: inspected!, canRemove: Effect.succeed(true), isStillEligible },
+        ]),
+      );
+      assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+    }).pipe(Effect.scoped, Effect.provide(testLayer(Effect.sync(() => points))));
+  },
+);
+
+it.effect(
+  "a delayed final eligibility guard detects new mounts while its sibling deletion proceeds independently",
+  () => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    return Effect.gen(function* () {
+      const protectedInstall = yield* fixture();
+      const sibling = yield* fixture();
+      const protectedInspection = yield* protectedInstall.cleanup.inspect(protectedInstall.input);
+      const siblingInspection = yield* sibling.cleanup.inspect(sibling.input);
+      assert.isNotNull(protectedInspection);
+      assert.isNotNull(siblingInspection);
+      const siblingDeletionStarted = yield* Deferred.make<void>();
+      const finalGuardFinished = yield* Deferred.make<void>();
+      let releaseNativeDeletion = (): void => undefined;
+      const nativeDeletionGate = new Promise<void>((resolve) => {
+        releaseNativeDeletion = resolve;
+      });
+      const release = Effect.sync(() => releaseNativeDeletion());
+      const rm = vi.mocked(NodeFSP.rm);
+      const original = rm.getMockImplementation()!;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          rm.mockImplementation(async (...args) => {
+            if (args[0] === sibling.dependencyPath) {
+              Deferred.doneUnsafe(siblingDeletionStarted, Effect.void);
+              await nativeDeletionGate;
+            }
+            return await original(...args);
+          }),
+        ),
+        () => Effect.sync(() => rm.mockImplementation(original)),
+      );
+      yield* Effect.gen(function* () {
+        const finalGuard = Effect.gen(function* () {
+          yield* Deferred.await(siblingDeletionStarted);
+          points = ["/", protectedInstall.data];
+          yield* Deferred.succeed(finalGuardFinished, undefined);
+          return true;
+        });
+        const removal = yield* protectedInstall.cleanup
+          .removeBatch([
+            {
+              inspection: protectedInspection!,
+              canRemove: Effect.succeed(true),
+              isStillEligible: finalGuard,
+            },
+            {
+              inspection: siblingInspection!,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
+          ])
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(finalGuardFinished);
+        assert.isTrue(yield* sibling.fs.exists(sibling.dependencyPath));
+        yield* release;
+        const removed = yield* Fiber.join(removal);
+        assert.deepEqual(
+          removed.map((entry) => entry.dependencyPath),
+          [sibling.dependencyPath],
+        );
+        assert.equal(
+          yield* protectedInstall.fs.readFileString(protectedInstall.data),
+          "preserve mounted data\n",
+        );
+        assert.isFalse(yield* sibling.fs.exists(sibling.dependencyPath));
+      }).pipe(Effect.ensuring(release));
+    }).pipe(Effect.scoped, Effect.provide(testLayer(Effect.sync(() => points))));
+  },
+);
+
+it.effect(
+  "preserves original and replacement data when root identity changes during the final mount inventory",
+  () => {
+    let reads = 0;
+    let replaceRoot: Effect.Effect<void> = Effect.void;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const displacedPath = `${f.dependencyPath}-original`;
+      replaceRoot = Effect.gen(function* () {
+        yield* f.fs.rename(f.dependencyPath, displacedPath);
+        yield* f.fs.makeDirectory(f.path.dirname(f.data), { recursive: true });
+        yield* f.fs.writeFileString(f.data, "preserve replacement data\n");
+      }).pipe(Effect.orDie);
+      assert.isEmpty(
+        yield* f.cleanup.removeBatch([
+          {
+            inspection: inspected!,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+        ]),
+      );
+      assert.equal(reads, 3);
+      assert.equal(
+        yield* f.fs.readFileString(f.path.join(displacedPath, "package", "index.js")),
+        "preserve mounted data\n",
+      );
+      assert.equal(yield* f.fs.readFileString(f.data), "preserve replacement data\n");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.gen(function* () {
+            reads++;
+            if (reads === 3) yield* replaceRoot;
+            return ["/"];
+          }),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect("preserves installs when inspection cannot read the mount table", () =>
   Effect.gen(function* () {
     const f = yield* fixture();
@@ -365,40 +514,43 @@ it.effect("preserves installs when inspection cannot read the mount table", () =
   }).pipe(Effect.scoped, Effect.provide(testLayer(Effect.succeed(null)))),
 );
 
-it.effect("shares one final mount snapshot and only removes unmounted batch members", () => {
-  let points: ReadonlyArray<string> | null = ["/"];
-  let reads = 0;
-  return Effect.gen(function* () {
-    const fixtures = yield* Effect.forEach([0, 1, 2, 3], () => fixture());
-    const inspections = yield* Effect.forEach(fixtures, (f) => f.cleanup.inspect(f.input));
-    for (const inspection of inspections) assert.isNotNull(inspection);
-    points = ["/", fixtures[0]!.path.dirname(fixtures[0]!.data)];
-    const removed = yield* fixtures[0]!.cleanup.removeBatch(
-      inspections.map((inspection) => ({
-        inspection: inspection!,
-        canRemove: Effect.succeed(true),
-        isStillEligible: Effect.succeed(true),
-      })),
-    );
-    assert.lengthOf(removed, 3);
-    assert.equal(reads, 5);
-    assert.equal(
-      yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
-      "preserve mounted data\n",
-    );
-    for (const f of fixtures.slice(1)) assert.isFalse(yield* f.fs.exists(f.dependencyPath));
-  }).pipe(
-    Effect.scoped,
-    Effect.provide(
-      testLayer(
-        Effect.sync(() => {
-          reads++;
-          return points;
-        }),
+it.effect(
+  "shares a mount prefilter and refreshes only unmounted eligible batch members before removal",
+  () => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    let reads = 0;
+    return Effect.gen(function* () {
+      const fixtures = yield* Effect.forEach([0, 1, 2, 3], () => fixture());
+      const inspections = yield* Effect.forEach(fixtures, (f) => f.cleanup.inspect(f.input));
+      for (const inspection of inspections) assert.isNotNull(inspection);
+      points = ["/", fixtures[0]!.path.dirname(fixtures[0]!.data)];
+      const removed = yield* fixtures[0]!.cleanup.removeBatch(
+        inspections.map((inspection) => ({
+          inspection: inspection!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        })),
+      );
+      assert.lengthOf(removed, 3);
+      assert.equal(reads, 8);
+      assert.equal(
+        yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
+        "preserve mounted data\n",
+      );
+      for (const f of fixtures.slice(1)) assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.sync(() => {
+            reads++;
+            return points;
+          }),
+        ),
       ),
-    ),
-  );
-});
+    );
+  },
+);
 
 it.effect("allows mount ancestors and path-prefix siblings outside the dependency root", () => {
   let points: ReadonlyArray<string> | null = ["/"];
