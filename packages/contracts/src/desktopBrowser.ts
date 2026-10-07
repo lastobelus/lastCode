@@ -1,15 +1,14 @@
 import * as Schema from "effect/Schema";
 
+import { PreviewAutomationProfiles } from "./previewAutomation.ts";
+
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
- * The desktop app renders browser tabs for the server it launched, and the
- * server drives them with the same engine as its headless tabs. Messages
- * travel as newline-delimited JSON over two bootstrap file descriptors, so
- * only that one server can reach the desktop's pages; nothing listens on a port.
- *
- * Each tab carries one CDP connection, multiplexed by `tabId`. CDP frames pass
- * through untouched; the desktop answers them with `CdpRelay`.
+ * Native browser CDP transport. The primary backend uses inherited file
+ * descriptors; remote environments use authenticated command/event RPCs.
+ * Every remote connection owns a distinct desktop host ID and its tab keys.
+ * The server runs automation; Electron relays only its own tab debugger.
  */
 
 const TabKey = {
@@ -18,7 +17,28 @@ const TabKey = {
 };
 
 /** Desktop -> server. */
+export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
+export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
+
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("resolvedUrl"),
+    requestId: Schema.String,
+    url: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("download"),
+    ...TabKey,
+    guid: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,128}$/)),
+    offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    data: Schema.String.check(Schema.isMaxLength((DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES * 4) / 3)),
+    done: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("profiles"),
+    requestId: Schema.String,
+    profiles: Schema.NullOr(PreviewAutomationProfiles),
+  }),
   /** A desktop `<webview>` for this server tab is attached and can be driven. */
   Schema.Struct({ type: Schema.Literal("attached"), ...TabKey }),
   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
@@ -30,6 +50,14 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("resolveUrl"),
+    requestId: Schema.String,
+    url: Schema.String,
+  }),
+  Schema.Struct({ type: Schema.Literal("announce") }),
+  Schema.Struct({ type: Schema.Literal("disconnect") }),
+  Schema.Struct({ type: Schema.Literal("profiles"), requestId: Schema.String }),
   /** One CDP message for the tab's relay. */
   Schema.Struct({ type: Schema.Literal("cdp"), ...TabKey, message: Schema.String }),
   /** The server stopped driving this tab, so the relay can drop its sessions. */
@@ -44,3 +72,24 @@ export const DesktopBrowserCommand = Schema.Union([
   }),
 ]);
 export type DesktopBrowserCommand = typeof DesktopBrowserCommand.Type;
+
+export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrowserTransportError>()(
+  "DesktopBrowserTransportError",
+  { reason: Schema.Literals(["host-unavailable", "download-transfer-failed"]) },
+) {
+  override get message(): string {
+    return this.reason === "host-unavailable"
+      ? "The selected desktop browser host is unavailable."
+      : "The desktop browser download could not be transferred to this environment.";
+  }
+}
+
+export const DesktopBrowserHostInput = Schema.Struct({ desktopHostId: TrimmedNonEmptyString });
+export const DesktopBrowserEventInput = Schema.Struct({
+  desktopHostId: TrimmedNonEmptyString,
+  event: DesktopBrowserEvent,
+});
+export const DesktopBrowserCommandInput = Schema.Struct({
+  desktopHostId: TrimmedNonEmptyString,
+  command: DesktopBrowserCommand,
+});

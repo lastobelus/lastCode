@@ -1,3 +1,5 @@
+import * as Queue from "effect/Queue";
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Stands in for an Electron debugger.
 import { describe, expect, it } from "@effect/vitest";
 import { DesktopBrowserEvent } from "@t3tools/contracts";
@@ -6,6 +8,7 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as NodeEvents from "node:events";
+import * as NodeFSP from "node:fs/promises";
 
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
 
@@ -56,7 +59,9 @@ const takeEvents = (host: DesktopBrowserHost.DesktopBrowserHost["Service"], coun
 describe("DesktopBrowserHost", () => {
   it.effect("announces tabs already attached to a backend that starts later", () =>
     Effect.gen(function* () {
-      const host = yield* DesktopBrowserHost.make;
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
       host.attach(key, makeDebuggee().tab);
       // A restarted backend subscribes after the attach and still hears it.
       expect(yield* takeEvents(host, 1)).toEqual([{ type: "attached", ...key }]);
@@ -66,7 +71,9 @@ describe("DesktopBrowserHost", () => {
 
   it.effect("drops replies from a relay the server released", () =>
     Effect.gen(function* () {
-      const host = yield* DesktopBrowserHost.make;
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
       const debuggee = makeDebuggee();
       host.attach(key, debuggee.tab);
       const reader = yield* takeEvents(host, 2).pipe(Effect.forkScoped);
@@ -94,7 +101,9 @@ describe("DesktopBrowserHost", () => {
 
   it.effect("saves a server tab's download under its CDP guid where the server asked", () =>
     Effect.gen(function* () {
-      const host = yield* DesktopBrowserHost.make;
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
       const debuggee = makeDebuggee();
       host.attach(key, debuggee.tab);
       const paths: Array<string> = [];
@@ -120,3 +129,125 @@ describe("DesktopBrowserHost", () => {
     }),
   );
 });
+
+describe("remote desktop browser host", () => {
+  it.effect("isolates native tab commands and announcements by desktop host", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const pull = yield* Stream.toPull(Stream.fromQueue(events));
+      // Start the subscriber immediately, before publishing any native event.
+      const remoteKey = { ...key, desktopHostId: "remote-a" };
+      host.attach(remoteKey, makeDebuggee().tab);
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
+      expect((yield* pull).every((event) => event.desktopHostId === "remote-a")).toBe(true);
+      // Local FD announcements must never expose a remote environment's tabs.
+      host.attach(key, makeDebuggee().tab);
+      expect(yield* takeEvents(host, 1)).toEqual([{ type: "attached", ...key }]);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { type: "profiles", requestId: "profiles-a" },
+      });
+      const profileEvent = (yield* pull).find((entry) => entry.event.type === "profiles");
+      expect(profileEvent).toMatchObject({
+        desktopHostId: "remote-a",
+        event: {
+          type: "profiles",
+          requestId: "profiles-a",
+          profiles: { defaultProfileId: "default" },
+        },
+      });
+    }).pipe(Effect.scoped),
+  );
+});
+
+it.effect("transfers native remote downloads as bytes before reporting CDP completion", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const emitter = new NodeEvents.EventEmitter();
+    const debuggee = Object.assign(emitter, {
+      sendCommand: async (method: string) =>
+        method === "Target.getTargetInfo" ? { targetInfo: { targetId: "GUEST" } } : {},
+    });
+    const webContents = {
+      getURL: () => "https://example.com/",
+      getTitle: () => "Download",
+      getUserAgent: () => "Electron",
+    } as unknown as Electron.WebContents;
+    const desktopHostId = "remote-download-host";
+    const remoteKey = { ...key, desktopHostId };
+    const events = yield* Queue.unbounded<{ desktopHostId: string; event: DesktopBrowserEvent }>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach((event) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const pull = yield* Stream.toPull(Stream.fromQueue(events));
+    host.attach(remoteKey, { webContents, debugger: debuggee as unknown as Electron.Debugger });
+    yield* pull;
+    const send = (id: number, method: string, params: Record<string, unknown>) =>
+      host.handleRemoteCommand({
+        desktopHostId,
+        command: { type: "cdp", ...key, message: encodeJson({ id, method, params }) },
+      });
+    yield* send(1, "Target.setAutoAttach", {});
+    const untilReply = (id: number) =>
+      Effect.gen(function* () {
+        let replied = false;
+        while (!replied) {
+          for (const { event } of yield* pull) {
+            if (event.type === "cdp" && event.message.includes(`"id":${id}`)) replied = true;
+          }
+        }
+      });
+    yield* untilReply(1);
+    yield* send(2, "Browser.setDownloadBehavior", {
+      behavior: "allowAndName",
+      downloadPath: "/remote-environment/downloads",
+    });
+    yield* untilReply(2);
+    emitter.emit("message", {}, "Browser.downloadWillBegin", { guid: "download-1" }, "");
+    let savePath = "";
+    expect(
+      host.placeDownload(webContents, {
+        setSavePath: (path: string) => {
+          savePath = path;
+        },
+      } as Electron.DownloadItem),
+    ).toBe(true);
+    expect(savePath.startsWith("/remote-environment/")).toBe(false);
+    yield* Effect.promise(() => NodeFSP.writeFile(savePath, Buffer.from([0, 255, 128, 42])));
+    emitter.emit(
+      "message",
+      {},
+      "Browser.downloadProgress",
+      { guid: "download-1", state: "completed" },
+      "",
+    );
+    const transferred: number[] = [];
+    let completed = false;
+    while (!completed) {
+      for (const { event } of yield* pull) {
+        if (event.type === "download") {
+          expect(event.offset).toBe(transferred.length);
+          transferred.push(...Buffer.from(event.data, "base64"));
+        }
+        if (event.type === "cdp" && event.message.includes('"state":"completed"')) {
+          expect(transferred).toEqual([0, 255, 128, 42]);
+          completed = true;
+        }
+      }
+    }
+    host.detach(remoteKey);
+  }).pipe(Effect.scoped),
+);

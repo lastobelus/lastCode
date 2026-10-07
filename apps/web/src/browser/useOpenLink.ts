@@ -5,6 +5,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useCallback } from "react";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
+
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { readLocalApi } from "~/localApi";
 import { previewEnvironment } from "~/state/preview";
@@ -17,6 +19,7 @@ import {
   resolveLinkTarget,
 } from "./browserLinkTarget";
 import { BrowserSettingsReadError, openUrlInPreview } from "./openFileInPreview";
+import { openPreparedExternalUrl } from "./openPreparedExternalUrl";
 
 const NO_MODIFIER = { metaKey: false, ctrlKey: false } as const;
 
@@ -43,6 +46,13 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
   return useCallback(
     async (url, options = {}) => {
       const targetThreadRef = options.threadRef ?? threadRef;
+      if (!window.desktopBridge) {
+        await openPreparedExternalUrl(url, async () => {
+          await resolveBrowserLinkTargetPreference();
+          return targetThreadRef ? (await prepareHostedPreview(targetThreadRef, url)).url : url;
+        });
+        return;
+      }
       const target = resolveLinkTarget({
         url,
         event: options.event ?? NO_MODIFIER,
@@ -65,7 +75,8 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
       }
       const api = readLocalApi();
       if (!api) throw new Error("Link opening is unavailable.");
-      await api.shell.openExternal(url);
+      const prepared = targetThreadRef ? await prepareHostedPreview(targetThreadRef, url) : { url };
+      await api.shell.openExternal(prepared.url);
     },
     [openPreview, threadRef],
   );

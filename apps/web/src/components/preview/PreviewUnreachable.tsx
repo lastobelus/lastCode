@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "~/components/ui/button";
 
 import { describePreviewError } from "./errorCodeMessages";
+import type { PreviewRecoveryRequestState } from "./previewRecoveryRequest";
 
 interface Props {
   url: string;
@@ -11,10 +12,21 @@ interface Props {
   /** Stringified Chromium error, e.g. "ERR_NAME_NOT_RESOLVED". */
   description: string;
   onReload: () => void;
+  recoveryRequest: PreviewRecoveryRequestState;
+  restoringHostedPreview?: boolean;
+  onRequestRecovery: () => void;
 }
 
 /** Theme-aware tailwind port of Chromium's "This site can't be reached" page. */
-export function PreviewUnreachable({ url, code, description, onReload }: Props) {
+export function PreviewUnreachable({
+  url,
+  code,
+  description,
+  onReload,
+  recoveryRequest,
+  restoringHostedPreview = false,
+  onRequestRecovery,
+}: Props) {
   const [showDetails, setShowDetails] = useState(false);
   const host = safeHost(url) ?? url;
   const friendly = describePreviewError(description);
@@ -44,6 +56,37 @@ export function PreviewUnreachable({ url, code, description, onReload }: Props) 
 
         <div className="mt-8 text-xs uppercase tracking-wide text-muted-foreground/70">
           {errorLabel}
+        </div>
+
+        <div className="mt-6 flex flex-col items-start gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={
+              restoringHostedPreview ||
+              recoveryRequest.status === "sending" ||
+              recoveryRequest.status === "sent"
+            }
+            onClick={onRequestRecovery}
+          >
+            {restoringHostedPreview
+              ? "Restoring preview…"
+              : recoveryRequest.status === "sending"
+                ? "Sending request…"
+                : recoveryRequest.status === "sent"
+                  ? "Request sent"
+                  : "Ask agent to restore preview"}
+          </Button>
+          <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+            {restoringHostedPreview
+              ? "LastCode is reopening this preview."
+              : recoveryRequest.status === "sent"
+                ? "The failed link and error were sent to this thread. Reload after the agent restores it."
+                : recoveryRequest.status === "error"
+                  ? recoveryRequest.error
+                  : "Send this failed link and error to the agent in this thread."}
+          </p>
         </div>
 
         <div className="mt-auto flex items-center gap-2 pt-8">

@@ -82,6 +82,27 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
+  it("keeps hosted preview observation read-only and process control terminal-authorized", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingList)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
+      AuthTerminalOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.subscribePreviewHosting)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingStopThread)).toBe(
+      AuthTerminalOperateScope,
+    );
+  });
+
+  it("keeps agent recovery claims behind task operation permission", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewClaimRecovery)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("requires permission to operate on a thread before uploading feedback", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.providerUploadFeedback)).toBe(
       AuthOrchestrationOperateScope,
@@ -159,6 +180,8 @@ describe("RPC authorization scopes", () => {
 
   it("separates preview control from observation", () => {
     for (const method of [
+      WS_METHODS.subscribeDesktopBrowserCommands,
+      WS_METHODS.desktopBrowserEvent,
       WS_METHODS.previewOpen,
       WS_METHODS.previewNavigate,
       WS_METHODS.previewResize,
@@ -268,6 +291,50 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect.each([
+  { scopes: [AuthPreviewOperateScope], allowed: true },
+  { scopes: [AuthOrchestrationOperateScope], allowed: false },
+])("authorizes native browser events using preview permission ($allowed)", ({ scopes, allowed }) =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.desktopBrowserEvent
+        > => tag !== WS_METHODS.desktopBrowserEvent,
+      ),
+    );
+    let handled = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.desktopBrowserEvent, () =>
+            Effect.sync(() => {
+              handled = true;
+            }),
+          ),
+          RpcAuthorization.layer(scopes),
+        ),
+      ),
+    );
+    const result = yield* client[WS_METHODS.desktopBrowserEvent]({
+      desktopHostId: "desktop-host",
+      event: { type: "attached", threadId: "thread-1", tabId: "tab-1" },
+    }).pipe(Effect.result);
+    expect(handled).toBe(allowed);
+    if (allowed) {
+      expect(result._tag).toBe("Success");
+    } else {
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { requiredPermission: AuthPreviewOperateScope },
+      });
+    }
+  }).pipe(Effect.scoped),
+);
 
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(

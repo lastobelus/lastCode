@@ -13,6 +13,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   ProjectId,
@@ -3508,4 +3509,452 @@ it.effect("publishes live events in commit order across concurrent writers", () 
       );
     }).pipe(Effect.provide(layerEventSink));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("commits recovery checkpoint effects only with the exact running attempt", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-effects");
+    const runId = RunId.make("run:recovery-effects");
+    const attemptId = RunAttemptId.make("attempt:recovery-effects");
+    const commandId = CommandId.make("command:recovery-effects");
+    const run: OrchestrationV2Run = {
+      id: runId,
+      threadId,
+      ordinal: 1,
+      providerInstanceId,
+      modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make("message:recovery-effects"),
+      rootNodeId: null,
+      activeAttemptId: attemptId,
+      status: "running",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:recovery-effects:thread",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+        {
+          id: EventId.make("event:recovery-effects:run"),
+          type: "run.created",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: run,
+        },
+      ],
+    });
+    const input = {
+      threadId,
+      runId,
+      activeAttemptId: attemptId,
+      expectedStatus: "running" as const,
+      events: [
+        {
+          id: EventId.make("event:recovery-effects:complete"),
+          type: "run.updated" as const,
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...run, status: "waiting" as const },
+        },
+      ],
+      effects: [
+        {
+          id: "effect:recovery-checkpoint",
+          commandId,
+          threadId,
+          request: {
+            type: "checkpoint.capture" as const,
+            runId,
+            scopeId: CheckpointScopeId.make("scope:recovery"),
+          },
+        },
+      ],
+    };
+    assert.isFalse(
+      (yield* sink.writeIfRunCurrent({
+        ...input,
+        activeAttemptId: RunAttemptId.make("attempt:obsolete"),
+      })).committed,
+    );
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 0);
+    assert.isTrue((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+    assert.isFalse((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect("selects unfinished recovery receipts for startup even without live provider work", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-receipt-candidate");
+    const thread = {
+      ...makeThread(threadId, now),
+      recovery: {
+        runId: RunId.make("run:old-recovery"),
+        attemptId: RunAttemptId.make("attempt:old-recovery"),
+        status: "recovering" as const,
+        detail: "Restoring turn",
+        updatedAt: now,
+      },
+    };
+    yield* sink.write({
+      events: [threadCreatedEvent({ id: "event:recovery-receipt-candidate", thread, now })],
+    });
+    assert.include(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:recovery-receipt-failed"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...thread, recovery: { ...thread.recovery, status: "failed" } },
+        },
+      ],
+    });
+    assert.notInclude(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each([true, false])(
+  "guards recovered background rows against completed history and independent work (during finalization: %s)",
+  (duringFinalization) =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const key = `recovered-background:${duringFinalization}`;
+      const threadId = ThreadId.make(`thread:${key}`);
+      const childId = ThreadId.make(`thread:${key}:native-child`);
+      const independentChildId = ThreadId.make(`thread:${key}:independent-child`);
+      const foreignChildId = ThreadId.make(`thread:${key}:foreign-child`);
+      const siblingId = ThreadId.make(`thread:${key}:sibling`);
+      const runId = RunId.make(`run:${key}`);
+      const attemptId = RunAttemptId.make(`attempt:${key}`);
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${key}`);
+      const providerSessionId = ProviderSessionId.make(`provider-session:${key}`);
+      const foreignProviderThreadId = ProviderThreadId.make(`provider-thread:${key}:foreign`);
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make(`message:${key}`),
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: duringFinalization ? "running" : "completed",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: duringFinalization ? null : now,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const providerThread = {
+        id: providerThreadId,
+        driver: providerDriver,
+        providerInstanceId,
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const nativeChildProvider = {
+        ...providerThread,
+        id: ProviderThreadId.make(`provider-thread:${key}:native-child`),
+        appThreadId: childId,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        nativeThreadRef: {
+          driver: providerDriver,
+          nativeId: `native-child:${key}`,
+          strength: "strong" as const,
+        },
+        forkedFrom: { providerThreadId },
+      };
+      const childRootNode = {
+        id: NodeId.make(`node:${key}:native-child-root`),
+        threadId: childId,
+        runId: null,
+        parentNodeId: null,
+        rootNodeId: NodeId.make(`node:${key}:native-child-root`),
+        kind: "root_turn" as const,
+        status: "running" as const,
+        countsForRun: false,
+        providerThreadId: nativeChildProvider.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      };
+      const command = (
+        name: string,
+        ownerThreadId = threadId,
+        ownerRunId: RunId | null = runId,
+        ownerProviderThreadId: ProviderThreadId | null = providerThreadId,
+      ): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(`item:${key}:${name}`),
+        threadId: ownerThreadId,
+        runId: ownerRunId,
+        nodeId: null,
+        providerThreadId: ownerProviderThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        type: "command_execution",
+        status: "running",
+        title: name,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        input: "work",
+        output: "latest saved output",
+      });
+      const root = command("root");
+      const completed = {
+        ...command("completed"),
+        status: "completed" as const,
+        completedAt: now,
+      };
+      const newer = command("newer", threadId, RunId.make(`run:${key}:newer`));
+      const sibling = command("sibling", siblingId);
+      const child = {
+        ...command("child", childId, null, nativeChildProvider.id),
+        nodeId: childRootNode.id,
+      };
+      const independentChild = command("independent-child", independentChildId, null, null);
+      const foreignChild = command("foreign-child", foreignChildId, runId, foreignProviderThreadId);
+      const task = (
+        childThreadId: ThreadId,
+        origin: OrchestrationV2Subagent["origin"] = "provider_native",
+      ): OrchestrationV2Subagent => ({
+        id: NodeId.make(`node:${key}:${childThreadId}`),
+        threadId,
+        runId,
+        parentNodeId: NodeId.make(`node:${key}:root`),
+        origin,
+        createdBy: "agent",
+        driver: providerDriver,
+        providerInstanceId,
+        providerThreadId:
+          childThreadId === foreignChildId
+            ? foreignProviderThreadId
+            : childThreadId === childId
+              ? nativeChildProvider.id
+              : null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Work",
+        title: "Task",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      });
+      const appOwned = task(ThreadId.make(`thread:${key}:app-owned`), "app_owned");
+      const tasks = [task(childId), task(independentChildId), task(foreignChildId), appOwned];
+      const items = [root, completed, newer, sibling, child, independentChild, foreignChild];
+      const itemEvent = (
+        item: OrchestrationV2TurnItem,
+        suffix: string,
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:${key}:${item.id}:${suffix}`),
+        type: "turn-item.updated",
+        threadId: item.threadId,
+        runId: item.runId ?? runId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: item,
+      });
+      yield* sink.write({
+        events: [
+          ...[threadId, childId, independentChildId, foreignChildId, siblingId].map((id) =>
+            threadCreatedEvent({ id: `event:${key}:${id}`, thread: makeThread(id, now), now }),
+          ),
+          {
+            id: EventId.make(`event:${key}:run`),
+            type: "run.created",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: run,
+          },
+          {
+            id: EventId.make(`event:${key}:provider`),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+          {
+            id: EventId.make(`event:${key}:foreign-provider`),
+            type: "provider-thread.updated",
+            threadId: foreignChildId,
+            occurredAt: now,
+            payload: {
+              ...providerThread,
+              id: foreignProviderThreadId,
+              appThreadId: foreignChildId,
+              providerSessionId: ProviderSessionId.make(`provider-session:${key}:foreign`),
+            },
+          },
+          {
+            id: EventId.make(`event:${key}:native-child-provider`),
+            type: "provider-thread.updated",
+            threadId: childId,
+            occurredAt: now,
+            payload: nativeChildProvider,
+          },
+          {
+            id: EventId.make(`event:${key}:native-child-root`),
+            type: "node.updated",
+            threadId: childId,
+            occurredAt: now,
+            payload: childRootNode,
+          },
+          {
+            id: EventId.make(`event:${key}:independent-run`),
+            type: "run.created",
+            threadId: independentChildId,
+            runId: RunId.make(`run:${key}:independent`),
+            occurredAt: now,
+            payload: {
+              ...run,
+              id: RunId.make(`run:${key}:independent`),
+              threadId: independentChildId,
+              status: "running",
+            },
+          },
+          ...tasks.map((payload): OrchestrationV2DomainEvent => ({
+            id: EventId.make(`event:${key}:${payload.id}:initial`),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload,
+          })),
+          ...items.map((item) => itemEvent(item, "initial")),
+        ],
+      });
+      // These stale candidates were built before completed/newer saved rows
+      // became visible. The transaction must preserve their current history.
+      const candidates: OrchestrationV2DomainEvent[] = [
+        {
+          id: EventId.make(`event:${key}:native-child-root:settle`),
+          type: "node.updated",
+          threadId: childId,
+          occurredAt: now,
+          payload: { ...childRootNode, status: "interrupted", completedAt: now },
+        },
+        ...items.map((item) =>
+          itemEvent(
+            {
+              ...item,
+              runId: item.threadId === threadId ? runId : item.runId,
+              status: "interrupted",
+              completedAt: now,
+              output: "stale output",
+            } as OrchestrationV2TurnItem,
+            "settle",
+          ),
+        ),
+        {
+          id: EventId.make(`event:${key}:app-owned:settle`),
+          type: "subagent.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...appOwned, status: "interrupted", completedAt: now },
+        },
+      ];
+      const guardRecoveredBackground = {
+        threadId,
+        runId,
+        providerThreadId,
+        providerSessionId,
+        eventIds: candidates.map((event) => event.id),
+      };
+      const result = duringFinalization
+        ? yield* sink.writeIfRunCurrent({
+            threadId,
+            runId,
+            activeAttemptId: attemptId,
+            expectedStatus: "running",
+            events: candidates,
+            guardRecoveredBackground,
+          })
+        : yield* sink.writeIfProviderThreadOwner({
+            providerThreadId,
+            runId,
+            activeAttemptId: attemptId,
+            expectedLastRunOrdinal: 1,
+            events: candidates,
+            guardRecoveredBackground,
+          });
+      assert.isTrue(result.committed);
+      assert.equal(
+        result.storedEvents.length,
+        3,
+        "only the exact native root item, native child root, and native child item settle",
+      );
+      const after = yield* projections.getThreadProjection(threadId);
+      assert.equal(after.turnItems.find((item) => item.id === root.id)?.status, "interrupted");
+      const savedRoot = after.turnItems.find((item) => item.id === root.id);
+      assert.isTrue(
+        savedRoot?.type === "command_execution" && savedRoot.output === "latest saved output",
+      );
+      assert.equal(after.turnItems.find((item) => item.id === completed.id)?.status, "completed");
+      assert.equal(after.turnItems.find((item) => item.id === newer.id)?.runId, newer.runId);
+      assert.equal(after.subagents.find((row) => row.id === appOwned.id)?.status, "running");
+      for (const item of [sibling, independentChild, foreignChild]) {
+        assert.equal(
+          (yield* projections.getTurnItem({ threadId: item.threadId, itemId: item.id }))?.status,
+          "running",
+        );
+      }
+      assert.equal(
+        (yield* projections.getTurnItem({ threadId: childId, itemId: child.id }))?.status,
+        "interrupted",
+      );
+      const childAfter = yield* projections.getThreadRecords(childId, ["nodes"]);
+      assert.equal(
+        childAfter.nodes.find((node) => node.id === childRootNode.id)?.status,
+        "interrupted",
+      );
+      assert.equal(
+        childAfter.nodes.find((node) => node.id === childRootNode.id)?.parentNodeId,
+        null,
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );

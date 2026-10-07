@@ -152,7 +152,14 @@ export const ProviderAdapterV2Event = Schema.Union([
     threadDisposition: Schema.Literals(["reusable", "broken"]),
   }),
 ]);
-export type ProviderAdapterV2Event = typeof ProviderAdapterV2Event.Type;
+export type ProviderAdapterV2Event =
+  | typeof ProviderAdapterV2Event.Type
+  | {
+      /** Internal stream ordering marker. Never persisted or sent to clients. */
+      readonly type: "events.barrier";
+      readonly driver: ProviderDriverKind;
+      readonly after: Effect.Effect<void>;
+    };
 
 export class ProviderAdapterCapabilitiesError extends Schema.TaggedError<ProviderAdapterCapabilitiesError>()(
   "ProviderAdapterCapabilitiesError",
@@ -473,15 +480,42 @@ export interface ProviderAdapterV2ForkThreadInput {
   readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
 }
 
+export type ProviderBackgroundWorkObservation = "pending" | "drained" | "unknown";
+
+export interface ProviderEventsBarrierInput {
+  /** Evaluated under the native publication permit, before enqueueing the marker. */
+  readonly observe: Effect.Effect<ProviderBackgroundWorkObservation>;
+  readonly after: (observation: ProviderBackgroundWorkObservation) => Effect.Effect<void>;
+}
+
 export interface ProviderAdapterV2EventSubscription {
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   readonly close: Effect.Effect<void>;
+  /** Orders a marker after native emission, manager fanout, and earlier subscriber events. */
+  readonly requestDrain?: (input: ProviderEventsBarrierInput) => Effect.Effect<void>;
 }
 
 export interface ProviderAdapterV2HistoricalContext {
   readonly messages: ReadonlyArray<OrchestrationV2HistoricalMessage>;
   readonly context: string;
 }
+
+export type ProviderAdapterV2TurnInspection =
+  | { readonly status: "active" }
+  | {
+      readonly status: "terminal";
+      readonly event: Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>;
+      /** The manager no longer owns the exact runtime that retained this terminal. */
+      readonly runtimeReleased?: true;
+    }
+  | {
+      /** Manager evidence of lost runtime ownership, not proof of native completion. */
+      readonly status: "released";
+      readonly driver: ProviderDriverKind;
+      readonly providerThreadId: ProviderThreadId;
+      readonly providerTurnId: ProviderTurnId;
+    }
+  | { readonly status: "unknown" };
 
 export interface ProviderAdapterV2SessionRuntime {
   readonly instanceId: ProviderInstanceId;
@@ -495,6 +529,24 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Manager lifecycle hook: startup recovery owns cancellation during server shutdown. */
+  readonly isShuttingDown?: Effect.Effect<boolean>;
+  /** Internal manager hook; serialized with native completion event publication. */
+  readonly publishEventsBarrier?: (input: ProviderEventsBarrierInput) => Effect.Effect<void>;
+  /** Exact-turn evidence only: missing adapter state never proves a turn has ended. */
+  readonly inspectTurn?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly providerTurnId: ProviderTurnId;
+  }) => Effect.Effect<ProviderAdapterV2TurnInspection, ProviderAdapterV2Error>;
+  /**
+   * Call after durable root finalization to discard matching cached terminal
+   * evidence. An acknowledgement for an older turn must preserve a newer
+   * terminal for the same provider thread.
+   */
+  readonly acknowledgeTurnTerminal?: (input: {
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerTurnId: ProviderTurnId;
+  }) => Effect.Effect<void>;
   /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it

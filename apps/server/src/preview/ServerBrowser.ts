@@ -41,6 +41,7 @@ import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
+import * as Mime from "effect/http/Mime";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -293,6 +294,7 @@ interface ServerTab {
    */
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
+  readonly desktopHostId: string | undefined;
   /** Set when a page in another tab opened this one with `window.open` or a link. */
   readonly openerTabId: string | undefined;
   /** Finished downloads, newest last; files live until the tab closes. */
@@ -670,7 +672,13 @@ const make = Effect.gen(function* () {
     desktopChannel.available
       ? Effect.runPromise(
           desktopChannel.awaitAttached(
-            { threadId: snapshot.threadId, tabId: snapshot.tabId },
+            {
+              threadId: snapshot.threadId,
+              tabId: snapshot.tabId,
+              ...(snapshot.desktopHostId === undefined
+                ? {}
+                : { desktopHostId: snapshot.desktopHostId }),
+            },
             DESKTOP_ATTACH_TIMEOUT,
           ),
         )
@@ -682,7 +690,13 @@ const make = Effect.gen(function* () {
     try {
       const endpoint = await Effect.runPromise(
         desktopChannel
-          .endpoint({ threadId: snapshot.threadId, tabId: snapshot.tabId })
+          .endpoint({
+            threadId: snapshot.threadId,
+            tabId: snapshot.tabId,
+            ...(snapshot.desktopHostId === undefined
+              ? {}
+              : { desktopHostId: snapshot.desktopHostId }),
+          })
           .pipe(Scope.provide(scope)),
       );
       const connected = await contexts.connectDesktopPage(endpoint);
@@ -706,6 +720,12 @@ const make = Effect.gen(function* () {
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
+    if (snapshot.desktopHostId !== undefined && desktop === null) {
+      throw new ServerBrowserPage.ServerBrowserOperationError(
+        "PreviewAutomationRemoteUnavailableError",
+        "The selected desktop browser did not attach. Keep that desktop connected and retry; the requested profile was not opened in another browser.",
+      );
+    }
     const isolatedContext =
       adopted === undefined &&
       desktop === null &&
@@ -743,6 +763,7 @@ const make = Effect.gen(function* () {
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
+      desktopHostId: snapshot.desktopHostId,
       openerTabId: adopted?.openerTabId,
       downloads: [],
       fileChooser: null,
@@ -951,7 +972,50 @@ const make = Effect.gen(function* () {
         "PreviewAutomationExecutionError",
         `Upload paths must be absolute: ${relative}`,
       );
-    if (await ServerBrowserPage.setInputFiles(tab.page, input)) return undefined;
+    // A remote desktop cannot open the environment's filesystem paths. Supply
+    // file bytes through Playwright, which injects the same files into its page.
+    let totalBytes = 0;
+    const files =
+      tab.desktopHostId !== undefined && tab.desktopHostId !== "local"
+        ? await Promise.all(
+            input.paths.map(async (path) => {
+              const handle = await NodeFSP.open(path, "r");
+              try {
+                const stat = await handle.stat();
+                totalBytes += stat.size;
+                if (!stat.isFile() || totalBytes > 64 * 1024 * 1024) {
+                  throw new ServerBrowserPage.ServerBrowserOperationError(
+                    "PreviewAutomationExecutionError",
+                    "Remote browser uploads must be regular files totaling at most 64 MiB.",
+                  );
+                }
+                const buffer = Buffer.alloc(stat.size);
+                let offset = 0;
+                while (offset < buffer.length) {
+                  const { bytesRead } = await handle.read(
+                    buffer,
+                    offset,
+                    buffer.length - offset,
+                    offset,
+                  );
+                  if (bytesRead === 0)
+                    throw new Error("An upload file changed while it was being read.");
+                  offset += bytesRead;
+                }
+                if ((await handle.stat()).size !== stat.size)
+                  throw new Error("An upload file changed while it was being read.");
+                return {
+                  name: NodePath.basename(path),
+                  mimeType: Option.getOrElse(Mime.getType(path), () => "application/octet-stream"),
+                  buffer,
+                };
+              } finally {
+                await handle.close();
+              }
+            }),
+          )
+        : [...input.paths];
+    if (await ServerBrowserPage.setInputFiles(tab.page, input, files)) return undefined;
     const open = tab.fileChooser;
     if (!open)
       throw new ServerBrowserPage.ServerBrowserOperationError(
@@ -964,7 +1028,7 @@ const make = Effect.gen(function* () {
         "This file picker accepts one file.",
       );
     if (input.paths.length > 0)
-      await open.chooser.setFiles([...input.paths], {
+      await open.chooser.setFiles(files, {
         timeout: input.timeoutMs ?? NAVIGATION_TIMEOUT_MS,
       });
     if (tab.fileChooser === open) closeFileChooser(tab);
@@ -1015,6 +1079,7 @@ const make = Effect.gen(function* () {
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
+        ...(opener.desktopHostId === undefined ? {} : { desktopHostId: opener.desktopHostId }),
         // Agent popups stay with the agent and only float when it asks, like its own opens.
         ...(opener.control.agentId === null
           ? {}
@@ -1112,7 +1177,18 @@ const make = Effect.gen(function* () {
     }
     const url = tab.page.url();
     const viewport = tab.page.viewportSize();
+    const catalogue =
+      tab.desktopHostId === undefined || agentSessionId === undefined
+        ? null
+        : await Effect.runPromise(
+            desktopChannel.getProfiles({ threadId: tab.threadId, agentSessionId }),
+          );
     const status = {
+      profileId: tab.profileId ?? null,
+      profileName:
+        catalogue?.desktopHostId === tab.desktopHostId
+          ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
+          : null,
       available: true,
       visible: tab.viewers.size > 0,
       tabId: tab.tabId,
@@ -1373,7 +1449,11 @@ const make = Effect.gen(function* () {
         if (tab.desktop)
           runFork(
             desktopChannel.pointer(
-              { threadId: tab.threadId, tabId: tab.tabId },
+              {
+                threadId: tab.threadId,
+                tabId: tab.tabId,
+                ...(tab.desktopHostId === undefined ? {} : { desktopHostId: tab.desktopHostId }),
+              },
               { phase: next, x, y },
             ),
           );
@@ -1457,6 +1537,26 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const browserNavigationUrl = async (
+    target: { readonly threadId: string; readonly desktopHostId?: string | undefined },
+    url: string,
+  ) => {
+    if (target.desktopHostId === undefined || target.desktopHostId === "local") return url;
+    const resolved = await Effect.runPromise(
+      desktopChannel.resolveUrl({
+        desktopHostId: target.desktopHostId,
+        threadId: target.threadId,
+        url,
+      }),
+    );
+    if (resolved === null)
+      throw new ServerBrowserPage.ServerBrowserOperationError(
+        "PreviewAutomationRemoteUnavailableError",
+        "The connected desktop cannot resolve this environment URL. Check the environment connection before retrying; the desktop's localhost was not opened.",
+      );
+    return normalizePreviewUrl(resolved);
+  };
+
   const runOperation = async (request: PreviewAutomationRequest): Promise<unknown> => {
     const input = request.input;
     switch (request.operation) {
@@ -1467,13 +1567,61 @@ const make = Effect.gen(function* () {
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
         );
-      case "open": {
+      case "profiles": {
+        const profiles = await Effect.runPromise(
+          desktopChannel.getProfiles({
+            threadId: request.threadId,
+            agentSessionId: request.agentSessionId ?? "",
+          }),
+        );
+        if (profiles === null)
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationRemoteUnavailableError",
+            "No unambiguous connected desktop profile catalogue is available. Connect the desktop that owns the desired profile, then call preview_profiles again.",
+          );
+        return { profiles: profiles.profiles, defaultProfileId: profiles.defaultProfileId };
+      }
+      case "open":
+      case "openWithProfile": {
         if (!request.agentSessionId)
           throw new BrowserControlInterrupted(
             "The agent session is missing. Reconnect the provider.",
           );
         const open = input as PreviewAutomationOpenInput;
-        const url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
+        const catalogue = await Effect.runPromise(
+          desktopChannel.getProfiles({
+            threadId: request.threadId,
+            agentSessionId: request.agentSessionId,
+          }),
+        );
+        let selectedProfileId: string | undefined;
+        if (open.profileId !== undefined || open.profileName !== undefined) {
+          if (catalogue === null)
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationRemoteUnavailableError",
+              "The desktop owning the requested browser profile is unavailable or ambiguous. Call preview_profiles after connecting the intended desktop.",
+            );
+          const matches = catalogue.profiles.filter((profile) =>
+            open.profileId !== undefined
+              ? profile.id === open.profileId
+              : profile.name === open.profileName,
+          );
+          if (matches.length !== 1) {
+            const reason = matches.length === 0 ? "unknown" : "ambiguous";
+            const detail =
+              matches.length === 0
+                ? `Browser profile ${JSON.stringify(open.profileId ?? open.profileName)} does not exist. Call preview_profiles to list available profiles.`
+                : `Browser profile name ${JSON.stringify(open.profileName)} matches multiple profiles. Use profileId: ${matches.map((profile) => JSON.stringify(profile.id)).join(", ")}.`;
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationProfileError",
+              detail,
+              { reason, detail },
+            );
+          }
+          selectedProfileId = matches[0]!.id;
+        }
+        const newTabProfileId = selectedProfileId ?? catalogue?.defaultProfileId;
+        let url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
         const reuse = open.reuseExistingTab ?? true;
         if (
           reuse &&
@@ -1488,7 +1636,7 @@ const make = Effect.gen(function* () {
             "tabRequired",
           );
         // A tab still launching exists only as a session, so resolve it like a viewer would.
-        const existing =
+        let existing =
           reuse && request.tabId !== undefined
             ? await Effect.runPromise(
                 findTab(request.threadId, request.tabId).pipe(
@@ -1498,6 +1646,39 @@ const make = Effect.gen(function* () {
                 ),
               )
             : undefined;
+        if (selectedProfileId !== undefined && request.tabIdExplicit && existing === undefined) {
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationTabNotFoundError",
+            "The requested preview tab no longer exists.",
+          );
+        }
+        if (
+          selectedProfileId !== undefined &&
+          existing &&
+          (existing.profileId !== selectedProfileId ||
+            existing.desktopHostId !== catalogue?.desktopHostId)
+        ) {
+          if (request.tabIdExplicit) {
+            const detail =
+              "The selected tab uses a different browser profile. Existing tabs cannot switch profiles; omit tabId to create a new tab.";
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationProfileError",
+              detail,
+              { reason: "tab-mismatch", detail },
+            );
+          }
+          existing = undefined;
+        }
+        if (url !== undefined)
+          url = await browserNavigationUrl(
+            {
+              threadId: request.threadId,
+              desktopHostId:
+                existing?.desktopHostId ??
+                (newTabProfileId === undefined ? undefined : catalogue?.desktopHostId),
+            },
+            url,
+          );
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
         if (!existing) {
           closeIdleAgentTabs();
@@ -1513,6 +1694,9 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(newTabProfileId === undefined || catalogue === null
+                  ? {}
+                  : { profileId: newTabProfileId, desktopHostId: catalogue.desktopHostId }),
               }),
             ),
           ));
@@ -1527,12 +1711,6 @@ const make = Effect.gen(function* () {
               "A browser dialog is pending. Read preview_status and use preview_dialog first.",
               "dialogPending",
             );
-          if (existing) {
-            if (url) await navigate(tab, url, "load", navigationTimeout);
-          } else {
-            // Await the original navigation failure even though background creation keeps the tab.
-            await tab.initialNavigation;
-          }
           const reveal = open.open ?? open.show;
           if (reveal !== false) {
             await Effect.runPromise(
@@ -1542,6 +1720,12 @@ const make = Effect.gen(function* () {
                 force: reveal === true,
               }),
             );
+          }
+          if (existing) {
+            if (url) await navigate(tab, url, "load", navigationTimeout);
+          } else {
+            // Await the original navigation failure even though background creation keeps the tab.
+            await tab.initialNavigation;
           }
           if (!existing && url) {
             await tab.page
@@ -1622,10 +1806,10 @@ const make = Effect.gen(function* () {
     switch (request.operation) {
       case "navigate": {
         const navigateInput = input as PreviewAutomationNavigateInput;
-        await recordAction(tab, "navigate", () =>
+        await recordAction(tab, "navigate", async () =>
           navigate(
             tab,
-            resolveNavigationUrl(navigateInput),
+            await browserNavigationUrl(tab, resolveNavigationUrl(navigateInput)),
             navigateInput.readiness ?? "load",
             navigateInput.timeoutMs ?? request.timeoutMs,
           ),
@@ -1883,7 +2067,7 @@ const make = Effect.gen(function* () {
       }
       case "navigate":
         if (typeof message.url === "string") {
-          const url = normalizePreviewUrl(message.url);
+          const url = await browserNavigationUrl(tab, normalizePreviewUrl(message.url));
           await tab.page.goto(url, VIEWER_NAVIGATION_OPTIONS);
         }
         return;
@@ -2137,7 +2321,8 @@ const make = Effect.gen(function* () {
     Stream.runForEach((key) =>
       Effect.sync(() => {
         const tab = tabs.get(tabKey(key.threadId, key.tabId));
-        if (tab?.desktop) dropTab(tab, false);
+        if (tab?.desktop && (tab.desktopHostId ?? "local") === (key.desktopHostId ?? "local"))
+          dropTab(tab, false);
       }),
     ),
     Effect.forkScoped,

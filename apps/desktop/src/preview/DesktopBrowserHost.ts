@@ -10,18 +10,27 @@
  * it here; the relay shares it.
  */
 import {
+  DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES,
+  DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES,
   DesktopBrowserCommand,
+  DesktopBrowserTransportError,
+  DEFAULT_BROWSER_PROFILE_ID,
+  resolveBrowserProfiles,
   DesktopBrowserEvent,
   type DesktopBrowserEvent as DesktopBrowserEventType,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 
 import { createCdpRelayConnection, type CdpRelayConnection } from "./CdpRelay.ts";
 
@@ -32,6 +41,7 @@ const lineEncoder = new TextEncoder();
 export interface DesktopBrowserTabKey {
   readonly threadId: string;
   readonly tabId: string;
+  readonly desktopHostId?: string | undefined;
 }
 
 /** A tab's debugger, as the preview manager lends it to the relay. */
@@ -40,7 +50,8 @@ export interface DesktopBrowserTabDebugger {
   readonly debugger: Electron.Debugger;
 }
 
-const keyOf = ({ threadId, tabId }: DesktopBrowserTabKey) => `${threadId}\u0000${tabId}`;
+const keyOf = ({ threadId, tabId, desktopHostId = "local" }: DesktopBrowserTabKey) =>
+  JSON.stringify([desktopHostId, threadId, tabId]);
 
 interface AttachedTab {
   readonly key: DesktopBrowserTabKey;
@@ -50,6 +61,7 @@ interface AttachedTab {
   downloadDirectory: string | null;
   /** The guid CDP gave the download that is about to start. */
   pendingDownloadGuid: string | null;
+  remoteDownloadDirectory: Promise<string> | null;
   readonly onMessage: (
     event: Electron.Event,
     method: string,
@@ -66,6 +78,14 @@ export class DesktopBrowserHost extends Context.Service<
      * announcing the tabs already attached, so a restarted backend hears them.
      */
     readonly events: Stream.Stream<Uint8Array>;
+    readonly remoteEvents: Stream.Stream<{
+      readonly desktopHostId: string;
+      readonly event: DesktopBrowserEventType;
+    }>;
+    readonly handleRemoteCommand: (input: {
+      readonly desktopHostId: string;
+      readonly command: DesktopBrowserCommand;
+    }) => Effect.Effect<void>;
     /** One line from the backend's browser control fd. */
     readonly handleCommandLine: (line: string) => Effect.Effect<void>;
     /** Offers a server tab's `<webview>` to the server. */
@@ -85,7 +105,11 @@ export class DesktopBrowserHost extends Context.Service<
 >()("@t3tools/desktop/preview/DesktopBrowserHost") {}
 
 export const make = Effect.gen(function* () {
-  const outbox = yield* PubSub.unbounded<DesktopBrowserEventType>();
+  const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
+  const outbox = yield* PubSub.unbounded<{
+    desktopHostId: string;
+    event: DesktopBrowserEventType;
+  }>();
   const pointers = yield* PubSub.sliding<{
     readonly key: DesktopBrowserTabKey;
     readonly phase: "move" | "click";
@@ -94,17 +118,34 @@ export const make = Effect.gen(function* () {
   }>(16);
   const runFork = Effect.runForkWith(yield* Effect.context<never>());
   const tabs = new Map<string, AttachedTab>();
-  const emit = (event: DesktopBrowserEventType) => runFork(PubSub.publish(outbox, event));
+  const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
+    runFork(PubSub.publish(outbox, { desktopHostId, event }));
 
   const relayFor = (tab: AttachedTab) => {
     if (tab.relay) return tab.relay;
     const { webContents, debugger: debuggee } = tab.debuggee;
     const relay: CdpRelayConnection = createCdpRelayConnection(
       {
-        send: (method, params, sessionId) =>
-          sessionId === undefined
-            ? debuggee.sendCommand(method, params)
-            : debuggee.sendCommand(method, params, sessionId),
+        send: async (method, params, sessionId) => {
+          let localParams = params;
+          if (
+            tab.key.desktopHostId &&
+            tab.key.desktopHostId !== "local" &&
+            method === "Browser.setDownloadBehavior"
+          ) {
+            if (typeof params.downloadPath === "string" && params.behavior !== "deny") {
+              tab.remoteDownloadDirectory ??= NodeFSP.mkdtemp(
+                NodePath.join(NodeOS.tmpdir(), "t3-browser-download-"),
+              );
+              const directory = await tab.remoteDownloadDirectory;
+              tab.downloadDirectory = directory;
+              localParams = { ...params, downloadPath: directory };
+            }
+          }
+          return sessionId === undefined
+            ? debuggee.sendCommand(method, localParams)
+            : debuggee.sendCommand(method, localParams, sessionId);
+        },
         targetId: () =>
           debuggee
             .sendCommand("Target.getTargetInfo")
@@ -119,7 +160,10 @@ export const make = Effect.gen(function* () {
       // A released relay's late replies belong to a connection that is gone.
       (message) => {
         if (tab.relay === relay && tabs.get(keyOf(tab.key)) === tab) {
-          emit({ type: "cdp", ...tab.key, message });
+          emit(
+            { type: "cdp", threadId: tab.key.threadId, tabId: tab.key.tabId, message },
+            tab.key.desktopHostId,
+          );
         }
       },
     );
@@ -142,13 +186,70 @@ export const make = Effect.gen(function* () {
     return true;
   };
 
+  const transferDownload = (tab: AttachedTab, guid: unknown, relay: CdpRelayConnection | null) =>
+    Effect.gen(function* () {
+      const directory = tab.downloadDirectory;
+      if (!directory || typeof guid !== "string" || !/^[a-zA-Z0-9-]{1,128}$/.test(guid)) {
+        return yield* Effect.fail(
+          new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
+        );
+      }
+      const path = NodePath.join(directory, guid);
+      const file = yield* Effect.acquireRelease(
+        Effect.tryPromise(() => NodeFSP.open(path, "r")),
+        (file) => Effect.promise(() => file.close().catch(() => undefined)),
+      );
+      const stat = yield* Effect.tryPromise(() => file.stat());
+      if (stat.size > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES)
+        return yield* Effect.fail(
+          new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
+        );
+      const buffer = Buffer.alloc(DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES);
+      let offset = 0;
+      do {
+        const { bytesRead } = yield* Effect.tryPromise(() =>
+          file.read(buffer, 0, buffer.length, offset),
+        );
+        if (
+          offset + bytesRead > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES ||
+          tabs.get(keyOf(tab.key)) !== tab ||
+          tab.relay !== relay ||
+          (bytesRead === 0 && offset < stat.size)
+        ) {
+          return yield* Effect.fail(
+            new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
+          );
+        }
+        yield* PubSub.publish(outbox, {
+          desktopHostId: tab.key.desktopHostId!,
+          event: {
+            type: "download",
+            threadId: tab.key.threadId,
+            tabId: tab.key.tabId,
+            guid,
+            offset,
+            data: buffer.subarray(0, bytesRead).toString("base64"),
+            done: offset + bytesRead >= stat.size,
+          },
+        });
+        offset += bytesRead;
+        if (bytesRead === 0) break;
+      } while (offset < stat.size);
+      yield* Effect.tryPromise(() => NodeFSP.rm(path, { force: true }));
+    }).pipe(Effect.scoped);
+
   const detach = (key: DesktopBrowserTabKey) => {
     const id = keyOf(key);
     const tab = tabs.get(id);
     if (!tab) return;
     tabs.delete(id);
+    if (tab.remoteDownloadDirectory) {
+      void tab.remoteDownloadDirectory
+        .then((directory) => NodeFSP.rm(directory, { recursive: true, force: true }))
+        .catch(() => undefined);
+    }
     tab.debuggee.debugger.off("message", tab.onMessage);
-    emit({ type: "detached", ...key });
+    emit({ type: "detached", threadId: key.threadId, tabId: key.tabId }, key.desktopHostId);
   };
 
   const attach = (key: DesktopBrowserTabKey, debuggee: DesktopBrowserTabDebugger) => {
@@ -161,49 +262,116 @@ export const make = Effect.gen(function* () {
       relay: null,
       downloadDirectory: null,
       pendingDownloadGuid: null,
+      remoteDownloadDirectory: null,
       onMessage: (_event, method, params, sessionId) => {
         if (method === "Browser.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
           tab.pendingDownloadGuid = typeof guid === "string" ? guid : null;
+        }
+        const progress = params as { guid?: unknown; state?: unknown } | undefined;
+        if (
+          tab.key.desktopHostId &&
+          tab.key.desktopHostId !== "local" &&
+          method === "Browser.downloadProgress" &&
+          progress?.state === "completed"
+        ) {
+          const relay = tab.relay;
+          runFork(
+            transferDownload(tab, progress.guid, relay).pipe(
+              Effect.match({
+                onFailure: () => {
+                  if (tab.relay === relay)
+                    relay?.event(method, { ...(params as object), state: "canceled" }, sessionId);
+                },
+                onSuccess: () => {
+                  if (tab.relay === relay) relay?.event(method, params, sessionId);
+                },
+              }),
+            ),
+          );
+          return;
         }
         tab.relay?.event(method, params, sessionId);
       },
     };
     tabs.set(id, tab);
     debuggee.debugger.on("message", tab.onMessage);
-    emit({ type: "attached", ...key });
+    emit({ type: "attached", threadId: key.threadId, tabId: key.tabId }, key.desktopHostId);
   };
 
-  const handleCommandLine = (line: string) =>
-    Effect.sync(() => {
-      const command = decodeCommand(line);
-      if (Option.isNone(command)) return;
-      const tab = tabs.get(keyOf(command.value));
-      if (!tab) return;
-      if (command.value.type === "pointer") {
-        const { threadId, tabId, phase, x, y } = command.value;
-        runFork(PubSub.publish(pointers, { key: { threadId, tabId }, phase, x, y }));
-        return;
+  const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
+    Effect.suspend(() => {
+      if (command.type === "resolveUrl") return Effect.void;
+      if (command.type === "announce") return announceAll(desktopHostId);
+      if (command.type === "disconnect") {
+        for (const tab of tabs.values()) {
+          if ((tab.key.desktopHostId ?? "local") !== desktopHostId) continue;
+          tab.relay = null;
+          tab.downloadDirectory = null;
+          tab.pendingDownloadGuid = null;
+          const directory = tab.remoteDownloadDirectory;
+          tab.remoteDownloadDirectory = null;
+          if (directory)
+            void directory
+              .then((path) => NodeFSP.rm(path, { recursive: true, force: true }))
+              .catch(() => undefined);
+        }
+        return Effect.void;
       }
-      if (command.value.type === "release") {
+      if (command.type === "profiles") {
+        const requestId = command.requestId;
+        return clientSettings.get.pipe(
+          Effect.map((settings) => {
+            const value = Option.getOrUndefined(settings);
+            const profiles = resolveBrowserProfiles(value?.browserProfiles ?? []);
+            const defaultProfileId =
+              profiles.find(
+                (profile) =>
+                  profile.id === value?.browserDefaultProfileId && profile.kind !== "incognito",
+              )?.id ?? DEFAULT_BROWSER_PROFILE_ID;
+            return { profiles, defaultProfileId };
+          }),
+          Effect.orElseSucceed(() => null),
+          Effect.flatMap((profiles) =>
+            PubSub.publish(outbox, {
+              desktopHostId,
+              event: { type: "profiles", requestId, profiles },
+            }),
+          ),
+          Effect.asVoid,
+        );
+      }
+      const tab = tabs.get(keyOf({ ...command, desktopHostId }));
+      if (!tab) return Effect.void;
+      if (command.type === "pointer") {
+        const { threadId, tabId, phase, x, y } = command;
+        runFork(PubSub.publish(pointers, { key: { threadId, tabId, desktopHostId }, phase, x, y }));
+        return Effect.void;
+      }
+      if (command.type === "release") {
         // A new server connection starts with a fresh relay and fresh sessions.
         tab.relay = null;
-        return;
+        return Effect.void;
       }
-      relayFor(tab).receive(command.value.message);
+      relayFor(tab).receive(command.message);
+      return Effect.void;
     });
 
   // Read when a backend starts, not when the host is built.
-  const announceAll = Effect.suspend(() =>
-    Effect.forEach(
-      [...tabs.values()],
-      (tab) => {
-        tab.relay = null;
-        return PubSub.publish(outbox, { type: "attached", ...tab.key });
-      },
-      { discard: true },
-    ),
-  );
+  const announceAll = (desktopHostId: string) =>
+    Effect.suspend(() =>
+      Effect.forEach(
+        [...tabs.values()].filter((tab) => (tab.key.desktopHostId ?? "local") === desktopHostId),
+        (tab) => {
+          tab.relay = null;
+          return PubSub.publish(outbox, {
+            desktopHostId,
+            event: { type: "attached", threadId: tab.key.threadId, tabId: tab.key.tabId },
+          });
+        },
+        { discard: true },
+      ),
+    );
 
   return DesktopBrowserHost.of({
     pointers: Stream.fromPubSub(pointers),
@@ -211,11 +379,22 @@ export const make = Effect.gen(function* () {
     events: Stream.unwrap(
       Effect.gen(function* () {
         const subscription = yield* PubSub.subscribe(outbox);
-        yield* announceAll;
+        yield* announceAll("local");
         return Stream.fromSubscription(subscription);
       }),
-    ).pipe(Stream.map((event) => lineEncoder.encode(`${encodeEvent(event)}\n`))),
-    handleCommandLine,
+    ).pipe(
+      Stream.filter((entry) => entry.desktopHostId === "local"),
+      Stream.map(({ event }) => lineEncoder.encode(`${encodeEvent(event)}\n`)),
+    ),
+    remoteEvents: Stream.fromPubSub(outbox).pipe(
+      Stream.filter((entry) => entry.desktopHostId !== "local"),
+    ),
+    handleRemoteCommand: ({ desktopHostId, command }) =>
+      desktopHostId === "local" ? Effect.void : handleCommand(command, desktopHostId),
+    handleCommandLine: (line) => {
+      const decoded = decodeCommand(line);
+      return Option.isSome(decoded) ? handleCommand(decoded.value) : Effect.void;
+    },
     attach,
     detach,
     placeDownload,

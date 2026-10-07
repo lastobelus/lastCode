@@ -14,7 +14,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -91,7 +91,7 @@ function makeHarness(
           Layer.mergeAll(
             UpdateDrain.layer.pipe(
               Layer.provide(UpdateDrainRepositoryPersistence.layer),
-              Layer.provide(SqlitePersistenceMemory),
+              Layer.provide(SqlitePersistence.layerMemory),
             ),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getShellSnapshot: () =>
