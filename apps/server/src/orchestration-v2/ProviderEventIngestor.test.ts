@@ -1413,4 +1413,54 @@ layer("ProviderEventIngestorV2", (it) => {
       });
     }),
   );
+  it.effect.each(["archived", "deleted"] as const)(
+    "keeps late native children %s and never recreates deleted children",
+    (state) =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const rootEvent = yield* threadCreatedEvent(now);
+        if (rootEvent.type !== "thread.created") throw new Error("Expected a thread fixture");
+        const owner = {
+          threadId: rootEvent.threadId,
+          commandId: CommandId.make(`archive:${rootEvent.threadId}`),
+        };
+        const parent = {
+          ...rootEvent.payload,
+          archivedAt: state === "archived" ? now : null,
+          archivedWith: state === "archived" ? owner : null,
+          deletedAt: state === "deleted" ? now : null,
+        };
+        yield* sink.write({ events: [{ ...rootEvent, payload: parent }] });
+        const childId = ThreadId.make(`late-child:${rootEvent.threadId}`);
+        const child = {
+          ...rootEvent.payload,
+          id: childId,
+          lineage: {
+            parentThreadId: rootEvent.threadId,
+            rootThreadId: rootEvent.threadId,
+            relationshipToParent: "subagent" as const,
+          },
+        };
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+        });
+        const input = {
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+          event: { type: "app_thread.created" as const, driver: CODEX_DRIVER, appThread: child },
+        };
+        yield* ingestor.ingestNormalized(input);
+        const created = yield* store.getThread(childId);
+        assert.deepEqual(created.archivedAt, parent.archivedAt);
+        assert.deepEqual(created.deletedAt, parent.deletedAt);
+        assert.deepEqual(created.archivedWith, parent.archivedWith);
+        assert.deepEqual(yield* ingestor.ingestNormalized(input), []);
+      }),
+  );
 });

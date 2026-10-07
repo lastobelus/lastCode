@@ -212,6 +212,7 @@ it.effect(
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
+          getOwnedThreadIds: () => Effect.die("not used by turn control tests"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           getThreadShell: () => Effect.die("unused getThreadShell"),
           getWorktreeCleanupThreads: Effect.die("unused getWorktreeCleanupThreads"),

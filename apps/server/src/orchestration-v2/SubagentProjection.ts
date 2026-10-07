@@ -82,13 +82,13 @@ export function makeSubagentChildThread(input: {
     },
     createdAt: input.now,
     updatedAt: input.now,
-    archivedAt: null,
+    archivedAt: input.parentThread.archivedAt,
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
     snoozedAt: null,
     lastVisitedAt: null,
-    deletedAt: null,
+    deletedAt: input.parentThread.deletedAt,
   };
 }
 

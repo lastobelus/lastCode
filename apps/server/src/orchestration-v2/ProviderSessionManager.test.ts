@@ -10,6 +10,7 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type Project,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -5232,5 +5233,137 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect(
+  "terminal detach interrupts and unloads an unbound native child without stopping an unrelated shared-session owner",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const parentId = ThreadId.make("completed-native-parent");
+        const childId = ThreadId.make("unbound-native-child");
+        const otherId = ThreadId.make("unrelated-native-owner");
+        const sessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        for (const [threadId, nativeThreadId, status] of [
+          [parentId, "completed-parent", "completed"],
+          [childId, "running-native-child", "running"],
+          [otherId, "unrelated-ordinary-owner", "running"],
+        ] as const) {
+          const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+          const thread = makeProviderThread({
+            idAllocator: ids,
+            threadId,
+            providerSessionId: sessionId,
+            now,
+            nativeThreadId,
+          });
+          yield* sink.write({
+            events: [
+              {
+                ...created,
+                payload: {
+                  ...created.payload,
+                  activeProviderThreadId: thread.id,
+                  ...(threadId === childId
+                    ? {
+                        creationSource: "provider" as const,
+                        createdBy: "agent" as const,
+                        lineage: {
+                          parentThreadId: parentId,
+                          rootThreadId: parentId,
+                          relationshipToParent: "subagent" as const,
+                        },
+                      }
+                    : {}),
+                },
+              },
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: thread,
+              },
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                type: "provider-turn.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  id: ids.derive.providerTurn({
+                    driver: CODEX_DRIVER,
+                    nativeTurnId: `turn:${nativeThreadId}`,
+                  }),
+                  providerThreadId: thread.id,
+                  nodeId: NodeId.make(`node:${nativeThreadId}`),
+                  runAttemptId: null,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status,
+                  startedAt: now,
+                  completedAt: status === "completed" ? now : null,
+                },
+              },
+            ],
+          });
+        }
+        const runtime = yield* manager.open({
+          threadId: parentId,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.open({
+          threadId: otherId,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        // Native children never attach to the manager; only their provider threads reference the session.
+        assert.deepEqual(
+          (yield* store.getThreadRecords(childId, ["providerSessions"])).providerSessions,
+          [],
+        );
+        yield* manager.detach({
+          threadId: parentId,
+          providerSessionId: sessionId,
+          revokeMcpCredential: true,
+        });
+        yield* manager.detach({
+          threadId: childId,
+          providerSessionId: sessionId,
+          revokeMcpCredential: true,
+        });
+        const current = yield* Ref.get(state);
+        assert.equal(current.interruptCount, 1);
+        assert.deepEqual(current.unloadedNativeThreadIds, [
+          "completed-parent",
+          "running-native-child",
+        ]);
+        assert.equal(current.closeCount, 0);
+        assert.strictEqual(
+          yield* manager.open({
+            threadId: otherId,
+            providerSessionId: sessionId,
+            modelSelection,
+            runtimePolicy,
+          }),
+          runtime,
+        );
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+        assert.equal(
+          (yield* store.getThreadRecords(otherId, ["providerTurns"])).providerTurns[0]?.status,
+          "running",
+        );
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 30_000 })));
     }),
 );

@@ -19,6 +19,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -394,12 +395,57 @@ export const layer: Layer.Layer<
           case "app_thread.created": {
             // Native sessions can reannounce children after reconnecting. Creation
             // must not replace their durable app metadata, including promotion.
-            if ((yield* projections.getThreadShell(providerEvent.appThread.id)) !== null) return [];
+            const existing = yield* projections.getThread(providerEvent.appThread.id).pipe(
+              Effect.catchTags({
+                ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+              }),
+            );
+            if (existing !== null) return [];
+            const parentId = providerEvent.appThread.lineage.parentThreadId;
+            const parent =
+              parentId === null
+                ? null
+                : yield* projections.getThread(parentId).pipe(
+                    Effect.catchTags({
+                      ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                    }),
+                  );
+            const archiveOwner =
+              parent !== null && parent.archivedAt !== null && parent.deletedAt === null
+                ? (parent.archivedWith ?? {
+                    threadId: parent.id,
+                    commandId: CommandId.make(
+                      `legacy-archive:${parent.id}:${DateTime.formatIso(parent.archivedAt)}`,
+                    ),
+                  })
+                : parent?.archivedWith;
+            const appThread =
+              parent !== null && providerEvent.appThread.lineage.relationshipToParent === "subagent"
+                ? {
+                    ...providerEvent.appThread,
+                    archivedAt: parent.archivedAt,
+                    deletedAt: parent.deletedAt,
+                    archivedWith: archiveOwner,
+                  }
+                : providerEvent.appThread;
             return [
+              ...(parent !== null &&
+              parent.archivedAt !== null &&
+              parent.deletedAt === null &&
+              parent.archivedWith == null &&
+              providerEvent.appThread.lineage.relationshipToParent === "subagent"
+                ? [
+                    yield* makeDomainEvent(input, {
+                      type: "thread.metadata-updated",
+                      threadId: parent.id,
+                      payload: { ...parent, archivedWith: archiveOwner },
+                    }),
+                  ]
+                : []),
               yield* makeDomainEvent(input, {
                 type: "thread.created",
                 threadId: providerEvent.appThread.id,
-                payload: providerEvent.appThread,
+                payload: appThread,
               }),
             ];
           }
@@ -564,6 +610,77 @@ export const layer: Layer.Layer<
           if (events.length === 0) {
             return [];
           }
+          // A native child can become inactive before its provider identity
+          // arrives. Later turns need fresh cleanup even after an earlier unload.
+          const effects: Array<PendingOrchestrationEffectV2> = [];
+          const incoming = input.event;
+          if (
+            incoming.type === "provider_thread.updated" ||
+            (incoming.type === "provider_turn.updated" &&
+              (incoming.providerTurn.status === "pending" ||
+                incoming.providerTurn.status === "running"))
+          ) {
+            const targetId =
+              incoming.type === "provider_thread.updated"
+                ? incoming.providerThread.appThreadId
+                : (incoming.threadId ?? input.threadId);
+            if (targetId !== null) {
+              const owner = yield* projections.getThread(targetId).pipe(
+                Effect.catchTags({
+                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                }),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderEventNormalizeError({
+                      providerSessionId: input.providerSessionId,
+                      threadId: input.threadId,
+                      providerEvent: incoming,
+                      cause,
+                    }),
+                ),
+              );
+              if (owner !== null && (owner.archivedAt !== null || owner.deletedAt !== null)) {
+                const providerThread =
+                  incoming.type === "provider_thread.updated"
+                    ? incoming.providerThread
+                    : (yield* projections.getThreadRecords(targetId, ["providerThreads"]).pipe(
+                        Effect.mapError(
+                          (cause) =>
+                            new ProviderEventNormalizeError({
+                              providerSessionId: input.providerSessionId,
+                              threadId: input.threadId,
+                              providerEvent: incoming,
+                              cause,
+                            }),
+                        ),
+                      )).providerThreads.find(
+                        (thread) => thread.id === incoming.providerTurn.providerThreadId,
+                      );
+                if (
+                  providerThread?.appThreadId === targetId &&
+                  providerThread.providerSessionId !== null
+                ) {
+                  const eventId = events.find(
+                    (event) =>
+                      event.type === "provider-thread.updated" ||
+                      event.type === "provider-turn.updated",
+                  )!.id;
+                  effects.push({
+                    id: `effect:inactive-native-detach:${eventId}`,
+                    commandId:
+                      input.commandId ??
+                      CommandId.make(`command:inactive-native-detach:${eventId}`),
+                    threadId: targetId,
+                    request: {
+                      type: "provider-session.detach",
+                      providerSessionId: providerThread.providerSessionId,
+                      revokeMcpCredential: true,
+                    },
+                  });
+                }
+              }
+            }
+          }
           const mapWriteError = (cause: unknown) =>
             new ProviderEventPublishError({
               providerSessionId: input.providerSessionId,
@@ -577,18 +694,22 @@ export const layer: Layer.Layer<
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 ...input.writeIfProviderThreadOwner,
                 events,
+                effects,
               })
               .pipe(Effect.mapError(mapWriteError));
             return ownerResult.storedEvents;
           }
           if (input.writeIfRunCurrent === undefined) {
-            return yield* eventSink
-              .write({
-                guardPendingUserInputCancellations: true,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                events,
-              })
-              .pipe(Effect.mapError(mapWriteError));
+            const writeInput = {
+              guardPendingUserInputCancellations: true,
+              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+              events,
+            };
+            return yield* (
+              effects.length === 0
+                ? eventSink.write(writeInput)
+                : eventSink.writeWithEffects({ ...writeInput, effects })
+            ).pipe(Effect.mapError(mapWriteError));
           }
           const result = yield* eventSink
             .writeIfRunCurrent({
@@ -597,6 +718,7 @@ export const layer: Layer.Layer<
               threadId: input.threadId,
               ...input.writeIfRunCurrent,
               events,
+              effects,
             })
             .pipe(Effect.mapError(mapWriteError));
           return result.storedEvents;
@@ -645,6 +767,16 @@ export const layer: Layer.Layer<
               );
             }),
           ),
+          (ingest) =>
+            input.event.type === "app_thread.created" &&
+            input.event.appThread.lineage.parentThreadId !== null
+              ? threadCommands.withLock(input.event.appThread.lineage.parentThreadId, ingest)
+              : input.event.type === "provider_thread.updated" &&
+                  input.event.providerThread.appThreadId !== null
+                ? threadCommands.withLock(input.event.providerThread.appThreadId, ingest)
+                : input.event.type === "provider_turn.updated"
+                  ? threadCommands.withLock(input.event.threadId ?? input.threadId, ingest)
+                  : ingest,
         ),
     });
   }),

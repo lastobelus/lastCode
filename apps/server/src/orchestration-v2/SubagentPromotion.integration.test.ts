@@ -452,7 +452,7 @@ it.effect("forks a native child cancelled before its first provider turn is reco
   }).pipe(Effect.provide(TestLayer)),
 );
 
-it.effect("continues an accepted waiting promotion while its source is archived", () =>
+it.effect("continues an accepted waiting promotion from a historically archived source", () =>
   Effect.gen(function* () {
     const h = yield* seed("running");
     yield* writeSourceRootNode(h, "running");
@@ -461,10 +461,17 @@ it.effect("continues an accepted waiting promotion while its source is archived"
       (yield* h.orchestrator.getThreadProjection(sourceId)).thread.subagentPromotion?.status,
       "waiting",
     );
-    yield* h.orchestrator.dispatch({
-      type: "thread.archive",
-      commandId: CommandId.make("archive-waiting-source"),
-      threadId: sourceId,
+    const source = (yield* h.orchestrator.getThreadProjection(sourceId)).thread;
+    yield* h.sink.write({
+      events: [
+        {
+          id: EventId.make("historical-archive-waiting-source"),
+          type: "thread.archived",
+          threadId: sourceId,
+          occurredAt: h.now,
+          payload: { ...source, archivedAt: h.now },
+        },
+      ],
     });
     const archivedAt = (yield* h.orchestrator.getThreadProjection(sourceId)).thread.archivedAt;
     assert.isNotNull(archivedAt);
