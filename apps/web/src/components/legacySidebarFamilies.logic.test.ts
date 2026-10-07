@@ -103,6 +103,61 @@ describe("legacy sidebar subagent families", () => {
     expect(result.renderedRows.map((row) => row.depth)).toEqual([0, 0, 1, 0]);
   });
 
+  it.each([
+    ["Working", { runtime: { ...thread("fixture").runtime!, status: "running" as const } }],
+    ["Awaiting Input", { hasPendingUserInput: true }],
+    ["Failed", { runtime: { ...thread("fixture").runtime!, lastError: "Provider failed" } }],
+    [
+      "Failed",
+      {
+        latestRun: {
+          runId: RunId.make("failed-run"),
+          status: "failed" as const,
+          requestedAt: null,
+          startedAt: null,
+          completedAt: "2026-01-01T00:01:00Z",
+          assistantMessageId: null,
+        },
+      },
+    ],
+  ])("keeps %s visible in a collapsed subagent section", (label, overrides) => {
+    const parent = thread("parent");
+    const helper = thread("helper", "parent", overrides);
+    const result = project([parent, helper], {
+      collapsedByKey: { [legacySidebarThreadKey(parent)]: false },
+    });
+    expect(keys(result)).toEqual(["parent"]);
+    expect(result.renderedItems.at(-1)).toMatchObject({
+      type: "subagents",
+      expanded: false,
+      status: { label },
+    });
+  });
+
+  it("aggregates only the hidden subagent branch and prioritizes failed work", () => {
+    const parent = thread("parent");
+    const ordinary = created("ordinary", parent.id, "grouped", { hasPendingUserInput: true });
+    const helper = thread("helper", "parent");
+    const nested = thread("nested", "helper", {
+      runtime: { ...helper.runtime!, status: "running" },
+    });
+    const threads = [parent, ordinary, helper, nested];
+    const options = { collapsedByKey: { [legacySidebarThreadKey(parent)]: false } };
+    const working = project(threads, options);
+    expect(keys(working)).toEqual(["parent", "ordinary"]);
+    expect(working.renderedItems.at(-1)).toMatchObject({ status: { label: "Working" } });
+    const failed = thread("failed", "parent", {
+      runtime: { ...helper.runtime!, lastError: "Error" },
+    });
+    expect(project([...threads, failed], options).renderedItems.at(-1)).toMatchObject({
+      count: 2,
+      status: { label: "Failed" },
+    });
+    expect(project([parent, ordinary, helper], options).renderedItems.at(-1)).toMatchObject({
+      status: null,
+    });
+  });
+
   it("nests multiple levels without folding forks into families", () => {
     const fork = thread("fork", "parent", {
       lineage: {
@@ -153,6 +208,26 @@ describe("legacy sidebar subagent families", () => {
     expect(keys(result)).toEqual(["parent"]);
     expect(result.orderedThreadKeys).toEqual([legacySidebarThreadKey(parent)]);
     expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent (1 working)");
+    expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
+  });
+
+  it("aggregates failures from ordinary children in a default-collapsed minimal family", () => {
+    const parent = thread("parent");
+    const child = created("child", parent.id, "grouped", {
+      latestRun: {
+        runId: RunId.make("failed-child-run"),
+        status: "failed",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00Z",
+        assistantMessageId: null,
+      },
+    });
+    const result = project([parent, child], { collapsedByKey: {}, groupingStyle: "minimal" });
+    expect(keys(result)).toEqual(["parent"]);
+    expect(result.renderedItems.map((item) => item.type)).toEqual(["thread"]);
+    expect(result.renderedRows[0]?.descendantsStatus?.label).toBe("Failed");
+    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 created thread (1 failed)");
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
 

@@ -564,9 +564,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     props.familyRow.parentKey === null &&
     thread.lineage.relationshipToParent !== "subagent";
   const threadEnvironmentLabel =
-    props.familyRow.parentKey !== null || thread.lineage.relationshipToParent === "subagent"
-      ? null
-      : environmentPresentation.hoverLabel;
+    props.familyRow.parentKey !== null ? null : environmentPresentation.hoverLabel;
   const environmentIconColor = resolveEnvironmentIconColor(
     props.configuredEnvironmentIconColor,
     environment !== null && !isDesktopLocalThread,
@@ -1252,16 +1250,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     </span>
                   ) : null}
                   {!typedGroups && family.descendantCount > 0 && !family.expanded ? (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span className="shrink-0 text-3xs text-sidebar-muted-foreground" />
-                        }
-                      >
-                        +{family.descendantCount}
-                      </TooltipTrigger>
-                      <TooltipPopup side="top">{legacySidebarFamilySummary(family)}</TooltipPopup>
-                    </Tooltip>
+                    <>
+                      {family.descendantsStatus ? (
+                        <ThreadStatusLabel
+                          status={family.descendantsStatus}
+                          compact={props.compactStatusIndicators}
+                        />
+                      ) : null}
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <span className="shrink-0 text-3xs text-sidebar-muted-foreground" />
+                          }
+                        >
+                          +{family.descendantCount}
+                        </TooltipTrigger>
+                        <TooltipPopup side="top">{legacySidebarFamilySummary(family)}</TooltipPopup>
+                      </Tooltip>
+                    </>
                   ) : null}
                 </span>
                 {typedGroups && family.descendantCount > 0 && !family.expanded ? (
@@ -1681,7 +1687,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 <LegacySidebarFamilyGuides depth={item.depth} />
                 <button
                   type="button"
-                  aria-label={`${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}`}
+                  aria-label={`${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}${!item.expanded && item.status ? ` · ${item.status.label}` : ""}`}
                   aria-expanded={item.expanded}
                   className="flex h-8 w-full items-center gap-1 rounded-md pr-2 text-3xs text-sidebar-muted-foreground uppercase hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
                   style={{ paddingLeft: 12 + Math.min(item.depth, 6) * 12 }}
@@ -1696,6 +1702,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                   <BotIcon aria-hidden className="size-3" />
                   <span>Subagents</span>
                   <span className="text-secondary-label">{item.count}</span>
+                  {!item.expanded && item.status ? (
+                    <ThreadStatusLabel status={item.status} compact={compactStatusIndicators} />
+                  ) : null}
                 </button>
               </SidebarMenuSubItem>
             );

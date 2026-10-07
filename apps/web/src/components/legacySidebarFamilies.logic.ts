@@ -31,6 +31,7 @@ export type LegacySidebarFamilyItem =
       expanded: boolean;
       selectedDescendant: boolean;
       count: number;
+      status: ThreadStatusPill | null;
     };
 
 export const legacySidebarSubagentGroupKey = (parentKey: string) => `${parentKey}:subagents`;
@@ -250,12 +251,29 @@ export function projectLegacySidebarFamilies(input: {
     }
   }
   const rowByKey = new Map(allRows.map((row) => [row.key, row]));
+  const statusByKey = new Map(
+    allRows.map((row) => {
+      const status = input.statusForThread?.(row.thread) ?? null;
+      const failed = legacySidebarSubagentStatusLabel(row.thread, status) === "Failed";
+      return [
+        row.key,
+        failed
+          ? {
+              label: "Failed" as const,
+              colorClass: "text-red-700 dark:text-red-300",
+              dotClass: "bg-red-600 dark:bg-red-300",
+              pulse: false,
+            }
+          : status,
+      ];
+    }),
+  );
   for (let index = allRows.length - 1; index >= 0; index--) {
     const row = allRows[index]!;
     const parent = row.parentKey ? rowByKey.get(row.parentKey) : undefined;
     if (!parent) continue;
     parent.descendantCount += row.descendantCount + 1;
-    const rowStatus = input.statusForThread?.(row.thread) ?? null;
+    const rowStatus = statusByKey.get(row.key) ?? null;
     const label = legacySidebarSubagentStatusLabel(row.thread, rowStatus);
     const ownCounts =
       row.thread.lineage.relationshipToParent === "subagent"
@@ -315,6 +333,12 @@ export function projectLegacySidebarFamilies(input: {
           expanded: input.collapsedByKey[groupKey] === false || selectedDescendant,
           selectedDescendant,
           count: subagents.length,
+          status: resolveProjectStatusIndicator(
+            subagents.flatMap((key) => [
+              statusByKey.get(key) ?? null,
+              rowByKey.get(key)!.descendantsStatus,
+            ]),
+          ),
         };
         renderedItems.push(group);
         subagentGroups.set(groupKey, group);
