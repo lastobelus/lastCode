@@ -541,7 +541,7 @@ export function useThreadActions() {
             input: { threadId: threadRef.threadId },
           });
       if (familyResult?._tag === "Failure") return familyResult;
-      if (retry && familyResult?._tag === "Success") {
+      if (familyResult?._tag === "Success") {
         const owner = familyResult.value.find(
           (candidate) =>
             candidate.id === threadRef.threadId &&
@@ -561,6 +561,15 @@ export function useThreadActions() {
         familyResult === null
           ? (opts.familySnapshot ?? null)
           : resolveArchiveFamily(familyResult.value, threadRef);
+      if (thread.persistent === true) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new Error(
+              "This thread is persistent. Remove its persistent protection before archiving it.",
+            ),
+          ),
+        );
+      }
       if (!retry && !threadRuntimeCanArchive(thread.runtime) && !family?.children.length) {
         return AsyncResult.failure(
           Cause.fail(

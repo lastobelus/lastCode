@@ -188,21 +188,18 @@ function useThreadActionExecutor(
             );
             return false;
           }
-          if (retry) {
-            const owner = familyResult.value.find(
-              (candidate) =>
-                candidate.id === archiveThreadId &&
-                candidate.environmentId === thread.environmentId,
+          const owner = familyResult.value.find(
+            (candidate) =>
+              candidate.id === archiveThreadId && candidate.environmentId === thread.environmentId,
+          );
+          if (!owner) {
+            Alert.alert(
+              actionFailureTitle(action),
+              "The archive owner is no longer available. Refresh the thread list before retrying.",
             );
-            if (!owner) {
-              Alert.alert(
-                actionFailureTitle(action),
-                "The archive owner is no longer available. Refresh the thread list before retrying.",
-              );
-              return false;
-            }
-            thread = owner;
+            return false;
           }
+          thread = owner;
           if (thread.persistent === true) {
             Alert.alert(
               actionFailureTitle(action),

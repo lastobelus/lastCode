@@ -102,7 +102,24 @@ vi.mock("../../state/use-atom-query-runner", () => ({
     () => async (request: { environmentId: string; input: { threadId: string } }) => {
       state.archiveFamilyReads.push(request);
       return state.archiveFamilyError === undefined
-        ? AsyncResult.success(state.archiveFamily ?? state.shells)
+        ? AsyncResult.success(
+            state.archiveFamily ?? [
+              state.shells.find(
+                (thread) =>
+                  thread.id === request.input.threadId &&
+                  thread.environmentId === request.environmentId,
+              ) ??
+                makeThread({
+                  id: ThreadId.make(request.input.threadId),
+                  environmentId: EnvironmentId.make(request.environmentId),
+                }),
+              ...state.shells.filter(
+                (thread) =>
+                  thread.id !== request.input.threadId ||
+                  thread.environmentId !== request.environmentId,
+              ),
+            ],
+          )
         : AsyncResult.failure(Cause.fail(state.archiveFamilyError));
     },
 }));
@@ -254,6 +271,80 @@ describe("archive family reads", () => {
                 },
               }),
             ],
+      );
+    },
+  );
+
+  it.each([
+    ["Stop and archive", "stop_and_archive"],
+    ["Keep running separately", "promote"],
+    ["Cancel", null],
+  ])(
+    "uses the authoritative working owner despite locally idle state: %s",
+    async (buttonText, disposition) => {
+      const local = makeThread({ title: "Stale title", runtime: null });
+      const owner = { ...local, title: "Authoritative title", runtime: workingRuntime };
+      const child = makeThread({
+        id: ThreadId.make("idle-child"),
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      state.shells = [local];
+      state.archiveFamily = [owner, child];
+      const archiving = useThreadListActions().archiveThread(local);
+      await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+      expect(state.alerts[0]?.title).toContain("Authoritative title");
+      expect(state.requests).toEqual([]);
+      state.alerts[0]!.buttons!.find((button) => button.text === buttonText)!.onPress!();
+      await archiving;
+      expect(state.requests).toEqual(
+        disposition === null
+          ? []
+          : [
+              expect.objectContaining({
+                action: "archive",
+                input: {
+                  threadId: owner.id,
+                  childDisposition: disposition,
+                  expectedChildThreadIds: [child.id],
+                },
+              }),
+            ],
+      );
+    },
+  );
+
+  it("archives the authoritative idle standalone owner despite locally running state", async () => {
+    const local = makeThread({ runtime: workingRuntime });
+    state.shells = [local];
+    state.archiveFamily = [{ ...local, runtime: null }];
+    await useThreadListActions().archiveThread(local);
+    expect(state.requests).toEqual([
+      expect.objectContaining({
+        action: "archive",
+        input: {
+          threadId: local.id,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [],
+        },
+      }),
+    ]);
+    expect(state.alerts).toEqual([]);
+  });
+
+  it.each(["missing", "persistent"] as const)(
+    "blocks archive when the authoritative owner is %s",
+    async (kind) => {
+      const local = makeThread();
+      state.shells = [local];
+      state.archiveFamily = kind === "missing" ? [] : [{ ...local, persistent: true }];
+      await useThreadListActions().archiveThread(local);
+      expect(state.requests).toEqual([]);
+      expect(state.alertMessages[0]).toContain(
+        kind === "missing" ? "owner is no longer available" : "persistent protection",
       );
     },
   );

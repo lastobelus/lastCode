@@ -120,7 +120,9 @@ beforeEach(() => {
   archiveFamilyQuery.mockReset().mockImplementation(async ({ environmentId, input }) => ({
     _tag: "Success",
     value: [
-      makeThreadFixture({ id: input.threadId, environmentId }),
+      familyState.threads.find(
+        (thread) => thread.id === input.threadId && thread.environmentId === environmentId,
+      ) ?? makeThreadFixture({ id: input.threadId, environmentId }),
       ...familyState.threads.filter((thread) => thread.id !== input.threadId),
     ],
   }));
@@ -440,6 +442,70 @@ describe("archive family confirmation", () => {
     expect(archiveDialog).toHaveBeenCalledTimes(1);
     expect(commands.archive).not.toHaveBeenCalled();
   });
+
+  it.each(["stop_and_archive", "promote", null] as const)(
+    "confirms the authoritative working owner despite a locally idle snapshot: %s",
+    async (choice) => {
+      const owner = { ...workingRoot(), title: "Authoritative title" };
+      const child = makeThreadFixture({
+        id: ThreadId.make("idle-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [{ ...owner, runtime: null, title: "Stale title" }];
+      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [owner, child] });
+      archiveDialog.mockImplementation(async (request) => {
+        expect(request.title).toContain("Authoritative title");
+        expect(commands.archive).not.toHaveBeenCalled();
+        if (choice !== null) expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      const result = await useThreadActions().archiveThread(target);
+      expect(archiveDialog).toHaveBeenCalledTimes(1);
+      expect(result._tag).toBe(choice === null ? "Failure" : "Success");
+      if (choice === null) expect(commands.archive).not.toHaveBeenCalled();
+      else
+        expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+          environmentId: target.environmentId,
+          input: {
+            threadId: owner.id,
+            childDisposition: choice,
+            expectedChildThreadIds: [child.id],
+          },
+        });
+    },
+  );
+
+  it("archives the authoritative idle standalone owner despite locally running state", async () => {
+    const local = workingRoot();
+    familyState.threads = [local];
+    archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [{ ...local, runtime: null }] });
+    expect((await useThreadActions().archiveThread(target))._tag).toBe("Success");
+    expect(archiveDialog).not.toHaveBeenCalled();
+    expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId },
+    });
+  });
+
+  it.each(["missing", "persistent"] as const)(
+    "blocks archive when the authoritative owner is %s",
+    async (kind) => {
+      const owner = { ...workingRoot(), runtime: null };
+      familyState.threads = [owner];
+      archiveFamilyQuery.mockResolvedValue({
+        _tag: "Success",
+        value: kind === "missing" ? [] : [{ ...owner, persistent: true }],
+      });
+      expect((await useThreadActions().archiveThread(target))._tag).toBe("Failure");
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(commands.archive).not.toHaveBeenCalled();
+    },
+  );
 
   function seedFamily() {
     const child = makeThreadFixture({
