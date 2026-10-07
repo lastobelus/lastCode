@@ -16,7 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -26,7 +26,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const importSessionId = ProviderSessionId.make("archive-child-session");
 const instanceId = ProviderInstanceId.make("codex");
@@ -38,16 +38,16 @@ const adapter = {
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
   openSession: () => Effect.die("Runs here never reach a provider"),
 } as ProviderAdapterV2Shape;
-const database = SqlitePersistenceMemory;
+const database = SqlitePersistence.layerMemory;
 // No effect worker: runs stay unstarted, so Stop ends them without a provider.
 const testLayer = ThreadManagementService.layer.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
       database,
       ProjectionStore.layer.pipe(Layer.provide(database)),
-      makeOrchestratorV2ReplayLayerWithRegistry(
+      ProviderReplayHarness.layerWithRegistry(
         { name: "thread-stop" },
-        ProviderAdapterRegistry.makeLayer([adapter]),
+        ProviderAdapterRegistry.layerFromAdapters([adapter]),
         { databaseLayer: database, runEffectWorker: false },
       ),
     ),
