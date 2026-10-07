@@ -114,6 +114,7 @@ import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
+  readProject,
   readThreadShell,
   readEnvironmentSupportsThreadAnnotations,
   readEnvironmentSupportsPersistence,
@@ -254,6 +255,7 @@ import {
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { LegacySidebarThreadPicker } from "./sidebar/LegacySidebarThreadPicker";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -293,8 +295,10 @@ import {
 } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import {
+  NO_PROJECT_GROUP_KEY,
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
+  resolveSidebarProjectSettingsKey,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
@@ -1874,6 +1878,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
+  const projectSettingsKey = resolveSidebarProjectSettingsKey({
+    sidebarProjectKey: project.projectKey,
+    targetProject: project,
+    settings: projectGroupingSettings,
+  });
   const projectEnvironmentIcons = useMemo(
     () =>
       projectEnvironmentIconEntries({
@@ -2452,14 +2462,18 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           if (isMobile) setOpenMobile(false);
           void router.navigate({
             to: "/projects/$projectKey",
-            params: { projectKey: project.projectKey },
+            params: { projectKey: projectSettingsKey },
           });
         });
 
         const clicked = await api.contextMenu.show(
           [
-            buildTargetedItem("rename", "Rename"),
-            buildTargetedItem("grouping", "Group into..."),
+            ...(isNoProjectGroup
+              ? []
+              : [
+                  buildTargetedItem("rename", "Rename"),
+                  buildTargetedItem("grouping", "Group into..."),
+                ]),
             buildTargetedItem("copy-path", "Copy Path"),
             { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
             { id: "project-settings", label: "Project settings", icon: "settings" },
@@ -2492,13 +2506,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       copyPathToClipboard,
       handleRemoveProject,
       isMobile,
+      isNoProjectGroup,
       openProjectGroupingDialog,
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
       project.environmentId,
       project.id,
-      project.projectKey,
+      projectSettingsKey,
       router,
       setOpenMobile,
       sidebarThreads,
@@ -3080,9 +3095,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const threadKey = scopedThreadKey(threadRef);
       const thread = sidebarThreadByKeyRef.current.get(threadKey) ?? null;
       if (!thread) return;
-      const threadProject = memberProjectByScopedKey.get(
-        scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-      );
+      const threadProjectRef = scopeProjectRef(thread.environmentId, thread.projectId);
+      const threadProject =
+        readProject(threadProjectRef) ??
+        memberProjectByScopedKey.get(scopedProjectKey(threadProjectRef));
+      const threadProjectSettingsKey = threadProject
+        ? resolveSidebarProjectSettingsKey({
+            sidebarProjectKey: project.projectKey,
+            targetProject: threadProject,
+            settings: projectGroupingSettings,
+          })
+        : isNoProjectGroup
+          ? null
+          : project.projectKey;
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
       const supportsThreadAnnotations = readEnvironmentSupportsThreadAnnotations(
@@ -3132,7 +3157,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
             { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
-            { id: "project-settings", label: "Project settings" },
+            {
+              id: "project-settings",
+              label: "Project settings",
+              disabled: threadProjectSettingsKey === null,
+            },
             { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
             ...(handoffDescriptors.length
               ? handoffDescriptors.map(({ entry, label }) => ({ id: `handoff:${entry.id}`, label }))
@@ -3204,10 +3233,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "project-settings") {
+        if (threadProjectSettingsKey === null) return;
         if (isMobile) setOpenMobile(false);
         void router.navigate({
           to: "/projects/$projectKey",
-          params: { projectKey: project.projectKey },
+          params: { projectKey: threadProjectSettingsKey },
         });
         return;
       }
@@ -3330,8 +3360,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       deleteThread,
       handleNewThread,
       isMobile,
+      isNoProjectGroup,
       markThreadUnread,
       memberProjectByScopedKey,
+      projectGroupingSettings,
       project.projectKey,
       project.workspaceRoot,
       router,
@@ -3401,7 +3433,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             <span className="truncate text-sm font-medium text-sidebar-foreground/90">
               {project.displayName}
             </span>
-            {project.groupedProjectCount > 1 ? (
+            {project.groupedProjectCount > 1 && !isNoProjectGroup ? (
               <span className="shrink-0 text-secondary-label text-3xs">
                 {project.groupedProjectCount} projects
               </span>
@@ -4161,13 +4193,18 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
         <SidebarGroup className="z-[1]">
           <SidebarMenu>
             <SidebarMenuItem>
-              <CommandDialogTrigger
-                render={<SidebarMenuButton data-testid="command-palette-trigger" />}
-              >
-                <SearchIcon />
-                <span className="flex-1 truncate">Search</span>
-                {commandPaletteShortcutLabel ? <Kbd>{commandPaletteShortcutLabel}</Kbd> : null}
-              </CommandDialogTrigger>
+              <div className="flex min-w-0 items-center gap-1">
+                <div className="min-w-0 flex-1">
+                  <CommandDialogTrigger
+                    render={<SidebarMenuButton data-testid="command-palette-trigger" />}
+                  >
+                    <SearchIcon />
+                    <span className="flex-1 truncate">Search</span>
+                    {commandPaletteShortcutLabel ? <Kbd>{commandPaletteShortcutLabel}</Kbd> : null}
+                  </CommandDialogTrigger>
+                </div>
+                <LegacySidebarThreadPicker projectGroups={sortedProjects} />
+              </div>
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
@@ -4434,6 +4471,17 @@ export default function LegacySidebar() {
       ),
     [environments],
   );
+  const scratchWorkspaceRootsByEnvironmentId = useMemo(
+    () =>
+      new Map(
+        environments.flatMap((environment) =>
+          environment.serverConfig?.scratchWorkspaceRoot
+            ? [[environment.environmentId, environment.serverConfig.scratchWorkspaceRoot] as const]
+            : [],
+        ),
+      ),
+    [environments],
+  );
   const desktopLocalEnvironmentIds = useMemo(
     () =>
       new Set(
@@ -4476,8 +4524,14 @@ export default function LegacySidebar() {
       projects: orderedProjects,
       settings: projectGroupingSettings,
       primaryEnvironmentId,
+      scratchWorkspaceRootsByEnvironmentId,
     });
-  }, [orderedProjects, projectGroupingSettings, primaryEnvironmentId]);
+  }, [
+    orderedProjects,
+    projectGroupingSettings,
+    primaryEnvironmentId,
+    scratchWorkspaceRootsByEnvironmentId,
+  ]);
   const projectPhysicalKeyByScopedRef = useMemo(
     () =>
       new Map(
@@ -4494,6 +4548,7 @@ export default function LegacySidebar() {
       projects: orderedProjects,
       settings: projectGroupingSettings,
       primaryEnvironmentId,
+      scratchWorkspaceRootsByEnvironmentId,
       resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
       isDesktopLocalEnvironment: (environmentId) => desktopLocalEnvironmentIds.has(environmentId),
       isWslEnvironment: (environmentId) => wslEnvironmentIds.has(environmentId),
@@ -4505,6 +4560,7 @@ export default function LegacySidebar() {
     orderedProjects,
     projectGroupingSettings,
     primaryEnvironmentId,
+    scratchWorkspaceRootsByEnvironmentId,
   ]);
 
   const sidebarProjectByKey = useMemo(
