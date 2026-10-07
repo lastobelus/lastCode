@@ -2616,8 +2616,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       );
       throw error;
     }
+    const repairedSelection = selection;
     runPromotionThenShadow(
-      () => promoteCheckpoint(repoRoot, selection.head, options, selection.sourceCommit, true),
+      () =>
+        promoteCheckpoint(
+          repoRoot,
+          repairedSelection.head,
+          options,
+          repairedSelection.sourceCommit,
+          true,
+        ),
       () =>
         runHistoricalShadowIfNeeded(repoRoot, shadowTag, replay, (record) =>
           appendCheckpointRunForOptions(options, record),
