@@ -11,6 +11,7 @@ import {
   readCarryReplayPlan,
   type CarryReplayPlan,
 } from "./lastcode-carry-replay.ts";
+import { assertRecoverySelection, continueCarryRecovery } from "./lastcode-checkpoint.ts";
 import { normalizeCheckpointCommits } from "./lastcode-quiet-references.ts";
 
 const repositories: Array<string> = [];
@@ -103,6 +104,89 @@ afterEach(() => {
 });
 
 describe("quiet checkpoint recovery", () => {
+  it.each(["running", "complete"] as const)(
+    "resumes a %s compile-phase rewrite before replaying onto a newer nightly",
+    (status) => {
+      const { repo, base, head: originalHead } = carryFixture();
+      const nightlyTag = "v9.9.9-nightly.20990102.2";
+      git(repo, ["checkout", "--quiet", "--detach", base]);
+      NodeFS.writeFileSync(NodePath.join(repo, "upstream-new.txt"), "new upstream behavior\n");
+      const nightlyHead = commit(repo, "new upstream nightly");
+      git(repo, ["tag", nightlyTag, nightlyHead]);
+      git(repo, ["checkout", "--quiet", "-b", `sync/nightly/${nightlyTag}`, originalHead]);
+      writePlan(
+        repo,
+        replayPlan(
+          "compile",
+          base,
+          originalHead,
+          status,
+          status === "complete" ? originalHead : undefined,
+        ),
+      );
+      // The compilation head moves before its plan or recovery selection is updated.
+      const normalizedHead = normalizeCheckpointCommits(repo, base);
+      expect(normalizedHead).not.toBe(originalHead);
+      const selection = { head: originalHead, sourceCommit: originalHead, nightlyTag };
+      expect(() => assertRecoverySelection(repo, selection, originalHead, false)).not.toThrow();
+      expect(() => assertRecoverySelection(repo, selection, originalHead)).toThrow(
+        "Recovery does not contain the selected upstream nightly.",
+      );
+
+      const recoveredHead = continueCarryRecovery({
+        repoRoot: repo,
+        worktree: repo,
+        selectedHead: originalHead,
+        nightlyTag,
+      });
+      expect(git(repo, ["merge-base", nightlyHead, recoveredHead])).toBe(nightlyHead);
+      expect(NodeFS.readFileSync(NodePath.join(repo, "upstream-new.txt"), "utf8")).toBe(
+        "new upstream behavior\n",
+      );
+      expect(NodeFS.readFileSync(NodePath.join(repo, "fixture.txt"), "utf8")).toBe("group 5\n");
+      expect(git(repo, ["log", "--format=%B", `${nightlyHead}..${recoveredHead}`])).toContain(
+        "https://redirect.github.com/example/upstream/pull/42",
+      );
+      expect(readCarryReplayPlan(repo)).toMatchObject({
+        phase: "replay",
+        status: "complete",
+        onto: nightlyHead,
+        resultHead: recoveredHead,
+      });
+      expect(() =>
+        assertRecoverySelection(repo, { ...selection, head: recoveredHead }, originalHead),
+      ).not.toThrow();
+    },
+  );
+
+  it("rejects an unrelated compile-phase message amend before selection or continuation", () => {
+    const { repo, base, head: originalHead } = carryFixture();
+    const nightlyTag = "v9.9.9-nightly.20990101.1";
+    git(repo, ["tag", nightlyTag, base]);
+    git(repo, ["checkout", "--quiet", "-b", `sync/nightly/${nightlyTag}`, originalHead]);
+    writePlan(repo, replayPlan("compile", base, originalHead, "complete", originalHead));
+    const alteredHead = replaceHeadWithCommit(
+      repo,
+      originalHead,
+      git(repo, ["rev-parse", `${originalHead}^{tree}`]),
+      `${git(repo, ["show", "-s", "--format=%B", originalHead])}\nUnexpected amend\n`,
+    );
+    const selection = { head: originalHead, sourceCommit: originalHead, nightlyTag };
+
+    expect(() => assertRecoverySelection(repo, selection, originalHead, false)).toThrow(
+      "Retained recovery head or branch changed; select again.",
+    );
+    expect(() =>
+      continueCarryRecovery({
+        repoRoot: repo,
+        worktree: repo,
+        selectedHead: originalHead,
+        nightlyTag,
+      }),
+    ).toThrow("Retained carry recovery head changed; inspect and select its exact head.");
+    expect(git(repo, ["rev-parse", "HEAD"])).toBe(alteredHead);
+  });
+
   it("reconciles a completed replay after normalization moved HEAD during a crash", () => {
     const { repo, base, head: originalHead } = carryFixture();
     const sourceRef = "refs/fixture/source";

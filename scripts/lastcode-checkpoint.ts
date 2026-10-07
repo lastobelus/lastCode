@@ -2112,11 +2112,12 @@ export function assertRecoverySelection(
 ): void {
   if (selection.sourceCommit !== sourceCommit)
     throw new Error("Recovery source changed; incorporate new main commits and select again.");
+  const plan = readCarryReplayPlan(worktree);
   if (
     git(worktree, ["branch", "--show-current"]) !== `sync/nightly/${selection.nightlyTag}` ||
     !isCheckpointMessageRewrite(
       worktree,
-      selection.nightlyTag,
+      plan?.onto ?? selection.nightlyTag,
       selection.head,
       git(worktree, ["rev-parse", "HEAD"]),
     )
@@ -2144,7 +2145,7 @@ export function continueCarryRecovery(input: {
   if (
     !isCheckpointMessageRewrite(
       input.worktree,
-      input.nightlyTag,
+      plan?.onto ?? input.nightlyTag,
       input.selectedHead,
       git(input.worktree, ["rev-parse", "HEAD"]),
     )
