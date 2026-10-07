@@ -241,6 +241,9 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
     legacySidebarScale: destination.legacySidebarScale,
     roundedProjectIcons: destination.roundedProjectIcons,
     showLocalEnvironmentIcon: destination.showLocalEnvironmentIcon,
+    showThreadProviderBadge: destination.showThreadProviderBadge,
+    threadProviderBadgeSize: destination.threadProviderBadgeSize,
+    threadProviderBadgeTransparency: destination.threadProviderBadgeTransparency,
     showThreadWorktreeIndicators: destination.showThreadWorktreeIndicators,
   })}\n`;
 }
