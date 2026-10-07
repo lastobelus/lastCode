@@ -419,6 +419,28 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+function hasUnfinishedArchiveWork(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "runtimeRequests" | "providerThreads" | "providerTurns"
+  >,
+) {
+  const ownedProviderThreadIds = new Set(
+    projection.providerThreads
+      .filter((thread) => thread.appThreadId === projection.thread.id)
+      .map((thread) => thread.id),
+  );
+  return (
+    projection.runs.some((run) =>
+      ["preparing", "starting", "running", "waiting"].includes(run.status),
+    ) ||
+    projection.runtimeRequests.some((request) => request.status === "pending") ||
+    projection.providerTurns.some(
+      (turn) => turn.status === "running" && ownedProviderThreadIds.has(turn.providerThreadId),
+    )
+  );
+}
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.worktree-cleanup.retry":
@@ -3614,20 +3636,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
-      const ownedProviderThreadIds = new Set(
-        projection.providerThreads
-          .filter((providerThread) => providerThread.appThreadId === command.threadId)
-          .map((providerThread) => providerThread.id),
-      );
-      if (
-        projection.runs.some((run) =>
-          ["preparing", "starting", "running", "waiting"].includes(run.status),
-        ) ||
-        projection.runtimeRequests.some((request) => request.status === "pending") ||
-        projection.providerTurns.some(
-          (turn) => turn.status === "running" && ownedProviderThreadIds.has(turn.providerThreadId),
-        )
-      ) {
+      if (hasUnfinishedArchiveWork(projection)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -11310,8 +11319,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .getThreadProviderContext(command.threadId)
       .pipe(mapDispatchError(command));
     const controls = yield* projectionStore
-      .getThreadRecords(command.threadId, ["runs", "runtimeRequests", "providerThreads"])
+      .getThreadRecords(command.threadId, [
+        "runs",
+        "runtimeRequests",
+        "providerThreads",
+        "providerTurns",
+      ])
       .pipe(mapDispatchError(command));
+    const unfinished = hasUnfinishedArchiveWork(controls);
+    if (family.children.length === 0 && unfinished)
+      return yield* reject("This conversation has unfinished work. Stop it before archiving.");
     if (
       !archivedRepair &&
       family.children.length === 0 &&
@@ -11321,10 +11338,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerThread.appThreadId === command.threadId &&
           providerThread.providerSessionId !== null,
       ) &&
-      !controls.runs.some((run) =>
-        ["preparing", "starting", "running", "waiting"].includes(run.status),
-      ) &&
-      !controls.runtimeRequests.some((request) => request.status === "pending")
+      !unfinished
     ) {
       yield* dispatchThreadMutation(command, events, effects);
       return;

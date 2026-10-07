@@ -8,6 +8,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
+  ProviderTurnId,
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -160,6 +162,149 @@ const archiveModeLimits = [
   { runtimeMode: "approval-required", interactionMode: "default", mode: "runtime" },
   { runtimeMode: "full-access", interactionMode: "plan", mode: "interaction" },
 ] as const;
+
+it.effect.each(["preparing", "starting", "running", "waiting"] as const)(
+  "ordinary standalone archive refuses %s work without stopping it",
+  (status) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const standalone = ThreadId.make("standalone-active-archive");
+      yield* createWatchingThread(standalone, 7);
+      yield* send(standalone, "standalone-work", "start_immediately");
+      const run = (yield* orchestrator.getThreadProjection(standalone)).runs[0]!;
+      yield* projections.apply({
+        id: EventId.make("standalone-run-state"),
+        type: "run.updated",
+        threadId: standalone,
+        occurredAt: yield* DateTime.now,
+        payload: { ...run, status },
+      });
+      const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      for (const childDisposition of [undefined, "stop_and_archive"] as const) {
+        const refused = yield* orchestrator
+          .dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(`standalone-archive:${childDisposition ?? "ordinary"}`),
+            threadId: standalone,
+            ...(childDisposition ? { childDisposition, expectedChildThreadIds: [] } : {}),
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused._tag, "OrchestratorDispatchError");
+        assert.include(String(refused.cause), "unfinished work");
+      }
+      const after = yield* orchestrator.getThreadProjection(standalone);
+      assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+      assert.isNull(after.thread.archivedAt);
+      assert.isNull(after.thread.archivePending ?? null);
+      assert.equal(after.runs[0]?.status, status);
+      assert.isTrue(after.thread.pullRequests?.[0]?.watch?.startedAt !== undefined);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("ordinary standalone archive preserves a pending question after its run stopped", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const standalone = ThreadId.make("standalone-question-archive");
+    yield* createWatchingThread(standalone, 8);
+    yield* send(standalone, "standalone-question", "start_immediately");
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("standalone-stop-before-question"),
+      threadId: standalone,
+    });
+    const run = (yield* orchestrator.getThreadProjection(standalone)).runs[0]!;
+    yield* projections.apply({
+      id: EventId.make("standalone-pending-question"),
+      type: "runtime-request.updated",
+      threadId: standalone,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        id: RuntimeRequestId.make("standalone-question"),
+        nodeId: run.rootNodeId!,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "not_resumable", reason: "fixture" },
+        createdAt: yield* DateTime.now,
+        resolvedAt: null,
+      },
+    });
+    const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("standalone-archive-pending-question"),
+        threadId: standalone,
+      })
+      .pipe(Effect.flip);
+    assert.include(String(refused.cause), "unfinished work");
+    assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+    const after = yield* orchestrator.getThreadProjection(standalone);
+    assert.equal(after.runtimeRequests[0]?.status, "pending");
+    assert.isNull(after.thread.archivedAt);
+    assert.isNull(after.thread.archivePending ?? null);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("ordinary standalone archive preserves runless owned provider execution", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { parent } = yield* family;
+    const owner = yield* orchestrator.getThreadProjection(parent);
+    const standalone = ThreadId.make("standalone-runless-archive");
+    yield* createWatchingThread(standalone, 9);
+    const providerThreadId = ProviderThreadId.make("standalone-owned-provider");
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("standalone-owned-provider"),
+      type: "provider-thread.updated",
+      threadId: standalone,
+      occurredAt: now,
+      payload: {
+        ...owner.providerThreads[0]!,
+        id: providerThreadId,
+        appThreadId: standalone,
+        providerSessionId: importSessionId,
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("standalone-owned-turn"),
+      type: "provider-turn.updated",
+      threadId: standalone,
+      occurredAt: now,
+      payload: {
+        id: ProviderTurnId.make("standalone-owned-turn"),
+        providerThreadId,
+        nodeId: owner.runs[0]!.rootNodeId!,
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+    assert.lengthOf((yield* orchestrator.getThreadProjection(standalone)).runs, 0);
+    const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("standalone-archive-owned-turn"),
+        threadId: standalone,
+      })
+      .pipe(Effect.flip);
+    assert.include(String(refused.cause), "unfinished work");
+    assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+    const after = yield* orchestrator.getThreadProjection(standalone);
+    assert.equal(after.providerTurns[0]?.status, "running");
+    assert.isNull(after.thread.archivedAt);
+    assert.isNull(after.thread.archivePending ?? null);
+  }).pipe(Effect.provide(testLayer)),
+);
 
 it.effect.each(
   archiveModeLimits.flatMap((limit) =>

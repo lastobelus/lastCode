@@ -729,9 +729,10 @@ export function useThreadActions() {
             >
           >
         | undefined;
+      const completedThreadKeys = new Set<string>();
       const perform = async (choice: ArchiveChildDisposition) => {
-        outcome = await archiveSelectedThreadEntries({
-          entries,
+        const attempt = await archiveSelectedThreadEntries({
+          entries: entries.filter((entry) => !completedThreadKeys.has(entry.threadKey)),
           archive: ({ threadRef, family, owner }, onArchived) =>
             archiveThread(threadRef, {
               confirmed: true,
@@ -743,6 +744,12 @@ export function useThreadActions() {
               onArchived,
             }),
         });
+        for (const threadKey of attempt.archivedThreadKeys) completedThreadKeys.add(threadKey);
+        outcome = {
+          ...attempt,
+          archivedThreadKeys: [...completedThreadKeys],
+          followupFailures: [...(outcome?.followupFailures ?? []), ...attempt.followupFailures],
+        };
         if (!outcome.mutationFailure) return null;
         const error = squashAtomCommandFailure(outcome.mutationFailure);
         return error instanceof Error ? error.message : "The archive did not complete.";

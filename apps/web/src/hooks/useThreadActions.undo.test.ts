@@ -63,7 +63,10 @@ vi.mock("../state/entities", async (original) => ({
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
-  readThreadShell: () => threadShell,
+  readThreadShell: (target: { threadId: ThreadId; environmentId: EnvironmentId }) =>
+    familyState.threads.find(
+      (thread) => thread.id === target.threadId && thread.environmentId === target.environmentId,
+    ) ?? { ...threadShell, id: target.threadId, environmentId: target.environmentId },
   readThreadShells: () => familyState.threads,
 }));
 vi.mock("../state/use-atom-command", () => ({
@@ -104,9 +107,12 @@ function currentUndo() {
 beforeEach(() => {
   familyState.threads = [];
   archiveDialog.mockReset();
-  archiveFamilyQuery.mockReset().mockImplementation(async () => ({
+  archiveFamilyQuery.mockReset().mockImplementation(async ({ environmentId, input }) => ({
     _tag: "Success",
-    value: familyState.threads,
+    value: [
+      makeThreadFixture({ id: input.threadId, environmentId }),
+      ...familyState.threads.filter((thread) => thread.id !== input.threadId),
+    ],
   }));
   vi.useFakeTimers();
   for (const command of Object.values(commands)) {
@@ -266,7 +272,14 @@ describe("archive family confirmation", () => {
       const inactiveOwner = { ...child, archivedAt: "2026-01-01T00:00:00.000Z" };
       const liveNested = { ...nested, hasPendingApprovals: true };
       familyState.threads = [liveNested];
-      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [inactiveOwner, liveNested] });
+      archiveFamilyQuery.mockResolvedValue({
+        _tag: "Success",
+        value: [
+          makeThreadFixture({ id: target.threadId, environmentId: target.environmentId }),
+          inactiveOwner,
+          liveNested,
+        ],
+      });
       archiveDialog.mockImplementation(async (request) => {
         expect(request.children.map((thread: { id: string }) => thread.id)).toEqual([nested.id]);
         expect(await request.submit("stop_and_archive")).toBeNull();
@@ -306,10 +319,15 @@ describe("archive family confirmation", () => {
   });
 
   it("reads every bulk family before dispatching any participant", async () => {
-    archiveFamilyQuery.mockResolvedValueOnce({ _tag: "Success", value: [] }).mockResolvedValueOnce({
-      _tag: "Failure",
-      cause: Cause.fail(new Error("Second family unavailable")),
-    });
+    archiveFamilyQuery
+      .mockResolvedValueOnce({
+        _tag: "Success",
+        value: [makeThreadFixture({ id: target.threadId, environmentId: target.environmentId })],
+      })
+      .mockResolvedValueOnce({
+        _tag: "Failure",
+        cause: Cause.fail(new Error("Second family unavailable")),
+      });
     const outcome = await useThreadActions().archiveThreads([
       { threadRef: target, threadKey: "undo-env:thread" },
       { threadRef: { ...target, threadId: ThreadId.make("second") }, threadKey: "undo-env:second" },
@@ -318,6 +336,107 @@ describe("archive family confirmation", () => {
     expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
     expect(commands.archive).not.toHaveBeenCalled();
     expect(archiveDialog).not.toHaveBeenCalled();
+  });
+});
+
+describe("bulk archive progress", () => {
+  function seedBulkFamilies() {
+    const second = { ...target, threadId: ThreadId.make("second") };
+    const roots = [target, second].map((ref) =>
+      makeThreadFixture({ id: ref.threadId, environmentId: ref.environmentId }),
+    );
+    const children = roots.map((root) =>
+      makeThreadFixture({
+        id: ThreadId.make(`${root.id}:child`),
+        environmentId: root.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+        attention: { kind: "question", raisedAt: "2026-01-01T00:00:00.000Z" },
+      }),
+    );
+    familyState.threads = [...roots, ...children];
+    archiveFamilyQuery.mockImplementation(async ({ input }) => ({
+      _tag: "Success",
+      value: familyState.threads.filter(
+        (thread) => thread.id === input.threadId || thread.lineage.rootThreadId === input.threadId,
+      ),
+    }));
+    let secondAttempts = 0;
+    commands.archive.mockImplementation(async ({ input }) => {
+      if (input.threadId === target.threadId) {
+        const root = familyState.threads.find((thread) => thread.id === target.threadId)!;
+        if (root.archivedAt !== null)
+          return { _tag: "Failure", cause: Cause.fail(new Error("The subagents changed")) };
+        familyState.threads = familyState.threads.map((thread) => {
+          if (thread.id === target.threadId)
+            return { ...thread, archivedAt: "2026-01-01T00:00:00.000Z" };
+          if (thread.lineage.parentThreadId !== target.threadId) return thread;
+          return input.childDisposition === "promote"
+            ? { ...thread, lineage: { ...thread.lineage, independent: true } }
+            : { ...thread, archivedAt: "2026-01-01T00:00:00.000Z" };
+        });
+        return { _tag: "Success", value: undefined };
+      }
+      if (++secondAttempts === 1)
+        return { _tag: "Failure", cause: Cause.fail(new Error("Second family shutdown failed")) };
+      return { _tag: "Success", value: undefined };
+    });
+    return {
+      selected: [target, second].map((threadRef) => ({
+        threadRef,
+        threadKey: `${threadRef.environmentId}:${threadRef.threadId}`,
+      })),
+      children,
+      second,
+    };
+  }
+
+  it.each(["stop_and_archive", "promote"] as const)(
+    "retains completed %s families and retries only the unresolved family",
+    async (firstChoice) => {
+      const { selected, children, second } = seedBulkFamilies();
+      archiveDialog.mockImplementation(async (request) => {
+        expect(await request.submit(firstChoice)).toContain("Second family shutdown failed");
+        expect(await request.submit("stop_and_archive")).toBeNull();
+        return "stop_and_archive";
+      });
+      const outcome = await useThreadActions().archiveThreads(selected);
+      expect(outcome?.archivedThreadKeys).toEqual(selected.map((entry) => entry.threadKey));
+      expect(outcome?.mutationFailure).toBeNull();
+      expect(commands.archive.mock.calls.map(([request]) => request.input)).toEqual([
+        {
+          threadId: target.threadId,
+          childDisposition: firstChoice,
+          expectedChildThreadIds: [children[0]!.id],
+        },
+        {
+          threadId: second.threadId,
+          childDisposition: firstChoice,
+          expectedChildThreadIds: [children[1]!.id],
+        },
+        {
+          threadId: second.threadId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [children[1]!.id],
+        },
+      ]);
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("retains successful selection keys when the user cancels after partial progress", async () => {
+    const { selected } = seedBulkFamilies();
+    archiveDialog.mockImplementation(async (request) => {
+      expect(await request.submit("promote")).toContain("Second family shutdown failed");
+      return null;
+    });
+    const outcome = await useThreadActions().archiveThreads(selected);
+    expect(outcome?.archivedThreadKeys).toEqual([selected[0]!.threadKey]);
+    expect(outcome?.mutationFailure?._tag).toBe("Failure");
+    expect(commands.archive).toHaveBeenCalledTimes(2);
   });
 });
 
