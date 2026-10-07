@@ -586,11 +586,13 @@ describe("settings sidebar scope", () => {
     ["show thread provider badges", "show-thread-provider-badges"],
     ["provider badge size", "thread-provider-badge-size"],
     ["provider badge transparency", "thread-provider-badge-transparency"],
-  ])("routes %s to LastCode settings", (query, id) => {
-    expect(searchSettings(query)[0]).toMatchObject({
+  ])("routes %s to the always-visible badge toggle", (query, id) => {
+    const result = searchSettings(query)[0];
+    expect(result).toMatchObject({
       id,
       to: "/settings/lastcode",
     });
+    expect(result?.targetId ?? result?.id).toBe("show-thread-provider-badges");
   });
 
   it("finds badge transparency through opacity search", () => {

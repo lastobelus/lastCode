@@ -981,12 +981,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "thread-provider-badge-size",
     title: "Provider badge size",
     to: "/settings/lastcode",
+    // The toggle stays mounted when its size and transparency sliders are hidden.
+    targetId: "show-thread-provider-badges",
     searchTerms: ["sidebar provider logo badge size percentage machine icon scale"],
   },
   {
     id: "thread-provider-badge-transparency",
     title: "Provider badge transparency",
     to: "/settings/lastcode",
+    targetId: "show-thread-provider-badges",
     searchTerms: ["sidebar provider logo badge transparency opacity transparent"],
   },
   {
