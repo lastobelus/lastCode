@@ -67,6 +67,7 @@ import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import {
   type ActionResumeState,
   type ThreadWorktreeCleanup,
+  CommandId,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -987,6 +988,27 @@ describe("isContextMenuPointerDown", () => {
 });
 
 describe("resolveSidebarThreadStatus", () => {
+  it.each(["stopping", "failed"] as const)(
+    "keeps persisted %s archive visible before provider and Action status",
+    (archiveState) => {
+      const thread = makeThreadFixture({
+        archivePending: {
+          threadId: ThreadId.make("archive-root"),
+          commandId: CommandId.make("archive-request"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status: archiveState,
+        },
+        hasPendingApprovals: true,
+      });
+      const status = resolveSidebarThreadStatus(thread);
+      expect(status).toBe(archiveState === "failed" ? "archive-failed" : "archiving");
+      expect(resolveSidebarV2TopStatus({ status, isUnread: true, isWoke: true })).toBe(status);
+      expect(resolveSidebarThreadStatus({ ...thread, archivePending: null })).toBe("approval");
+    },
+  );
   const runtime = {
     status: "running" as const,
     activeRunId: null,
@@ -1386,6 +1408,35 @@ describe("resolveThreadStatusPill", () => {
       updatedAt: "2026-03-09T10:00:00.000Z",
     },
   };
+
+  it.each(["stopping", "failed"] as const)(
+    "shows persisted %s archive ahead of provider work and approval",
+    (status) => {
+      const displayed = resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasPendingApprovals: true,
+          archivePending: {
+            threadId: ThreadId.make("archive-root"),
+            commandId: CommandId.make("archive-request"),
+            childDisposition: "stop_and_archive",
+            childThreadIds: [],
+            archiveThreadIds: [],
+            promoteThreadIds: [],
+            status,
+          },
+        },
+      });
+      expect(displayed).toMatchObject({
+        label: status === "failed" ? "Archive failed" : "Archiving…",
+        pulse: false,
+      });
+      if (status === "failed")
+        expect(displayed?.description).toContain(
+          "some work may have stopped. Choose Archive again to retry.",
+        );
+    },
+  );
 
   it("shows pending approval before all other statuses", () => {
     expect(

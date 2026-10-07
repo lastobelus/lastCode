@@ -267,6 +267,10 @@
       "types": "./src/state/threadRecovery.ts",
       "default": "./src/state/threadRecovery.ts"
     },
+    "./state/thread-archive": {
+      "types": "./src/state/threadArchive.ts",
+      "default": "./src/state/threadArchive.ts"
+    },
     "./state/threads": {
       "types": "./src/state/threads.ts",
       "default": "./src/state/threads.ts"

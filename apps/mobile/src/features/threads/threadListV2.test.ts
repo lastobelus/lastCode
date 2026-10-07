@@ -118,6 +118,37 @@ describe("resolveThreadListV2SnoozeMenuSelection", () => {
 });
 
 describe("resolveThreadListV2Status", () => {
+  it.each(["stopping", "failed"] as const)(
+    "shows persisted %s archive before stale provider and approval state",
+    (status) => {
+      const thread = makeThread({
+        id: ThreadId.make("archive-root"),
+        title: "Archiving",
+        hasPendingApprovals: true,
+        archivePending: {
+          threadId: ThreadId.make("archive-root"),
+          commandId: CommandId.make("archive-request"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      });
+      expect(resolveThreadListV2Status(thread)).toBe(
+        status === "failed" ? "archive-failed" : "archiving",
+      );
+      expect(resolveThreadStatus(thread)).toMatchObject({
+        label: status === "failed" ? "Archive failed" : "Archiving…",
+        pulse: false,
+      });
+      if (status === "failed")
+        expect(resolveThreadStatus(thread)?.description).toContain(
+          "some work may have stopped. Choose Archive again to retry.",
+        );
+      expect(resolveThreadListV2Status({ ...thread, archivePending: null })).toBe("approval");
+    },
+  );
   it("distinguishes usage limits from ordinary failures and clears the label after recovery", () => {
     const thread = makeThread({
       id: ThreadId.make("limited"),

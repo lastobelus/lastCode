@@ -71,6 +71,7 @@ import {
   withThreadMenuDividers,
 } from "./thread-persistence-menu";
 import { resolveWorktreeCleanupStatus, shouldShowActionWaitingIndicator } from "./thread-status";
+import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 /**
@@ -86,6 +87,8 @@ import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 const STATUS_LABEL_BY_STATUS: Partial<
   Record<ThreadListV2Status, { label: string; className: string }>
 > = {
+  archiving: { label: "Archiving…", className: "text-muted-foreground" },
+  "archive-failed": { label: "Archive failed", className: "text-warning-foreground" },
   "not-responding": { label: "Not responding", className: "text-warning-foreground" },
   "needs-repair": { label: "Needs repair", className: "text-warning-foreground" },
   approval: { label: "Approval", className: "text-warning-foreground" },
@@ -664,6 +667,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const mutedForegroundColor =
     theme[sidebarPane ? "--color-drawer-foreground-muted" : "--color-foreground-muted"];
   const status = resolveThreadListV2Status(thread);
+  const archiveStatus = presentThreadArchive(thread);
   const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status);
   const cleanupStatus = resolveWorktreeCleanupStatus(thread);
   // "Done" marks a completion the user has not opened yet — same emerald
@@ -944,21 +948,32 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const withPersistence = useCallback(
     (actions: ReadonlyArray<MenuAction>) =>
       buildThreadPersistenceMenuItems({
-        actions: hasManagedProcesses
-          ? [
-              {
-                id: "stop-thread-processes",
-                title: "Stop all previews & processes",
-                image: "stop.fill",
-                attributes: { destructive: true },
-              },
-              ...actions,
-            ]
-          : actions,
+        actions: [
+          ...(thread.archivePending?.status === "failed" &&
+          !actions.some((action) => action.id === "archive")
+            ? [{ id: "archive", title: "Retry archive", image: "archivebox" }]
+            : []),
+          ...(hasManagedProcesses
+            ? [
+                {
+                  id: "stop-thread-processes",
+                  title: "Stop all previews & processes",
+                  image: "stop.fill",
+                  attributes: { destructive: true },
+                },
+                ...actions,
+              ]
+            : actions),
+        ],
         persistent: thread.persistent === true,
         supported: props.persistenceSupported,
       }),
-    [hasManagedProcesses, props.persistenceSupported, thread.persistent],
+    [
+      hasManagedProcesses,
+      props.persistenceSupported,
+      thread.persistent,
+      thread.archivePending?.status,
+    ],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () =>
@@ -1166,6 +1181,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
   const threadAccessibilityLabel = [
     thread.title,
+    archiveStatus ? `${archiveStatus.label}. ${archiveStatus.description}` : null,
     showActionWaitingIndicator && runningAction
       ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
       : null,
@@ -1252,6 +1268,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           {thread.title}
         </Text>
       </View>
+      {archiveStatus?.status === "archive-failed" ? (
+        <Text className="mt-1 text-xs text-warning-foreground" accessibilityLiveRegion="polite">
+          {archiveStatus.description}
+        </Text>
+      ) : null}
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -1488,6 +1509,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 {thread.title}
               </Text>
             </View>
+            {archiveStatus?.status === "archive-failed" ? (
+              <Text
+                className="mt-1 text-xs text-warning-foreground"
+                accessibilityLiveRegion="polite"
+              >
+                {archiveStatus.description}
+              </Text>
+            ) : null}
             {props.searchMatch ? (
               <ThreadSearchMatchExcerpt
                 sidebar={sidebarPane}
@@ -1509,9 +1538,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             )}
             style={{ fontFamily: MONO_FONT }}
           >
-            {snoozedRow && props.snoozeWakeLabelText !== undefined
-              ? props.snoozeWakeLabelText
-              : timeLabel}
+            {archiveStatus?.label ??
+              (snoozedRow && props.snoozeWakeLabelText !== undefined
+                ? props.snoozeWakeLabelText
+                : timeLabel)}
           </Text>
         </View>
       </RowPressable>

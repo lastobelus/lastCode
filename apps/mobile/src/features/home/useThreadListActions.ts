@@ -1,5 +1,6 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { archiveRetryThreadId } from "@t3tools/client-runtime/state/thread-archive";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -164,14 +165,9 @@ function useThreadActionExecutor(
               (candidate) =>
                 candidate.id === thread.id && candidate.environmentId === thread.environmentId,
             ) ?? thread;
-          if (thread.persistent === true) {
-            Alert.alert(
-              actionFailureTitle(action),
-              "This thread is persistent. Remove its persistent protection before archiving it.",
-            );
-            return false;
-          }
-          if (!threadCanArchive(thread.runtime)) {
+          const retry = thread.archivePending?.status === "failed";
+          const archiveThreadId = archiveRetryThreadId(thread);
+          if (!retry && !threadCanArchive(thread.runtime)) {
             Alert.alert(
               actionFailureTitle(action),
               "This thread is working. Interrupt it first, then try again.",
@@ -180,12 +176,34 @@ function useThreadActionExecutor(
           }
           const familyResult = await loadArchiveFamily({
             environmentId: thread.environmentId,
-            input: { threadId: thread.id },
+            input: { threadId: archiveThreadId },
           });
           if (familyResult._tag === "Failure") {
             Alert.alert(
               actionFailureTitle(action),
               actionFailureMessage(action, familyResult.cause),
+            );
+            return false;
+          }
+          if (retry) {
+            const owner = familyResult.value.find(
+              (candidate) =>
+                candidate.id === archiveThreadId &&
+                candidate.environmentId === thread.environmentId,
+            );
+            if (!owner) {
+              Alert.alert(
+                actionFailureTitle(action),
+                "The archive owner is no longer available. Refresh the thread list before retrying.",
+              );
+              return false;
+            }
+            thread = owner;
+          }
+          if (thread.persistent === true) {
+            Alert.alert(
+              actionFailureTitle(action),
+              "This thread is persistent. Remove its persistent protection before archiving it.",
             );
             return false;
           }

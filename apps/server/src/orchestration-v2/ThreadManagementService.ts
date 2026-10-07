@@ -36,6 +36,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as Orchestrator from "./Orchestrator.ts";
+import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
@@ -484,47 +485,44 @@ const make = Effect.gen(function* () {
       yield* ensureCommandTranscripts(command);
       const result = yield* orchestrator.dispatch(command);
       if (command.type !== "thread.archive") return result;
-      const inspect = (
-        thread: OrchestrationV2ThreadProjection["thread"],
-      ): Effect.Effect<boolean, Orchestrator.OrchestratorDispatchError> => {
-        if (thread.archivedAt !== null && thread.archivedWith?.commandId === command.commandId)
-          return Effect.succeed(true);
-        if (
-          thread.archivePending?.commandId !== command.commandId ||
-          thread.archivePending.status === "failed"
-        )
-          return Effect.fail(
-            new Orchestrator.OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause:
-                thread.archivePending?.error ??
-                "Archive did not complete. The conversations remain visible.",
-            }),
-          );
-        return Effect.succeed(false);
-      };
-      const initial = yield* orchestrator.getThreadRecords(command.threadId, []);
-      const done = yield* inspect(initial.thread);
-      if (done) return result;
+      const pending = result.storedEvents.some(
+        (stored) =>
+          stored.event.threadId === command.threadId &&
+          stored.event.type === "thread.metadata-updated" &&
+          stored.event.payload.archivePending?.commandId === command.commandId &&
+          stored.event.payload.archivePending.status === "stopping",
+      );
+      // Accepted no-ops and synchronous repairs have already finished. Pending
+      // requests observe their own durable outcome: a later reopen or retry must
+      // not replace the result with the latest thread state.
+      if (!pending) return result;
       const completion = yield* orchestrator
         .streamStoredEventsFrom({ threadId: command.threadId, afterSequence: result.sequence })
         .pipe(
           Stream.filter(
             (stored) =>
-              stored.event.type === "thread.metadata-updated" ||
-              stored.event.type === "thread.archived",
+              (stored.commandId === CommandId.make(`${command.commandId}:complete`) &&
+                stored.event.type === "thread.archived" &&
+                stored.event.payload.archivedAt !== null &&
+                stored.event.payload.archivePending == null) ||
+              (stored.commandId === CommandId.make(`${command.commandId}:failed`) &&
+                stored.event.type === "thread.metadata-updated" &&
+                stored.event.payload.archivePending?.commandId === command.commandId &&
+                stored.event.payload.archivePending.status === "failed"),
           ),
           Stream.mapEffect((stored) =>
-            orchestrator
-              .getThreadRecords(command.threadId, [])
-              .pipe(
-                Effect.flatMap(({ thread }) =>
-                  inspect(thread).pipe(Effect.map((done) => ({ stored, done }))),
-                ),
-              ),
+            stored.event.type === "thread.metadata-updated"
+              ? Effect.fail(
+                  new Orchestrator.OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause:
+                      stored.event.payload.archivePending?.error ??
+                      "Archive did not complete. The conversations remain visible.",
+                  }),
+                )
+              : Effect.succeed(stored),
           ),
-          Stream.filter((value) => value.done),
           Stream.runHead,
         );
       if (Option.isNone(completion))
@@ -534,8 +532,8 @@ const make = Effect.gen(function* () {
           cause: "Archive completion could not be observed.",
         });
       return {
-        sequence: completion.value.stored.sequence,
-        storedEvents: [completion.value.stored],
+        sequence: completion.value.sequence,
+        storedEvents: [completion.value],
       };
     });
 
@@ -895,6 +893,7 @@ const make = Effect.gen(function* () {
 
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (input) =>
     Effect.gen(function* () {
+      const cancellationOwnership = yield* DelegatedTaskCancellation;
       const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
       const failures: Array<Orchestrator.OrchestratorV2Error> = [];
       for (const task of subagents) {
@@ -914,6 +913,10 @@ const make = Effect.gen(function* () {
           ...(input.reason === undefined ? {} : { reason: input.reason }),
         }).pipe(
           Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
+          Effect.provideService(DelegatedTaskCancellation, [
+            ...cancellationOwnership,
+            { parentThreadId: input.threadId, taskId: task.id, childThreadId: threadId },
+          ]),
           Effect.catch((error) =>
             Effect.logWarning("Unable to stop a delegated task", {
               parentThreadId: input.threadId,

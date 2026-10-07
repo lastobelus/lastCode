@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { getOrphanedWorktreePathForThread } from "../worktreeCleanup";
@@ -10,8 +10,54 @@ import {
   navigateAfterThreadDeletion,
   requestThreadUnpinConfirmation,
   ThreadArchiveBlockedError,
+  normalizeArchiveSelectedEntries,
 } from "./useThreadActions";
 import { toastManager } from "../components/ui/toast";
+import { makeThreadFixture } from "../test-fixtures";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+
+describe("archive retry selections", () => {
+  it("deduplicates a selected owner and failed child before querying and choosing the owner family", () => {
+    const owner = makeThreadFixture({
+      id: ThreadId.make("archive-owner"),
+      environmentId: EnvironmentId.make("environment-test"),
+    });
+    const pending = {
+      threadId: owner.id,
+      commandId: CommandId.make("archive-request"),
+      childDisposition: "promote" as const,
+      childThreadIds: [],
+      archiveThreadIds: [],
+      promoteThreadIds: [],
+      status: "failed" as const,
+    };
+    const child = { ...owner, id: ThreadId.make("failed-child"), archivePending: pending };
+    const ownerRef = scopeThreadRef(owner.environmentId, owner.id);
+    const childRef = scopeThreadRef(child.environmentId, child.id);
+    const normalized = normalizeArchiveSelectedEntries(
+      [
+        { threadKey: scopedThreadKey(childRef), threadRef: childRef },
+        { threadKey: scopedThreadKey(ownerRef), threadRef: ownerRef },
+      ],
+      (ref) => (ref.threadId === child.id ? child : owner),
+    );
+    expect(normalized).toEqual([{ threadKey: scopedThreadKey(ownerRef), threadRef: ownerRef }]);
+    // Only the owner key represents a completed family operation. A kept
+    // child remains a selectable independent conversation after promotion.
+    expect(normalized.map((entry) => entry.threadKey)).not.toContain(scopedThreadKey(childRef));
+    expect(child.archivePending.childDisposition).toBe("promote");
+  });
+  it("keeps same-id retry owners in different environments separate", () => {
+    const first = scopeThreadRef(EnvironmentId.make("first-environment"), ThreadId.make("owner"));
+    const second = scopeThreadRef(EnvironmentId.make("second-environment"), first.threadId);
+    expect(
+      normalizeArchiveSelectedEntries(
+        [first, second].map((threadRef) => ({ threadRef, threadKey: scopedThreadKey(threadRef) })),
+        () => null,
+      ),
+    ).toHaveLength(2);
+  });
+});
 
 describe("navigateAfterThreadDeletion", () => {
   afterEach(() => vi.restoreAllMocks());

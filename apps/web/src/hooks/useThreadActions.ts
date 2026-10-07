@@ -9,6 +9,10 @@ import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-se
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import {
+  archiveChildNeedsAttention,
+  archiveRetryThreadId,
+} from "@t3tools/client-runtime/state/thread-archive";
+import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
@@ -94,17 +98,25 @@ function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target
   };
 }
 
-function archiveChildNeedsAttention(thread: EnvironmentThreadShell) {
-  return (
-    !threadRuntimeCanArchive(thread.runtime) ||
-    thread.runtime?.status === "waiting" ||
-    thread.runtime?.status === "queued" ||
-    thread.hasPendingApprovals ||
-    thread.hasPendingUserInput ||
-    thread.hasActionableProposedPlan ||
-    thread.attention != null ||
-    thread.pendingBackgroundTasks.length > 0
-  );
+/** Failed participants share one retry owner, even when that owner is already archived. */
+export function normalizeArchiveSelectedEntries<
+  T extends { threadKey: string; threadRef: ScopedThreadRef },
+>(
+  selected: readonly T[],
+  readThread: (
+    target: ScopedThreadRef,
+  ) => Pick<EnvironmentThreadShell, "id" | "archivePending"> | null,
+) {
+  const owners = new Map<string, T>();
+  for (const entry of selected) {
+    const thread = readThread(entry.threadRef);
+    const threadRef = thread
+      ? scopeThreadRef(entry.threadRef.environmentId, archiveRetryThreadId(thread))
+      : entry.threadRef;
+    const threadKey = scopedThreadKey(threadRef);
+    if (!owners.has(threadKey)) owners.set(threadKey, { ...entry, threadKey, threadRef });
+  }
+  return [...owners.values()];
 }
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
@@ -495,12 +507,20 @@ export function useThreadActions() {
           childDisposition: ArchiveChildDisposition;
           expectedChildThreadIds: ThreadId[];
         };
+        familyOwner?: EnvironmentThreadShell;
       } = {},
     ) => {
-      const resolved = resolveThreadTarget(target);
+      const resolved =
+        opts.familyOwner?.id === target.threadId &&
+        opts.familyOwner.environmentId === target.environmentId
+          ? { thread: opts.familyOwner, threadRef: target }
+          : resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
-      const { thread, threadRef } = resolved;
-      if (!threadRuntimeCanArchive(thread.runtime)) {
+      const retry = resolved.thread.archivePending?.status === "failed";
+      const threadRef = scopeThreadRef(target.environmentId, archiveRetryThreadId(resolved.thread));
+      let thread = resolved.thread;
+      const familyChoice = retry && !opts.familyOwner ? undefined : opts.familyChoice;
+      if (!retry && !threadRuntimeCanArchive(thread.runtime)) {
         return AsyncResult.failure(
           Cause.fail(
             new ThreadArchiveBlockedError({
@@ -517,13 +537,29 @@ export function useThreadActions() {
         currentRouteThreadRef.environmentId === threadRef.environmentId;
       let action: ReturnType<typeof ThreadUndo.begin> | undefined;
       // Bulk actions already read every family before gathering one shared choice.
-      const familyResult = opts.familyChoice
+      const familyResult = familyChoice
         ? null
         : await loadArchiveFamily({
             environmentId: threadRef.environmentId,
             input: { threadId: threadRef.threadId },
           });
       if (familyResult?._tag === "Failure") return familyResult;
+      if (retry && familyResult?._tag === "Success") {
+        const owner = familyResult.value.find(
+          (candidate) =>
+            candidate.id === threadRef.threadId &&
+            candidate.environmentId === threadRef.environmentId,
+        );
+        if (!owner)
+          return AsyncResult.failure(
+            Cause.fail(
+              new Error(
+                "The archive owner is no longer available. Refresh the thread list before retrying.",
+              ),
+            ),
+          );
+        thread = owner;
+      }
       const family =
         familyResult === null ? null : resolveArchiveFamily(familyResult.value, threadRef);
       const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
@@ -535,7 +571,7 @@ export function useThreadActions() {
           environmentId: threadRef.environmentId,
           input: {
             threadId: threadRef.threadId,
-            ...(opts.familyChoice ??
+            ...(familyChoice ??
               (family !== null && family.children.length > 0
                 ? {
                     childDisposition: childDisposition ?? "stop_and_archive",
@@ -566,7 +602,7 @@ export function useThreadActions() {
           return AsyncResult.failure(Cause.interrupt());
         }
       } else {
-        if (!opts.confirmed && !opts.familyChoice && confirmThreadArchive) {
+        if (!opts.confirmed && !familyChoice && confirmThreadArchive) {
           const confirmed = await readLocalApi()?.dialogs.confirm(
             `Archive thread "${thread.title}"${family !== null && family.children.length > 0 ? ` and its ${family.children.length} subagents` : ""}?`,
           );
@@ -626,9 +662,12 @@ export function useThreadActions() {
   const archiveThreads = useCallback(
     async (selected: ReadonlyArray<{ threadKey: string; threadRef: ScopedThreadRef }>) => {
       const families: Array<
-        (typeof selected)[number] & { family: ReturnType<typeof resolveArchiveFamily> }
+        (typeof selected)[number] & {
+          family: ReturnType<typeof resolveArchiveFamily>;
+          owner: EnvironmentThreadShell;
+        }
       > = [];
-      for (const entry of selected) {
+      for (const entry of normalizeArchiveSelectedEntries(selected, readThreadShell)) {
         const result = await loadArchiveFamily({
           environmentId: entry.threadRef.environmentId,
           input: { threadId: entry.threadRef.threadId },
@@ -639,7 +678,28 @@ export function useThreadActions() {
             mutationFailure: result,
             followupFailures: [],
           };
-        families.push({ ...entry, family: resolveArchiveFamily(result.value, entry.threadRef) });
+        const owner = result.value.find(
+          (candidate) =>
+            candidate.id === entry.threadRef.threadId &&
+            candidate.environmentId === entry.threadRef.environmentId,
+        );
+        if (!owner)
+          return {
+            archivedThreadKeys: [],
+            mutationFailure: AsyncResult.failure(
+              Cause.fail(
+                new Error(
+                  "The archive owner is no longer available. Refresh the thread list before retrying.",
+                ),
+              ),
+            ),
+            followupFailures: [],
+          };
+        families.push({
+          ...entry,
+          family: resolveArchiveFamily(result.value, entry.threadRef),
+          owner,
+        });
       }
       // A selected descendant is handled by its selected ancestor's family operation.
       const entries = families.filter(
@@ -672,13 +732,14 @@ export function useThreadActions() {
       const perform = async (choice: ArchiveChildDisposition) => {
         outcome = await archiveSelectedThreadEntries({
           entries,
-          archive: ({ threadRef, family }, onArchived) =>
+          archive: ({ threadRef, family, owner }, onArchived) =>
             archiveThread(threadRef, {
               confirmed: true,
               familyChoice: {
                 childDisposition: choice,
                 expectedChildThreadIds: family.children.map((child) => child.id),
               },
+              familyOwner: owner,
               onArchived,
             }),
         });

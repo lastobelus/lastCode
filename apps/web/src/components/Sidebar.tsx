@@ -1,4 +1,5 @@
 import { type EnvironmentId } from "@t3tools/contracts";
+import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
 import {
   ConnectedSidebarEnvironmentIcon,
   useSidebarProviderBadgePreferences,
@@ -1199,6 +1200,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const archiveStatus = presentThreadArchive(thread);
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -1226,6 +1228,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
   const topStatus = (() => {
+    if (archiveStatus)
+      return {
+        label: archiveStatus.label,
+        icon:
+          archiveStatus.status === "archive-failed" ? ("failed" as const) : ("waiting" as const),
+        className:
+          archiveStatus.status === "archive-failed" ? "text-warning" : "text-muted-foreground",
+      };
     if (status === "cleanup-deleting" || status === "cleanup-queued")
       return {
         label: status === "cleanup-queued" ? "Deleting (Queued)" : "Deleting",
@@ -1270,6 +1280,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     return isUnread ? { label: "Done", icon: "done" as const, className: "text-success" } : null;
   })();
   const actionIsPrimary =
+    archiveStatus === null &&
     actionPresentation !== null &&
     (thread.runtime === null ||
       ["idle", "completed", "cancelled", "interrupted", "rolled_back"].includes(
@@ -1507,9 +1518,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     props.snoozeSupported &&
     canSnooze(thread, { now: new Date().toISOString() });
   const showHoverActions =
-    (canOperateThread && cleanup === null && props.settlementSupported) ||
-    showSnoozeButton ||
-    hasUnsentDraft;
+    archiveStatus === null &&
+    ((canOperateThread && cleanup === null && props.settlementSupported) ||
+      showSnoozeButton ||
+      hasUnsentDraft);
   // If the thread becomes blocked while the popover is open, the button
   // unmounts without firing onOpenChange(false). Deriving the flag keeps a
   // stale true from permanently hiding the status label / pinning the
@@ -1608,7 +1620,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
-    statusLabel: topStatus?.label ?? null,
+    statusLabel: archiveStatus
+      ? `${archiveStatus.label}. ${archiveStatus.description}`
+      : (topStatus?.label ?? null),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -1850,12 +1864,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   className={cn(
                     "inline-flex justify-end tabular-nums text-secondary-label transition-opacity",
                     !isWoke &&
+                      archiveStatus === null &&
                       canOperateThread &&
                       cleanup === null &&
                       "group-any-hover/sidebar-row:opacity-0",
                   )}
                 >
-                  {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
+                  {archiveStatus ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span role="status" className={cn("text-xs", topStatus?.className)} />
+                        }
+                      >
+                        {archiveStatus.label}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{archiveStatus.description}</TooltipPopup>
+                    </Tooltip>
+                  ) : variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
                     // Snoozed rows show when they come BACK, not when they were
                     // last touched — the return ticket is the row's whole story.
                     <span className="text-xs text-info-foreground tabular-nums">
@@ -1888,7 +1914,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     </span>
                   )}
                 </span>
-                {variantAction === "unsnooze" ? (
+                {archiveStatus ? null : variantAction === "unsnooze" ? (
                   !canOperateThread || cleanup !== null || !props.snoozeSupported ? null : (
                     <button
                       type="button"
@@ -2035,7 +2061,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     )}
                   >
                     {topStatus ? (
-                      actionIsPrimary && actionResume !== null && actionPresentation !== null ? (
+                      archiveStatus ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <span
+                                role="status"
+                                className={cn("inline-flex font-medium", topStatus.className)}
+                              />
+                            }
+                          >
+                            {archiveStatus.label}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">{archiveStatus.description}</TooltipPopup>
+                        </Tooltip>
+                      ) : actionIsPrimary &&
+                        actionResume !== null &&
+                        actionPresentation !== null ? (
                         <Popover>
                           <PopoverTrigger
                             render={
@@ -4831,7 +4873,9 @@ export default function Sidebar() {
                 isSnoozed,
                 canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
                 isRegeneratingTitle,
-                isRunning: !threadRuntimeCanArchive(thread.runtime),
+                isRunning:
+                  thread.archivePending?.status !== "failed" &&
+                  !threadRuntimeCanArchive(thread.runtime),
                 hasRunningAction: thread.actionResume?.outcome === "running",
                 hasStoppableProcesses,
                 supports: {

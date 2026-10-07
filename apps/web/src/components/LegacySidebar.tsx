@@ -649,7 +649,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
     [discoveredPorts, navigateToThread, openPreview, thread.environmentId, threadRef],
   );
-  const isThreadRunning = !threadRuntimeCanArchive(thread.runtime);
+  const isThreadRunning =
+    thread.archivePending?.status !== "failed" && !threadRuntimeCanArchive(thread.runtime);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -2730,7 +2731,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const count = selectedThreadEntries.length;
       if (count === 0) return;
       const hasRunningThread = selectedThreadEntries.some(
-        ({ thread }) => !threadRuntimeCanArchive(thread.runtime),
+        ({ thread }) =>
+          thread.archivePending?.status !== "failed" && !threadRuntimeCanArchive(thread.runtime),
       );
       const canOperateSelection = selectedThreadEntries.every(({ threadRef }) =>
         readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),

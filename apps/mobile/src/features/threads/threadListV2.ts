@@ -1,4 +1,5 @@
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import {
@@ -83,6 +84,8 @@ export function resolveThreadListV2ProviderDrivers(
  * monitors); commands left running, such as a dev server, read as ready.
  */
 export type ThreadListV2Status =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "input"
   | "question"
@@ -219,8 +222,11 @@ export function resolveThreadListV2Status(
     | "hasPendingUserInput"
     | "runtime"
     | "recovery"
+    | "archivePending"
   >,
 ): ThreadListV2Status {
+  const archive = presentThreadArchive(thread);
+  if (archive) return archive.status;
   const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
   if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals) {

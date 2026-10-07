@@ -5,6 +5,7 @@ import {
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { getOwnedThreadFamily } from "@t3tools/contracts";
 import { resolveThreadStatus } from "../threads/thread-status";
+import { archiveChildNeedsAttention } from "@t3tools/client-runtime/state/thread-archive";
 
 /**
  * Archiving may discard queued work, but it must not detach a provider while
@@ -55,12 +56,7 @@ export function resolveThreadArchiveFamily(
     }
     return false;
   };
-  const activeChildren = family.children.filter(
-    (child) =>
-      resolveThreadStatus(child) !== null ||
-      child.pendingBackgroundTasks.length > 0 ||
-      child.hasActionableProposedPlan,
-  );
+  const activeChildren = family.children.filter(archiveChildNeedsAttention);
   const canKeepSeparately =
     family.promotableChildren.length > 0 && family.protectedChildren.every(isKept);
   const nativeStopCount = family.children.filter(

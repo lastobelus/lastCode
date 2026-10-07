@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
@@ -887,4 +888,137 @@ it.effect("rejects deleting an ancestor while a descendant archive is stopping",
       "failed",
     );
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "keeps a stranded native child visible when archived-family repair cannot unload it",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild } = yield* family;
+      for (const threadId of [parent, child, grandchild])
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make(`stop-before-repair:${threadId}`),
+          threadId,
+        });
+      const now = yield* DateTime.now;
+      const original = {
+        threadId: parent,
+        commandId: CommandId.make("original-family-archive"),
+      };
+      const owner = (yield* orchestrator.getThreadProjection(parent)).thread;
+      yield* projections.apply({
+        id: EventId.make("legacy-archived-owner"),
+        type: "thread.metadata-updated",
+        threadId: parent,
+        occurredAt: now,
+        payload: { ...owner, archivedAt: now, archivedWith: original },
+      });
+      const native = yield* orchestrator.getThreadProjection(grandchild);
+      yield* projections.apply({
+        id: EventId.make("stranded-native-mirror"),
+        type: "thread.metadata-updated",
+        threadId: grandchild,
+        occurredAt: now,
+        payload: { ...native.thread, creationSource: "provider" },
+      });
+      yield* projections.apply({
+        id: EventId.make("stranded-native-session"),
+        type: "provider-thread.updated",
+        threadId: grandchild,
+        occurredAt: now,
+        payload: { ...native.providerThreads[0]!, providerSessionId: importSessionId },
+      });
+      const command = {
+        type: "thread.archive" as const,
+        commandId: CommandId.make("repair-stranded-family"),
+        threadId: parent,
+      };
+      const result = yield* orchestrator.dispatch(command);
+      assert.isFalse(result.storedEvents.some((stored) => stored.event.type === "thread.archived"));
+      for (const id of [child, grandchild]) {
+        const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+        assert.isNull(thread.archivedAt);
+        assert.equal(thread.archivePending?.status, "stopping");
+      }
+      yield* threads.executeArchive({ threadId: parent, requestId: command.commandId }).pipe(
+        Effect.provide(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            teardownThread: (input) =>
+              Effect.fail(
+                new ProviderSessionManager.ProviderSessionReleaseError({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  cause: "native unload refused",
+                }),
+              ),
+          }),
+        ),
+      );
+      for (const id of [child, grandchild]) {
+        const failed = (yield* orchestrator.getThreadProjection(id)).thread;
+        assert.isNull(failed.archivedAt);
+        assert.equal(failed.archivePending?.status, "failed");
+      }
+      const root = (yield* orchestrator.getThreadProjection(parent)).thread;
+      assert.deepEqual(root.archivedAt, now);
+      assert.deepEqual(root.archivedWith, original);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "rechecks released cancellation ownership under locks before stopping or replaying a receipt",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { parent, child, grandchild } = yield* family;
+      const task = (yield* orchestrator.getThreadProjection(parent)).subagents.find(
+        (candidate) => candidate.childThreadId === child,
+      )!;
+      const ownership = [{ parentThreadId: parent, taskId: task.id, childThreadId: child }];
+      const stop = {
+        type: "thread.stop" as const,
+        commandId: CommandId.make("owned-task-stop-before-promotion"),
+        threadId: child,
+      };
+      yield* orchestrator
+        .dispatch(stop)
+        .pipe(Effect.provideService(DelegatedTaskCancellation, ownership));
+      const promote = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(promote);
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("release-task-ownership"),
+        threadId: parent,
+        requestId: promote.commandId,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("reopen-former-task-owner"),
+        threadId: parent,
+      });
+      yield* send(child, "independent-follow-up", "start_immediately");
+      const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      for (const command of [
+        stop,
+        { ...stop, commandId: CommandId.make("new-former-owner-stop") },
+      ]) {
+        const refused = yield* orchestrator
+          .dispatch(command)
+          .pipe(Effect.provideService(DelegatedTaskCancellation, ownership), Effect.flip);
+        assert.equal(refused._tag, "OrchestratorDispatchError");
+        assert.include(String(refused.cause), "independent thread");
+      }
+      assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+      const independent = yield* orchestrator.getThreadProjection(child);
+      assert.equal(independent.runs.at(-1)?.status, "starting");
+      assert.isTrue(independent.thread.lineage.independent);
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(grandchild)).runs[0]?.status,
+        "starting",
+      );
+    }).pipe(Effect.provide(testLayer)),
 );

@@ -25,6 +25,10 @@ import {
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import {
+  DelegatedTaskCancellation,
+  type DelegatedTaskCancellationEdge,
+} from "../orchestration-v2/DelegatedTaskCancellation.ts";
+import {
   OrchestratorProjectionError,
   OrchestratorThreadAboveModeLimitError,
 } from "../orchestration-v2/Orchestrator.ts";
@@ -588,6 +592,11 @@ describe("OrchestratorMcpService", () => {
     readonly deleted: boolean;
     /** The grandchild passes the check, and its user raises it before the stop reaches it. */
     readonly raisedDuringStop?: boolean;
+    readonly releasedRoot?: "task" | "lineage";
+    readonly releasedGrandchild?: "task" | "lineage";
+    readonly supervisedGrandchild?: boolean;
+    readonly captureOwnership?: boolean;
+    readonly readStatus?: boolean;
   }) =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-cancel-grandchild-parent");
@@ -596,6 +605,9 @@ describe("OrchestratorMcpService", () => {
       const taskId = NodeId.make("node:mcp-cancel-grandchild-task");
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
       const stoppedBelow = yield* Ref.make(false);
+      const ownership = yield* Ref.make<
+        ReadonlyArray<ReadonlyArray<DelegatedTaskCancellationEdge>>
+      >([]);
       const appOwnedTask = (id: string, threadId: ThreadId, childId: ThreadId) => ({
         id: NodeId.make(id),
         threadId,
@@ -618,7 +630,12 @@ describe("OrchestratorMcpService", () => {
             },
             runs: [],
             contextTransfers: [],
-            subagents: [appOwnedTask(taskId, parentThreadId, childThreadId)],
+            subagents: [
+              {
+                ...appOwnedTask(taskId, parentThreadId, childThreadId),
+                ownershipReleased: child.releasedRoot === "task",
+              },
+            ],
           },
         ],
         [
@@ -629,7 +646,14 @@ describe("OrchestratorMcpService", () => {
             contextTransfers: [],
             messages: [],
             subagents: [
-              appOwnedTask("node:mcp-cancel-grandchild-below", childThreadId, grandchildThreadId),
+              {
+                ...appOwnedTask(
+                  "node:mcp-cancel-grandchild-below",
+                  childThreadId,
+                  grandchildThreadId,
+                ),
+                ownershipReleased: child.releasedGrandchild === "task",
+              },
             ],
             providerThreads: [],
           },
@@ -652,22 +676,38 @@ describe("OrchestratorMcpService", () => {
           getThreadRecords: (threadId) => Effect.succeed(projections.get(threadId)!),
           // The child still runs Supervised; its user has since raised the task under it
           // to full access.
-          getThreadShell: (threadId) =>
-            Effect.succeed(
-              threadId === grandchildThreadId && child.raisedDuringStop !== true
+          getThreadShell: (threadId) => {
+            const shell =
+              threadId === grandchildThreadId &&
+              child.raisedDuringStop !== true &&
+              child.supervisedGrandchild !== true
                 ? liveThreadShell(threadId)
                 : threadId === childThreadId && child.deleted
                   ? null
-                  : liveThreadShell(threadId, { runtimeMode: "approval-required" }),
-            ),
+                  : liveThreadShell(threadId, { runtimeMode: "approval-required" });
+            return Effect.succeed(
+              shell !== null &&
+                ((threadId === childThreadId && child.releasedRoot === "lineage") ||
+                  (threadId === grandchildThreadId && child.releasedGrandchild === "lineage"))
+                ? { ...shell, lineage: { ...shell.lineage, independent: true } }
+                : shell,
+            );
+          },
           dispatch: (command) =>
-            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
-              Effect.as({} as never),
-            ),
+            Effect.gen(function* () {
+              if (command.type === "thread.stop") {
+                const edges = yield* DelegatedTaskCancellation;
+                yield* Ref.update(ownership, (seen) => [...seen, edges]);
+              }
+              yield* Ref.update(dispatched, (commands) => [...commands, command]);
+              return {} as never;
+            }),
           // Stands in for the orchestrator, which finds the grandchild raised
           // under its lock, when the stop runs under the parent's limit.
           stopDelegatedTasks: () =>
             Effect.gen(function* () {
+              const edges = yield* DelegatedTaskCancellation;
+              yield* Ref.update(ownership, (seen) => [...seen, edges]);
               const limit = yield* DispatchModeLimit;
               if (child.raisedDuringStop === true && limit?.refused !== undefined) {
                 const refusal: DispatchModeRefusal = {
@@ -711,13 +751,21 @@ describe("OrchestratorMcpService", () => {
 
       return yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const error = yield* service
+        const code = yield* service
           .cancelTask(scope, { taskId, clientRequestId: "cancel-grandchild-above-modes" })
-          .pipe(Effect.flip);
+          .pipe(
+            Effect.match({
+              onFailure: (error) => error.code,
+              onSuccess: (result) => result.status,
+            }),
+          );
+        const status = child.readStatus ? yield* service.taskStatus(scope, taskId) : undefined;
         return {
-          code: error.code,
+          code,
           dispatched: yield* Ref.get(dispatched),
           stoppedBelow: yield* Ref.get(stoppedBelow),
+          ...(child.captureOwnership ? { ownership: yield* Ref.get(ownership) } : {}),
+          ...(status === undefined ? {} : { status }),
         };
       }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
     });
@@ -748,6 +796,57 @@ describe("OrchestratorMcpService", () => {
         stoppedBelow: false,
       });
     }),
+  );
+
+  it.effect.each(["task", "lineage"] as const)(
+    "rejects historical cancellation after release recorded on %s",
+    (releasedRoot) =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({
+          deleted: false,
+          releasedRoot,
+          readStatus: true,
+        });
+        assert.equal(outcome.code, "task_not_cancellable");
+        assert.deepEqual(outcome.dispatched, []);
+        assert.isFalse(outcome.stoppedBelow);
+        assert.equal(outcome.status?.taskId, NodeId.make("node:mcp-cancel-grandchild-task"));
+        assert.equal(
+          outcome.status?.childThreadId,
+          ThreadId.make("thread:mcp-cancel-grandchild-child"),
+        );
+      }),
+  );
+
+  it.effect.each(["task", "lineage"] as const)(
+    "excludes a released %s edge from cancellation permission checks",
+    (releasedGrandchild) =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({ deleted: false, releasedGrandchild });
+        assert.equal(outcome.code, "cancel_requested");
+        assert.isTrue(outcome.stoppedBelow);
+        assert.equal(outcome.dispatched.length, 2);
+      }),
+  );
+
+  it.effect(
+    "retains the original ownership guard through the child stop and recursive cancellation",
+    () =>
+      Effect.gen(function* () {
+        const outcome = yield* cancelOverRaisedGrandchild({
+          deleted: false,
+          supervisedGrandchild: true,
+          captureOwnership: true,
+        });
+        assert.equal(outcome.code, "cancel_requested");
+        assert.isTrue(outcome.stoppedBelow);
+        const edge = {
+          parentThreadId: ThreadId.make("thread:mcp-cancel-grandchild-parent"),
+          taskId: NodeId.make("node:mcp-cancel-grandchild-task"),
+          childThreadId: ThreadId.make("thread:mcp-cancel-grandchild-child"),
+        };
+        assert.deepEqual(outcome.ownership, [[edge], [edge]]);
+      }),
   );
 });
 
