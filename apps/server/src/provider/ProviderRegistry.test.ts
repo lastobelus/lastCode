@@ -2146,7 +2146,7 @@ it.layer(
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           },
         ] satisfies ReadonlyArray<ProviderInstance>;
