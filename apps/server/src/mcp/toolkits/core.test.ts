@@ -30,6 +30,7 @@ import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
+import * as ThreadRecoveryRepair from "../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
@@ -543,6 +544,87 @@ it.effect("a read-only client reads threads and is refused every write before it
   ),
 );
 const dispatched: Array<string> = [];
+
+it.effect(
+  "repair accepts a full-access client but refuses limited clients and stale agents",
+  () => {
+    let launches = 0;
+    let targetRuntimeMode: "auto" | "full-access" = "full-access";
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (invocation: McpInvocationContext.McpInvocationScope) =>
+        server
+          .callTool({
+            name: "t3_thread_repair",
+            arguments: {
+              threadId: "repair-target",
+              runId: "repair-run",
+              attemptId: "repair-attempt",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const escalation = yield* call(clientScope("auto"));
+      expect(declaredFailure(escalation)).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+      });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "auto";
+      const limited = yield* call(clientScope("auto"));
+      expect(declaredFailure(limited)).toMatchObject({ code: "capability_denied" });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "full-access";
+      const stale = yield* call(scope);
+      expect(declaredFailure(stale)).toMatchObject({ code: "parent_not_active" });
+      expect(launches).toBe(0);
+      const accepted = yield* call(clientScope("full-access"));
+      expect(accepted.isError).toBe(false);
+      expect(accepted.structuredContent).toEqual({ threadId: "repair-conversation" });
+      expect(launches).toBe(1);
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerThreadToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({
+              launch: () =>
+                Effect.sync(() => {
+                  launches++;
+                  return { threadId: ThreadId.make("repair-conversation") };
+                }),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: () =>
+                Effect.succeed({
+                  id: ThreadId.make("repair-target"),
+                  projectId: "repair-project",
+                  runtimeMode: targetRuntimeMode,
+                  interactionMode: "default",
+                  archivedAt: null,
+                  deletedAt: null,
+                  activeRunId: null,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                } as never),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  thread: {
+                    id: ThreadId.make("repair-target"),
+                    runtimeMode: targetRuntimeMode,
+                    interactionMode: "default",
+                  },
+                } as never),
+            }),
+          ),
+        ),
+      ),
+    );
+  },
+);
 
 it.effect("refuses act-as-caller tools to a client caller", () =>
   Effect.gen(function* () {

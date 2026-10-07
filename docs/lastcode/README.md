@@ -19,6 +19,9 @@ directories.
 
 ## Documents
 
+- [Plain-language product guide](../../doc/design/2026-10-06__lastcode-product-guide-eli5.html):
+  one tabbed ELI5 page covering scheduled tasks, usage limits, storage, dashboards,
+  environments, and browser profiles/captures.
 - [Documentation-site research archive](documentation-site-research/README.md):
   preserved design proposals, prototypes, delivery history, and issue ownership
   for the unfinished public site release.
@@ -39,6 +42,10 @@ directories.
   LastCode runtime validation and the headless LaunchAgent activation boundary.
 - [Remote update activation helper](update-activation-helper.md): the dormant,
   one-owner crash-safe app, plist, and database selection transaction.
+- [Settings import](settings-import.md): the one-time, selective migration from
+  T3 Code into an independent LastCode profile, including exclusions and backups.
+- [QA preview handoffs](preview-handoffs.md): recovery requests and the required
+  24-hour hosting and automatic cleanup contract for agent-delivered previews.
 
 ## Command Summary
 
@@ -51,8 +58,8 @@ pnpm run lastcode:setup -- \
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
 
-# Checkpoint every missing nightly and push immutable tags.
-pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
+# Checkpoint the newest available nightly and push immutable tags.
+pnpm run lastcode:checkpoint -- --push-tags --promote
 
 # Enable managed background checkpointing.
 pnpm lastcode:checkpoint:service install \

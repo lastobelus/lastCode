@@ -137,12 +137,29 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
  */
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "import-t3-settings",
+    title: "Import settings from T3 Code",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
+    id: "handoffs-menu-limit",
+    title: "Handoffs shown in menus",
+    to: "/settings/lastcode",
+    searchTerms: ["handoffs history recent links files menu count"],
+  },
+  {
     id: "storage-worktrees",
     title: "Worktree cleanup",
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [
-      "disk storage delete deleted archived threads old inactive merged unchanged worktrees retention days project inherit off custom",
+      "disk storage delete deleted archived threads old inactive merged unchanged worktrees dependencies npm pnpm node_modules retention days project inherit off custom",
     ],
   },
   {
@@ -1017,6 +1034,7 @@ const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id,
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
   "/settings/projects": "project",
   "/settings/general": null,
+  "/settings/lastcode": null,
   "/settings/appearance": null,
   "/settings/snap-shot": null,
   // Keybindings fan out to the selection; Providers shows the representative

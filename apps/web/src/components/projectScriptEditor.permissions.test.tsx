@@ -67,6 +67,7 @@ const request: ProjectScriptEditorRequest = {
     keybinding: "mod+k",
     previewUrl: null,
     autoOpenPreview: false,
+    allowAgentResume: false,
   },
 };
 

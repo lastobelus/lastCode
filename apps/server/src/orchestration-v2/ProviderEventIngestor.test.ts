@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -16,6 +17,7 @@ import {
   PlanId,
   RunAttemptId,
   RunId,
+  ThreadId,
   RuntimeRequestId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -1242,6 +1244,79 @@ layer("ProviderEventIngestorV2", (it) => {
       assert.equal(messageEvents[0]?.type, "message.updated");
       assert.equal(messageEvents[0]?.threadId, childThreadId);
     }),
+  );
+
+  it.effect.each(["waiting", "promoted"] as const)(
+    "preserves %s promotion when a restarted provider reannounces its child",
+    (status) =>
+      Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const rootEvent = yield* threadCreatedEvent(now);
+        if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+        const childThreadId = idAllocator.derive.threadFromProviderThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: `native-reannounced-${status}`,
+        });
+        const childThread: OrchestrationV2AppThread = {
+          ...rootEvent.payload,
+          id: childThreadId,
+          title: "Saved child title",
+          archivedAt: now,
+          subagentPromotion: {
+            requestId: CommandId.make(`promotion-${status}`),
+            targetThreadId: ThreadId.make(`interactive-${status}`),
+            status,
+            createdBy: "user",
+            creationSource: "web",
+            requestedAt: now,
+            updatedAt: now,
+            error: null,
+          },
+          lineage: {
+            parentThreadId: rootEvent.threadId,
+            relationshipToParent: "subagent",
+            rootThreadId: rootEvent.threadId,
+          },
+        };
+        yield* eventSink.write({
+          events: [
+            rootEvent,
+            {
+              ...rootEvent,
+              id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+              threadId: childThreadId,
+              payload: childThread,
+            },
+          ],
+        });
+        const restartedIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+          Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
+        );
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+        });
+        const events = yield* restartedIngestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+          event: {
+            type: "app_thread.created",
+            driver: CODEX_DRIVER,
+            appThread: {
+              ...childThread,
+              title: "Provider's fresh title",
+              archivedAt: null,
+              subagentPromotion: null,
+            },
+          },
+        });
+        assert.lengthOf(events, 0);
+        assert.deepEqual(yield* projectionStore.getThread(childThreadId), childThread);
+      }),
   );
 
   it.effect("moves a native subagent's thread to the model its provider reports later", () =>

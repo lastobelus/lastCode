@@ -31,12 +31,27 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { ActionResume } from "../actionResume/ActionResume.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
+import * as DeviceService from "../device/DeviceService.ts";
+import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLifecycle from "../orchestration-v2/ThreadLifecycleService.ts";
+import * as ThreadRecovery from "../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
 const tabId = PreviewTabId.make("tab-mcp-test");
 const alternateTabId = PreviewTabId.make("tab-mcp-alternate");
 const decodeJsonText = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const encodeJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const invocation = {
   environmentId,
   requestNamespace: "provider-session-mcp-test",
@@ -49,6 +64,171 @@ const invocation = {
   capabilities: new Set(["preview"] as const),
   issuedAt: 1,
 };
+
+it("keeps attention-only credentials off the full MCP endpoint", () => {
+  const attentionOnlyInvocation = { ...invocation, capabilities: new Set<"preview">() };
+  const deviceInvocation = {
+    ...invocation,
+    capabilities: new Set<McpInvocationContext.McpCapability>(["device"]),
+  };
+
+  expect(McpHttpServer.canInvokeMcpEndpoint("/mcp", attentionOnlyInvocation)).toBe(false);
+  expect(McpHttpServer.canInvokeMcpEndpoint("/mcp/thread", attentionOnlyInvocation)).toBe(true);
+  expect(McpHttpServer.canInvokeMcpEndpoint("/mcp", invocation)).toBe(true);
+  expect(McpHttpServer.canInvokeMcpEndpoint("/mcp", deviceInvocation)).toBe(true);
+});
+
+it.effect("isolates full and restricted tool discovery over HTTP", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const scopes = {
+        full: {
+          ...invocation,
+          capabilities: new Set<McpInvocationContext.McpCapability>([
+            "preview",
+            "device",
+            "orchestration",
+            "action-resume",
+          ]),
+        },
+        restricted: {
+          ...invocation,
+          capabilities: new Set<McpInvocationContext.McpCapability>(["orchestration"]),
+        },
+      };
+      yield* HttpRouter.serve(McpHttpServer.layer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+              resolve: (token) =>
+                Effect.succeed(
+                  token === "full"
+                    ? scopes.full
+                    : token === "restricted"
+                      ? scopes.restricted
+                      : undefined,
+                ),
+            }),
+            Layer.mock(Orchestrator.OrchestratorV2)({}),
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+            Layer.mock(DeviceService.DeviceService)({}),
+            Layer.mock(PreviewBrowser.PreviewBrowser)({
+              executable: Effect.die("tool discovery must not launch a browser"),
+              installed: Effect.succeedNone,
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(ThreadLifecycle.ThreadLifecycleService)({}),
+            Layer.mock(ThreadRecovery.ThreadRecoveryService)({}),
+            Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({}),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ProjectService.ProjectService)({}),
+            ServerSettings.layerTest({}),
+            Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+            Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
+            Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+            Layer.mock(UpdateDrainAdmission)({}),
+            PreviewAutomationBroker.layer,
+          ),
+        ),
+        Layer.build,
+      );
+
+      const httpClient = yield* HttpClient.HttpClient;
+      const decodeTools = Schema.decodeUnknownEffect(
+        Schema.fromJsonString(
+          Schema.Struct({
+            result: Schema.Struct({
+              tools: Schema.Array(Schema.Struct({ name: Schema.String })),
+            }),
+          }),
+        ),
+      );
+      const listTools = (path: string, token: string) =>
+        Effect.gen(function* () {
+          const headers = {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+          };
+          const initialized = yield* httpClient.post(path, {
+            headers,
+            body: HttpBody.text(
+              encodeJsonText({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "initialize",
+                params: {
+                  protocolVersion: "2025-06-18",
+                  capabilities: {},
+                  clientInfo: { name: "endpoint-isolation", version: "1" },
+                },
+              }),
+              "application/json",
+            ),
+          });
+          expect(initialized.status).toBe(200);
+          yield* initialized.text;
+          const sessionId = initialized.headers["mcp-session-id"];
+          const response = yield* httpClient.post(path, {
+            headers: {
+              ...headers,
+              "mcp-protocol-version": "2025-06-18",
+              ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+            },
+            body: HttpBody.text(
+              encodeJsonText({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+              "application/json",
+            ),
+          });
+          expect(response.status).toBe(200);
+          const text = yield* response.text;
+          const payload = yield* decodeTools(text.match(/\{.*\}/s)?.[0] ?? text);
+          return payload.result.tools.map((tool) => tool.name);
+        });
+
+      const full = yield* listTools("/mcp", "full");
+      const restricted = yield* listTools("/mcp/thread", "restricted");
+      for (const names of [full, restricted]) {
+        expect(names).toEqual(
+          expect.arrayContaining([
+            "html_preview",
+            "html_render",
+            "set_thread_attention",
+            "upsert_dashboard_item",
+            "delegate_task",
+            "t3_thread_launch",
+          ]),
+        );
+        expect(new Set(names).size).toBe(names.length);
+      }
+      for (const name of ["preview_status", "device_list", "list_project_actions"]) {
+        expect(full).toContain(name);
+        expect(restricted).not.toContain(name);
+      }
+      expect(
+        restricted.some((name) => name.startsWith("preview_") || name.startsWith("device_")),
+      ).toBe(false);
+      expect(restricted).not.toContain("run_project_action_and_resume");
+      expect(restricted).not.toContain("inspect_action_run");
+    }),
+  ).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeHttpServer.layerTest,
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-endpoint-isolation-" }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   clientCapabilities: {},
@@ -927,6 +1107,19 @@ it.effect("registers annotated tools and preserves authenticated request context
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
         environmentId,
+        supportedOperations: [
+          "status",
+          "open",
+          "openWithProfile",
+          "profiles",
+          "snapshot",
+          "click",
+          "type",
+          "press",
+          "scroll",
+          "evaluate",
+          "waitFor",
+        ],
       });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Effect.void;
@@ -937,20 +1130,27 @@ it.effect("registers annotated tools and preserves authenticated request context
           requestId: event.request.requestId,
           ok: true,
           result:
-            event.request.operation === "snapshot"
-              ? snapshotResult
-              : event.request.operation === "evaluate"
-                ? ["Connect", "Continue"]
-                : event.request.operation === "press"
-                  ? undefined
-                  : {
-                      available: true,
-                      visible: true,
-                      tabId,
-                      url: "http://example.test/",
-                      title: "Example",
-                      loading: false,
-                    },
+            event.request.operation === "profiles"
+              ? {
+                  profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+                  defaultProfileId: "work",
+                }
+              : event.request.operation === "snapshot"
+                ? snapshotResult
+                : event.request.operation === "evaluate"
+                  ? ["Connect", "Continue"]
+                  : event.request.operation === "press"
+                    ? undefined
+                    : {
+                        available: true,
+                        visible: true,
+                        tabId,
+                        url: "http://example.test/",
+                        title: "Example",
+                        loading: false,
+                        profileId: "work",
+                        profileName: "Work",
+                      },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -990,6 +1190,38 @@ it.effect("registers annotated tools and preserves authenticated request context
         available: true,
         tabId,
       });
+
+      const profilesTool = server.tools.find(({ tool }) => tool.name === "preview_profiles");
+      expect(profilesTool?.tool.annotations?.readOnlyHint).toBe(true);
+      expect(profilesTool?.tool.annotations?.idempotentHint).toBe(true);
+      const catalog = yield* server
+        .callTool({ name: "preview_profiles", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(catalog.isError).toBe(false);
+      expect(catalog.structuredContent).toEqual({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      expect(routedRequests.at(-1)?.operation).toBe("profiles");
+      for (const selection of [{ profileName: "Work" }, { profileId: "work" }, {}]) {
+        const opened = yield* server
+          .callTool({
+            name: "preview_open",
+            arguments: { ...selection, open: false, reuseExistingTab: false },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(opened.isError).toBe(false);
+        expect(opened.structuredContent).toMatchObject({ profileId: "work", profileName: "Work" });
+        expect(routedRequests.at(-1)?.operation).toBe(
+          Object.keys(selection).length ? "openWithProfile" : "open",
+        );
+      }
 
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })
@@ -1071,7 +1303,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
           providerInstanceId: ProviderInstanceId.make("codex"),
         },
         client: undefined,
-        capabilities: new Set(["orchestration"]),
+        capabilities: new Set(["orchestration", "preview"]),
         issuedAt: 1,
       };
       const clientScope: McpInvocationContext.McpInvocationScope = {

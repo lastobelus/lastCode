@@ -88,11 +88,10 @@ Keep using the same tab.
 
 If managed hosting fails readiness, inspect the startup diagnostics returned by
 `preview_host`, the launch command, actual listening port, and ownership before
-retrying. The failure includes a bounded output excerpt captured before terminal
-cleanup. Treat that output as private diagnostic evidence, not publishable PR
-content. If diagnostics are unavailable, report that missing evidence rather
-than claiming to have diagnosed the launch. Opening or
-focusing a browser does not repair a failed server launch. Report the concrete
+retrying. The failure reports readiness and terminal status, not transcript
+contents: commands can load credentials that cannot be safely redacted. Do not
+infer a specific startup error from status alone. Opening or focusing a browser
+does not repair a failed server launch. Report the concrete
 startup failure if it cannot be repaired; do not ask for browser permission as
 a workaround.
 

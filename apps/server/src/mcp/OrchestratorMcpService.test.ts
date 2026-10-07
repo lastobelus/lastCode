@@ -1847,6 +1847,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
       );
       yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
@@ -1855,8 +1856,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           clientRequestId: "creator-unprompted-batch",
         });
         const command = commands.find((command) => command.type === "thread.create");
-        assert.equal(command?.creatorThreadId, scope.thread!.threadId);
-        assert.equal(result.threads[0]?.creatorThreadId, scope.thread!.threadId);
+        assert.equal(command?.creatorThreadId, parentThreadId);
+        assert.equal(result.threads[0]?.creatorThreadId, parentThreadId);
         assert.isFalse(commands.some((command) => command.type === "message.dispatch"));
         assert.isFalse(commands.some((command) => command.type === "delegated_task.request"));
       }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));

@@ -1,4 +1,5 @@
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -272,6 +273,7 @@ const layerTest = Layer.mergeAll(
   ThreadCommandExecutor.layer,
 ).pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -284,6 +286,7 @@ const layerTest = Layer.mergeAll(
 
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -323,6 +326,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
     }),
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -467,6 +471,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
     }),
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -476,7 +481,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
-it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer", (it) => {
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1673,7 +1678,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
   );
 });
 
-it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
   it.effect("applies lifecycle commands idempotently and emits archive/removal shell deltas", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

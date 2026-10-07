@@ -59,6 +59,10 @@ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import * as ActionResumeHandlers from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
+import * as ThreadAttentionHandlers from "./toolkits/threadAttention/handlers.ts";
+import { ThreadAttentionToolkit } from "./toolkits/threadAttention/tools.ts";
+import * as ThreadDashboardHandlers from "./toolkits/threadDashboard/handlers.ts";
+import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
 /** Where an MCP client discovers how to sign in (RFC 9728), at this request's own origin. */
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
@@ -146,44 +150,62 @@ export const normalizeMcpHttpResponse = (
 // Session tokens are `<payload>.<signature>`; registry tokens are a bare base64url secret.
 const looksLikeProviderToken = (token: string) => token.length > 0 && !token.includes(".");
 
-const makeMcpAuthMiddleware = Effect.gen(function* () {
-  const registry = yield* McpSessionRegistry.McpSessionRegistry;
-  const clients = yield* Effect.serviceOption(McpClientAuthenticator);
-  return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const authorization = request.headers.authorization;
-    const token =
-      authorization?.startsWith("Bearer ") === true
-        ? authorization.slice("Bearer ".length).trim()
-        : "";
-    const invocation =
-      (yield* registry.resolve(token)) ??
-      (Option.isSome(clients) && token.length > 0
-        ? yield* clients.value.authenticate(request)
-        : undefined);
-    if (!invocation) {
-      // Without this the only symptom of a dead credential is the agent
-      // quietly losing the whole `t3-code` toolkit for the rest of its
-      // session, with nothing on the server to explain why.
-      yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-        reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
-      });
-      return unauthorized({
-        request,
-        presentedToken: token.length > 0,
-        offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
-      });
-    }
-    return yield* httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-      Effect.map(normalizeMcpHttpResponse),
-    );
-  }) satisfies McpAuthMiddleware;
-}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
+type McpEndpointPath = "/mcp" | "/mcp/thread";
 
-const layerMcpAuthMiddleware = HttpRouter.middleware<{
-  provides: McpInvocationContext.McpInvocationContext;
-}>()(makeMcpAuthMiddleware).layer;
+export const canInvokeMcpEndpoint = (
+  path: McpEndpointPath,
+  invocation: McpInvocationContext.McpInvocationScope,
+): boolean =>
+  path === "/mcp/thread" ||
+  invocation.client !== undefined ||
+  invocation.capabilities.has("preview") ||
+  invocation.capabilities.has("device");
+
+const makeMcpAuthMiddleware = (path: McpEndpointPath) =>
+  Effect.gen(function* () {
+    const registry = yield* McpSessionRegistry.McpSessionRegistry;
+    const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+    return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const authorization = request.headers.authorization;
+      const token =
+        authorization?.startsWith("Bearer ") === true
+          ? authorization.slice("Bearer ".length).trim()
+          : "";
+      const invocation =
+        (yield* registry.resolve(token)) ??
+        (Option.isSome(clients) && token.length > 0
+          ? yield* clients.value.authenticate(request)
+          : undefined);
+      if (!invocation || !canInvokeMcpEndpoint(path, invocation)) {
+        // Without this the only symptom of a dead credential is the agent
+        // quietly losing the whole `t3-code` toolkit for the rest of its
+        // session, with nothing on the server to explain why.
+        yield* Effect.logWarning("rejected MCP request with an unusable credential", {
+          reason:
+            token.length === 0
+              ? "missing_bearer_token"
+              : invocation
+                ? "insufficient_capability"
+                : "unknown_or_expired_token",
+        });
+        return unauthorized({
+          request,
+          presentedToken: token.length > 0,
+          offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
+        });
+      }
+      return yield* httpEffect.pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.map(normalizeMcpHttpResponse),
+      );
+    }) satisfies McpAuthMiddleware;
+  }).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
+
+const layerMcpAuthMiddlewareFor = (path: McpEndpointPath) =>
+  HttpRouter.middleware<{
+    provides: McpInvocationContext.McpInvocationContext;
+  }>()(makeMcpAuthMiddleware(path)).layer;
 
 /**
  * Claude Code moves an MCP result above its output limit to a file and hands
@@ -847,14 +869,27 @@ export const layerActionResumeToolkit = toolkitRegistration(
   ActionResumeHandlers.layer,
 );
 
-export const layerMcpTransport = McpServer.layerHttp({
-  name: "T3 Code",
-  version: packageJson.version,
-  path: "/mcp",
-  protocols: [McpProtocol.v2025_06_18],
-}).pipe(Layer.provide(layerMcpAuthMiddleware));
+const layerThreadAttentionToolkit = toolkitRegistration(
+  ThreadAttentionToolkit,
+  ThreadAttentionHandlers.layer,
+);
 
-export const layer = Layer.mergeAll(
+const layerThreadDashboardToolkit = toolkitRegistration(
+  ThreadDashboardToolkit,
+  ThreadDashboardHandlers.layer,
+);
+
+const makeMcpTransport = (path: McpEndpointPath) =>
+  McpServer.layerHttp({
+    name: "T3 Code",
+    version: packageJson.version,
+    path,
+    protocols: [McpProtocol.v2025_06_18],
+  }).pipe(Layer.provide(layerMcpAuthMiddlewareFor(path)));
+
+export const layerMcpTransport = makeMcpTransport("/mcp");
+
+const layerFullToolkit = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
@@ -867,4 +902,28 @@ export const layer = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerActionResumeToolkit,
-).pipe(Layer.provideMerge(layerMcpTransport));
+  layerThreadAttentionToolkit,
+  layerThreadDashboardToolkit,
+).pipe(Layer.provideMerge(makeMcpTransport("/mcp")));
+
+// Sessions created while agent browser access is disabled still receive the
+// attention and dashboard tools, but preview tools stay absent from discovery entirely.
+const layerThreadAttentionOnlyToolkit = Layer.mergeAll(
+  layerOrchestratorToolkit,
+  layerHtmlToolkit,
+  layerThreadToolkit,
+  layerAttachmentRegistration,
+  layerProjectRegistration,
+  layerEnvironmentRegistration,
+  layerWorktreeToolkitRegistration,
+  layerThreadAttentionToolkit,
+  layerThreadDashboardToolkit,
+  layerPullRequestsToolkit,
+).pipe(Layer.provideMerge(makeMcpTransport("/mcp/thread")));
+
+// Each transport needs its own mutable MCP registry. Sharing the memoized
+// McpServer layer would expose the full catalog on the restricted endpoint too.
+export const layer = Layer.mergeAll(
+  Layer.fresh(layerFullToolkit),
+  Layer.fresh(layerThreadAttentionOnlyToolkit),
+);
