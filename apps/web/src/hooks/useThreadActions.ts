@@ -625,7 +625,9 @@ export function useThreadActions() {
 
   const archiveThreads = useCallback(
     async (selected: ReadonlyArray<{ threadKey: string; threadRef: ScopedThreadRef }>) => {
-      const families = [];
+      const families: Array<
+        (typeof selected)[number] & { family: ReturnType<typeof resolveArchiveFamily> }
+      > = [];
       for (const entry of selected) {
         const result = await loadArchiveFamily({
           environmentId: entry.threadRef.environmentId,
