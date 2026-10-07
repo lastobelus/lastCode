@@ -42,8 +42,8 @@ describe("archive retry selections", () => {
       (ref) => (ref.threadId === child.id ? child : owner),
     );
     expect(normalized).toEqual([{ threadKey: scopedThreadKey(ownerRef), threadRef: ownerRef }]);
-    // Only the owner key represents a completed family operation. A kept
-    // child remains a selectable independent conversation after promotion.
+    // The owner key dispatches the family operation; its disposition decides
+    // whether the original child row leaves the selection.
     expect(normalized.map((entry) => entry.threadKey)).not.toContain(scopedThreadKey(childRef));
     expect(child.archivePending.childDisposition).toBe("promote");
   });

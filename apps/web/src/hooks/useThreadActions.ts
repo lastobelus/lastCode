@@ -776,6 +776,8 @@ export function useThreadActions() {
           >
         | undefined;
       const completedThreadKeys = new Set<string>();
+      const completedParticipantKeys = new Set<string>();
+      const entriesByKey = new Map(entries.map((entry) => [entry.threadKey, entry]));
       const perform = async (choice: ThreadArchiveChildDisposition) => {
         const attempt = await archiveSelectedThreadEntries({
           entries: entries.filter((entry) => !completedThreadKeys.has(entry.threadKey)),
@@ -791,10 +793,23 @@ export function useThreadActions() {
               onArchived,
             }),
         });
-        for (const threadKey of attempt.archivedThreadKeys) completedThreadKeys.add(threadKey);
+        for (const threadKey of attempt.archivedThreadKeys) {
+          completedThreadKeys.add(threadKey);
+          const entry = entriesByKey.get(threadKey);
+          if (!entry) continue;
+          for (const thread of [entry.owner, ...entry.family.children]) {
+            if (choice === "promote" && entry.family.keptThreadIds.has(thread.id)) continue;
+            completedParticipantKeys.add(
+              scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, thread.id)),
+            );
+          }
+        }
         outcome = {
           ...attempt,
-          archivedThreadKeys: [...completedThreadKeys],
+          // Retry owners identify commands; selection still identifies the original rows.
+          archivedThreadKeys: selected
+            .filter(({ threadRef }) => completedParticipantKeys.has(scopedThreadKey(threadRef)))
+            .map(({ threadKey }) => threadKey),
           followupFailures: [...(outcome?.followupFailures ?? []), ...attempt.followupFailures],
         };
         if (!outcome.mutationFailure) return null;
