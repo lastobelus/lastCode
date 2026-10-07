@@ -47,7 +47,7 @@ export const PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS = [
 ] as const;
 
 /** All request operations. Profile operations are negotiated separately on the host. */
-export const PREVIEW_AUTOMATION_OPERATIONS = [
+const PREVIEW_AUTOMATION_OPERATIONS = [
   ...PREVIEW_AUTOMATION_PROTOCOL_2_OPERATIONS,
   "profiles",
   "openWithProfile",
