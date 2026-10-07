@@ -241,9 +241,30 @@ export const make = Effect.gen(function* () {
   const dependencyCleanupEnabled = (rules: WorktreeCleanupRules) =>
     rules.worktreeDependenciesAfterDays !== null;
 
+  const readApplicationSequence = Effect.fn("StorageCleanup.readApplicationSequence")(function* () {
+    const rows = yield* sql<{ sequence: number }>`
+        SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events
+      `;
+    return rows[0]!.sequence;
+  });
+
+  const ownershipChangedSince = Effect.fn("StorageCleanup.ownershipChangedSince")(function* (
+    sequence: number,
+  ) {
+    // Thread-core payloads and project events can change workspace ownership.
+    // Read only events after the batch; unrelated streaming output is safe to ignore.
+    const rows = yield* sql`
+      SELECT 1 FROM orchestration_events
+      WHERE sequence > ${sequence}
+        AND (aggregate_kind = 'project' OR event_type LIKE 'thread.%')
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  });
+
   const readDeletedDependencyCandidates = Effect.fn(
     "StorageCleanup.readDeletedDependencyCandidates",
-  )(function* () {
+  )(function* (threadId?: ThreadId) {
     const rows = yield* sql<{
       payload_json: string;
       workspaceRoot: string;
@@ -255,6 +276,7 @@ export const make = Effect.gen(function* () {
         FROM orchestration_v2_projection_threads t
         JOIN projection_projects p ON p.project_id = t.project_id
         WHERE t.deleted_at IS NOT NULL
+          ${threadId === undefined ? sql`` : sql`AND t.thread_id = ${threadId}`}
       `;
     return yield* Effect.forEach(rows, (row) =>
       decodeCleanupThread(row.payload_json).pipe(
@@ -302,6 +324,7 @@ export const make = Effect.gen(function* () {
     if (!(yield* fs.exists(config.worktreesDir))) return;
     const processCwds = yield* dependencies.processWorkingDirectories;
     if (processCwds === null) return;
+    const sequence = yield* readApplicationSequence();
     const snapshot = yield* readThreads();
     const groups = Map.groupBy(
       // Deleted shells can remain visible during cleanup; use their durable
@@ -315,6 +338,7 @@ export const make = Effect.gen(function* () {
       (yield* readDeletedDependencyCandidates()).filter((thread) => thread.worktreePath !== null),
       (thread) => path.resolve(thread.worktreePath!),
     );
+    if (yield* ownershipChangedSince(sequence)) return;
     const candidates = [
       ...[...groups.entries()].flatMap(([cwd, group]) =>
         group.length === 1 && !deletedGroups.has(cwd) ? [group[0]!] : [],
@@ -352,27 +376,22 @@ export const make = Effect.gen(function* () {
               thread.projectId,
             ).worktreeDependenciesAfterDays;
             if (currentDays !== days || hasTerminal(worktreePath)) return false;
-            const latestSnapshot = yield* readThreads();
-            if (yield* containsProjectRoot(worktreePath, [project, ...latestSnapshot.projects]))
+            // Reuse normalized ownership and project roots only while no
+            // ownership event has changed them; otherwise defer to a new sweep.
+            if (yield* ownershipChangedSince(sequence)) return false;
+            if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
               return false;
             if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
               return false;
-            const latest = latestSnapshot.threads.filter(
-              (entry) =>
-                entry.deletedAt === null &&
-                entry.worktreePath !== null &&
-                path.resolve(entry.worktreePath) === worktreePath,
-            );
-            const latestDeleted = (yield* readDeletedDependencyCandidates()).filter(
-              (entry) =>
-                entry.worktreePath !== null && path.resolve(entry.worktreePath) === worktreePath,
-            );
+            const latest = yield* projections.getThreadShell(thread.id);
             if (deleted) {
-              if (latest.length !== 0) return false;
-              const rows = latestDeleted;
+              if (latest !== null && latest.deletedAt === null) return false;
+              const rows = yield* readDeletedDependencyCandidates(thread.id);
               if (
                 rows.length !== 1 ||
                 rows[0]!.id !== thread.id ||
+                rows[0]!.worktreePath === null ||
+                path.resolve(rows[0]!.worktreePath) !== worktreePath ||
                 rows[0]!.branch !== thread.branch ||
                 rows[0]!.projectId !== thread.projectId ||
                 path.resolve(rows[0]!.workspaceRoot) !== path.resolve(project.workspaceRoot) ||
@@ -385,20 +404,23 @@ export const make = Effect.gen(function* () {
             `;
               if (pending.length > 0) return false;
             } else if (
-              latestDeleted.length !== 0 ||
-              latest.length !== 1 ||
-              latest[0]!.id !== thread.id ||
-              latest[0]!.branch !== thread.branch ||
-              latest[0]!.projectId !== thread.projectId ||
-              !storageCleanupThreadIdle(latest[0]!, now) ||
-              storageCleanupActivityAt(latest[0]!) !== activityAt
+              latest === null ||
+              latest.deletedAt !== null ||
+              latest.id !== thread.id ||
+              latest.worktreePath === null ||
+              path.resolve(latest.worktreePath) !== worktreePath ||
+              latest.branch !== thread.branch ||
+              latest.projectId !== thread.projectId ||
+              !storageCleanupThreadIdle(latest, now) ||
+              storageCleanupActivityAt(latest) !== activityAt
             )
               return false;
             if (yield* hasPendingWorkspaceWork(thread.id)) return false;
             return (
               !hasTerminal(worktreePath) &&
               resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
-                .worktreeDependenciesAfterDays === days
+                .worktreeDependenciesAfterDays === days &&
+              !(yield* ownershipChangedSince(sequence))
             );
           },
         );

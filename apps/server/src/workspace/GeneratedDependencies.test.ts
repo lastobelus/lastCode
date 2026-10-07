@@ -516,6 +516,12 @@ type SweepCase =
   | "project-root"
   | "policy-changed"
   | "activity-changed"
+  | "path-changed"
+  | "ownership-changed"
+  | "revision-changed"
+  | "initial-revision-changed"
+  | "unrelated-streaming"
+  | "batch"
   | "session"
   | "shared-session-live"
   | "shared-session-stopped"
@@ -540,6 +546,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const sql = yield* SqlClient.SqlClient;
   const config = yield* ServerConfig.ServerConfig;
   for (const query of [
+    "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, aggregate_id TEXT, event_type TEXT)",
     "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT)",
     "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, payload_json TEXT, deleted_at TEXT)",
     "CREATE TABLE orchestration_v2_events (thread_id TEXT, occurred_at TEXT)",
@@ -553,6 +560,32 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  let secondThread: typeof thread | null = null;
+  if (mode === "batch") {
+    const secondPath = f.path.join(f.input.managedWorktreesRoot, "second-feature");
+    yield* f.runGit(f.repository, ["worktree", "add", "-b", "second-feature", secondPath]);
+    const secondInstall = f.path.join(secondPath, "node_modules");
+    yield* f.fs.makeDirectory(f.path.join(secondInstall, "package"), { recursive: true });
+    yield* f.fs.writeFileString(f.path.join(secondInstall, f.marker), "layoutVersion: 5\n");
+    yield* f.fs.writeFileString(
+      f.path.join(secondInstall, "package/index.js"),
+      "module.exports = 1;\n",
+    );
+    secondThread = {
+      ...makeShell(secondPath),
+      id: ThreadId.make("batch-second"),
+      branch: "second-feature",
+    };
+  }
+  const unrelatedHistory =
+    mode === "batch"
+      ? Array.from({ length: 40 }, (_, index) => ({
+          ...thread,
+          id: ThreadId.make(`unrelated-history-${index}`),
+          worktreePath: null,
+          archivedAt: at(15),
+        }))
+      : [];
   const wholeSharedDeleted = mode === "whole-shared-deleted-visible-pending";
   const sharedSession = mode.includes("shared-session");
   const wholeSession = mode.startsWith("whole-shared-session");
@@ -647,6 +680,23 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (sharedSession && !detachedSession)
       yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('session', ${threadId})`;
   }
+  if (mode === "batch") {
+    yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
+    for (const history of unrelatedHistory.slice(0, 8)) {
+      const deletedHistoryId = ThreadId.make(`${history.id}-deleted`);
+      const payload = encodeFullThread(
+        decodeFullThread({
+          ...history,
+          id: deletedHistoryId,
+          createdAt: DateTime.formatIso(at(30)),
+          updatedAt: DateTime.formatIso(at(20)),
+          archivedAt: DateTime.formatIso(at(15)),
+          deletedAt: DateTime.formatIso(at(15)),
+        }),
+      );
+      yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${deletedHistoryId}, ${projectId}, ${payload}, 'deleted')`;
+    }
+  }
   const project = {
     id: projectId,
     workspaceRoot: mode === "project-root" ? f.input.worktreePath : f.repository,
@@ -657,6 +707,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     updatedAt: "2026-05-01T00:00:00.000Z",
   };
   let reads = 0;
+  const targetedReads: ThreadId[] = [];
   let processReads = 0;
   setProcessReader(() => {
     processReads++;
@@ -691,38 +742,67 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([project]) }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
       getShellSnapshot: (options) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           reads++;
-          if (reads > 2 && mode === "policy-changed")
-            settings = {
-              ...settings,
-              storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: null },
-            };
-          if (reads > 2 && mode === "activity-changed")
-            thread = { ...thread, latestRunCompletedAt: at(0) };
+          if (reads === 1 && mode === "initial-revision-changed")
+            yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated')`;
           const threads =
             options?.location === "archive" ||
             (deleted && mode !== "deleted-visible-pending") ||
             mode === "archived"
               ? []
-              : visibleDeletedThread !== null
-                ? [thread, visibleDeletedThread]
-                : mode === "shared"
-                  ? [thread, { ...thread, id: ThreadId.make("other") }]
-                  : [thread];
+              : secondThread !== null
+                ? [thread, secondThread]
+                : visibleDeletedThread !== null
+                  ? [thread, visibleDeletedThread]
+                  : mode === "shared"
+                    ? [thread, { ...thread, id: ThreadId.make("other") }]
+                    : [thread];
           return {
             schemaVersion: 1 as const,
             snapshotSequence: 0,
             projects: [project],
             threads,
             archivedThreads:
-              mode === "archived"
-                ? [thread]
-                : mode === "shared-archived"
-                  ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
-                  : [],
+              mode === "batch"
+                ? unrelatedHistory
+                : mode === "archived"
+                  ? [thread]
+                  : mode === "shared-archived"
+                    ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
+                    : [],
           };
-        }),
+        }).pipe(Effect.orDie),
+      getThreadShell: (requestedId) =>
+        Effect.gen(function* () {
+          targetedReads.push(requestedId);
+          if (targetedReads.length > 2 && mode === "policy-changed")
+            settings = {
+              ...settings,
+              storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: null },
+            };
+          if (targetedReads.length > 2 && mode === "activity-changed")
+            thread = { ...thread, latestRunCompletedAt: at(0) };
+          if (targetedReads.length > 1 && mode === "path-changed")
+            thread = {
+              ...thread,
+              worktreePath: f.path.join(f.input.managedWorktreesRoot, "moved"),
+            };
+          if (targetedReads.length > 1 && mode === "ownership-changed")
+            thread = { ...thread, projectId: ProjectId.make("changed-project") };
+          if (targetedReads.length === 1 && mode === "revision-changed") {
+            yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
+            yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES ('unrelated-new-deleted', ${projectId}, '{"not":"a-thread"}', 'deleted')`;
+            yield* sql`INSERT INTO orchestration_events VALUES (1, 'project', ${projectId}, 'project.updated')`;
+          }
+          if (targetedReads.length === 1 && mode === "unrelated-streaming")
+            yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated')`;
+          if (requestedId === secondThread?.id) return secondThread;
+          if (requestedId === visibleDeletedThread?.id) return visibleDeletedThread;
+          if (requestedId !== thread.id || (deleted && mode !== "deleted-visible-pending"))
+            return null;
+          return thread;
+        }).pipe(Effect.orDie),
     }),
     Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
     Layer.mock(Settings.ServerSettingsService)({
@@ -769,7 +849,27 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "deleted" ||
     mode === "whole-policy" ||
     mode === "shared-session-stopped" ||
-    mode === "shared-session-detached";
+    mode === "shared-session-detached" ||
+    mode === "unrelated-streaming" ||
+    mode === "batch";
+  if (mode === "batch") {
+    assert.equal(reads, 1);
+    assert.include(targetedReads, threadId);
+    assert.include(targetedReads, secondThread!.id);
+    assert.isFalse(yield* f.fs.exists(f.path.join(secondThread!.worktreePath!, "node_modules")));
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(secondThread!.worktreePath!, "source.ts")),
+      "export const value = 1;\n",
+    );
+  }
+  if (mode === "initial-revision-changed") {
+    assert.equal(targetedReads.length, 0);
+    assert.equal(dependencyInspections(), 0);
+  }
+  if (mode === "revision-changed") {
+    assert.equal(reads, 1);
+    assert.equal(dependencyInspections(), 0);
+  }
   assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
   if (preserveResearch)
@@ -803,6 +903,12 @@ it.effect.each([
   "project-root",
   "policy-changed",
   "activity-changed",
+  "path-changed",
+  "ownership-changed",
+  "revision-changed",
+  "initial-revision-changed",
+  "unrelated-streaming",
+  "batch",
   "session",
   "shared-session-live",
   "shared-session-stopped",
