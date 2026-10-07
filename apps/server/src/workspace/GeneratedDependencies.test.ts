@@ -1,6 +1,8 @@
 import * as Path from "effect/Path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as DateTime from "effect/DateTime";
@@ -43,7 +45,7 @@ import * as ServerActivation from "../serverActivation.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
-  return { ...original, opendir: vi.fn(original.opendir) };
+  return { ...original, opendir: vi.fn(original.opendir), rm: vi.fn(original.rm) };
 });
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
@@ -80,6 +82,13 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
   const path = yield* Path.Path;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const cleanup = yield* GeneratedDependencies.GeneratedDependencies;
+  const remove = (
+    inspection: Parameters<typeof cleanup.removeBatch>[0][number]["inspection"],
+    canRemove: Effect.Effect<boolean>,
+  ) =>
+    cleanup
+      .removeBatch([{ inspection, canRemove }])
+      .pipe(Effect.map((removed) => removed[0] ?? null));
   const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dependencies-" });
   // /tmp is itself a symlink on macOS; candidates must use the actual path.
   const root = yield* fs.realPath(temporary);
@@ -132,7 +141,18 @@ const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | 
     "module.exports = 1;\n",
   );
   const input = { managedWorktreesRoot, repositoryRoot: repository, worktreePath };
-  return { fs, path, cleanup, root, repository, input, dependencyPath, marker, lock, runGit };
+  return {
+    fs,
+    path,
+    cleanup: { ...cleanup, remove },
+    root,
+    repository,
+    input,
+    dependencyPath,
+    marker,
+    lock,
+    runGit,
+  };
 });
 
 it.effect.each(["pnpm", "npm"] as const)(
@@ -450,6 +470,121 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
+const inspectedBatchFixture = Effect.fn("test.inspectedBatchFixture")(function* () {
+  const f = yield* fixture();
+  yield* f.fs.makeDirectory(f.path.join(f.input.worktreePath, "tmp"));
+  yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "tmp/notes.md"), "private notes");
+  yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), "unfinished source");
+  const inspection = yield* f.cleanup.inspect(f.input);
+  assert.isNotNull(inspection);
+  return { ...f, inspection: inspection! };
+});
+
+const assertBatchWorkspacePreserved = Effect.fn("test.assertBatchWorkspacePreserved")(function* (
+  f: Effect.Success<ReturnType<typeof inspectedBatchFixture>>,
+) {
+  assert.equal(
+    yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")),
+    "unfinished source",
+  );
+  assert.equal(
+    yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
+    "private notes",
+  );
+  assert.isTrue(yield* f.fs.exists(f.path.join(f.input.worktreePath, ".git")));
+});
+
+it.effect(
+  "a delayed dependency deletion lets its sibling finish its final guard and deletion",
+  () =>
+    Effect.gen(function* () {
+      const first = yield* inspectedBatchFixture();
+      const second = yield* inspectedBatchFixture();
+      const delayedStarted = yield* Deferred.make<void>();
+      const siblingFinished = yield* Deferred.make<void>();
+      const releaseDeletion = yield* Deferred.make<void>();
+      let releaseNativeDeletion = (): void => undefined;
+      const nativeDeletionGate = new Promise<void>((resolve) => {
+        releaseNativeDeletion = resolve;
+      });
+      const release = Deferred.succeed(releaseDeletion, undefined).pipe(
+        Effect.andThen(Effect.sync(() => releaseNativeDeletion())),
+      );
+      let siblingGuarded = false;
+      const rm = vi.mocked(NodeFSP.rm);
+      const original = rm.getMockImplementation()!;
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          rm.mockImplementation(async (...args) => {
+            if (args[0] === first.dependencyPath) {
+              Deferred.doneUnsafe(delayedStarted, Effect.void);
+              await nativeDeletionGate;
+            }
+            await original(...args);
+            if (args[0] === second.dependencyPath)
+              Deferred.doneUnsafe(siblingFinished, Effect.void);
+          });
+        }),
+        () => Effect.sync(() => rm.mockImplementation(original)),
+      );
+      yield* Effect.gen(function* () {
+        const removal = yield* first.cleanup
+          .removeBatch([
+            { inspection: first.inspection, canRemove: Effect.succeed(true) },
+            {
+              inspection: second.inspection,
+              canRemove: Effect.sync(() => {
+                siblingGuarded = true;
+                return true;
+              }),
+            },
+          ])
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(delayedStarted);
+        yield* Deferred.await(siblingFinished);
+        assert.isTrue(siblingGuarded);
+        assert.isTrue(yield* first.fs.exists(first.dependencyPath));
+        assert.isFalse(yield* second.fs.exists(second.dependencyPath));
+        assert.isFalse(yield* Deferred.isDone(releaseDeletion));
+        yield* release;
+        assert.lengthOf(yield* Fiber.join(removal), 2);
+        assert.isFalse(yield* first.fs.exists(first.dependencyPath));
+      }).pipe(Effect.ensuring(release));
+      yield* assertBatchWorkspacePreserved(first);
+      yield* assertBatchWorkspacePreserved(second);
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("one dependency removal error leaves its sibling eligible for deletion", () =>
+  Effect.gen(function* () {
+    const first = yield* inspectedBatchFixture();
+    const second = yield* inspectedBatchFixture();
+    const rm = vi.mocked(NodeFSP.rm);
+    const original = rm.getMockImplementation()!;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        rm.mockImplementation(async (...args) => {
+          if (args[0] === first.dependencyPath) throw new Error("Fixture removal failure");
+          return await original(...args);
+        });
+      }),
+      () => Effect.sync(() => rm.mockImplementation(original)),
+    );
+    const removed = yield* first.cleanup.removeBatch([
+      { inspection: first.inspection, canRemove: Effect.succeed(true) },
+      { inspection: second.inspection, canRemove: Effect.succeed(true) },
+    ]);
+    assert.deepStrictEqual(
+      removed.map((entry) => entry.dependencyPath),
+      [second.dependencyPath],
+    );
+    assert.isTrue(yield* first.fs.exists(first.dependencyPath));
+    assert.isFalse(yield* second.fs.exists(second.dependencyPath));
+    yield* assertBatchWorkspacePreserved(first);
+    yield* assertBatchWorkspacePreserved(second);
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
 const NOW = Date.parse("2026-06-10T12:00:00.000Z");
 const day = 86_400_000;
 const at = (daysAgo: number) => DateTime.makeUnsafe(NOW - daysAgo * day);
@@ -526,6 +661,9 @@ type SweepCase =
   | "initial-revision-changed"
   | "unrelated-streaming"
   | "batch"
+  | "batch-five"
+  | "batch-process-started"
+  | "batch-process-unknown"
   | "provider-history-batch"
   | "provider-binding-changed"
   | "provider-cwd-changed"
@@ -579,11 +717,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
-  const batch = mode === "batch" || mode === "provider-history-batch";
-  let secondThread: typeof thread | null = null;
-  if (batch) {
-    const secondPath = f.path.join(f.input.managedWorktreesRoot, "second-feature");
-    yield* f.runGit(f.repository, ["worktree", "add", "-b", "second-feature", secondPath]);
+  const batch =
+    mode === "batch" ||
+    mode === "batch-five" ||
+    mode === "batch-process-started" ||
+    mode === "batch-process-unknown" ||
+    mode === "provider-history-batch";
+  const additionalThreads: Array<typeof thread> = [];
+  for (let index = 0; index < (mode === "batch-five" ? 4 : batch ? 1 : 0); index++) {
+    const branch = index === 0 ? "second-feature" : `feature-${index + 2}`;
+    const secondPath = f.path.join(f.input.managedWorktreesRoot, branch);
+    yield* f.runGit(f.repository, ["worktree", "add", "-b", branch, secondPath]);
     const secondInstall = f.path.join(secondPath, "node_modules");
     yield* f.fs.makeDirectory(f.path.join(secondInstall, "package"), { recursive: true });
     yield* f.fs.writeFileString(f.path.join(secondInstall, f.marker), "layoutVersion: 5\n");
@@ -591,12 +735,13 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       f.path.join(secondInstall, "package/index.js"),
       "module.exports = 1;\n",
     );
-    secondThread = {
+    additionalThreads.push({
       ...makeShell(secondPath),
-      id: ThreadId.make("batch-second"),
-      branch: "second-feature",
-    };
+      id: ThreadId.make(`batch-${index + 2}`),
+      branch,
+    });
   }
+  const secondThread = additionalThreads[0] ?? null;
   const unrelatedHistory =
     mode === "batch"
       ? Array.from({ length: 40 }, (_, index) => ({
@@ -795,9 +940,15 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   let providerEventInserted = false;
   const targetedReads: ThreadId[] = [];
   let processReads = 0;
+  let processStartedDuringInspection = false;
   setProcessReader(() => {
     processReads++;
-    if (mode === "process-unknown") return null;
+    if (mode === "process-unknown" || (mode === "batch-process-unknown" && processReads > 1))
+      return null;
+    if (mode === "batch-process-started" && dependencyInspections() > 0) {
+      processStartedDuringInspection = true;
+      return [f.path.join(f.dependencyPath, "package")];
+    }
     return mode === "process" || (mode === "process-started" && processReads > 1)
       ? [f.path.join(f.dependencyPath, "package")]
       : [];
@@ -840,7 +991,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             mode === "archived"
               ? []
               : secondThread !== null
-                ? [thread, secondThread]
+                ? [thread, ...additionalThreads]
                 : visibleDeletedThread !== null
                   ? [thread, visibleDeletedThread]
                   : mode === "shared"
@@ -908,7 +1059,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             );
             providerEventInserted = true;
           }
-          if (requestedId === secondThread?.id) return secondThread;
+          const additionalThread = additionalThreads.find(
+            (candidate) => candidate.id === requestedId,
+          );
+          if (additionalThread !== undefined) return additionalThread;
           if (requestedId === visibleDeletedThread?.id) return visibleDeletedThread;
           if (requestedId !== thread.id || (deleted && mode !== "deleted-visible-pending"))
             return null;
@@ -972,6 +1126,14 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
+  if (batch)
+    for (const candidate of [thread, ...additionalThreads]) {
+      yield* f.fs.makeDirectory(f.path.join(candidate.worktreePath!, "tmp"));
+      yield* f.fs.writeFileString(
+        f.path.join(candidate.worktreePath!, "tmp/notes.md"),
+        "private notes",
+      );
+    }
   yield* worker.sweep();
   if (
     mode === "whole-removal" ||
@@ -990,16 +1152,29 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "shared-session-stopped" ||
     mode === "shared-session-detached" ||
     mode === "unrelated-streaming" ||
-    batch;
+    (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
     assert.equal(reads, 1);
+    assert.equal(processReads, mode === "batch-five" ? 3 : 2);
     assert.include(targetedReads, threadId);
-    assert.include(targetedReads, secondThread!.id);
-    assert.isFalse(yield* f.fs.exists(f.path.join(secondThread!.worktreePath!, "node_modules")));
-    assert.equal(
-      yield* f.fs.readFileString(f.path.join(secondThread!.worktreePath!, "source.ts")),
-      "export const value = 1;\n",
-    );
+    for (const candidate of additionalThreads) {
+      assert.include(targetedReads, candidate.id);
+      assert.equal(
+        yield* f.fs.exists(f.path.join(candidate.worktreePath!, "node_modules")),
+        mode === "batch-process-unknown",
+      );
+      assert.equal(
+        yield* f.fs.readFileString(f.path.join(candidate.worktreePath!, "source.ts")),
+        "export const value = 1;\n",
+      );
+      assert.isTrue(yield* f.fs.exists(f.path.join(candidate.worktreePath!, ".git")));
+    }
+    for (const candidate of [thread, ...additionalThreads])
+      assert.equal(
+        yield* f.fs.readFileString(f.path.join(candidate.worktreePath!, "tmp/notes.md")),
+        "private notes",
+      );
+    if (mode === "batch-process-started") assert.isTrue(processStartedDuringInspection);
   }
   if (mode === "provider-history-batch") {
     assert.equal(sessionLookups.size, 40);
@@ -1067,6 +1242,9 @@ it.effect.each([
   "initial-revision-changed",
   "unrelated-streaming",
   "batch",
+  "batch-five",
+  "batch-process-started",
+  "batch-process-unknown",
   "provider-history-batch",
   "provider-binding-changed",
   "provider-cwd-changed",

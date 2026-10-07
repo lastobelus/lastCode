@@ -104,6 +104,8 @@ interface DependencyInspection extends DependencyInput {
   readonly inode: number;
 }
 
+export const MAX_DEPENDENCY_REMOVAL_BATCH_SIZE = 4;
+
 export class GeneratedDependencies extends Context.Service<
   GeneratedDependencies,
   {
@@ -111,11 +113,13 @@ export class GeneratedDependencies extends Context.Service<
     readonly inspect: (
       input: DependencyInput,
     ) => Effect.Effect<DependencyInspection | null, GeneratedDependenciesError>;
-    /** Rechecks recognition, Git ownership and directory identity before removal. */
-    readonly remove: (
-      inspection: DependencyInspection,
-      canRemove: Effect.Effect<boolean>,
-    ) => Effect.Effect<DependencyInspection | null, GeneratedDependenciesError>;
+    /** Shares a fresh process check after every entry's Git/identity validation. */
+    readonly removeBatch: (
+      entries: ReadonlyArray<{
+        readonly inspection: DependencyInspection;
+        readonly canRemove: Effect.Effect<boolean>;
+      }>,
+    ) => Effect.Effect<ReadonlyArray<DependencyInspection>>;
   }
 >()("t3/workspace/GeneratedDependencies") {}
 
@@ -336,46 +340,77 @@ const make = Effect.gen(function* () {
       : ({ ...current, estimatedReclaimedBytes } satisfies DependencyInspection);
   });
 
-  const remove = Effect.fn("GeneratedDependencies.remove")(function* (
-    inspection: DependencyInspection,
-    canRemove: Effect.Effect<boolean>,
+  const skip = (error: GeneratedDependenciesError) =>
+    Effect.logDebug("storage cleanup skipped dependency install", { error }).pipe(Effect.as(null));
+  const removeBatch = Effect.fn("GeneratedDependencies.removeBatch")(function* (
+    entries: ReadonlyArray<{
+      readonly inspection: DependencyInspection;
+      readonly canRemove: Effect.Effect<boolean>;
+    }>,
   ) {
-    const current = yield* validate(inspection);
     if (
-      current === null ||
-      current.dependencyPath !== inspection.dependencyPath ||
-      current.repositoryCommonGitDir !== inspection.repositoryCommonGitDir ||
-      current.device !== inspection.device ||
-      current.inode !== inspection.inode ||
-      current.packageManager !== inspection.packageManager
+      entries.length === 0 ||
+      entries.length > MAX_DEPENDENCY_REMOVAL_BATCH_SIZE ||
+      new Set(entries.map(({ inspection }) => NodePath.resolve(inspection.worktreePath))).size !==
+        entries.length
     )
-      return null;
+      return [];
+    const validated = (yield* Effect.forEach(
+      entries,
+      ({ inspection, canRemove }) =>
+        Effect.gen(function* () {
+          const current = yield* validate(inspection);
+          if (
+            current === null ||
+            current.dependencyPath !== inspection.dependencyPath ||
+            current.repositoryCommonGitDir !== inspection.repositoryCommonGitDir ||
+            current.device !== inspection.device ||
+            current.inode !== inspection.inode ||
+            current.packageManager !== inspection.packageManager
+          )
+            return null;
+          return { current, inspection, canRemove };
+        }).pipe(Effect.catch(skip)),
+      { concurrency: entries.length },
+    )).filter((entry) => entry !== null);
+    if (validated.length === 0) return [];
+    // Finish all recognition and Git work before the shared fresh inventory.
+    // Leases stay held, and no candidate queues behind another lengthy removal.
     const processes = yield* processCwds;
-    if (
-      processes === null ||
-      processes.some(
-        (cwd) =>
-          NodePath.resolve(cwd) === current.worktreePath ||
-          inside(current.worktreePath, NodePath.resolve(cwd)),
-      )
-    )
-      return null;
-    if (!(yield* canRemove)) return null;
-    return yield* Effect.tryPromise({
-      try: async () => {
-        if (await hasLiveRuntime(current.worktreePath)) return null;
-        if (!(await realDirectoryChain(current.dependencyPath))) return null;
-        const stat = await NodeFSP.lstat(current.dependencyPath);
-        if (stat.dev !== current.device || stat.ino !== current.inode) return null;
-        // fs.rm unlinks internal symlinks; it does not traverse their targets.
-        await NodeFSP.rm(current.dependencyPath, { recursive: true });
-        // Reuse the inspection's estimate; safety revalidation needs no second traversal.
-        return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };
-      },
-      catch: (cause) => new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
-    });
+    if (processes === null) return [];
+    const removed = yield* Effect.forEach(
+      validated,
+      ({ current, inspection, canRemove }) =>
+        Effect.gen(function* () {
+          if (
+            processes.some(
+              (cwd) =>
+                NodePath.resolve(cwd) === current.worktreePath ||
+                inside(current.worktreePath, NodePath.resolve(cwd)),
+            ) ||
+            !(yield* canRemove)
+          )
+            return null;
+          // Keep the caller's leases until native removal settles on cancellation.
+          return yield* Effect.tryPromise({
+            try: async () => {
+              if (await hasLiveRuntime(current.worktreePath)) return null;
+              if (!(await realDirectoryChain(current.dependencyPath))) return null;
+              const stat = await NodeFSP.lstat(current.dependencyPath);
+              if (stat.dev !== current.device || stat.ino !== current.inode) return null;
+              // fs.rm unlinks internal symlinks; it does not traverse their targets.
+              await NodeFSP.rm(current.dependencyPath, { recursive: true });
+              return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };
+            },
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
+          }).pipe(Effect.uninterruptible);
+        }).pipe(Effect.catch(skip)),
+      { concurrency: validated.length },
+    );
+    return removed.filter((entry) => entry !== null);
   });
-  return GeneratedDependencies.of({ inspect, remove, processWorkingDirectories: processCwds });
+  return GeneratedDependencies.of({ inspect, removeBatch, processWorkingDirectories: processCwds });
 });
 
 export const layer = Layer.effect(GeneratedDependencies, make);

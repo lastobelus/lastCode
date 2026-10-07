@@ -384,118 +384,139 @@ export const make = Effect.gen(function* () {
         !groups.has(cwd) && group.length === 1 ? [group[0]!] : [],
       ),
     ];
-    for (const thread of candidates) {
+    const eligible = candidates.flatMap((thread) => {
       const days = resolveWorktreeCleanup(
         serverSettings,
         thread.projectId,
       ).worktreeDependenciesAfterDays;
-      if (days === null || thread.worktreePath === null || thread.branch === null) continue;
+      if (days === null || thread.worktreePath === null || thread.branch === null) return [];
       const deleted = "dependencyActivityAt" in thread;
       const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
-      if (activityAt === null || activityAt >= now - days * DAY_MS) continue;
-      if (!deleted && !storageCleanupThreadIdle(thread, now)) continue;
+      if (activityAt === null || activityAt >= now - days * DAY_MS) return [];
+      if (!deleted && !storageCleanupThreadIdle(thread, now)) return [];
       const worktreePath = path.resolve(thread.worktreePath);
       if (
         processCwds.some(
           (cwd) => path.resolve(cwd) === worktreePath || inside(worktreePath, path.resolve(cwd)),
         )
       )
-        continue;
+        return [];
       const project = deleted
         ? { workspaceRoot: thread.workspaceRoot }
         : snapshot.projects.find((entry) => entry.id === thread.projectId);
-      if (project === undefined || hasTerminal(worktreePath)) continue;
-      yield* Effect.gen(function* () {
-        const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
-          function* () {
-            const currentDays = resolveWorktreeCleanup(
-              yield* settingsService.getSettings,
-              thread.projectId,
-            ).worktreeDependenciesAfterDays;
-            if (currentDays !== days || hasTerminal(worktreePath)) return false;
-            // Reuse normalized ownership and project roots only while no
-            // ownership event has changed them; otherwise defer to a new sweep.
-            if (yield* ownershipChangedSince(sequence)) return false;
-            if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
-              return false;
-            if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
-              return false;
-            const latest = yield* projections.getThreadShell(thread.id);
-            if (deleted) {
-              if (latest !== null && latest.deletedAt === null) return false;
-              const rows = yield* readDeletedDependencyCandidates(thread.id);
-              if (
-                rows.length !== 1 ||
-                rows[0]!.id !== thread.id ||
-                rows[0]!.worktreePath === null ||
-                path.resolve(rows[0]!.worktreePath) !== worktreePath ||
-                rows[0]!.branch !== thread.branch ||
-                rows[0]!.projectId !== thread.projectId ||
-                path.resolve(rows[0]!.workspaceRoot) !== path.resolve(project.workspaceRoot) ||
-                rows[0]!.dependencyActivityAt !== activityAt
-              )
-                return false;
-              const pending = yield* sql`
+      if (project === undefined || hasTerminal(worktreePath)) return [];
+      return [{ thread, days, deleted, activityAt, worktreePath, project }];
+    });
+    const batchSize = GeneratedDependencies.MAX_DEPENDENCY_REMOVAL_BATCH_SIZE;
+    for (let offset = 0; offset < eligible.length; offset += batchSize) {
+      const group = eligible.slice(offset, offset + batchSize);
+      const removeGroup = Effect.gen(function* () {
+        const prepared = (yield* Effect.forEach(
+          group,
+          ({ thread, days, deleted, activityAt, worktreePath, project }) =>
+            Effect.gen(function* () {
+              const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
+                function* () {
+                  const currentDays = resolveWorktreeCleanup(
+                    yield* settingsService.getSettings,
+                    thread.projectId,
+                  ).worktreeDependenciesAfterDays;
+                  if (currentDays !== days || hasTerminal(worktreePath)) return false;
+                  // Reuse normalized ownership and project roots only while no
+                  // ownership event has changed them; otherwise defer to a new sweep.
+                  if (yield* ownershipChangedSince(sequence)) return false;
+                  if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
+                    return false;
+                  if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
+                    return false;
+                  const latest = yield* projections.getThreadShell(thread.id);
+                  if (deleted) {
+                    if (latest !== null && latest.deletedAt === null) return false;
+                    const rows = yield* readDeletedDependencyCandidates(thread.id);
+                    if (
+                      rows.length !== 1 ||
+                      rows[0]!.id !== thread.id ||
+                      rows[0]!.worktreePath === null ||
+                      path.resolve(rows[0]!.worktreePath) !== worktreePath ||
+                      rows[0]!.branch !== thread.branch ||
+                      rows[0]!.projectId !== thread.projectId ||
+                      path.resolve(rows[0]!.workspaceRoot) !==
+                        path.resolve(project.workspaceRoot) ||
+                      rows[0]!.dependencyActivityAt !== activityAt
+                    )
+                      return false;
+                    const pending = yield* sql`
               SELECT 1 FROM orchestration_v2_effect_outbox
               WHERE thread_id = ${thread.id} AND status NOT IN ('succeeded', 'cancelled') LIMIT 1
             `;
-              if (pending.length > 0) return false;
-            } else if (
-              latest === null ||
-              latest.deletedAt !== null ||
-              latest.id !== thread.id ||
-              latest.worktreePath === null ||
-              path.resolve(latest.worktreePath) !== worktreePath ||
-              latest.branch !== thread.branch ||
-              latest.projectId !== thread.projectId ||
-              !storageCleanupThreadIdle(latest, now) ||
-              storageCleanupActivityAt(latest) !== activityAt
-            )
-              return false;
-            if (yield* hasPendingWorkspaceWork(thread.id)) return false;
-            return (
-              !hasTerminal(worktreePath) &&
-              resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
-                .worktreeDependenciesAfterDays === days &&
-              !(yield* ownershipChangedSince(sequence))
-            );
-          },
-        );
-        const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
-          if (!(yield* candidateStillIdle())) return false;
-          if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
-          const status = yield* git.statusDetailsLocal(worktreePath);
-          if (!status.isRepo || status.branch !== thread.branch) return false;
-          // Re-read policy, activity, roots, leases and durable pending state
-          // after Git/session calls as well as after dependency inspection.
-          return (
-            (yield* candidateStillIdle()) &&
-            !(yield* hasLiveProviderSession(worktreePath, thread.id))
-          );
-        });
-        if (!(yield* revalidate())) return;
-        const inspection = yield* dependencies.inspect({
-          managedWorktreesRoot: config.worktreesDir,
-          worktreePath,
-          repositoryRoot: project.workspaceRoot,
-        });
-        if (inspection === null) return;
-        const removed = yield* dependencies.remove(
-          inspection,
-          revalidate().pipe(Effect.catch(() => Effect.succeed(false))),
-        );
-        if (removed !== null)
+                    if (pending.length > 0) return false;
+                  } else if (
+                    latest === null ||
+                    latest.deletedAt !== null ||
+                    latest.id !== thread.id ||
+                    latest.worktreePath === null ||
+                    path.resolve(latest.worktreePath) !== worktreePath ||
+                    latest.branch !== thread.branch ||
+                    latest.projectId !== thread.projectId ||
+                    !storageCleanupThreadIdle(latest, now) ||
+                    storageCleanupActivityAt(latest) !== activityAt
+                  )
+                    return false;
+                  if (yield* hasPendingWorkspaceWork(thread.id)) return false;
+                  return (
+                    !hasTerminal(worktreePath) &&
+                    resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
+                      .worktreeDependenciesAfterDays === days &&
+                    !(yield* ownershipChangedSince(sequence))
+                  );
+                },
+              );
+              const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
+                if (!(yield* candidateStillIdle())) return false;
+                if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
+                const status = yield* git.statusDetailsLocal(worktreePath);
+                if (!status.isRepo || status.branch !== thread.branch) return false;
+                // Re-read policy, activity, roots, leases and durable pending state
+                // after Git/session calls as well as after dependency inspection.
+                return (
+                  (yield* candidateStillIdle()) &&
+                  !(yield* hasLiveProviderSession(worktreePath, thread.id))
+                );
+              });
+              if (!(yield* revalidate())) return null;
+              const inspection = yield* dependencies.inspect({
+                managedWorktreesRoot: config.worktreesDir,
+                worktreePath,
+                repositoryRoot: project.workspaceRoot,
+              });
+              if (inspection === null) return null;
+              return {
+                inspection,
+                canRemove: revalidate().pipe(Effect.catch(() => Effect.succeed(false))),
+                threadId: thread.id,
+              };
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.logDebug("storage cleanup skipped dependencies", {
+                  threadId: thread.id,
+                  error,
+                }).pipe(Effect.as(null)),
+              ),
+            ),
+          { concurrency: group.length },
+        )).filter((entry) => entry !== null);
+        for (const removed of yield* dependencies.removeBatch(prepared))
           yield* Effect.logInfo("storage cleanup removed dependency install", {
-            threadId: thread.id,
+            threadId: prepared.find(
+              (entry) => entry.inspection.dependencyPath === removed.dependencyPath,
+            )!.threadId,
             packageManager: removed.packageManager,
             estimatedReclaimedBytes: removed.estimatedReclaimedBytes,
           });
-      }).pipe(
-        (effect) => withWorkspaceLease(worktreePath, effect),
-        Effect.catch((error) =>
-          Effect.logDebug("storage cleanup skipped dependencies", { threadId: thread.id, error }),
-        ),
-      );
+      });
+      // Ordered group leases exclude startup throughout inspection and removal.
+      const paths = [...new Set(group.map((entry) => entry.worktreePath))].sort();
+      yield* paths.reduceRight((effect, cwd) => withWorkspaceLease(cwd, effect), removeGroup);
     }
   });
 
