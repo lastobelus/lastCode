@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
 import {
   handoffTargetKey,
   handoffTitle,
@@ -63,6 +64,17 @@ describe("handoff identity and ordering", () => {
 });
 
 describe("handoff persistence and provenance", () => {
+  it("saves the clean destination when a navigation snapshot contains a bootstrap token", () => {
+    const url = "http://localhost:5173/project?view=qa#details";
+    const navigationUrl = setPairingTokenOnUrl(new URL(url), "one-use-secret").href;
+    const target = { kind: "url" as const, url: navigationUrl };
+    recordHandoff(ref, target);
+    rememberHandoffBrowser(ref, "qa-tab", target, navigationUrl);
+    expect(readThreadHandoffs(ref)[0]?.target).toEqual({ kind: "url", url });
+    expect(handoffBrowserTarget(ref, "qa-tab")).toEqual({ target: { kind: "url", url }, url });
+    updateHandoffBrowserTitle(ref, "qa-tab", "Ready for QA", url);
+    expect(readThreadHandoffs(ref)[0]?.title).toBe("Ready for QA");
+  });
   it("round trips valid records and discards malformed persisted entries", () => {
     const entries = upsertHandoff([], file, { label: "Mockup", at: 123 });
     const saved = JSON.parse(

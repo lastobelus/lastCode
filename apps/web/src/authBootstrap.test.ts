@@ -7,6 +7,7 @@ import {
   type DesktopBridge,
 } from "@t3tools/contracts";
 import { createBrowserHistory } from "@tanstack/react-router";
+import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
@@ -375,6 +376,26 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(takePairingTokenFromUrl()).toBe("pairing-token");
     expect(testWindow.location.hash).toBe("");
     expect(testWindow.location.searchParams.get("token")).toBeNull();
+  });
+
+  it("bootstraps a prepared preview while preserving its route, query, and fragment", async () => {
+    let authenticated = false;
+    await installAuthApi({
+      session: () =>
+        authenticated ? authenticatedSession(LOOPBACK_AUTH) : unauthenticatedSession(LOOPBACK_AUTH),
+      browserSession: () =>
+        Effect.sync(() => {
+          authenticated = true;
+          return browserSession(["orchestration:read", "access:write"]);
+        }),
+    });
+    const destination = "http://localhost/threads/qa?view=preview#details";
+    const testWindow = installTestBrowser(
+      setPairingTokenOnUrl(new URL(destination), "one-time-credential").href,
+    );
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+    await expect(resolveInitialServerAuthGateState()).resolves.toEqual({ status: "authenticated" });
+    expect(testWindow.location.href).toBe(destination);
   });
 
   it("accepts query-string pairing tokens as a backward-compatible fallback", async () => {

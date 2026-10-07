@@ -95,7 +95,7 @@ const PreviewProfilesTool = Tool.make("preview_profiles", {
 
 const PreviewHostTool = Tool.make("preview_host", {
   description:
-    "Start or recover a thread-owned local web preview in a managed terminal for 24 hours. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Opening the link in its owning thread restores a stopped server automatically within the fixed lease; viewing or recovering does not extend expiry.",
+    "Prepare a retained thread-owned local web preview in a managed terminal. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Processes sleep after 24 hours, but the saved setup and source remain until explicit stop or thread deletion. Opening the in-thread link restores a stopped server automatically for another run window. For isolated T3 dev QA, set browserAuth: t3-dev and retain a fixed T3CODE_DEV_AUTH_TOKEN in env; emit only the clean URL.",
   parameters: PreviewHostingLaunchInput,
   success: PreviewHostingLeaseSummary,
   failure: Schema.Union([

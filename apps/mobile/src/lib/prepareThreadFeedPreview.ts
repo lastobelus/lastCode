@@ -1,6 +1,8 @@
 import {
   prepareHostedPreview,
   HostedPreviewUrlTooLongError,
+  HostedPreviewRecoveryError,
+  hostedPreviewNavigationUrl,
   type PrepareHostedPreviewInput,
 } from "@t3tools/client-runtime/preview-hosting";
 import type { MediaActionsSource } from "./mediaActionsSource";
@@ -12,9 +14,13 @@ export async function prepareThenOpenThreadFeedUrl<A>(
 ): Promise<A> {
   let destination = input.url;
   try {
-    destination = (await prepareHostedPreview(input)).url;
+    destination = hostedPreviewNavigationUrl(await prepareHostedPreview(input));
   } catch (cause) {
-    if (cause instanceof HostedPreviewUrlTooLongError) throw cause;
+    if (
+      cause instanceof HostedPreviewUrlTooLongError ||
+      cause instanceof HostedPreviewRecoveryError
+    )
+      throw cause;
     // Keep the user's original link usable if preparation unexpectedly fails.
   }
   return open(destination);
@@ -45,7 +51,8 @@ export function startPreparingThreadFeedMediaUrl(
         (uri) => publishIfCurrent({ status: "ready", uri }),
         (cause: unknown) => {
           publishIfCurrent(
-            cause instanceof HostedPreviewUrlTooLongError
+            cause instanceof HostedPreviewUrlTooLongError ||
+              cause instanceof HostedPreviewRecoveryError
               ? { status: "unavailable", uri: null }
               : { status: "ready", uri: url },
           );

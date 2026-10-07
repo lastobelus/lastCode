@@ -155,17 +155,21 @@ export const stripPairingTokenFromUrl = (url: URL): URL => {
   const next = new URL(url.toString());
   const hashParams = readHashParams(next);
   if (hashParams.has(PAIRING_TOKEN_PARAM)) {
+    const returnHash = hashParams.get("t3-preview-return-hash");
     hashParams.delete(PAIRING_TOKEN_PARAM);
-    next.hash = hashParams.toString();
+    hashParams.delete("t3-preview-return-hash");
+    next.hash = returnHash ?? hashParams.toString();
   }
   next.searchParams.delete(PAIRING_TOKEN_PARAM);
   return next;
 };
 
 export const setPairingTokenOnUrl = (url: URL, credential: string): URL => {
-  const next = new URL(url.toString());
-  next.searchParams.delete(PAIRING_TOKEN_PARAM);
-  next.hash = new URLSearchParams([[PAIRING_TOKEN_PARAM, credential]]).toString();
+  const next = stripPairingTokenFromUrl(url);
+  const hash = next.hash;
+  const params = new URLSearchParams([[PAIRING_TOKEN_PARAM, credential]]);
+  if (hash) params.set("t3-preview-return-hash", hash);
+  next.hash = params.toString();
   return next;
 };
 

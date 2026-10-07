@@ -64,7 +64,7 @@ describe("native preview reopening", () => {
     expect(mocks.run.mock.calls.map((call) => call[1])).toEqual([mocks.list, mocks.recover]);
     expect(mocks.run.mock.calls[1]![2]).toEqual({
       environmentId: owner.environmentId,
-      input: { threadId: owner.threadId, leaseId: lease.leaseId, url: lease.url },
+      input: { threadId: owner.threadId, leaseId: lease.leaseId, url: lease.url, bootstrap: false },
     });
   });
   it("uses the configured same-environment endpoint for a LAN-to-remote reopen", async () => {
@@ -116,13 +116,15 @@ describe("native preview reopening", () => {
     expect(await recoverHostedPreview(owner, "http://localhost:5173/qa")).toBe(false);
     expect(mocks.run).toHaveBeenCalledTimes(1);
   });
-  it("leaves unmanaged, expired, or failed previews to the existing fallback", async () => {
+  it("leaves unknown links alone and rejects a managed handoff removed during recovery", async () => {
     mocks.run.mockResolvedValueOnce({ _tag: "Success", value: [] });
     expect(await recoverHostedPreview(owner, "http://localhost:5173/qa")).toBe(false);
     mocks.run
       .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
       .mockResolvedValueOnce({ _tag: "Success", value: null });
-    expect(await recoverHostedPreview(owner, "http://localhost:5173/qa")).toBe(false);
+    await expect(recoverHostedPreview(owner, "http://localhost:5173/qa")).rejects.toThrow(
+      "saved preview",
+    );
     mocks.run.mockResolvedValueOnce({ _tag: "Failure" });
     expect(await recoverHostedPreview(owner, "http://localhost:5173/qa")).toBe(false);
   });

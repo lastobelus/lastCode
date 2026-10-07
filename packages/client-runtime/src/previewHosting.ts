@@ -4,9 +4,11 @@ import type { PreparedConnection } from "./connection/model.ts";
 import {
   PREVIEW_URL_MAX_LENGTH,
   type PreviewHostingLeaseSummary,
+  type PreviewHostingRecoverResult,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
+import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "@t3tools/shared/remote";
 import {
   isLocalLoopbackHost,
   isPrivateNetworkHost,
@@ -44,27 +46,53 @@ export class HostedPreviewUrlTooLongError extends Error {
   }
 }
 
+export class HostedPreviewRecoveryError extends Error {
+  constructor(cause?: unknown) {
+    super(
+      "The saved preview could not be started. Retry opening it when its environment is available.",
+      { cause },
+    );
+    this.name = "HostedPreviewRecoveryError";
+  }
+}
+
 export interface PrepareHostedPreviewInput {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly environmentUrl: string;
   /** Previous endpoints explicitly known to belong to this same environment. */
   readonly knownEnvironmentUrls?: ReadonlyArray<string>;
+  /** Resource loads must not consume a browser-navigation credential. */
+  readonly purpose?: "navigation" | "resource";
   readonly list: () => Promise<ReadonlyArray<PreviewHostingLeaseSummary>>;
   readonly recover: (
     lease: PreviewHostingLeaseSummary,
-  ) => Promise<PreviewHostingLeaseSummary | null>;
+    options: { readonly bootstrap: boolean },
+  ) => Promise<PreviewHostingRecoverResult>;
 }
 
 export interface PreparedHostedPreview {
   readonly url: string;
   readonly managed: boolean;
   readonly restored: boolean;
+  /** One-use navigation only; never save in handoffs, history, or copied links. */
+  readonly navigationUrl?: string;
+  readonly restarted?: boolean;
 }
 
-const inFlightPreparations = new Map<string, Promise<PreparedHostedPreview>>();
+/** Use only at the navigation boundary; retained destinations stay credential-free. */
+export function hostedPreviewNavigationUrl(
+  prepared: Pick<PreparedHostedPreview, "url" | "navigationUrl">,
+  destination = prepared.url,
+): string {
+  const token = prepared.navigationUrl
+    ? getPairingTokenFromUrl(new URL(prepared.navigationUrl))
+    : null;
+  return token ? setPairingTokenOnUrl(new URL(destination), token).href : destination;
+}
+
 const inFlightListings = new Map<string, Promise<ReadonlyArray<PreviewHostingLeaseSummary>>>();
-const inFlightRecoveries = new Map<string, Promise<PreviewHostingLeaseSummary | null>>();
+const inFlightRecoveries = new Map<string, Promise<PreviewHostingRecoverResult>>();
 
 /** Share pending work only; a later opening must check the server again. */
 function sharePending<A>(pending: Map<string, Promise<A>>, key: string, run: () => Promise<A>) {
@@ -132,11 +160,7 @@ export function prepareHostedPreview(
     input.environmentUrl,
     input.knownEnvironmentUrls ?? [],
   ]);
-  const key = JSON.stringify([scope, input.url]);
-  const existing = inFlightPreparations.get(key);
-  if (existing) return existing;
-
-  const preparation = (async (): Promise<PreparedHostedPreview> => {
+  return (async (): Promise<PreparedHostedPreview> => {
     let leases: ReadonlyArray<PreviewHostingLeaseSummary>;
     try {
       leases = await sharePending(inFlightListings, scope, input.list);
@@ -150,27 +174,36 @@ export function prepareHostedPreview(
     if (!owned) return original;
     const destination = resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress);
     if (destination.length > PREVIEW_URL_MAX_LENGTH) throw new HostedPreviewUrlTooLongError();
-    let restored = false;
+    let recovered: PreviewHostingRecoverResult;
     try {
-      restored =
-        (await sharePending(
-          inFlightRecoveries,
-          JSON.stringify([scope, owned.leaseId, owned.url]),
-          () => input.recover(owned),
-        )) !== null;
-    } catch {
-      // Keep the managed destination when the best-effort restore request fails.
+      // Each navigation needs its own one-use credential, including two opens
+      // of the same URL. Only resource recovery can share the complete result.
+      recovered =
+        input.purpose === "resource"
+          ? await sharePending(
+              inFlightRecoveries,
+              JSON.stringify([scope, owned.leaseId, owned.url]),
+              () => input.recover(owned, { bootstrap: false }),
+            )
+          : await input.recover(owned, { bootstrap: true });
+    } catch (cause) {
+      throw new HostedPreviewRecoveryError(cause);
     }
+    if (recovered === null) throw new HostedPreviewRecoveryError();
+    const navigationUrl =
+      input.purpose !== "resource" && recovered.bootstrapToken
+        ? setPairingTokenOnUrl(new URL(destination), recovered.bootstrapToken).href
+        : undefined;
+    if (navigationUrl !== undefined && navigationUrl.length > PREVIEW_URL_MAX_LENGTH)
+      throw new HostedPreviewUrlTooLongError();
     return {
       url: destination,
       managed: true,
-      restored,
+      restored: true,
+      ...(navigationUrl === undefined ? {} : { navigationUrl }),
+      ...(recovered.restarted ? { restarted: true } : {}),
     };
-  })().finally(() => {
-    inFlightPreparations.delete(key);
-  });
-  inFlightPreparations.set(key, preparation);
-  return preparation;
+  })();
 }
 
 function isKnownPreviousPrivateAddress(

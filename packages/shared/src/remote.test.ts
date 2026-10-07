@@ -6,9 +6,25 @@ import {
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
   resolveRemotePairingTarget,
+  getPairingTokenFromUrl,
+  setPairingTokenOnUrl,
+  stripPairingTokenFromUrl,
 } from "./remote.ts";
 
 describe("remote", () => {
+  it.each(["", "#details", "#section%20two?x=1&y=2", "#/thread/a?view=qa"])(
+    "restores the exact destination after private preview pairing (%s)",
+    (hash) => {
+      const original = new URL(`http://localhost:5173/threads/qa?view=preview${hash}`);
+      const entry = setPairingTokenOnUrl(original, "one-time-credential");
+      expect(getPairingTokenFromUrl(entry)).toBe("one-time-credential");
+      expect(entry.search).toBe(original.search);
+      expect(stripPairingTokenFromUrl(entry).href).toBe(original.href);
+      const refreshed = setPairingTokenOnUrl(entry, "next-credential");
+      expect(getPairingTokenFromUrl(refreshed)).toBe("next-credential");
+      expect(stripPairingTokenFromUrl(refreshed).href).toBe(original.href);
+    },
+  );
   it("derives backend urls and token from a pairing url", () => {
     expect(
       resolveRemotePairingTarget({

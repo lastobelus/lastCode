@@ -1,6 +1,6 @@
 import type { PreviewHostingLeaseMetadata, TerminalSummary } from "@t3tools/contracts";
 
-/** Preview handoffs use a fixed expiry, shown in the viewer's local time. */
+/** Preview processes sleep at a fixed deadline, shown in the viewer's local time. */
 export function formatPreviewExpiry(expiresAt: string): string | null {
   const date = new Date(expiresAt);
   if (!Number.isFinite(date.getTime())) return null;
@@ -20,16 +20,15 @@ export function threadTerminalProcessLabels(
     const expiry = preview ? formatPreviewExpiry(preview.expiresAt) : null;
     return {
       terminalId: terminal.terminalId,
-      label: expiry ? `${terminal.label} (preview till ${expiry})` : terminal.label,
+      label: expiry ? `${terminal.label} (preview sleeps ${expiry})` : terminal.label,
     };
   });
   const runningIds = new Set(running.map((terminal) => terminal.terminalId));
   for (const preview of previews) {
     if (runningIds.has(preview.terminalId)) continue;
-    const expiry = formatPreviewExpiry(preview.expiresAt);
     labels.push({
       terminalId: preview.terminalId,
-      label: `${new URL(preview.url).host} (preview${expiry ? ` till ${expiry}` : ""}; ${preview.status === "starting" ? "starting" : "stopped"})`,
+      label: `${new URL(preview.url).host} (preview ${preview.status === "starting" ? "starting" : "reopens when viewed"})`,
     });
   }
   return labels;

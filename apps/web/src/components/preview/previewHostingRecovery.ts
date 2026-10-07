@@ -25,13 +25,18 @@ export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): 
   }
 }
 
-export async function prepareHostedPreview(threadRef: ScopedThreadRef, url: string) {
+export async function prepareHostedPreview(
+  threadRef: ScopedThreadRef,
+  url: string,
+  purpose: "navigation" | "resource" = "navigation",
+) {
   const connection = readPreparedConnection(threadRef.environmentId);
   if (!connection) return { url, managed: false, restored: false };
   const configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
   return prepareOwnedPreview({
     threadRef,
     url,
+    purpose,
     environmentUrl: connection.httpBaseUrl,
     knownEnvironmentUrls: configuredEndpoint === null ? [] : [configuredEndpoint],
     list: async () => {
@@ -47,13 +52,18 @@ export async function prepareHostedPreview(threadRef: ScopedThreadRef, url: stri
       if (result._tag === "Failure") throw new Error("Preview leases unavailable.");
       return result.value;
     },
-    recover: async (lease) => {
+    recover: async (lease, options) => {
       const result = await runAtomCommand(
         appAtomRegistry,
         previewEnvironment.hostingRecover,
         {
           environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, leaseId: lease.leaseId, url: lease.url },
+          input: {
+            threadId: threadRef.threadId,
+            leaseId: lease.leaseId,
+            url: lease.url,
+            bootstrap: options.bootstrap,
+          },
         },
         { reportFailure: false },
       );
@@ -68,5 +78,5 @@ export async function recoverHostedPreview(
   threadRef: ScopedThreadRef,
   url: string,
 ): Promise<boolean> {
-  return (await prepareHostedPreview(threadRef, url)).restored;
+  return (await prepareHostedPreview(threadRef, url, "resource")).restored;
 }

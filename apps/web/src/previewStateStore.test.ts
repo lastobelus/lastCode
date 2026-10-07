@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
 
 import {
   __testing,
@@ -60,6 +61,26 @@ const applyPreviewServerEvent = (eventRef: typeof ref, event: PreviewEventDraft)
 beforeEach(() => {
   nextServerRevision = 0;
   resetPreviewStateForTests();
+});
+
+it("keeps bootstrap credentials out of recent addresses across loading and success", () => {
+  const destination = "http://localhost:5173/project?view=qa#details";
+  const navigationUrl = setPairingTokenOnUrl(new URL(destination), "one-use-secret").href;
+  applyPreviewServerSnapshot(
+    ref,
+    makeSnapshot({
+      navStatus: { _tag: "Loading", url: navigationUrl, title: "" },
+    }),
+  );
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual([destination]);
+  applyPreviewServerSnapshot(
+    ref,
+    makeSnapshot({
+      navStatus: { _tag: "Success", url: destination, title: "QA" },
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    }),
+  );
+  expect(readThreadPreviewState(ref).recentlySeenUrls).toEqual([destination]);
 });
 
 it("drops a restarted server's desktop pages without resetting another environment", () => {

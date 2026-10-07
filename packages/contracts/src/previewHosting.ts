@@ -24,10 +24,15 @@ export const PreviewHostingLaunchInput = Schema.Struct({
     description: "The absolute directory where the preview command should run.",
   }),
   worktreePath: Schema.optional(Schema.NullOr(PreviewPath)).annotate({
-    description: "The source worktree root to retain until expiry; inferred from cwd when omitted.",
+    description:
+      "The source worktree root to retain until previews are explicitly stopped or the thread is deleted; inferred from cwd when omitted.",
   }),
   env: Schema.optional(Environment).annotate({
     description: "Environment variable overrides for the preview command.",
+  }),
+  browserAuth: Schema.optional(Schema.Literal("t3-dev")).annotate({
+    description:
+      "Renew browser access to an isolated T3 development preview using T3CODE_DEV_AUTH_TOKEN supplied in env.",
   }),
   url: PreviewUrl.annotate({
     description: "The exact local HTTP or HTTPS URL served by the preview command.",
@@ -41,7 +46,7 @@ export const PreviewHostingLeaseSummary = Schema.Struct({
   url: PreviewUrl,
   handedOffAt: Schema.String,
   expiresAt: Schema.String,
-  status: Schema.Literals(["starting", "active"]),
+  status: Schema.Literals(["starting", "active", "sleeping"]),
 });
 export type PreviewHostingLeaseSummary = typeof PreviewHostingLeaseSummary.Type;
 
@@ -55,6 +60,7 @@ export const PreviewHostingRecoverInput = Schema.Struct({
   threadId: ThreadId,
   leaseId: PreviewHostingLeaseId,
   url: PreviewUrl,
+  bootstrap: Schema.optional(Schema.Boolean),
 });
 export type PreviewHostingRecoverInput = typeof PreviewHostingRecoverInput.Type;
 
@@ -75,5 +81,13 @@ export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>
     message: Schema.String.check(Schema.isMaxLength(1_024)),
   },
 ) {}
-export const PreviewHostingRecoverResult = Schema.NullOr(PreviewHostingLeaseSummary);
+// Only the protected recovery RPC returns a per-navigation credential. Listings and
+// agent hosting results deliberately use PreviewHostingLeaseSummary instead.
+export const PreviewHostingRecoverResult = Schema.NullOr(
+  Schema.Struct({
+    ...PreviewHostingLeaseSummary.fields,
+    bootstrapToken: Schema.optional(TrimmedNonEmptyString),
+    restarted: Schema.optional(Schema.Boolean),
+  }),
+);
 export type PreviewHostingRecoverResult = typeof PreviewHostingRecoverResult.Type;

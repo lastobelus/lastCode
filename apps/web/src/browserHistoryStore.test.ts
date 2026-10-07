@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { setPairingTokenOnUrl } from "@t3tools/shared/remote";
 
 const { readPreparedConnection } = vi.hoisted(() => ({
   readPreparedConnection: vi.fn<() => { httpBaseUrl: string } | null>(() => null),
@@ -39,6 +40,15 @@ function spyOnPersistWrites() {
 }
 
 describe("normalizeHistoryUrl", () => {
+  it("retains a managed preview destination without its one-use browser credential", () => {
+    const destination = "http://localhost:3000/app?view=qa#/route";
+    const navigation = setPairingTokenOnUrl(new URL(destination), "one-use-secret").href;
+    expect(normalizeHistoryUrl(navigation)).toBe(destination);
+    useBrowserHistoryStore.getState().recordVisit("qa", navigation, 1000);
+    expect(useBrowserHistoryStore.getState().byProjectKey.qa).toEqual([
+      { url: destination, lastVisitedAt: 1000 },
+    ]);
+  });
   it("normalizes bare loopback hosts to http and keeps path/query", () => {
     expect(normalizeHistoryUrl("localhost:3000/admin?tab=1")).toBe(
       "http://localhost:3000/admin?tab=1",

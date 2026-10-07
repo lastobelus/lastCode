@@ -225,6 +225,7 @@ const handlers = {
           providerInstanceId: scope.thread.providerInstanceId,
           ...(input.worktreePath === undefined ? {} : { worktreePath: input.worktreePath }),
           ...(input.env === undefined ? {} : { env: input.env }),
+          ...(input.browserAuth === undefined ? {} : { browserAuth: input.browserAuth }),
         })
         .pipe(
           Effect.map(PreviewHosting.toPreviewHostingLeaseSummary),

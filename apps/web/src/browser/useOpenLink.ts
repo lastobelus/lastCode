@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import { AuthPreviewOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -49,7 +50,9 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
       if (!window.desktopBridge) {
         await openPreparedExternalUrl(url, async () => {
           await resolveBrowserLinkTargetPreference();
-          return targetThreadRef ? (await prepareHostedPreview(targetThreadRef, url)).url : url;
+          return targetThreadRef
+            ? hostedPreviewNavigationUrl(await prepareHostedPreview(targetThreadRef, url))
+            : url;
         });
         return;
       }
@@ -76,7 +79,7 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
       const api = readLocalApi();
       if (!api) throw new Error("Link opening is unavailable.");
       const prepared = targetThreadRef ? await prepareHostedPreview(targetThreadRef, url) : { url };
-      await api.shell.openExternal(prepared.url);
+      await api.shell.openExternal(hostedPreviewNavigationUrl(prepared));
     },
     [openPreview, threadRef],
   );
