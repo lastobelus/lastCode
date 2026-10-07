@@ -222,6 +222,7 @@ function RootRouteView() {
         <FontAppearanceSync />
         <ProviderAuthCallbackCoordinator />
         <ChatGptWelcomeCoordinator />
+        <ProjectIconAppearanceSync />
         <FirstRunGate
           enabled={primaryEnvironmentAuthenticated}
           hostedStatic={authGateState.status === "hosted-static"}
@@ -299,6 +300,19 @@ function GlassAppearanceSync() {
       style.removeProperty("--glass-blur");
     }
   }, [glassOpacity]);
+
+  return null;
+}
+
+function ProjectIconAppearanceSync() {
+  const roundedProjectIcons = useClientSettings((settings) => settings.roundedProjectIcons);
+
+  useEffect(() => {
+    document.documentElement.toggleAttribute("data-rounded-project-icons", roundedProjectIcons);
+    return () => {
+      document.documentElement.removeAttribute("data-rounded-project-icons");
+    };
+  }, [roundedProjectIcons]);
 
   return null;
 }

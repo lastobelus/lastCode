@@ -60,6 +60,7 @@ export function environmentTransportLabel(
  */
 export function EnvironmentRow({
   kind,
+  icon,
   label,
   subtitle,
   below,
@@ -69,6 +70,7 @@ export function EnvironmentRow({
   children,
 }: {
   readonly kind: EnvironmentMachineKind;
+  readonly icon?: ReactNode;
   readonly label: string;
   readonly subtitle: ReactNode;
   /** Extra content under the subtitle, such as update progress. */
@@ -87,7 +89,9 @@ export function EnvironmentRow({
         className,
       )}
     >
-      <EnvironmentMachineIcon aria-hidden kind={kind} className="size-4 text-muted-foreground" />
+      {icon ?? (
+        <EnvironmentMachineIcon aria-hidden kind={kind} className="size-4 text-muted-foreground" />
+      )}
       <div className="min-w-0">
         <p className="truncate text-sm font-medium text-foreground">{label}</p>
         <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
