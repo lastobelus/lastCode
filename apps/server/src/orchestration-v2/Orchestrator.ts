@@ -4761,11 +4761,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // The steer's selection becomes the saved next-turn choice, even when it
         // matches the running run again. A delegated completion carries the
         // run's selection, not a user choice, so it never replaces the saved one.
+        // Strict steering without an explicit selection also carries the run's choice.
         // The saved choice may name another instance, so it moves with the steer.
         const instanceChanged =
           input.projection.thread.providerInstanceId !== input.modelSelection.instanceId;
         if (
           input.delegatedCompletion === undefined &&
+          !(
+            input.nativeOnly &&
+            input.command.type === "message.dispatch" &&
+            input.command.modelSelection === undefined
+          ) &&
           (instanceChanged ||
             !modelSelectionsEqual(input.projection.thread.modelSelection, input.modelSelection))
         ) {
@@ -5605,10 +5611,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           effects,
           projection,
           modelSelection:
-            delegatedCompletion === undefined
-              ? modelSelection
-              : (projection.runs.find((run) => run.id === dispatchMode.targetRunId)
-                  ?.modelSelection ?? modelSelection),
+            delegatedCompletion !== undefined ||
+            (dispatchMode.type === "steer_active_native" && command.modelSelection === undefined)
+              ? (projection.runs.find((run) => run.id === dispatchMode.targetRunId)
+                  ?.modelSelection ?? modelSelection)
+              : modelSelection,
           delegatedCompletion,
           targetRunId: dispatchMode.targetRunId,
           messageId: command.messageId,

@@ -167,46 +167,56 @@ function layerExecutorFor(input: {
   );
 }
 
-it.effect("native-only steering cannot start a follow-up when completion wins delivery", () =>
+it.effect("settles native-only steering without a follow-up when completion wins delivery", () =>
   Effect.gen(function* () {
     const events = yield* Ref.make<ReadonlyArray<string>>([]);
-    const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+    const layerExecutor = layerExecutorFor({
+      events,
+      steer: () =>
+        Effect.fail(
+          new ProviderTurnControlService.ProviderTurnControlError({
+            threadId,
+            operation: "steer",
+            providerTurnId,
+            turnCompleted: true,
+          }),
+        ),
+      threads: {
+        getThreadRecords: () => Effect.die("strict steering must not read follow-up state"),
+        dispatch: () => Effect.die("strict steering must not dispatch a follow-up"),
+      },
+    });
+    const now = yield* DateTime.now;
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      ...restartEffect(now, { type: "detach" }),
+      request: {
+        type: "provider-turn.steer",
+        nativeOnly: true,
+        providerSessionId: oldSessionId,
+        providerThreadId,
+        providerTurnId,
+        messageId: MessageId.make("native-only-steer"),
+      },
+    };
+    const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(effect)),
+      get: () => Effect.succeed(Option.some(effect)),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      succeed: () =>
+        Ref.update(events, (existing) => [...existing, "succeeded"]).pipe(Effect.as(true)),
+      retry: () => Effect.die("a completed target must not retry"),
+      fail: () => Effect.die("a completed target must not leave a failed outbox row"),
+    });
+    yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+      Effect.flatMap((worker) => worker.runOnce),
       Effect.provide(
-        layerExecutorFor({
-          events,
-          steer: () =>
-            Effect.fail(
-              new ProviderTurnControlService.ProviderTurnControlError({
-                threadId,
-                operation: "steer",
-                providerTurnId,
-                turnCompleted: true,
-              }),
-            ),
-          threads: {
-            getThreadRecords: () => Effect.die("strict steering must not read follow-up state"),
-            dispatch: () => Effect.die("strict steering must not dispatch a follow-up"),
-          },
-        }),
+        EffectWorker.layerWithOptions({ workerId: "test-worker" }).pipe(
+          Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+        ),
       ),
     );
-    const now = yield* DateTime.now;
-    const effect = restartEffect(now, { type: "detach" });
-    const error = yield* executor
-      .execute({
-        ...effect,
-        request: {
-          type: "provider-turn.steer",
-          nativeOnly: true,
-          providerSessionId: oldSessionId,
-          providerThreadId,
-          providerTurnId,
-          messageId: MessageId.make("native-only-steer"),
-        },
-      })
-      .pipe(Effect.flip);
-    assert.instanceOf(error, EffectWorker.OrchestrationEffectExecutionError);
-    assert.deepEqual(yield* Ref.get(events), []);
+    assert.deepEqual(yield* Ref.get(events), ["succeeded"]);
   }),
 );
 

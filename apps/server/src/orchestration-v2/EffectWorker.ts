@@ -257,11 +257,13 @@ export const layerExecutor: Layer.Layer<
                     if (
                       !("turnCompleted" in error) ||
                       !error.turnCompleted ||
-                      effect.request.type !== "provider-turn.steer" ||
-                      effect.request.nativeOnly === true
+                      effect.request.type !== "provider-turn.steer"
                     ) {
                       return yield* error;
                     }
+                    // The target already finished. Strict steering must neither start
+                    // a follow-up nor leave an expected delivery race blocking cleanup.
+                    if (effect.request.nativeOnly === true) return;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
