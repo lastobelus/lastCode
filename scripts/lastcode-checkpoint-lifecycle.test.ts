@@ -924,6 +924,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
 });
 
 describe("checkpoint carry lifecycle", () => {
+  // This complete lifecycle executes ten checkpoint subprocesses and two repair rebases.
   it("publishes compact revisions, folds a new source PR, and completes retained conflict recovery", () => {
     const fixture = initFixture();
     try {
@@ -1350,7 +1351,7 @@ describe("checkpoint carry lifecycle", () => {
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   it("blocks the first carry revision when it would drop checkpoint-only resolutions", () => {
     const fixture = initFixture();

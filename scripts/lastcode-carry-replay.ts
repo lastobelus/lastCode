@@ -753,7 +753,10 @@ export function completeCarryReplay(worktree: string): CarryReplayResult {
       `Completed carry replay recorded ${plan.resultHead ?? "no head"}, found ${previousHead}.`,
     );
   }
-  if (plan.phase !== "historical") readCarryGroupChain(worktree, previousHead, plan.onto);
+  const previousGroups =
+    plan.phase === "historical"
+      ? undefined
+      : readCarryGroupChain(worktree, previousHead, plan.onto);
   if (
     plan.phase === "compile" &&
     plan.expectedSourceTree !== undefined &&
@@ -765,7 +768,9 @@ export function completeCarryReplay(worktree: string): CarryReplayResult {
   // refer to the exact commits that will be published, including old metadata.
   const head = normalizeCheckpointCommits(worktree, plan.onto);
   const groups =
-    plan.phase === "historical" ? undefined : readCarryGroupChain(worktree, head, plan.onto);
+    head === previousHead || plan.phase === "historical"
+      ? previousGroups
+      : readCarryGroupChain(worktree, head, plan.onto);
   if (plan.status !== "complete" || plan.resultHead !== head) finishPlan(worktree, plan, head);
   return {
     phase: plan.phase,
