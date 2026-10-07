@@ -1790,7 +1790,12 @@ function publishRevisionIfNeeded(
  * The published tag stays installable; the merge's own service request (or the next scheduled run)
  * publishes a revision that replays the merge onto it and promotes that instead.
  */
-function deferPromotion(sourceCommit: string, current: string): void {
+function deferPromotion(repoRoot: string, sourceCommit: string, current: string): void {
+  if (!isAncestor(repoRoot, sourceCommit, current)) {
+    throw new Error(
+      `LastCode main changed from candidate source ${sourceCommit} to ${current}; refusing stale promotion because current main no longer contains the candidate source. Retry to incorporate the current main.`,
+    );
+  }
   console.log(
     `[lastcode:checkpoint] LastCode main advanced from candidate source ${sourceCommit} to ${current}; leaving promotion to the next run, which publishes a revision including it.`,
   );
@@ -1820,7 +1825,7 @@ function promoteCheckpoint(
       return;
     }
     if (expected !== sourceCommit) {
-      deferPromotion(sourceCommit, expected);
+      deferPromotion(repoRoot, sourceCommit, expected);
       return;
     }
 
@@ -1836,13 +1841,14 @@ function promoteCheckpoint(
         ),
       );
     } catch (error) {
-      const current = splitLines(
-        git(repoRoot, ["ls-remote", options.pushRemote, "refs/heads/lastcode/main"], {
-          allowFailure: true,
-        }),
-      )[0]?.split(/\s+/)[0];
-      if (!current || current === sourceCommit || current === commit) throw error;
-      deferPromotion(sourceCommit, current);
+      // Fetch the competing head so ancestry checks also work for commits created elsewhere.
+      git(repoRoot, ["fetch", options.pushRemote, "lastcode/main"]);
+      const current = git(repoRoot, [
+        "rev-parse",
+        `refs/remotes/${options.pushRemote}/lastcode/main`,
+      ]);
+      if (current === sourceCommit || current === commit) throw error;
+      deferPromotion(repoRoot, sourceCommit, current);
       return;
     }
     console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);

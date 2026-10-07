@@ -894,6 +894,88 @@ exec "$FIXTURE_REAL_GIT" "$@"
     }
   });
 
+  it.each(["smoke", "push"] as const)(
+    "publishes the checkpoint but rejects promotion after main is rewritten during %s",
+    (phase) => {
+      const { fixture, source, raceEnvironment } = historicalFixture();
+      try {
+        const rewritten = git(
+          fixture.origin,
+          [
+            "-c",
+            "user.name=Carry lifecycle test",
+            "-c",
+            "user.email=carry-lifecycle@localhost",
+            "commit-tree",
+            git(fixture.origin, ["rev-parse", `${source}^{tree}`]),
+            "-F",
+            "-",
+          ],
+          "Rewritten main with unrelated history\n",
+        );
+        // The push race must discover a remote commit that was not fetched earlier.
+        assert.notEqual(gitResult(fixture.repo, ["cat-file", "-e", rewritten]).status, 0);
+        const result = checkpoint(fixture, ["--push-tags", "--promote"], {
+          ...raceEnvironment,
+          FIXTURE_MERGE_PHASE: phase,
+          FIXTURE_MERGE_COMMIT: rewritten,
+        });
+        assert.equal(NodeFS.existsSync(raceEnvironment.FIXTURE_MERGE_MARKER), true);
+        assert.equal(
+          remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+          false,
+          result.stderr || result.stdout,
+        );
+        assert.notEqual(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stderr, /refusing stale promotion/u);
+        assert.notMatch(result.stdout, /leaving promotion to the next run/u);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), rewritten);
+        assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("defers promotion after a remote-only descendant arrives during push", () => {
+    const { fixture, source, raceEnvironment } = historicalFixture();
+    try {
+      const descendant = git(
+        fixture.origin,
+        [
+          "-c",
+          "user.name=Carry lifecycle test",
+          "-c",
+          "user.email=carry-lifecycle@localhost",
+          "commit-tree",
+          git(fixture.origin, ["rev-parse", `${source}^{tree}`]),
+          "-p",
+          source,
+          "-F",
+          "-",
+        ],
+        "Concurrent remote main update\n",
+      );
+      assert.notEqual(gitResult(fixture.repo, ["cat-file", "-e", descendant]).status, 0);
+      const result = checkpoint(fixture, ["--push-tags", "--promote"], {
+        ...raceEnvironment,
+        FIXTURE_MERGE_PHASE: "push",
+        FIXTURE_MERGE_COMMIT: descendant,
+      });
+      assert.equal(NodeFS.existsSync(raceEnvironment.FIXTURE_MERGE_MARKER), true);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, /leaving promotion to the next run/u);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+        false,
+      );
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), descendant);
+      assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it.each(
     (["none", "selected", "smoke", "push"] as const).map((phase) => ({
       phase,

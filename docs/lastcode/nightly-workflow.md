@@ -109,10 +109,14 @@ Each candidate is prepared from a pinned `lastcode/main` source commit.
 Promotion uses that incorporated source as its exact `--force-with-lease`
 value, rather than adopting a newer remote head at publication time. When a
 merge advances main during the run, the validated tag still publishes and
-promotion is deferred instead of failing the
-run. The merge's own service request then publishes a revision that replays the
+promotion is deferred instead of failing the run. The merge's own service request
+then publishes a revision that replays the
 merged work onto that tag and promotes it; a newer lease alone never makes a
 stale candidate safe.
+
+Deferral requires current main to descend from the candidate's pinned source.
+A rewrite that drops that source still fails promotion after tag publication;
+inspect the new history before retrying.
 
 Lock acquisition failures still fail the run after the tag publishes. The lock
 ref cannot prove its writer is active, so contention, abandoned locks, and
