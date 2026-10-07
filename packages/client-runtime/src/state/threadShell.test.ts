@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  CommandId,
   MessageId,
   ProjectId,
   ThreadId,
@@ -144,6 +145,37 @@ describe("v2 thread shell lists", () => {
       dispose();
       registry.dispose();
     }
+  });
+
+  it("retains promotion progress and cancellation through live shell updates", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const dispose = registry.mount(threads.threadShellsAtom);
+    let snapshot = v2ShellSnapshot;
+    const promotion = {
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      requestId: CommandId.make("promote-subagent"),
+      targetThreadId: ThreadId.make("interactive-subagent"),
+      status: "waiting" as const,
+      error: null,
+      requestedAt: v2ThreadShell.updatedAt,
+      updatedAt: v2ThreadShell.updatedAt,
+    };
+    const updates = [promotion, { ...promotion, status: "promoted" as const }, null];
+    for (const [index, subagentPromotion] of updates.entries()) {
+      snapshot = applyShellStreamEvent(snapshot, {
+        kind: "thread.updated",
+        location: "active",
+        sequence: index + 1,
+        thread: { ...v2ThreadShell, subagentPromotion },
+      });
+      registry.set(snapshotAtom(environmentId), snapshot);
+      expect(registry.get(threads.threadShellsAtom)[0]?.subagentPromotion).toEqual(
+        subagentPromotion,
+      );
+    }
+    dispose();
+    registry.dispose();
   });
 
   it("updates creator placement from the shell stream while retaining environment and ordinary ownership", () => {

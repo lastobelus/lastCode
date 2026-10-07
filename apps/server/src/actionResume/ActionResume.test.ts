@@ -22,6 +22,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  RunId,
   ThreadId,
   type TerminalEvent,
   type TerminalOpenInput,
@@ -53,9 +54,10 @@ import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ServerActivation from "../serverActivation.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { ActionResumeToolkitHandlersLive } from "../mcp/toolkits/actionResume/handlers.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ActionResumeHandlers from "../mcp/toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "../mcp/toolkits/actionResume/tools.ts";
-import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ActionResume from "./ActionResume.ts";
@@ -186,6 +188,7 @@ const makeHarness = Effect.gen(function* () {
   let listener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
   const state = {
     busy: false,
+    callerRunId: null as RunId | null,
     missingShell: false,
     deleted: false,
     drainClosed: false,
@@ -277,7 +280,9 @@ const makeHarness = Effect.gen(function* () {
   const dependencies = Layer.mergeAll(
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: () =>
-        Effect.succeed(state.missingShell ? null : { ...shell, ...appThread() }),
+        Effect.succeed(
+          state.missingShell ? null : { ...shell, ...appThread(), activeRunId: state.callerRunId },
+        ),
       ensureLegacyTranscript: () => Effect.void,
       getThreadRecords: () => Effect.succeed(projection()),
       dispatch: (command) => {
@@ -389,7 +394,7 @@ const makeHarness = Effect.gen(function* () {
           };
         }),
     }),
-    makeProviderRegistryLayer([
+    ProviderRegistryMock.layer([
       { instanceId: providerInstanceId, driver: ProviderDriverKind.make("codex") } as never,
       {
         instanceId: ProviderInstanceId.make("claude"),
@@ -416,7 +421,10 @@ const makeHarness = Effect.gen(function* () {
     written,
     closed,
     state,
-    layer: ActionResume.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeServices.layer)),
+    layer: ActionResume.layer.pipe(
+      Layer.provideMerge(dependencies),
+      Layer.provide(NodeServices.layer),
+    ),
     emit: (event: TerminalEvent) =>
       Effect.suspend(() => listener?.(event) ?? Effect.die("not subscribed")),
     followUps: () => commands.filter((command) => command.type === "message.dispatch"),
@@ -715,10 +723,11 @@ it.effect("does not dispose hydrated history when startup is cancelled before ac
 it.effect("orders MCP launch after completion ownership before acquiring shared admission", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness;
+    h.state.callerRunId = RunId.make("run-mcp-action");
     yield* Effect.gen(function* () {
       const actions = yield* ActionResume.ActionResume;
       const toolkit = yield* ActionResumeToolkit.pipe(
-        Effect.provide(ActionResumeToolkitHandlersLive),
+        Effect.provide(McpToolAccess.HandlersLayer.layer(ActionResumeHandlers.layer)),
       );
       const run = yield* actions.runProjectActionAndResume(invocation, "qa");
       const entered = yield* Deferred.make<void>();
@@ -791,10 +800,11 @@ it.effect("rejects native process launch during update drain without opening a t
 it.effect("rejects MCP Action launch during update drain without opening a terminal", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness;
+    h.state.callerRunId = RunId.make("run-mcp-action");
     h.state.drainClosed = true;
     yield* Effect.gen(function* () {
       const toolkit = yield* ActionResumeToolkit.pipe(
-        Effect.provide(ActionResumeToolkitHandlersLive),
+        Effect.provide(McpToolAccess.HandlersLayer.layer(ActionResumeHandlers.layer)),
       );
       const result = yield* toolkit
         .handle("run_project_action_and_resume", { actionId: "qa" })

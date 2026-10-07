@@ -1,17 +1,140 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import {
   createPendingAttachmentId,
   parseThreadSegmentFromAttachmentId,
 } from "../../../attachmentStore.ts";
 import * as ServerConfig from "../../../config.ts";
-import { claimPreviewRecording, normalizePreviewOpenInput } from "./handlers.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
+import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { claimPreviewRecording, normalizePreviewOpenInput, layerStandard } from "./handlers.ts";
+import { PreviewStandardToolkit } from "./tools.ts";
+
+it.effect("preview_host returns structured startup diagnostics to its owning agent", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("preview-startup-thread");
+    const dependencies = Layer.mergeAll(
+      McpToolAccessTestkit.liveThreadsLayer,
+      Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("preview-startup-environment"),
+        thread: {
+          threadId,
+          providerSessionId: "preview-startup-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        requestNamespace: "thread:preview-startup-thread",
+        capabilities: new Set(["preview"] as const),
+        issuedAt: 0,
+      }),
+      Layer.mock(PreviewHosting.PreviewHosting)({
+        launch: (input) => {
+          expect(input.threadId).toBe(threadId);
+          return Effect.fail(
+            new PreviewHosting.PreviewHostingError({
+              operation: "ready",
+              statePath: "/isolated/preview-hosting.json",
+              threadId,
+              url: "http://localhost:5173/",
+              detail: "Terminal: exited; running subprocess: no; exit code: 1.",
+            }),
+          );
+        },
+      }),
+    );
+    const toolkit = yield* PreviewStandardToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(layerStandard).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const results = yield* toolkit
+      .handle("preview_host", {
+        command: "pnpm dev",
+        cwd: "/workspace",
+        url: "http://localhost:5173/",
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies), Effect.result);
+    expect(results._tag).toBe("Failure");
+    if (results._tag !== "Failure") return;
+    expect(results.failure).toMatchObject({
+      _tag: "PreviewHostingError",
+      reason: "unavailable",
+      message: expect.stringContaining("Terminal: exited"),
+    });
+    expect(results.failure).not.toHaveProperty("statePath");
+  }),
+);
+
+it.effect.each([true, false])(
+  "preview_stop_thread cleans up only its authenticated owner (thread caller: %s)",
+  (threadCaller) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("preview-stop-thread");
+      const stoppedThreads: Array<string> = [];
+      const dependencies = Layer.mergeAll(
+        McpToolAccessTestkit.liveThreadsLayer,
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.succeed(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("preview-stop-environment"),
+          thread: threadCaller
+            ? {
+                threadId,
+                providerSessionId: "preview-stop-session",
+                providerInstanceId: ProviderInstanceId.make("codex"),
+              }
+            : undefined,
+          client: threadCaller
+            ? undefined
+            : {
+                sessionId: "external-session",
+                label: "External client",
+                access: "approval-required",
+              },
+          requestNamespace: threadCaller ? "thread:preview-stop-thread" : "client:external-session",
+          capabilities: new Set(["preview"] as const),
+          issuedAt: 0,
+        }),
+        Layer.mock(PreviewHosting.PreviewHosting)({
+          stopThread: (ownerThreadId) =>
+            Effect.sync(() => {
+              stoppedThreads.push(ownerThreadId);
+            }),
+        }),
+      );
+      const toolkit = yield* PreviewStandardToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(layerStandard).pipe(Layer.provide(dependencies)),
+        ),
+      );
+      const result = yield* toolkit
+        .handle("preview_stop_thread", {})
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies), Effect.result);
+
+      if (threadCaller) {
+        expect(result._tag).toBe("Success");
+        expect(stoppedThreads).toEqual([threadId]);
+      } else {
+        expect(result._tag).toBe("Failure");
+        if (result._tag !== "Failure") return;
+        expect(result.failure).toMatchObject({
+          _tag: "OrchestratorMcpFailure",
+          code: "thread_credential_required",
+        });
+        expect(stoppedThreads).toEqual([]);
+      }
+    }),
+);
 
 describe("normalizePreviewOpenInput", () => {
   it("leaves an unstated visibility for the client preference to decide", () => {

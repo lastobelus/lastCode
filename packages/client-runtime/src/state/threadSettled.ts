@@ -2,51 +2,37 @@
 import * as DateTime from "effect/DateTime";
 
 interface SettlementRunLike {
-  readonly turnId?: unknown;
-  readonly assistantMessageId?: unknown;
   readonly status?: string;
-  readonly state?: string;
   readonly requestedAt?: string | null;
   readonly startedAt?: string | null;
   readonly completedAt?: string | null;
 }
 
 interface SettlementRuntimeLike {
-  readonly threadId?: unknown;
-  readonly providerName?: unknown;
-  readonly runtimeMode?: unknown;
-  readonly activeTurnId?: unknown;
-  readonly lastError?: unknown;
   readonly status: string;
   readonly updatedAt?: string;
 }
 
 interface QueuedThreadShell {
   readonly latestUserMessageAt?: string | null;
-  readonly latestTurn?: SettlementRunLike | null;
   readonly latestRun?: SettlementRunLike | null;
-  readonly session?: SettlementRuntimeLike | null;
   readonly runtime?: SettlementRuntimeLike | null;
 }
 
 /**
- * A queued turn start lives for at most this long: session adoption takes
+ * A queued turn start lives for at most this long: run adoption takes
  * seconds, so a user message still unadopted after the grace window is a
  * failed start (or stale data — shells from older servers can carry user
- * messages with no latestTurn at all), not pending work. Without this bound
+ * messages with no latestRun at all), not pending work. Without this bound
  * such threads would be permanently unsettleable.
  */
 export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
 /**
- * A user message no turn has picked up yet: the turn.start command was
- * dispatched (message-sent + turn-start-requested) but no session has
- * adopted it, so `session` is still null and the pending work is invisible
- * to the session-status checks. Detectable as a user message strictly newer
- * than every timestamp on the latest turn — on adoption the new turn's
- * requestedAt equals the message time, clearing the condition — and only
- * within the adoption grace window.
+ * A user message no run has picked up yet: it is strictly newer than every
+ * timestamp on the latest run, within the bounded adoption grace window.
+ * Preparing, queued and starting runtime states are explicit pending work.
  */
 export function hasQueuedTurnStart(
   shell: QueuedThreadShell,
@@ -60,9 +46,9 @@ export function hasQueuedTurnStart(
     return true;
   }
   if (shell.latestUserMessageAt == null) return false;
-  // A failed session start clears the queued state: the failure is already
+  // A failed run start clears the queued state: the failure is already
   // visible (status edge / error).
-  if (shell.session?.status === "error") return false;
+  if (shell.runtime?.status === "failed") return false;
   const messageAt = Date.parse(shell.latestUserMessageAt);
   if (Number.isNaN(messageAt)) return false;
   const nowMs = Date.parse(options.now);
@@ -72,7 +58,7 @@ export function hasQueuedTurnStart(
   // that would otherwise hold the queued state for the whole skew. Mirrors
   // the decider's guard.
   if (Math.abs(nowMs - messageAt) > QUEUED_TURN_START_GRACE_MS) return false;
-  const turn = shell.latestRun ?? shell.latestTurn ?? null;
+  const turn = shell.latestRun ?? null;
   if (turn === null) return true;
   return [turn.requestedAt, turn.startedAt, turn.completedAt].every(
     (candidate) => candidate == null || Date.parse(candidate) < messageAt,
@@ -88,6 +74,7 @@ export function hasQueuedTurnStart(
 export interface ThreadSnoozeShell extends QueuedThreadShell {
   readonly snoozedUntil?: string | null;
   readonly snoozedAt?: string | null;
+  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
 }
@@ -95,21 +82,21 @@ export interface ThreadSnoozeShell extends QueuedThreadShell {
 /**
  * A snoozed thread "raises its hand" when something happens that outranks
  * the user's snooze: the agent is blocked on them (approval / user input),
- * the session failed, or a run completed after the snooze was set — the
- * v1 taste of event-based snooze ("something happened" wakes early).
+ * the runtime failed, or a run completed after the snooze was set.
  * Raising a hand never clears the server-side snooze fields; it only stops
  * the thread from classifying as snoozed.
  */
 export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean {
+  if (shell.attention?.kind === "question") return true;
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return true;
-  const runtime = shell.runtime ?? shell.session ?? null;
-  const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
+  const runtime = shell.runtime ?? null;
+  const latestRun = shell.latestRun ?? null;
   // Only a FRESH failure raises the hand: a thread snoozed while already
   // failed stays snoozed — that snooze was the user saying "I saw it, not
-  // now". session.updatedAt stamps the status edge, so an error newer than
+  // now". runtime.updatedAt stamps the status edge, so an error newer than
   // the snooze is new information.
   if (
-    (runtime?.status === "error" || runtime?.status === "failed") &&
+    runtime?.status === "failed" &&
     (shell.snoozedAt == null ||
       (runtime.updatedAt != null && Date.parse(runtime.updatedAt) > Date.parse(shell.snoozedAt)))
   ) {
@@ -117,7 +104,7 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
   }
   if (
     shell.snoozedAt != null &&
-    (latestRun?.state === "completed" || latestRun?.status === "completed") &&
+    latestRun?.status === "completed" &&
     latestRun.completedAt != null &&
     Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
   ) {
@@ -130,24 +117,28 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
  * A thread may be snoozed unless the agent is blocked on the user: hiding a
  * pending approval or user-input request defeats the request, and a queued
  * turn start (a message no turn has adopted yet) is invisible pending work
- * the same way it is for settle. A running session IS snoozable — snooze
+ * the same way it is for settle. An active runtime is snoozable — snooze
  * only affects visibility, never the agent. Client-side twin of the server
  * invariants so the UI can reject before a round trip.
  */
 export function canSnooze(
   shell: Pick<
     ThreadSnoozeShell,
+    | "attention"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "latestUserMessageAt"
-    | "latestTurn"
     | "latestRun"
-    | "session"
     | "runtime"
   >,
   options: { readonly now: string },
 ): boolean {
-  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
+  if (
+    shell.hasPendingApprovals ||
+    shell.hasPendingUserInput ||
+    shell.attention?.kind === "question"
+  )
+    return false;
   if (hasQueuedTurnStart(shell, options)) return false;
   return true;
 }
@@ -194,11 +185,12 @@ export function threadWokeAt(
   // indicator the user already cleared by visiting (snoozedUntil is newer
   // than that visit's lastVisitedAt).
   if (threadRaisedHandWhileSnoozed(shell)) {
-    const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
-    const runtime = shell.runtime ?? shell.session ?? null;
+    if (shell.attention?.kind === "question") return shell.attention.raisedAt;
+    const latestRun = shell.latestRun ?? null;
+    const runtime = shell.runtime ?? null;
     if (
       shell.snoozedAt != null &&
-      (latestRun?.state === "completed" || latestRun?.status === "completed") &&
+      latestRun?.status === "completed" &&
       latestRun.completedAt != null &&
       Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
     ) {

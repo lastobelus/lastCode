@@ -62,6 +62,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import { MENU_ACTION_CHANNEL, PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
+import { captureAnnotationImage } from "./AnnotationScreenshot.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -109,7 +110,11 @@ export interface PreviewTabState {
   controller: "human" | "agent" | "none";
   favicon?: DesktopPreviewFavicon;
   /** Set for a tab of the desktop's own server, which drives it over the browser channel. */
-  serverTab?: { readonly threadId: string; readonly tabId: string };
+  serverTab?: {
+    readonly threadId: string;
+    readonly tabId: string;
+    readonly desktopHostId?: string | undefined;
+  };
   updatedAt: string;
 }
 
@@ -276,12 +281,8 @@ const normalizeCaptureRect = (value: unknown): PreviewAnnotationRect | null => {
   ) {
     return null;
   }
-  return {
-    x: Math.max(0, Math.floor(x)),
-    y: Math.max(0, Math.floor(y)),
-    width: Math.max(1, Math.ceil(width)),
-    height: Math.max(1, Math.ceil(height)),
-  };
+  // Keep CSS-pixel precision until the crop is mapped into the captured image.
+  return { x, y, width, height };
 };
 
 /** `capturePage` never settles when the guest's compositor is wedged. */
@@ -301,17 +302,7 @@ const captureAnnotationScreenshot = (
     // The unused abort signal is what makes this interruptible, and therefore
     // what lets the timeout below fire. Drop the parameter and a stalled
     // capture strands the pick session again.
-    try: (_signal) =>
-      wc.capturePage(
-        cropRect
-          ? {
-              x: cropRect.x,
-              y: cropRect.y,
-              width: cropRect.width,
-              height: cropRect.height,
-            }
-          : undefined,
-      ),
+    try: (_signal) => captureAnnotationImage(wc, cropRect),
     catch: (cause) =>
       new PreviewOperationError({
         operation: "captureAnnotationScreenshot",
@@ -320,15 +311,6 @@ const captureAnnotationScreenshot = (
         cause,
       }),
   }).pipe(
-    Effect.map((image): PreviewAnnotationPayload["screenshot"] => {
-      const size = image.getSize();
-      return {
-        dataUrl: image.toDataURL(),
-        width: size.width,
-        height: size.height,
-        cropRect: cropRect ?? { x: 0, y: 0, width: size.width, height: size.height },
-      };
-    }),
     Effect.timeoutOption(ANNOTATION_SCREENSHOT_TIMEOUT),
     Effect.flatMap((screenshot) =>
       Option.isSome(screenshot)
@@ -1278,17 +1260,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         if (!current || current.webContentsId !== wc.id || webContents.fromId(wc.id) !== wc) {
           return [Option.none<PreviewTabState>(), tabs] as const;
         }
-        // Electron emits did-stop-loading after did-fail-load. At that point the
-        // failed guest is no longer "loading", but it has not successfully
-        // navigated anywhere. Keep the failure until a new load actually starts.
+        // Electron can commit its error document after did-fail-load, then emit
+        // navigation, stop and title updates without a successful retry. Keep
+        // the failure until a new main-frame navigation actually starts.
         const navStatus =
-          preserveLoadFailure &&
-          current.navStatus.kind === "LoadFailed" &&
-          computedNavStatus.kind === "Success"
+          preserveLoadFailure && current.navStatus.kind === "LoadFailed"
             ? current.navStatus
             : computedNavStatus;
         const clearFavicon =
           confirmedNavigation &&
+          navStatus.kind !== "LoadFailed" &&
           current.favicon !== undefined &&
           safeHttpOrigin(current.favicon.pageUrl) !==
             safeHttpOrigin(navStatus.kind === "Idle" ? wc.getURL() : navStatus.url);
@@ -1313,8 +1294,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       if (Option.isSome(next)) yield* emitIfCurrent(tabId, next.value);
     });
     const sync = () => runFork(syncState(true));
-    const syncNavigation = () => runFork(syncState(false, true));
-    const syncInPageNavigation = () => runFork(syncState(false));
+    const syncNavigation = () => runFork(syncState(true, true));
+    const syncInPageNavigation = () => runFork(syncState(true));
     const restoreRecordingCursor = () =>
       runFork(
         Effect.gen(function* () {
@@ -1333,7 +1314,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const navigationStarted = (
       event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
     ) => {
-      if (event.isMainFrame && !event.isSameDocument) cancelFaviconCapture();
+      if (event.isMainFrame && !event.isSameDocument) {
+        cancelFaviconCapture();
+        runFork(syncState(false));
+      }
     };
     const audioStateChanged = (
       event: Electron.Event<Electron.WebContentsAudioStateChangedEventParams>,
@@ -3274,7 +3258,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
    * drives here. The live cursor and desktop recordings draw it like any agent.
    */
   const emitAgentPointer = Effect.fn("PreviewManager.emitAgentPointer")(function* (pointer: {
-    readonly key: { readonly threadId: string; readonly tabId: string };
+    readonly key: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly desktopHostId?: string | undefined;
+    };
     readonly phase: "move" | "click";
     readonly x: number;
     readonly y: number;
@@ -3282,7 +3270,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
       (candidate) =>
         candidate.serverTab?.threadId === pointer.key.threadId &&
-        candidate.serverTab.tabId === pointer.key.tabId,
+        candidate.serverTab.tabId === pointer.key.tabId &&
+        (candidate.serverTab.desktopHostId ?? "local") === (pointer.key.desktopHostId ?? "local"),
     );
     if (!tab) return;
     const event: DesktopPreviewPointerEvent = {

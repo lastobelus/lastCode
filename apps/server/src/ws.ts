@@ -1,4 +1,9 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import { ThreadRecoveryOperationError } from "@t3tools/contracts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./orchestration-v2/ThreadRecoveryRepairService.ts";
+import { OrchestrationDispatchCommandError, ActionResumeError } from "@t3tools/contracts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -6,14 +11,12 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Base64 from "effect/encoding/Base64";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
@@ -92,9 +95,13 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  PreviewHostingError as ContractPreviewHostingError,
+  type PreviewHostingLeaseMetadata,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
+  type UpdateDrainAdmissionError,
+  type UpdateDrainError,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
@@ -175,11 +182,12 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
-import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
+import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { attachmentRelativePath, createDeterministicAttachmentId } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
@@ -1182,7 +1190,7 @@ const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
-  previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  desktopBrowserChannel: DesktopBrowserChannel.DesktopBrowserChannel["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
   ServerWsRpcGroup.toLayer(
@@ -1190,6 +1198,8 @@ const layerWsRpc = (
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
+      const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -1217,6 +1227,8 @@ const layerWsRpc = (
         }
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+      const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
+      const threadRepair = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
@@ -1227,6 +1239,7 @@ const layerWsRpc = (
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
       const crypto = yield* Crypto.Crypto;
+      const desktopBrowserOwner = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const serverCommandId = (tag: string) =>
         crypto.randomUUIDv4.pipe(
           Effect.orDie,
@@ -1261,6 +1274,7 @@ const layerWsRpc = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const previewHosting = yield* PreviewHosting.PreviewHosting;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -1888,6 +1902,21 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [ORCHESTRATION_V2_WS_METHODS.recoverThread]: (input) =>
+          startup.enqueueCommand(threadRecovery.recover(input)).pipe(
+            Effect.as({ ok: true as const }),
+            Effect.mapError(
+              (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.repairThread]: (input) =>
+          startup
+            .enqueueCommand(threadRepair.launch(input))
+            .pipe(
+              Effect.mapError(
+                (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+              ),
+            ),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
           threadSearch.search(input).pipe(
             Effect.mapError(
@@ -2330,6 +2359,35 @@ const layerWsRpc = (
         [WS_METHODS.providerInstallSubscribe]: (input) => providerInstallation.subscribe(input),
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
         [WS_METHODS.serverUpdateServer]: (input) => serverSelfUpdate.update(input),
+        [WS_METHODS.serverStartUpdateDrain]: (input) =>
+          DateTime.now.pipe(
+            Effect.flatMap((now) =>
+              updateDrainAdmission.dispatch({
+                type: "update-drain.start",
+                ...input,
+                createdAt: DateTime.formatIso(now),
+              }),
+            ),
+          ),
+        [WS_METHODS.serverCancelUpdateDrain]: (input) =>
+          DateTime.now.pipe(
+            Effect.flatMap((now) =>
+              updateDrainAdmission.dispatch({
+                type: "update-drain.cancel",
+                ...input,
+                createdAt: DateTime.formatIso(now),
+              }),
+            ),
+            Effect.tap(() =>
+              Option.match(actionResume, {
+                onNone: () => Effect.void,
+                onSome: (service) => service.retryPendingFollowUps,
+              }),
+            ),
+          ),
+        [WS_METHODS.serverClaimUpdateActivation]: (input) =>
+          updateDrainAdmission.claimActivation(input),
+        [WS_METHODS.serverGetUpdateDrainStatus]: () => updateDrainAdmission.status,
         [WS_METHODS.serverUpdateServerWithProgress]: (input) =>
           Stream.callback<ServerSelfUpdateProgressEvent, ServerSelfUpdateError>((queue) =>
             serverSelfUpdate
@@ -2836,18 +2894,32 @@ const layerWsRpc = (
           vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
-        [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
+        [WS_METHODS.terminalOpen]: (input) =>
+          updateDrainAdmission.admit("terminal-open", terminalManager.open(input)),
         [WS_METHODS.terminalAttach]: (input) =>
-          Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
-            Effect.acquireRelease(
-              terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
-              (unsubscribe) => Effect.sync(unsubscribe),
-            ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
-          ),
-        [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),
+          Stream.callback<
+            TerminalAttachStreamEvent,
+            TerminalError | UpdateDrainAdmissionError | UpdateDrainError
+          >((queue) => {
+            const attach = (startIfNeeded: boolean) =>
+              Effect.acquireRelease(
+                terminalManager.attachStream(
+                  input,
+                  (event) => Queue.offer(queue, event),
+                  startIfNeeded,
+                ),
+                (unsubscribe) => Effect.sync(unsubscribe),
+              );
+            return updateDrainAdmission
+              .admitOrElse("terminal-open", attach(true), attach(false))
+              .pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause)));
+          }),
+        [WS_METHODS.terminalWrite]: (input) =>
+          updateDrainAdmission.admit("terminal-write", terminalManager.write(input)),
         [WS_METHODS.terminalResize]: (input) => terminalManager.resize(input),
         [WS_METHODS.terminalClear]: (input) => terminalManager.clear(input),
-        [WS_METHODS.terminalRestart]: (input) => terminalManager.restart(input),
+        [WS_METHODS.terminalRestart]: (input) =>
+          updateDrainAdmission.admit("terminal-restart", terminalManager.restart(input)),
         [WS_METHODS.terminalClose]: (input) => terminalManager.close(input),
         [WS_METHODS.terminalObserve]: (input) =>
           Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
@@ -2856,6 +2928,28 @@ const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
           ),
+        [WS_METHODS.actionResumeResume]: (input) =>
+          Option.match(actionResume, {
+            onNone: () =>
+              Effect.fail(
+                new ActionResumeError({
+                  reason: "internal_error",
+                  message: "Action resume is unavailable in this server runtime.",
+                }),
+              ),
+            onSome: (service) => service.resumeInterrupted(input.threadId),
+          }),
+        [WS_METHODS.actionResumeDiscard]: (input) =>
+          Option.match(actionResume, {
+            onNone: () =>
+              Effect.fail(
+                new ActionResumeError({
+                  reason: "internal_error",
+                  message: "Action resume is unavailable in this server runtime.",
+                }),
+              ),
+            onSome: (service) => service.discardInterrupted(input.threadId),
+          }),
         [WS_METHODS.subscribeTerminalEvents]: (_input) =>
           Stream.callback<TerminalEvent>((queue) =>
             Effect.acquireRelease(
@@ -2877,8 +2971,67 @@ const layerWsRpc = (
         [WS_METHODS.previewRefresh]: (input) => previewManager.refresh(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.subscribeDesktopBrowserCommands]: (input) =>
+          desktopBrowserChannel.subscribeCommands(desktopBrowserOwner, input.desktopHostId),
+        [WS_METHODS.desktopBrowserEvent]: (input) =>
+          desktopBrowserChannel.receiveEvent(desktopBrowserOwner, input.desktopHostId, input.event),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
+        [WS_METHODS.previewHostingList]: (input) =>
+          previewHosting.list(input.threadId).pipe(
+            Effect.map((leases) => leases.map(PreviewHosting.toPreviewHostingLeaseSummary)),
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
+        [WS_METHODS.previewHostingRecover]: (input) =>
+          previewHosting
+            .recover({ threadId: input.threadId, leaseId: input.leaseId, url: input.url })
+            .pipe(
+              Effect.map((lease) =>
+                lease === null ? null : PreviewHosting.toPreviewHostingLeaseSummary(lease),
+              ),
+              Effect.mapError(
+                () =>
+                  new ContractPreviewHostingError({
+                    reason: "unavailable",
+                    message: "Preview hosting is unavailable on this server.",
+                  }),
+              ),
+            ),
+        [WS_METHODS.previewHostingStopThread]: (input) =>
+          previewHosting.stopThread(input.threadId).pipe(
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Some previews or processes could not be stopped. Please try again.",
+                }),
+            ),
+          ),
+        [WS_METHODS.subscribePreviewHosting]: (_input) =>
+          Stream.callback<
+            ReadonlyArray<PreviewHostingLeaseMetadata>,
+            PreviewHosting.PreviewHostingError
+          >((queue) =>
+            Effect.acquireRelease(
+              previewHosting.subscribe((leases) => Queue.offer(queue, leases)),
+              (unsubscribe) => Effect.sync(unsubscribe),
+            ),
+          ).pipe(
+            Stream.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
+        [WS_METHODS.previewClaimRecovery]: (input) => previewManager.claimRecovery(input),
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
@@ -3106,7 +3259,7 @@ export const WS_RPC_SERVER_OPTIONS = {
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
-    const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const desktopBrowserChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3162,7 +3315,7 @@ export const layer = Layer.unwrap(
               session,
               clientOrigin,
               clientAnalyticsProps,
-              previewAutomationBroker,
+              desktopBrowserChannel,
               serverBrowser,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),

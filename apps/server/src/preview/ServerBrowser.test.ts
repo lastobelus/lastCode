@@ -153,6 +153,12 @@ let clipboardBinding: ClipboardBinding | null = null;
 let contextFailure: Error | null = null;
 /** Server tabs the fake desktop renders, and the endpoints the server connected to. */
 let desktopRendersNext = false;
+let remoteUrlAvailable = true;
+let profileCatalogue: {
+  desktopHostId: string;
+  profiles: Array<{ id: string; name: string; kind: "persistent" }>;
+  defaultProfileId: string;
+} | null = null;
 /** Pages the fake desktop takes back; the channel's detached stream emits them. */
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
@@ -197,6 +203,13 @@ const dependencies = Layer.mergeAll(
   Layer.succeed(DesktopChannel.DesktopBrowserChannel, {
     // Only tabs a test marks render on the desktop; the rest stay headless.
     available: true,
+    getProfiles: () => Effect.sync(() => profileCatalogue),
+    resolveUrl: (input) =>
+      Effect.sync(() =>
+        remoteUrlAvailable ? input.url.replace("localhost", "environment.example.test") : null,
+      ),
+    subscribeCommands: () => Stream.empty,
+    receiveEvent: () => Effect.void,
     awaitAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
     detached: Stream.callback<{ threadId: string; tabId: string }>((queue) =>
       Effect.acquireRelease(
@@ -257,6 +270,8 @@ beforeEach(() => {
   contextFailure = null;
   desktopTabs.clear();
   desktopRendersNext = false;
+  profileCatalogue = null;
+  remoteUrlAvailable = true;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
@@ -1087,6 +1102,233 @@ it.live("a desktop page the desktop takes back reconnects instead of closing", (
       expect(sessions.map((session) => session.tabId)).toContain(opened.tabId);
       yield* browser.attachViewer(viewerInput(opened.tabId, false));
       expect(desktopConnections).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "uses the configured desktop profile and rejects explicit profile changes on the same tab",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "local",
+          profiles: [
+            { id: "work", name: "Work", kind: "persistent" },
+            { id: "personal", name: "Personal", kind: "persistent" },
+          ],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const current = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(current).toMatchObject({ profileId: "work", profileName: "Work" });
+        expect(contexts).toHaveLength(0);
+        expect(desktopConnections).toHaveLength(1);
+        const mismatch = yield* broker
+          .invoke<void>({
+            scope,
+            tabId,
+            operation: "openWithProfile",
+            input: { profileName: "Personal" },
+          })
+          .pipe(Effect.flip);
+        expect(mismatch).toMatchObject({
+          _tag: "PreviewAutomationProfileError",
+          reason: "tab-mismatch",
+        });
+        desktopRendersNext = true;
+        const fresh = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { profileName: "Personal", show: false },
+        });
+        expect(fresh).toMatchObject({ profileId: "personal", profileName: "Personal" });
+        expect(fresh.tabId).not.toBe(tabId);
+        expect(desktopConnections).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("fails explicit missing and ambiguous profiles without opening another cookie jar", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      profileCatalogue = {
+        desktopHostId: "local",
+        profiles: [
+          { id: "work", name: "Work", kind: "persistent" },
+          { id: "work-2", name: "Work", kind: "persistent" },
+        ],
+        defaultProfileId: "work",
+      };
+      for (const [profileName, reason] of [
+        ["Missing", "unknown"],
+        ["Work", "ambiguous"],
+      ] as const) {
+        const failure = yield* broker
+          .invoke<void>({ scope, operation: "openWithProfile", input: { profileName } })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewAutomationProfileError", reason });
+      }
+      expect(contexts).toHaveLength(0);
+      expect(desktopConnections).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("never substitutes a headless page when the selected desktop does not attach", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      profileCatalogue = {
+        desktopHostId: "local",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      yield* broker
+        .invoke<void>({
+          scope,
+          operation: "openWithProfile",
+          input: { profileId: "work", show: false },
+        })
+        .pipe(Effect.flip);
+      expect(contexts).toHaveLength(0);
+      expect(desktopConnections).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "uploads environment file bytes to a remote desktop profile without passing host paths",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "remote-desktop",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = `${config.stateDir}/remote-upload.txt`;
+        yield* fs.writeFileString(path, "environment file contents");
+        const setInputFiles = vi.fn(async () => {});
+        desktopConnections[0]!.context.page.locator.mockReturnValue({ setInputFiles } as never);
+        yield* broker.invoke<void>({
+          scope,
+          tabId,
+          operation: "upload",
+          input: { paths: [path], locator: "input[type=file]" },
+        });
+        expect(setInputFiles).toHaveBeenCalledWith(
+          [
+            {
+              name: "remote-upload.txt",
+              mimeType: "text/plain",
+              buffer: Buffer.from("environment file contents"),
+            },
+          ],
+          expect.anything(),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("resolves remote environment URLs for explicit profile opens and later navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      profileCatalogue = {
+        desktopHostId: "remote-desktop",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "openWithProfile",
+        input: { profileName: "Work", url: "http://localhost:5173/start?x=1#section", show: false },
+      });
+      const page = desktopConnections[0]!.context.page;
+      const manager = yield* Manager.PreviewManager;
+      const initial = (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
+        (session) => session.tabId === opened.tabId,
+      );
+      // The desktop loads the initial URL from the session snapshot itself.
+      expect(initial).toMatchObject({
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+        navStatus: {
+          _tag: "Loading",
+          url: "http://environment.example.test:5173/start?x=1#section",
+        },
+      });
+      expect(page.goto).not.toHaveBeenCalled();
+      yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: opened.tabId!,
+        operation: "navigate",
+        input: { target: { kind: "environment-port", port: 3000, path: "/next?x=2#target" } },
+      });
+      expect(page.goto).toHaveBeenLastCalledWith(
+        "http://environment.example.test:3000/next?x=2#target",
+        expect.anything(),
+      );
+      const navigationCount = page.goto.mock.calls.length;
+      remoteUrlAvailable = false;
+      const failure = yield* broker
+        .invoke<void>({
+          scope,
+          tabId: opened.tabId!,
+          operation: "navigate",
+          input: { url: "http://localhost:5173/wrong-machine" },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(page.goto).toHaveBeenCalledTimes(navigationCount);
+      expect(contexts).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("does not open a remote profile when the environment URL cannot be resolved", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      profileCatalogue = {
+        desktopHostId: "remote-desktop",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      remoteUrlAvailable = false;
+      const failure = yield* broker
+        .invoke<void>({
+          scope,
+          operation: "openWithProfile",
+          input: { profileName: "Work", url: "http://localhost:5173/", show: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(contexts).toHaveLength(0);
+      expect(desktopConnections).toHaveLength(0);
+      const manager = yield* Manager.PreviewManager;
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
 );

@@ -21,6 +21,7 @@ import {
   ChevronRight,
   FileDiff,
   Files,
+  History,
   Globe2,
   Plus,
   TerminalSquare,
@@ -81,6 +82,7 @@ import { previewBridge } from "./preview/previewBridge";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+import { HandoffsMenu } from "./handoffs/HandoffsMenu";
 
 interface RightPanelTabsProps {
   mode: PreviewPanelMode;
@@ -127,6 +129,8 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddHandoffs?: (() => void) | undefined;
+  threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -324,6 +328,8 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddHandoffs?: (() => void) | undefined;
+  threadRef?: import("@t3tools/contracts").ScopedThreadRef | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -601,6 +607,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "pull-requests":
       return "Pull requests";
+    case "handoffs":
+      return "Handoffs";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -684,6 +692,8 @@ function SurfaceIcon({
       );
     case "pull-requests":
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
+    case "handoffs":
+      return <History className="size-3 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -1263,6 +1273,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   align="start"
                   side="bottom"
                   sideOffset={6}
+                  className="max-h-96 overflow-y-auto"
                   onKeyDownCapture={handleAddSurfaceMenuKeyDown}
                 >
                   {addSurfaceActions.map((action) => {
@@ -1329,6 +1340,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                       </SurfaceMenuItem>
                     );
                   })}
+                  {props.threadRef ? (
+                    <HandoffsMenu
+                      threadRef={props.threadRef}
+                      onShowAll={() => {
+                        setAddSurfaceMenuOpen(false);
+                        props.onAddHandoffs?.();
+                      }}
+                    />
+                  ) : null}
                 </MenuPopup>
               </Menu>
             ) : null}

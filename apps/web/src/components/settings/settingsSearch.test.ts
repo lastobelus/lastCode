@@ -575,6 +575,13 @@ describe("settings sidebar scope", () => {
     });
   });
 
+  it("routes scrollbar sizing to LastCode settings", () => {
+    expect(searchSettings("scrollbar margin")[0]).toMatchObject({
+      id: "larger-scrollbars",
+      to: "/settings/lastcode",
+    });
+  });
+
   it.each([
     ["show thread provider badges", "show-thread-provider-badges"],
     ["provider badge size", "thread-provider-badge-size"],

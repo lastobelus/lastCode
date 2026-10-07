@@ -1,3 +1,7 @@
+import type { DesktopBrowserCommand } from "@t3tools/contracts";
+import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 // @effect-diagnostics nodeBuiltinImport:off - The channel reads real file descriptors.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -53,6 +57,247 @@ it.layer(NodeServices.layer)("DesktopBrowserChannel", (it) => {
       // Whether or not the reader has reached these lines yet, the tab is not attached.
       const exit = yield* Effect.exit(Effect.scoped(channel.endpoint(key)));
       expect(Exit.isFailure(exit)).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+});
+
+const remoteChannel = Effect.gen(function* () {
+  const context = yield* Layer.build(
+    DesktopBrowserChannel.layer.pipe(
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-desktop-browser-remote-" }),
+      ),
+    ),
+  );
+  return Context.get(context, DesktopBrowserChannel.DesktopBrowserChannel);
+});
+
+const connectHost = (
+  channel: DesktopBrowserChannel.DesktopBrowserChannel["Service"],
+  owner: string,
+  hostId: string,
+) =>
+  Effect.gen(function* () {
+    const commands = yield* Queue.unbounded<DesktopBrowserCommand>();
+    const fiber = yield* channel.subscribeCommands(owner, hostId).pipe(
+      Stream.runForEach((command) => Queue.offer(commands, command)),
+      Effect.forkScoped,
+    );
+    expect(yield* Queue.take(commands)).toEqual({ type: "announce" });
+    return { commands, fiber };
+  });
+
+it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect("rejects a different socket owner and keeps equal tab IDs on separate hosts", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      yield* connectHost(channel, "socket-a", "host-a");
+      yield* connectHost(channel, "socket-b", "host-b");
+      const forged = yield* Effect.exit(
+        channel.receiveEvent("socket-b", "host-a", { type: "attached", ...key }),
+      );
+      expect(Exit.isFailure(forged)).toBe(true);
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-a" })).toBe(false);
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-a" })).toBe(true);
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-b" })).toBe(false);
+      expect(yield* channel.isAttached(key)).toBe(false);
+      const duplicate = yield* channel
+        .subscribeCommands("socket-b", "host-a")
+        .pipe(Stream.runHead, Effect.exit);
+      expect(Exit.isFailure(duplicate)).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("pins the catalogue to its responding host and refuses ambiguous selection", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const first = yield* connectHost(channel, "socket-a", "host-a");
+      const profiles = channel.getProfiles({ threadId: "thread-1", agentSessionId: "agent-1" });
+      const request = yield* profiles.pipe(Effect.forkScoped);
+      const command = yield* Queue.take(first.commands);
+      if (command.type !== "profiles") throw new Error("Expected profile catalogue request");
+      const second = yield* connectHost(channel, "socket-b", "host-b");
+      yield* channel.receiveEvent("socket-b", "host-b", {
+        type: "profiles",
+        requestId: command.requestId,
+        profiles: null,
+      });
+      const catalogue = {
+        profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
+        defaultProfileId: "work",
+      };
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "profiles",
+        requestId: command.requestId,
+        profiles: catalogue,
+      });
+      expect(yield* Fiber.join(request)).toEqual({ ...catalogue, desktopHostId: "host-a" });
+      expect(yield* profiles).toBeNull();
+      yield* Fiber.interrupt(first.fiber);
+      yield* Fiber.interrupt(second.fiber);
+      expect(channel.available).toBe(false);
+      expect(yield* profiles).toBeNull();
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("releases only the disconnected host's tabs and pending catalogue requests", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const first = yield* connectHost(channel, "socket-a", "host-a");
+      const pending = yield* channel
+        .getProfiles({ threadId: "thread-1", agentSessionId: "agent-1" })
+        .pipe(Effect.forkScoped);
+      yield* Queue.take(first.commands);
+      yield* connectHost(channel, "socket-b", "host-b");
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      yield* channel.receiveEvent("socket-b", "host-b", { type: "attached", ...key });
+      yield* Fiber.interrupt(first.fiber);
+      expect(yield* Fiber.join(pending)).toBeNull();
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-a" })).toBe(false);
+      expect(yield* channel.isAttached({ ...key, desktopHostId: "host-b" })).toBe(true);
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(
+            channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key }),
+          ),
+        ),
+      ).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("relays CDP frames through the pinned host and closes its socket on disconnect", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const first = yield* connectHost(channel, "socket-a", "host-a");
+      const desktopKey = { ...key, desktopHostId: "host-a" };
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      const endpoint = yield* channel.endpoint(desktopKey);
+      const opened = Promise.withResolvers<void>();
+      const received = Promise.withResolvers<string>();
+      const closed = Promise.withResolvers<void>();
+      const barrier = Promise.withResolvers<void>();
+      const frames: string[] = [];
+      const socket = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const socket = new WebSocket(endpoint);
+          socket.addEventListener("open", () => opened.resolve());
+          socket.addEventListener("message", (event) => {
+            const frame = String(event.data);
+            frames.push(frame);
+            received.resolve(frame);
+            if (frame === '{"id":99,"result":{}}') barrier.resolve();
+          });
+          socket.addEventListener("close", () => closed.resolve());
+          socket.addEventListener("error", () => opened.reject(new Error("CDP socket failed")));
+          return socket;
+        }),
+        (socket) => Effect.sync(() => socket.close()),
+      );
+      yield* Effect.promise(() => opened.promise);
+      socket.send('{"id":1,"method":"Browser.getVersion"}');
+      expect(yield* Queue.take(first.commands)).toEqual({
+        type: "cdp",
+        ...key,
+        message: '{"id":1,"method":"Browser.getVersion"}',
+      });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "cdp",
+        ...key,
+        message: '{"id":1,"result":{}}',
+      });
+      expect(yield* Effect.promise(() => received.promise)).toBe('{"id":1,"result":{}}');
+      const directory = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-remote-download-")),
+        ),
+        (directory) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      socket.send(
+        JSON.stringify({
+          id: 2,
+          method: "Browser.setDownloadBehavior",
+          params: { behavior: "allowAndName", downloadPath: directory },
+        }),
+      );
+      yield* Queue.take(first.commands);
+      const chunk = {
+        type: "download" as const,
+        ...key,
+        guid: "download-1",
+        offset: 0,
+        data: Buffer.from([0, 255, 128]).toString("base64"),
+        done: false,
+      };
+      yield* channel.receiveEvent("socket-a", "host-a", { ...chunk, guid: "failed-download" });
+      const outOfOrder = yield* channel
+        .receiveEvent("socket-a", "host-a", { ...chunk, guid: "failed-download", offset: 1 })
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(outOfOrder)).toBe(true);
+      expect(NodeFS.existsSync(NodePath.join(directory, "failed-download"))).toBe(false);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "cdp",
+        ...key,
+        message:
+          '{"method":"Browser.downloadProgress","params":{"guid":"failed-download","state":"completed"}}',
+      });
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "cdp",
+        ...key,
+        message: '{"id":99,"result":{}}',
+      });
+      yield* Effect.promise(() => barrier.promise);
+      expect(
+        frames.some(
+          (frame) =>
+            frame.includes('"guid":"failed-download"') && frame.includes('"state":"completed"'),
+        ),
+      ).toBe(false);
+      expect(
+        frames.some(
+          (frame) =>
+            frame.includes('"guid":"failed-download"') && frame.includes('"state":"canceled"'),
+        ),
+      ).toBe(true);
+      yield* channel.receiveEvent("socket-a", "host-a", chunk);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        ...chunk,
+        offset: 3,
+        data: Buffer.from([42]).toString("base64"),
+        done: true,
+      });
+      expect([...NodeFS.readFileSync(NodePath.join(directory, "download-1"))]).toEqual([
+        0, 255, 128, 42,
+      ]);
+      yield* Fiber.interrupt(first.fiber);
+      yield* Effect.promise(() => closed.promise);
+    }).pipe(Effect.scoped),
+  );
+});
+
+it.layer(NodeServices.layer)("desktop browser URL resolution", (it) => {
+  it.effect("pins the environment URL response to the selected desktop host", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const input = {
+        desktopHostId: "host-a",
+        threadId: "thread-1",
+        url: "http://localhost:5173/path?q=1#result",
+      };
+      const resolving = yield* channel.resolveUrl(input).pipe(Effect.forkScoped);
+      const command = yield* Queue.take(host.commands);
+      if (command.type !== "resolveUrl") throw new Error("Expected URL request");
+      expect(command.url).toBe(input.url);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "resolvedUrl",
+        requestId: command.requestId,
+        url: "http://192.168.1.20:5173/path?q=1#result",
+      });
+      expect(yield* Fiber.join(resolving)).toBe("http://192.168.1.20:5173/path?q=1#result");
+      expect(yield* channel.resolveUrl({ ...input, desktopHostId: "missing" })).toBeNull();
+      expect(yield* channel.resolveUrl({ ...input, desktopHostId: "local" })).toBe(input.url);
     }).pipe(Effect.scoped),
   );
 });

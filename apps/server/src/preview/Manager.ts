@@ -11,6 +11,7 @@
  */
 import {
   type PreviewCloseInput,
+  type PreviewClaimRecoveryInput,
   type PreviewEvent,
   type PreviewError,
   PreviewInvalidUrlError,
@@ -20,6 +21,8 @@ import {
   type PreviewOpenInput,
   type PreviewRefreshInput,
   type PreviewReportStatusInput,
+  type PreviewRecoveryClaim,
+  PreviewRecoveryStorageError,
   type PreviewResizeInput,
   type PreviewAdjustInput,
   FILL_PREVIEW_VIEWPORT,
@@ -34,6 +37,7 @@ import {
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -41,6 +45,12 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { PreviewControlRequiredError } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import { CommandId, MessageId } from "@t3tools/contracts";
+import { ServerConfig } from "../config.ts";
+import { writeFileStringAtomically } from "../atomicWrite.ts";
 
 export class PreviewManager extends Context.Service<
   PreviewManager,
@@ -61,6 +71,9 @@ export class PreviewManager extends Context.Service<
     readonly requestReveal: (
       input: PreviewCloseInput & { readonly tabId: string; readonly force: boolean },
     ) => Effect.Effect<void, PreviewError>;
+    readonly claimRecovery: (
+      input: PreviewClaimRecoveryInput,
+    ) => Effect.Effect<PreviewRecoveryClaim, PreviewError>;
     readonly resize: (
       input: PreviewResizeInput,
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
@@ -95,6 +108,21 @@ interface ManagerState {
 
 const initialState: ManagerState = { sessions: new Map(), revision: 0 };
 
+const RECOVERY_CLAIM_TTL_MS = 24 * 60 * 60 * 1_000;
+const RecoveryClaimRecord = Schema.Struct({
+  threadId: Schema.String,
+  url: Schema.String,
+  commandId: CommandId,
+  messageId: MessageId,
+  createdAt: Schema.Number,
+  tabIds: Schema.Array(Schema.String),
+});
+const RecoveryClaimFile = Schema.Array(RecoveryClaimRecord);
+type RecoveryClaimRecord = typeof RecoveryClaimRecord.Type;
+const RecoveryClaimFileJson = Schema.fromJsonString(RecoveryClaimFile);
+const decodeRecoveryClaimFile = Schema.decodeUnknownEffect(RecoveryClaimFileJson);
+const encodeRecoveryClaimFile = Schema.encodeSync(RecoveryClaimFileJson);
+
 type PreviewEventDraft = PreviewEvent extends infer Event
   ? Event extends { readonly revision: number }
     ? Omit<Event, "revision" | "serverEpoch">
@@ -102,6 +130,7 @@ type PreviewEventDraft = PreviewEvent extends infer Event
   : never;
 
 const compositeKey = (threadId: string, tabId: string): string => `${threadId}\u0000${tabId}`;
+const recoveryClaimKey = (threadId: string, url: string): string => JSON.stringify([threadId, url]);
 
 const sessionsForThread = (
   state: ManagerState,
@@ -141,6 +170,31 @@ const currentIsoTimestamp = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 export const make = Effect.gen(function* PreviewManagerMake() {
   const crypto = yield* Crypto.Crypto;
   const serverEpoch = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+  const serverConfig = yield* ServerConfig;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const recoveryClaimsPath = path.join(serverConfig.stateDir, "preview-recovery-claims.json");
+  const loadedRecoveryClaims = yield* fileSystem.exists(recoveryClaimsPath).pipe(
+    Effect.flatMap((exists) =>
+      exists
+        ? fileSystem.readFileString(recoveryClaimsPath).pipe(
+            Effect.flatMap(decodeRecoveryClaimFile),
+            Effect.map(
+              (records) =>
+                new Map(
+                  records.map((record) => [recoveryClaimKey(record.threadId, record.url), record]),
+                ),
+            ),
+          )
+        : Effect.succeed(new Map<string, RecoveryClaimRecord>()),
+    ),
+    Effect.map((claims) => ({ claims, loadError: null as unknown | null })),
+    Effect.catch((cause) =>
+      Effect.succeed({ claims: new Map<string, RecoveryClaimRecord>(), loadError: cause }),
+    ),
+  );
+  const recoveryClaimsLoadError = loadedRecoveryClaims.loadError;
+  const recoveryClaimsRef = yield* SynchronizedRef.make(loadedRecoveryClaims.claims);
   const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
   // Unbounded PubSub is fine here — events are tiny and we don't want to
   // block publishers if a subscriber is slow. WS clients backpressure on
@@ -221,6 +275,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         viewport: input.viewport ?? FILL_PREVIEW_VIEWPORT,
         ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
         ...(runtime === undefined ? {} : { runtime }),
+        ...(input.desktopHostId === undefined ? {} : { desktopHostId: input.desktopHostId }),
         ...(runtime === "server" && input.automationOwner !== undefined
           ? { automationOwner: input.automationOwner }
           : {}),
@@ -332,7 +387,83 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         };
       }),
     );
+    if (input.navStatus._tag === "Success" && recoveryClaimsLoadError === null) {
+      yield* SynchronizedRef.modifyEffect(recoveryClaimsRef, (claims) => {
+        const remaining = new Map(claims);
+        for (const [key, claim] of claims) {
+          if (claim.threadId === input.threadId && claim.tabIds.includes(input.tabId)) {
+            remaining.delete(key);
+          }
+        }
+        if (remaining.size === claims.size) return Effect.succeed([undefined, claims] as const);
+        return persistRecoveryClaims(remaining).pipe(Effect.as([undefined, remaining] as const));
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning(
+            "Could not release preview recovery identities after successful navigation.",
+            {
+              cause: String(cause),
+            },
+          ),
+        ),
+      );
+    }
   });
+
+  const claimRecovery: PreviewManager["Service"]["claimRecovery"] = Effect.fn(
+    "PreviewManager.claimRecovery",
+  )(function* (input) {
+    if (recoveryClaimsLoadError !== null) {
+      return yield* new PreviewRecoveryStorageError({ cause: recoveryClaimsLoadError });
+    }
+    const key = recoveryClaimKey(input.threadId, input.url);
+    const now = yield* Clock.currentTimeMillis;
+    const commandId = CommandId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+    const messageId = MessageId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+    return yield* SynchronizedRef.modifyEffect(recoveryClaimsRef, (claims) => {
+      const retained = new Map(
+        [...claims].filter(([, claim]) => now - claim.createdAt <= RECOVERY_CLAIM_TTL_MS),
+      );
+      const current = retained.get(key);
+      if (current) {
+        const next = current.tabIds.includes(input.tabId)
+          ? current
+          : { ...current, tabIds: [...current.tabIds, input.tabId] };
+        retained.set(key, next);
+        if (next === current && retained.size === claims.size) {
+          return Effect.succeed([
+            { commandId: next.commandId, messageId: next.messageId },
+            claims,
+          ] as const);
+        }
+        return persistRecoveryClaims(retained).pipe(
+          Effect.as([{ commandId: next.commandId, messageId: next.messageId }, retained] as const),
+        );
+      }
+      const next: RecoveryClaimRecord = {
+        threadId: input.threadId,
+        url: input.url,
+        commandId,
+        messageId,
+        createdAt: now,
+        tabIds: [input.tabId],
+      };
+      retained.set(key, next);
+      return persistRecoveryClaims(retained).pipe(
+        Effect.as([{ commandId: next.commandId, messageId: next.messageId }, retained] as const),
+      );
+    });
+  });
+
+  const persistRecoveryClaims = (claims: ReadonlyMap<string, RecoveryClaimRecord>) =>
+    writeFileStringAtomically({
+      filePath: recoveryClaimsPath,
+      contents: encodeRecoveryClaimFile([...claims.values()]),
+    }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.mapError((cause) => new PreviewRecoveryStorageError({ cause })),
+    );
 
   const resize: PreviewManager["Service"]["resize"] = Effect.fn("PreviewManager.resize")(
     function* (input) {
@@ -501,6 +632,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     requestReveal,
     navigate,
     reportStatus,
+    claimRecovery,
     resize,
     adjust,
     refresh,
