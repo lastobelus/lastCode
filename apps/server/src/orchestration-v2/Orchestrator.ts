@@ -11147,7 +11147,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const family = yield* ownedThreadFamily(command);
         const root = yield* projectionStore
           .getThread(command.threadId)
-          .pipe(mapDispatchError(command));
+          .pipe(
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          );
         if (command.type === "thread.unarchive") {
           const ownerIds = new Set([
             ...(root.lineage.relationshipToParent === "subagent" &&
