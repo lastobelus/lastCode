@@ -4747,7 +4747,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: input.command.threadId,
           providerInstanceId: targetRun.providerInstanceId,
           capabilities: session.providerSession.capabilities,
-          nativeOnly: input.nativeOnly,
+          nativeOnly: input.nativeOnly === true,
           forceRestart:
             input.forceRestart ||
             selectionMustApplyNow ||
