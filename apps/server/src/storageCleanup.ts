@@ -204,11 +204,12 @@ export const make = Effect.gen(function* () {
       const runtimeRevision = yield* providerSessions.ownershipRevision;
       const sequence = yield* readApplicationSequence();
       const rows = yield* sql<{ payload_json: string }>`
-      SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
+      SELECT payload_json FROM orchestration_v2_projection_provider_sessions
     `;
       const sessions = yield* Effect.forEach(rows, (row) => decodeCleanupSession(row.payload_json));
       const protectedSessions = (yield* Effect.forEach(sessions, (session) =>
-        session.status === "error"
+        // A persisted terminal status can precede an unfinished runtime close.
+        session.status === "error" || session.status === "stopped"
           ? providerSessions.isLive(session.id).pipe(Effect.map((live) => (live ? session : null)))
           : Effect.succeed(session),
       )).filter((session) => session !== null);

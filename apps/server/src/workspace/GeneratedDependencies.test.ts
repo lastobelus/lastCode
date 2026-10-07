@@ -640,6 +640,7 @@ type SweepCase =
   | "whole-shared-deleted-visible-pending"
   | "whole-shared-session-live"
   | "whole-shared-session-stopped"
+  | "whole-shared-session-stopped-live"
   | "whole-shared-session-detached"
   | "whole-shared-session-error-released"
   | "whole-shared-session-error-live"
@@ -671,10 +672,13 @@ type SweepCase =
   | "provider-cwd-changed"
   | "provider-event-during-capture"
   | "session"
+  | "session-stopped-live"
   | "session-error-released"
   | "session-error-live"
   | "shared-session-live"
   | "shared-session-stopped"
+  | "shared-session-stopped-live"
+  | "shared-session-stopped-ownership-changed"
   | "shared-session-detached"
   | "shared-session-error-released"
   | "shared-session-error-live"
@@ -689,6 +693,7 @@ type SweepCase =
   | "deleted-pending"
   | "deleted-visible-pending"
   | "deleted-shared-session-live"
+  | "deleted-shared-session-stopped-live"
   | "deleted-shared-session-error-released"
   | "deleted-event"
   | "process"
@@ -764,15 +769,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const wholeSharedDeleted = mode === "whole-shared-deleted-visible-pending";
   const sharedSession = mode.includes("shared-session");
   const wholeSession = mode.startsWith("whole-shared-session");
-  const stoppedSession = mode.endsWith("-stopped");
+  const stoppedSession = mode.includes("session-stopped");
+  const liveStoppedSession = mode.endsWith("-stopped-live");
   const detachedSession = mode.endsWith("-detached");
   const releasedErrorSession = mode.endsWith("-error-released");
   const liveErrorSession = mode.endsWith("-error-live");
   const managerOwnershipCase =
     mode === "whole-shared-session-error-ownership-changed" ||
     mode === "shared-session-error-ownership-changed" ||
+    mode === "shared-session-stopped-ownership-changed" ||
     mode === "shared-session-error-ownership-during-capture";
-  let managerOwnsSession = liveErrorSession;
+  let managerOwnsSession = liveErrorSession || liveStoppedSession;
   let ownershipRevision = 0;
   const acquireManagerOwnership = () => {
     managerOwnsSession = true;
@@ -1103,7 +1110,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getThreadShell: (requestedId) =>
         Effect.gen(function* () {
           targetedReads.push(requestedId);
-          if (targetedReads.length === 1 && mode === "shared-session-error-ownership-changed")
+          if (
+            targetedReads.length === 1 &&
+            (mode === "shared-session-error-ownership-changed" ||
+              mode === "shared-session-stopped-ownership-changed")
+          )
             acquireManagerOwnership();
           if (targetedReads.length > 2 && mode === "policy-changed")
             settings = {
@@ -1219,7 +1230,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const source = cleanSource ? "export const value = 1;\n" : "unfinished source";
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
-  if (batch || workerLifecycle)
+  if (batch || workerLifecycle || (stoppedSession && !wholeSession))
     for (const candidate of [thread, ...additionalThreads]) {
       yield* f.fs.makeDirectory(f.path.join(candidate.worktreePath!, "tmp"));
       yield* f.fs.writeFileString(
@@ -1247,7 +1258,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   } else yield* worker.sweep();
   if (
     mode === "whole-removal" ||
-    (wholeSession && (stoppedSession || detachedSession || releasedErrorSession))
+    (wholeSession &&
+      ((stoppedSession && !liveStoppedSession) || detachedSession || releasedErrorSession))
   ) {
     assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
     assert.equal(dependencyInspections(), 0);
@@ -1314,6 +1326,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   assert.isTrue(yield* f.fs.exists(f.input.worktreePath));
   assert.equal(yield* f.fs.exists(f.dependencyPath), !expectedRemoval);
+  if (stoppedSession && !wholeSession)
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
+      "private notes",
+    );
   if (preserveResearch)
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research", "notes.md")),
@@ -1331,6 +1348,7 @@ it.effect.each([
   "whole-shared-deleted-visible-pending",
   "whole-shared-session-live",
   "whole-shared-session-stopped",
+  "whole-shared-session-stopped-live",
   "whole-shared-session-detached",
   "whole-shared-session-error-released",
   "whole-shared-session-error-live",
@@ -1362,10 +1380,13 @@ it.effect.each([
   "provider-cwd-changed",
   "provider-event-during-capture",
   "session",
+  "session-stopped-live",
   "session-error-released",
   "session-error-live",
   "shared-session-live",
   "shared-session-stopped",
+  "shared-session-stopped-live",
+  "shared-session-stopped-ownership-changed",
   "shared-session-detached",
   "shared-session-error-released",
   "shared-session-error-live",
@@ -1380,6 +1401,7 @@ it.effect.each([
   "deleted-pending",
   "deleted-visible-pending",
   "deleted-shared-session-live",
+  "deleted-shared-session-stopped-live",
   "deleted-shared-session-error-released",
   "deleted-event",
   "process",

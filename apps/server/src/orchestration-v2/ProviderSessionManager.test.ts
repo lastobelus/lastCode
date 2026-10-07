@@ -2215,6 +2215,7 @@ it.effect("ProviderSessionManagerV2 persists release when session scope close ha
       yield* Effect.yieldNow;
       const projection = yield* projectionStore.getThreadProjection(threadId);
       assert.equal(projection.providerSessions.at(-1)?.status, "stopped");
+      assert.isTrue(yield* manager.isLive(providerSessionId));
       assert.equal((yield* Ref.get(state)).closeCount, 0);
     });
 
