@@ -436,6 +436,7 @@ prerelease without stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
+pnpm lastcode:intel-stage stage --maximum-version 1.2.3-nightly.20260821.7
 pnpm lastcode:intel-stage stage --maximum-version-host version-source.example
 pnpm lastcode:intel-stage status
 ```
@@ -459,9 +460,16 @@ nightly, staging stops before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
 
+`--maximum-version <nightly>` supplies the ceiling directly and performs no SSH
+read. It accepts a bare checkpoint or revision nightly version, such as
+`1.2.3-nightly.20260821.7` or `1.2.3-nightly.20260821.7.2`. The explicit ceiling
+and `--maximum-version-host` are mutually exclusive. A missing or invalid
+ceiling fails before staging changes anything; lowering a valid ceiling clears
+a pending candidate above it.
+
 Stage results include `currentVersion`, `maximumVersion` (or `null` without a
-version source), and `availableVersion` (or `null` without an eligible release).
-When the version source is newer but there is neither a newer eligible release
+ceiling), and `availableVersion` (or `null` without an eligible release).
+When the ceiling is newer but there is neither a newer eligible release
 nor a newer pending candidate, the status is `waiting-for-release` rather than
 `up-to-date`.
 An available intermediate update still returns `staged` or `pending`; its

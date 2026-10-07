@@ -356,6 +356,125 @@ describe("LastCode Intel staging", () => {
     expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toHaveLength(1);
   });
 
+  it("stages the newest release within an explicit ceiling without reading SSH", async () => {
+    const root = temporaryDirectory();
+    const maximumVersion = "1.2.3-nightly.20260821.7";
+    const tag = `lastcode/checkpoint/v${maximumVersion}`;
+    const result = await stageIntelUpdate(
+      {
+        currentVersion: "1.2.3-nightly.20260820.1",
+        homeDirectory: root,
+        maximumVersion,
+      },
+      dependencies(tag, "a".repeat(40), {
+        listReleases: async () =>
+          ["lastcode/revision/v1.2.3-nightly.20260821.7.2", tag].map((tagName) => ({
+            tagName,
+            isDraft: false,
+            isImmutable: true,
+            isPrerelease: true,
+          })),
+        readRemoteInstalledVersion: async () => {
+          throw new Error("explicit ceiling must not read SSH");
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "staged",
+      maximumVersion,
+      availableVersion: maximumVersion,
+      pending: { tag, version: maximumVersion },
+    });
+  });
+
+  it("removes an ineligible pending candidate when the explicit ceiling is lowered", async () => {
+    const root = temporaryDirectory();
+    const currentVersion = "1.2.3-nightly.20260820.1";
+    const newerVersion = "1.2.3-nightly.20260821.7";
+    const tag = `lastcode/checkpoint/v${newerVersion}`;
+    const deps = dependencies(tag, "a".repeat(40));
+    const staged = await stageIntelUpdate(
+      { currentVersion, homeDirectory: root, maximumVersion: newerVersion },
+      deps,
+    );
+    const result = await stageIntelUpdate(
+      { currentVersion, homeDirectory: root, maximumVersion: currentVersion },
+      {
+        ...deps,
+        downloadRelease: async () => {
+          throw new Error("release above the lowered ceiling must not download");
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "up-to-date",
+      maximumVersion: currentVersion,
+      availableVersion: null,
+      pending: undefined,
+    });
+    expect(readPending(root)).toBeUndefined();
+    expect(NodeFS.existsSync(staged.pending.candidateDirectory)).toBe(false);
+    expect(NodeFS.readdirSync(NodePath.join(root, "candidates"))).toEqual([]);
+  });
+
+  it.each([
+    { maximumVersion: undefined },
+    { maximumVersion: null },
+    { maximumVersion: 123 },
+    { maximumVersion: "" },
+    { maximumVersion: " " },
+    { maximumVersion: "1.2.3" },
+    { maximumVersion: "1.2.3-nightly.20260821.7\n" },
+    { maximumVersion: "1.2.3-nightly.20260821.7.0" },
+    { maximumVersion: "lastcode/checkpoint/v1.2.3-nightly.20260821.7" },
+    { maximumVersionHost: "" },
+    {
+      maximumVersion: "1.2.3-nightly.20260821.7",
+      maximumVersionHost: "version-source.example",
+    },
+  ])("rejects invalid ceiling options before any staging I/O: %j", async (capOptions) => {
+    const root = NodePath.join(temporaryDirectory(), "uncreated");
+    const calls = [];
+    const unexpected = async () => {
+      calls.push("unexpected I/O");
+      throw new Error("unexpected staging I/O");
+    };
+    await expect(
+      stageIntelUpdate(
+        { currentVersion: "1.2.3-nightly.20260820.1", homeDirectory: root, ...capOptions },
+        {
+          acquireLock: unexpected,
+          downloadRelease: unexpected,
+          listReleases: unexpected,
+          readRemoteInstalledVersion: unexpected,
+        },
+      ),
+    ).rejects.toThrow(/Maximum version|Maximum-version host/u);
+    expect(calls).toEqual([]);
+    expect(NodeFS.existsSync(root)).toBe(false);
+  });
+
+  it.each([undefined, "", "1.2.3"])(
+    "rejects an invalid remote ceiling before staging I/O: %s",
+    async (maximumVersion) => {
+      const root = NodePath.join(temporaryDirectory(), "uncreated");
+      await expect(
+        stageIntelUpdate(
+          { homeDirectory: root, maximumVersionHost: "version-source.example" },
+          {
+            readRemoteInstalledVersion: async () => maximumVersion,
+            listReleases: async () => {
+              throw new Error("invalid remote ceiling must not list releases");
+            },
+          },
+        ),
+      ).rejects.toThrow("is not a LastCode nightly");
+      expect(NodeFS.existsSync(root)).toBe(false);
+    },
+  );
+
   it("leaves the pending update untouched when the remote version cannot be read", async () => {
     const root = temporaryDirectory();
     const tag = "lastcode/checkpoint/v1.2.3-nightly.20260821.7";
@@ -681,6 +800,9 @@ describe("LastCode Intel staging", () => {
 
   it("parses only status and staging options", () => {
     expect(
+      parseStageOptions(["stage", "--maximum-version", "1.2.3-nightly.20260821.7"]),
+    ).toMatchObject({ command: "stage", maximumVersion: "1.2.3-nightly.20260821.7" });
+    expect(
       parseStageOptions([
         "stage",
         "--current-version",
@@ -700,5 +822,28 @@ describe("LastCode Intel staging", () => {
       homeDirectory: "/tmp/intel",
     });
     expect(() => parseStageOptions(["install"])).toThrow("Expected 'stage' or 'status'");
+  });
+
+  it.each([
+    ["stage", "--maximum-version"],
+    ["stage", "--maximum-version", ""],
+    ["stage", "--maximum-version", "--home-dir", "/tmp/intel"],
+    ["stage", "--maximum-version", "1.2.3"],
+    [
+      "stage",
+      "--maximum-version",
+      "1.2.3-nightly.20260821.7",
+      "--maximum-version-host",
+      "version-source.example",
+    ],
+    [
+      "stage",
+      "--maximum-version-host",
+      "version-source.example",
+      "--maximum-version",
+      "1.2.3-nightly.20260821.7",
+    ],
+  ])("rejects missing, invalid or conflicting CLI ceilings: %j", (...argv) => {
+    expect(() => parseStageOptions(argv)).toThrow(/Missing value|Maximum version/u);
   });
 });
