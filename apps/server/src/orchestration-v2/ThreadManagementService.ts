@@ -40,6 +40,8 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 
+const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
+
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
 export interface ThreadManagementProvenance {
@@ -585,8 +587,7 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           requestId: input.requestId,
           error:
-            Option.isSome(failure) &&
-            failure.value instanceof Orchestrator.OrchestratorThreadAboveModeLimitError
+            Option.isSome(failure) && isThreadAboveModeLimitError(failure.value)
               ? "Permissions changed while stopping. The family remains visible; some work may have stopped. Review the archive choices again."
               : "Could not stop all subagents and provider work. The conversations remain visible; some work may still be running. Try archiving again.",
         });
