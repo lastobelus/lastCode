@@ -1196,9 +1196,11 @@ describe("PreviewManager", () => {
           const preview = makeFaviconWebContents();
           fromId.mockReturnValue(preview.webContents);
           const states: PreviewManager.PreviewTabState[] = [];
+          let navigationObserved: Deferred.Deferred<void> | undefined;
           yield* manager.subscribeStateChanges((_tabId, state) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               states.push(state);
+              if (navigationObserved) yield* Deferred.succeed(navigationObserved, undefined);
             }),
           );
           yield* manager.createTab("tab_favicon_failed_origin");
@@ -1219,8 +1221,10 @@ describe("PreviewManager", () => {
           yield* settle(() => states.at(-1)?.navStatus.kind === "LoadFailed");
           expect(states.at(-1)?.favicon?.dataUrl).toBe(TEST_FAVICON);
 
+          navigationObserved = yield* Deferred.make<void>();
           preview.listeners.get("did-navigate")?.({} as never);
-          yield* settle(() => states.at(-1)?.navStatus.kind === "Success");
+          yield* Deferred.await(navigationObserved);
+          expect(states.at(-1)?.navStatus.kind).toBe("LoadFailed");
           expect(states.at(-1)?.favicon?.dataUrl).toBe(TEST_FAVICON);
         }),
       ),
@@ -2174,97 +2178,144 @@ describe("PreviewManager", () => {
     ),
   );
 
-  effectIt.effect("keeps a main-frame load failure visible until a retry starts", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        const url = "http://localhost:5733/";
-        let loading = false;
-        const listeners = new Map<string, (...args: unknown[]) => void>();
-        fromId.mockReturnValue({
-          id: 42,
-          isDestroyed: () => false,
-          getType: () => "webview",
-          getURL: () => url,
-          getTitle: () => "localhost:5733",
-          isLoading: () => loading,
-          getZoomFactor: () => 1,
-          setZoomFactor: vi.fn(),
-          setAudioMuted: vi.fn(),
-          isCurrentlyAudible: () => false,
-          on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
-            listeners.set(event, listener);
-          }),
-          off: vi.fn(),
-          ipc: { on: vi.fn(), off: vi.fn() },
-          send: webviewSend,
-          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
-          setIgnoreMenuShortcuts: vi.fn(),
-          setWindowOpenHandler: vi.fn(),
-          debugger: {
-            isAttached: () => false,
-            attach: vi.fn(),
-            sendCommand: vi.fn(async () => undefined),
-            on: vi.fn(),
+  effectIt.effect.each(["same URL", "another URL"] as const)(
+    "keeps an error-document navigation failed until a genuine retry to %s starts",
+    (destination) =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          let url = "http://localhost:5733/";
+          let loading = false;
+          const listeners = new Map<string, (...args: unknown[]) => void>();
+          fromId.mockReturnValue({
+            id: 42,
+            isDestroyed: () => false,
+            getType: () => "webview",
+            getURL: () => url,
+            getTitle: () => "localhost:5733",
+            isLoading: () => loading,
+            getZoomFactor: () => 1,
+            setZoomFactor: vi.fn(),
+            setAudioMuted: vi.fn(),
+            isCurrentlyAudible: () => false,
+            on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+              listeners.set(event, listener);
+            }),
             off: vi.fn(),
-          },
-        } as never);
-        const statuses: PreviewManager.PreviewNavStatus[] = [];
+            ipc: { on: vi.fn(), off: vi.fn() },
+            send: webviewSend,
+            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+            setIgnoreMenuShortcuts: vi.fn(),
+            setWindowOpenHandler: vi.fn(),
+            debugger: {
+              isAttached: () => false,
+              attach: vi.fn(),
+              sendCommand: vi.fn(async () => undefined),
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+          } as never);
+          const statuses: PreviewManager.PreviewNavStatus[] = [];
+          let observed: Deferred.Deferred<PreviewManager.PreviewNavStatus> | null = null;
+          yield* manager.subscribeStateChanges((_tabId, state) =>
+            Effect.gen(function* () {
+              statuses.push(state.navStatus);
+              if (observed !== null) yield* Deferred.succeed(observed, state.navStatus);
+            }),
+          );
+          yield* manager.createTab("tab_failed");
+          yield* manager.registerWebview("tab_failed", 42);
+          const emitAndObserve = Effect.fnUntraced(function* (event: string, ...args: unknown[]) {
+            const milestone = yield* Deferred.make<PreviewManager.PreviewNavStatus>();
+            observed = milestone;
+            const listener = listeners.get(event);
+            expect(listener).toBeDefined();
+            listener!(...args);
+            const status = yield* Deferred.await(milestone);
+            observed = null;
+            return status;
+          });
 
-        yield* manager.subscribeStateChanges((_tabId, state) =>
-          Effect.sync(() => {
-            statuses.push(state.navStatus);
-          }),
-        );
-        yield* manager.createTab("tab_failed");
-        yield* manager.registerWebview("tab_failed", 42);
+          // Subframe failures and aborted requests must not replace the main-frame state.
+          const initialCount = statuses.length;
+          listeners.get("did-fail-load")?.(
+            {},
+            -105,
+            "ERR_NAME_NOT_RESOLVED",
+            "https://missing-frame.example/",
+            false,
+          );
+          listeners.get("did-fail-load")?.({}, -3, "ERR_ABORTED", url, true);
+          expect(statuses).toHaveLength(initialCount);
+          expect(statuses.at(-1)?.kind).toBe("Success");
 
-        listeners.get("did-fail-load")?.(
-          {},
-          -105,
-          "ERR_NAME_NOT_RESOLVED",
-          "https://missing-frame.example/",
-          false,
-        );
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("Success");
+          loading = true;
+          expect((yield* emitAndObserve("did-start-loading")).kind).toBe("Loading");
+          const failure = yield* emitAndObserve(
+            "did-fail-load",
+            {},
+            -102,
+            "ERR_CONNECTION_REFUSED",
+            url,
+            true,
+          );
+          expect(failure).toEqual({
+            kind: "LoadFailed",
+            url,
+            title: "localhost:5733",
+            code: -102,
+            description: "ERR_CONNECTION_REFUSED",
+          });
 
-        loading = true;
-        listeners.get("did-start-loading")?.();
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("Loading");
+          // The error document can update its title while Chromium is still loading.
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
 
-        loading = false;
-        listeners.get("did-fail-load")?.({}, -102, "ERR_CONNECTION_REFUSED", url, true);
-        listeners.get("did-stop-loading")?.();
-        listeners.get("page-title-updated")?.();
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)).toEqual({
-          kind: "LoadFailed",
-          url,
-          title: "localhost:5733",
-          code: -102,
-          description: "ERR_CONNECTION_REFUSED",
-        });
+          // Finishing the error document does not mean the requested page loaded.
+          loading = false;
+          expect(yield* emitAndObserve("did-navigate")).toEqual(failure);
+          expect(yield* emitAndObserve("did-stop-loading")).toEqual(failure);
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
 
-        loading = true;
-        listeners.get("did-start-loading")?.();
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("Loading");
+          const failedCount = statuses.length;
+          listeners.get("did-fail-load")?.({}, -3, "ERR_ABORTED", url, true);
+          listeners.get("did-fail-load")?.({}, -102, "ERR_CONNECTION_REFUSED", url, false);
+          expect(statuses).toHaveLength(failedCount);
+          expect(statuses.at(-1)).toEqual(failure);
 
-        loading = false;
-        listeners.get("did-stop-loading")?.();
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("Success");
+          if (destination === "another URL") url = "https://recovered.example/";
+          loading = true;
+          // Aggregate loading includes iframe requests, so only a new document in
+          // the main frame can release the pending failure and start a retry.
+          expect(yield* emitAndObserve("did-start-loading")).toEqual(failure);
+          listeners.get("did-start-navigation")?.({ isMainFrame: false, isSameDocument: false });
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          loading = false;
+          expect(yield* emitAndObserve("did-stop-loading")).toEqual(failure);
+          listeners.get("did-start-navigation")?.({ isMainFrame: true, isSameDocument: true });
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
 
-        listeners.get("did-fail-load")?.({}, -102, "ERR_CONNECTION_REFUSED", url, true);
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("LoadFailed");
-
-        listeners.get("did-navigate")?.();
-        yield* Effect.yieldNow;
-        expect(statuses.at(-1)?.kind).toBe("Success");
-      }),
-    ),
+          loading = true;
+          expect(
+            yield* emitAndObserve("did-start-navigation", {
+              isMainFrame: true,
+              isSameDocument: false,
+            }),
+          ).toEqual({
+            kind: "Loading",
+            url,
+            title: "localhost:5733",
+          });
+          loading = false;
+          expect(yield* emitAndObserve("did-navigate")).toEqual({
+            kind: "Success",
+            url,
+            title: "localhost:5733",
+          });
+          expect((yield* emitAndObserve("did-stop-loading")).kind).toBe("Success");
+        }),
+      ),
   );
 
   effectIt.effect("captures a PNG screenshot into browser artifacts", () =>
