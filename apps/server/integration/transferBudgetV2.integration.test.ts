@@ -44,6 +44,9 @@ import * as ThreadManagementService from "../src/orchestration-v2/ThreadManageme
 import * as ProjectStore from "../src/orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../src/project/ProjectService.ts";
 import * as ProjectEnrichmentService from "../src/project/ProjectEnrichmentService.ts";
+import * as ServerConfig from "../src/config.ts";
+import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
+import * as ThreadWait from "../src/threadTools/ThreadWait.ts";
 import * as OrchestrationHttp from "../src/orchestration-v2/http.ts";
 import * as ServerHttp from "../src/http.ts";
 import { subscribeOrchestrationV2Thread, subscribeOrchestrationV2Shell } from "../src/ws.ts";
@@ -108,11 +111,15 @@ const layerEnrichment = Layer.unwrap(
   }),
 );
 // The transfer history has no project events, so shell streams never read a project shell.
+// Dispatch and wait handlers register with the same HTTP group but are not measured here.
 const layerServices = layerManagement.pipe(
   Layer.provideMerge(ProjectStore.layer),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
+  Layer.provideMerge(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
+  Layer.provideMerge(Layer.mock(ThreadWait.ThreadWait)({})),
   Layer.provideMerge(layerEnrichment),
   Layer.provideMerge(layerPersistence),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-transfer-v2-" })),
 );
 class TransferApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.orchestration,
@@ -229,7 +236,9 @@ it.live(
             yield* sink.write({ events: [threadCreated(provider)] });
             for (let index = 0; index < TRANSFER_HISTORY_TURN_COUNT; index++)
               yield* sink.write({ events: turnEvents(provider, index, false) });
-            const context = yield* Effect.context<Layer.Success<typeof layerServices>>();
+            const context = yield* Effect.context<
+              Layer.Success<typeof layerServices> | FileSystem.FileSystem
+            >();
             const server = yield* Layer.build(
               HttpRouter.serve(layerRoutes, { disableListenLog: true }).pipe(
                 Layer.provide(Layer.succeedContext(context)),

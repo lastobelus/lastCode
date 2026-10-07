@@ -113,7 +113,7 @@ import {
 } from "../../provider/claudeUsageLimits.ts";
 import type { ServerProviderShape } from "../../provider/ServerProvider.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
+import { T3_CODE_MCP_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import { mcpToolPresentation, normalizeMcpText } from "../../provider/McpToolPresentation.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -910,7 +910,7 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers === undefined ? "" : `\n\n${T3_CODE_MCP_INSTRUCTIONS}`),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };

@@ -1,6 +1,7 @@
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
+import * as Effect from "effect/Effect";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
@@ -49,6 +50,7 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -238,6 +240,14 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(Layer.merge(layerOrchestratorProvided, layerLegacyV1ThreadImporterProvided)),
 );
+const layerWorktreeCleanupProvided = WorktreeCleanupService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(layerThreadManagementProvided, ProjectionStore.layer, ProjectStore.layer, layerProviderSessionManagerProvided, layerLegacyV1ThreadImporterProvided, layerEventInfrastructure),
+  ),
+);
+const layerWorktreeCleanupWorkerProvided = Layer.effectDiscard(
+  Effect.flatMap(WorktreeCleanupService.WorktreeCleanupService, (service) => service.start()),
+).pipe(Layer.provideMerge(layerWorktreeCleanupProvided));
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
   Layer.provide(layerProjectService),
 );
@@ -326,6 +336,7 @@ export const layer = Layer.mergeAll(
 );
 
 export const layerProduction = Layer.mergeAll(
+  layerWorktreeCleanupWorkerProvided,
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
   layerManagedProjectFoldersProvided,
