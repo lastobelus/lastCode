@@ -6,6 +6,7 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
+  getThreadArchivePlan,
   MessageId,
   type ModelSelection,
   type OrchestrationV2Actor,
@@ -541,7 +542,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const { thread } = yield* orchestrator.getThreadRecords(input.threadId, []);
-      const pending = thread.archivePending;
+      const pending = getThreadArchivePlan(thread.archivePending);
       if (pending?.commandId !== input.requestId || pending.status !== "stopping") return;
       const stopped = yield* Effect.exit(
         Effect.gen(function* () {

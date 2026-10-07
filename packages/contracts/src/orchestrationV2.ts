@@ -125,9 +125,15 @@ export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLin
 
 export const ThreadArchiveChildDisposition = Schema.Literals(["stop_and_archive", "promote"]);
 export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
-export const ThreadArchivePending = Schema.Struct({
+export const ThreadArchiveParticipant = Schema.Struct({
   threadId: ThreadId,
   commandId: CommandId,
+  status: Schema.Literals(["stopping", "failed"]),
+  error: Schema.optional(Schema.String),
+});
+/** Only the operation owner stores the family plan; participants hold a compact reference. */
+export const ThreadArchiveOperation = Schema.Struct({
+  ...ThreadArchiveParticipant.fields,
   childDisposition: ThreadArchiveChildDisposition,
   childThreadIds: Schema.Array(ThreadId),
   archiveThreadIds: Schema.Array(ThreadId),
@@ -136,9 +142,11 @@ export const ThreadArchivePending = Schema.Struct({
   modeLimit: Schema.optional(
     Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
   ),
-  status: Schema.Literals(["stopping", "failed"]),
-  error: Schema.optional(Schema.String),
 });
+export const ThreadArchivePending = Schema.Union([
+  ThreadArchiveOperation,
+  ThreadArchiveParticipant,
+]);
 
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",

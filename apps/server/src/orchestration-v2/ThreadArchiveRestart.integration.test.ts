@@ -3,6 +3,7 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  getThreadArchivePlan,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -184,7 +185,7 @@ it.effect(
             const pending = (yield* orchestrator.getThreadProjection(parentId)).thread
               .archivePending;
             assert.equal(pending?.status, "stopping");
-            assert.deepEqual(pending?.archiveThreadIds, [parentId, childId]);
+            assert.deepEqual(getThreadArchivePlan(pending)?.archiveThreadIds, [parentId, childId]);
             return { childId, command, effectId, sequence: result.sequence };
           }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
         );
@@ -286,7 +287,7 @@ it.effect.each([
             const outbox = yield* EffectOutbox.EffectOutboxV2;
             const pending = (yield* orchestrator.getThreadProjection(parentId)).thread
               .archivePending;
-            assert.deepEqual(pending?.modeLimit, {
+            assert.deepEqual(getThreadArchivePlan(pending)?.modeLimit, {
               runtimeMode: limit.runtimeMode,
               interactionMode: limit.interactionMode,
             });
@@ -343,7 +344,9 @@ it.effect.each([
             };
             yield* orchestrator.dispatch(retry);
             assert.isUndefined(
-              (yield* orchestrator.getThreadProjection(parentId)).thread.archivePending?.modeLimit,
+              getThreadArchivePlan(
+                (yield* orchestrator.getThreadProjection(parentId)).thread.archivePending,
+              )?.modeLimit,
             );
             yield* worker.drain();
             assert.isNotNull((yield* orchestrator.getThreadProjection(parentId)).thread.archivedAt);

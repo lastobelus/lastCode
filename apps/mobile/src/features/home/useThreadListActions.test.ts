@@ -19,6 +19,8 @@ const state = vi.hoisted(() => ({
   archiveFamily: undefined as EnvironmentThreadShell[] | undefined,
   archiveFamilyError: undefined as Error | undefined,
   archiveFamilyReads: [] as { environmentId: string; input: { threadId: string } }[],
+  archiveSupport: true as boolean | undefined,
+  alertMessages: [] as string[],
   requests: [] as {
     action: string;
     environmentId: string;
@@ -38,8 +40,10 @@ vi.mock("react", () => ({
 }));
 vi.mock("react-native", () => ({
   Alert: {
-    alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
-      state.alerts.push({ title, buttons }),
+    alert: (title: string, message: string, buttons?: { text: string; onPress?: () => void }[]) => {
+      state.alerts.push({ title, buttons });
+      state.alertMessages.push(message);
+    },
   },
 }));
 vi.mock("expo-haptics", () => ({
@@ -78,6 +82,7 @@ vi.mock("../../state/atom-registry", () => ({
                     environment: {
                       capabilities: {
                         threadSettlement: true,
+                        threadArchiveFamilies: state.archiveSupport,
                         threadSnooze: true,
                         threadPinning: true,
                         threadPinReorder: true,
@@ -192,6 +197,8 @@ beforeEach(() => {
   state.archiveFamily = undefined;
   state.archiveFamilyError = undefined;
   state.archiveFamilyReads = [];
+  state.archiveSupport = true;
+  state.alertMessages = [];
   state.dialogs = [];
   state.alerts = [];
   state.afterRequest = undefined;
@@ -200,6 +207,17 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("archive family reads", () => {
+  it.each([undefined, false])(
+    "requires a server update before querying unsupported archive families (%s)",
+    async (support) => {
+      state.archiveSupport = support;
+      await useThreadListActions().archiveThread(makeThread());
+      expect(state.archiveFamilyReads).toEqual([]);
+      expect(state.requests).toEqual([]);
+      expect(state.alerts[0]?.title).toBe("Server update required");
+      expect(state.alertMessages[0]).toContain("Update this environment's server");
+    },
+  );
   it("confirms a live descendant reached through an inactive owner", async () => {
     const root = makeThread();
     const intermediate = makeThread({

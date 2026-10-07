@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  getThreadArchivePlan,
   MessageId,
   NodeId,
   ProjectId,
@@ -355,7 +356,7 @@ it.effect.each(archiveModeLimits)(
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const threads = yield* ThreadManagementService.ThreadManagementService;
       const { parent, child, grandchild } = yield* family;
-      for (const id of [parent, child]) {
+      for (const id of [parent, child, grandchild]) {
         const thread = (yield* orchestrator.getThreadProjection(id)).thread;
         yield* projections.apply({
           id: EventId.make(`initial-mode:${id}`),
@@ -415,7 +416,7 @@ it.effect.each(archiveModeLimits)(
       assert.isNull(root.archivedAt);
       assert.equal(root.archivePending?.status, "failed");
       assert.include(root.archivePending?.error, "Permissions changed while stopping");
-      assert.deepEqual(pending?.modeLimit, {
+      assert.deepEqual(getThreadArchivePlan(pending)?.modeLimit, {
         runtimeMode: limit.runtimeMode,
         interactionMode: limit.interactionMode,
       });
@@ -432,7 +433,9 @@ it.effect.each(archiveModeLimits)(
       const retry = { ...command, commandId: CommandId.make(`${command.commandId}:retry`) };
       yield* orchestrator.dispatch(retry);
       assert.isUndefined(
-        (yield* orchestrator.getThreadProjection(parent)).thread.archivePending?.modeLimit,
+        getThreadArchivePlan(
+          (yield* orchestrator.getThreadProjection(parent)).thread.archivePending,
+        )?.modeLimit,
       );
       yield* threads.executeArchive({ threadId: parent, requestId: retry.commandId }).pipe(
         Effect.provide(
@@ -1168,6 +1171,137 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each(["child", "grandchild", "late descendant"] as const)(
+  "reserves %s against delegated cancellation while promotion waits, lifting the hold after failure",
+  (target) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { parent, child, grandchild } = yield* family;
+      const promote = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(promote);
+      const parentThreadId = target === "child" ? parent : child;
+      const childThreadId =
+        target === "child"
+          ? child
+          : target === "grandchild"
+            ? grandchild
+            : yield* delegate(child, "late-retained-child");
+      const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (candidate) => candidate.childThreadId === childThreadId,
+      )!;
+      const ownership = [{ parentThreadId, taskId: task.id, childThreadId }];
+      const stop = {
+        type: "thread.stop" as const,
+        commandId: CommandId.make("cancel-during-promotion"),
+        threadId: childThreadId,
+      };
+      const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      const refused = yield* orchestrator
+        .dispatch(stop)
+        .pipe(Effect.provideService(DelegatedTaskCancellation, ownership), Effect.flip);
+      assert.include(String(refused.cause), "being kept separately");
+      assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(childThreadId)).runs.at(-1)?.status,
+        "starting",
+      );
+      assert.isFalse(
+        (yield* orchestrator.getThreadProjection(child)).thread.lineage.independent === true,
+      );
+      if (target === "late descendant") {
+        const changed = yield* orchestrator
+          .dispatch({
+            type: "thread.archive.complete",
+            commandId: CommandId.make("stale-family-promotion-complete"),
+            threadId: parent,
+            requestId: promote.commandId,
+          })
+          .pipe(Effect.flip);
+        assert.include(String(changed.cause), "subagents changed");
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make("promotion-shutdown-failed"),
+        threadId: parent,
+        requestId: promote.commandId,
+        error: "Synthetic shutdown failure",
+      });
+      // The temporary hold never records a rejected receipt or releases ownership.
+      yield* orchestrator
+        .dispatch(stop)
+        .pipe(Effect.provideService(DelegatedTaskCancellation, ownership));
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(childThreadId)).runs.at(-1)?.status,
+        "interrupted",
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("an explicit direct Stop can still stop retained work during promotion", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const { parent, child, grandchild } = yield* family;
+    yield* orchestrator.dispatch(archive(parent, [child, grandchild], "promote"));
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("direct-stop-retained-child"),
+      threadId: child,
+    });
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(child)).runs.at(-1)?.status,
+      "interrupted",
+    );
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(parent)).thread.archivePending?.status,
+      "stopping",
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("stores a single family plan through shutdown failure and completion", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const { parent, child, grandchild } = yield* family;
+    const command = archive(parent, [child, grandchild]);
+    yield* orchestrator.dispatch(command);
+    for (const status of ["stopping", "failed"] as const) {
+      const shells = yield* orchestrator.getThreadArchiveFamily(parent);
+      const plans = shells.flatMap((shell) => {
+        const pending = getThreadArchivePlan(shell.archivePending);
+        return pending === null ? [] : [pending];
+      });
+      assert.lengthOf(plans, 1);
+      assert.deepEqual(plans[0]?.archiveThreadIds, [parent, child, grandchild]);
+      for (const shell of shells) {
+        assert.equal(shell.archivePending?.status, status);
+        assert.equal(shell.archivePending?.threadId, parent);
+        assert.equal(shell.archivePending?.commandId, command.commandId);
+      }
+      if (status === "stopping")
+        yield* orchestrator.dispatch({
+          type: "thread.archive.fail",
+          commandId: CommandId.make("compact-plan-failure"),
+          threadId: parent,
+          requestId: command.commandId,
+          error: "Synthetic shutdown failure",
+        });
+    }
+    const retry = { ...command, commandId: CommandId.make("compact-plan-retry") };
+    yield* orchestrator.dispatch(retry);
+    yield* orchestrator.dispatch({
+      type: "thread.archive.complete",
+      commandId: CommandId.make("compact-plan-complete"),
+      threadId: parent,
+      requestId: retry.commandId,
+    });
+    for (const id of [parent, child, grandchild]) {
+      const projection = yield* orchestrator.getThreadProjection(id);
+      assert.isNull(projection.thread.archivePending);
+      assert.isNotNull(projection.thread.archivedAt);
+    }
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect.each([false, true])(
   "promotion after failed shutdown clears former-owner failures and preserves unrelated failures=%s",
   (unrelatedFailure) =>
@@ -1229,29 +1363,32 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(archiveModeLimits)(
-  "a descendant's raised $mode ceiling blocks clearing failure and releasing its branch",
-  (limit) =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const threads = yield* ThreadManagementService.ThreadManagementService;
-      const { parent, child, grandchild } = yield* family;
-      for (const id of [parent, child, grandchild]) {
-        const thread = (yield* orchestrator.getThreadProjection(id)).thread;
-        yield* projections.apply({
-          id: EventId.make(`retry-initial-mode:${id}`),
-          type: "thread.metadata-updated",
-          threadId: id,
-          occurredAt: yield* DateTime.now,
-          payload: {
-            ...thread,
-            runtimeMode: limit.runtimeMode,
-            interactionMode: limit.interactionMode,
-          },
-        });
-      }
-      const stop = archive(parent, [child, grandchild]);
+it.effect.each(
+  archiveModeLimits.flatMap((limit) =>
+    [false, true].map((hadFailure) => ({ ...limit, hadFailure })),
+  ),
+)("a descendant's raised $mode ceiling blocks release with prior failure=$hadFailure", (limit) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const { parent, child, grandchild } = yield* family;
+    for (const id of [parent, child, grandchild]) {
+      const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+      yield* projections.apply({
+        id: EventId.make(`retry-initial-mode:${id}`),
+        type: "thread.metadata-updated",
+        threadId: id,
+        occurredAt: yield* DateTime.now,
+        payload: {
+          ...thread,
+          runtimeMode: limit.runtimeMode,
+          interactionMode: limit.interactionMode,
+        },
+      });
+    }
+    const stop = archive(parent, [child, grandchild]);
+    if (limit.hadFailure) {
       yield* orchestrator.dispatch(stop).pipe(Effect.provideService(DispatchModeLimit, limit));
       yield* orchestrator.dispatch({
         type: "thread.archive.fail",
@@ -1260,58 +1397,64 @@ it.effect.each(archiveModeLimits)(
         requestId: stop.commandId,
         error: "Isolated shutdown failed",
       });
-      const providerThread = (yield* orchestrator.getThreadProjection(parent)).providerThreads[0]!;
-      yield* projections.apply({
-        id: EventId.make("retry-parent-shutdown-session"),
-        type: "provider-thread.updated",
-        threadId: parent,
-        occurredAt: yield* DateTime.now,
-        payload: { ...providerThread, providerSessionId: importSessionId },
-      });
-      const promote = archive(parent, [child, grandchild], "promote");
-      yield* orchestrator.dispatch(promote).pipe(Effect.provideService(DispatchModeLimit, limit));
-      const stopping = yield* Deferred.make<void>();
-      const resume = yield* Deferred.make<void>();
-      const shutdown = yield* threads
-        .executeArchive({ threadId: parent, requestId: promote.commandId })
-        .pipe(
-          Effect.provide(
-            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-              teardownThread: () =>
-                Deferred.succeed(stopping, undefined).pipe(Effect.andThen(Deferred.await(resume))),
-            }),
-          ),
-          Effect.forkChild,
-        );
-      yield* Deferred.await(stopping);
-      yield* orchestrator.dispatch(
-        limit.mode === "runtime"
-          ? {
-              type: "thread.runtime-mode.set",
-              commandId: CommandId.make("raise-retained-descendant-runtime"),
-              threadId: grandchild,
-              runtimeMode: "full-access",
-            }
-          : {
-              type: "thread.interaction-mode.set",
-              commandId: CommandId.make("raise-retained-descendant-interaction"),
-              threadId: grandchild,
-              interactionMode: "default",
-            },
+    }
+    const providerThread = (yield* orchestrator.getThreadProjection(parent)).providerThreads[0]!;
+    yield* projections.apply({
+      id: EventId.make("retry-parent-shutdown-session"),
+      type: "provider-thread.updated",
+      threadId: parent,
+      occurredAt: yield* DateTime.now,
+      payload: { ...providerThread, providerSessionId: importSessionId },
+    });
+    const promote = archive(parent, [child, grandchild], "promote");
+    yield* orchestrator.dispatch(promote).pipe(Effect.provideService(DispatchModeLimit, limit));
+    const stopping = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    const shutdown = yield* threads
+      .executeArchive({ threadId: parent, requestId: promote.commandId })
+      .pipe(
+        Effect.provide(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            teardownThread: () =>
+              Deferred.succeed(stopping, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+          }),
+        ),
+        Effect.forkChild,
       );
-      yield* Deferred.succeed(resume, undefined);
-      yield* Fiber.join(shutdown);
-      const root = (yield* orchestrator.getThreadProjection(parent)).thread;
-      assert.isNull(root.archivedAt);
-      assert.equal(root.archivePending?.status, "failed");
-      assert.include(root.archivePending?.error, "Permissions changed while stopping");
-      const kept = (yield* orchestrator.getThreadProjection(child)).thread;
-      const nested = (yield* orchestrator.getThreadProjection(grandchild)).thread;
-      assert.isUndefined(kept.lineage.independent);
+    yield* Deferred.await(stopping);
+    yield* orchestrator.dispatch(
+      limit.mode === "runtime"
+        ? {
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("raise-retained-descendant-runtime"),
+            threadId: grandchild,
+            runtimeMode: "full-access",
+          }
+        : {
+            type: "thread.interaction-mode.set",
+            commandId: CommandId.make("raise-retained-descendant-interaction"),
+            threadId: grandchild,
+            interactionMode: "default",
+          },
+    );
+    yield* Deferred.succeed(resume, undefined);
+    yield* Fiber.join(shutdown);
+    const root = (yield* orchestrator.getThreadProjection(parent)).thread;
+    assert.isNull(root.archivedAt);
+    assert.equal(root.archivePending?.status, "failed");
+    assert.include(root.archivePending?.error, "Permissions changed while stopping");
+    const kept = (yield* orchestrator.getThreadProjection(child)).thread;
+    const nested = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+    assert.isUndefined(kept.lineage.independent);
+    if (limit.hadFailure) {
       assert.equal(kept.archivePending?.commandId, stop.commandId);
       assert.equal(nested.archivePending?.commandId, stop.commandId);
-      assert.isUndefined(
-        (yield* orchestrator.getThreadProjection(parent)).subagents[0]?.ownershipReleased,
-      );
-    }).pipe(Effect.provide(testLayer)),
+    } else {
+      assert.isNull(kept.archivePending ?? null);
+      assert.isNull(nested.archivePending ?? null);
+    }
+    assert.isUndefined(
+      (yield* orchestrator.getThreadProjection(parent)).subagents[0]?.ownershipReleased,
+    );
+  }).pipe(Effect.provide(testLayer)),
 );

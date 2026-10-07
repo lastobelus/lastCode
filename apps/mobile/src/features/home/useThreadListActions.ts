@@ -1,6 +1,9 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { archiveRetryThreadId } from "@t3tools/client-runtime/state/thread-archive";
+import {
+  archiveRetryThreadId,
+  THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
+} from "@t3tools/client-runtime/state/thread-archive";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -159,6 +162,13 @@ function useThreadActionExecutor(
           expectedChildThreadIds: [],
         };
         if (action === "archive") {
+          if (
+            appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
+              .capabilities.threadArchiveFamilies !== true
+          ) {
+            Alert.alert("Server update required", THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE);
+            return false;
+          }
           const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
           thread =
             shells.find(

@@ -1,6 +1,9 @@
 import type { EnvironmentThreadShell } from "./models.ts";
 import { threadRuntimeIsActive } from "./models.ts";
 
+export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE =
+  "Update this environment's server before archiving threads and their subagents safely.";
+
 type ArchiveRecoveryThread = Pick<EnvironmentThreadShell, "lineage" | "archivePending"> & {
   readonly id: string;
   readonly environmentId?: string;

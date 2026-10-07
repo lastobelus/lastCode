@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -8,7 +8,12 @@ import { toastManager } from "../components/ui/toast";
 import { useThreadUndoNotice } from "./showThreadUndoNotice";
 import { makeThreadFixture } from "../test-fixtures";
 
-const familyState = vi.hoisted(() => ({ threads: [] as ReturnType<typeof makeThreadFixture>[] }));
+const familyState = vi.hoisted(() => ({
+  threads: [] as ReturnType<typeof makeThreadFixture>[],
+  archiveSupport: true as boolean | undefined,
+  unsupportedEnvironments: new Set<string>(),
+}));
+const newThread = vi.hoisted(() => vi.fn());
 const archiveDialog = vi.hoisted(() => vi.fn());
 const archiveFamilyQuery = vi.hoisted(() => vi.fn());
 vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
@@ -43,7 +48,7 @@ vi.mock("react", async (original) => ({
 }));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => false }));
-vi.mock("./useHandleNewThread", () => ({ useNewThreadHandler: () => vi.fn() }));
+vi.mock("./useHandleNewThread", () => ({ useNewThreadHandler: () => newThread }));
 vi.mock("../composerDraftStore", () => ({ useComposerDraftStore: () => vi.fn() }));
 vi.mock("../terminalUiStateStore", () => ({ useTerminalUiStateStore: () => vi.fn() }));
 vi.mock("../uiStateStore", () => ({ useUiStateStore: () => vi.fn() }));
@@ -62,6 +67,8 @@ vi.mock("../state/entities", async (original) => ({
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
+  readEnvironmentSupportsArchiveFamilies: (environmentId: string) =>
+    familyState.archiveSupport === true && !familyState.unsupportedEnvironments.has(environmentId),
   readEnvironmentSupportsSnooze: () => true,
   readThreadShell: (target: { threadId: ThreadId; environmentId: EnvironmentId }) =>
     familyState.threads.find(
@@ -106,6 +113,9 @@ function currentUndo() {
 
 beforeEach(() => {
   familyState.threads = [];
+  familyState.archiveSupport = true;
+  familyState.unsupportedEnvironments.clear();
+  newThread.mockReset().mockResolvedValue(undefined);
   archiveDialog.mockReset();
   archiveFamilyQuery.mockReset().mockImplementation(async ({ environmentId, input }) => ({
     _tag: "Success",
@@ -119,7 +129,7 @@ beforeEach(() => {
     command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   }
   router.navigate.mockClear();
-  router.state.matches[0]!.params = {};
+  router.state.matches = [{ params: {} }];
   threadShell.pinnedAt = null;
   threadShell.snoozedUntil = null;
 });
@@ -152,6 +162,21 @@ describe("unpin Undo", () => {
 });
 
 describe("archive Undo", () => {
+  it("archives an idle thread with null runtime from a route without a thread", async () => {
+    familyState.threads = [
+      makeThreadFixture({
+        environmentId: target.environmentId,
+        id: target.threadId,
+        runtime: null,
+      }),
+    ];
+    router.state.matches = [];
+    const result = await useThreadActions().archiveThread(target);
+    expect(result._tag).toBe("Success");
+    expect(commands.archive).toHaveBeenCalledOnce();
+    expect(newThread).not.toHaveBeenCalled();
+  });
+
   it("unarchives and returns to the thread when archiving left it", async () => {
     const add = vi.spyOn(toastManager, "add").mockReturnValue("toast");
     router.state.matches[0]!.params = {
@@ -189,6 +214,135 @@ describe("archive Undo", () => {
     await useThreadActions().archiveThread(target);
     expect(add).not.toHaveBeenCalled();
   });
+});
+
+describe("archive support under server version skew", () => {
+  it.each([
+    { support: undefined, bulk: false },
+    { support: false, bulk: false },
+    { support: undefined, bulk: true },
+    { support: false, bulk: true },
+  ])(
+    "requires an update before querying or mutating (support=$support, bulk=$bulk)",
+    async ({ support, bulk }) => {
+      familyState.archiveSupport = support;
+      const actions = useThreadActions();
+      const failure = bulk
+        ? (await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]))
+            ?.mutationFailure
+        : await actions.archiveThread(target);
+      expect(failure?._tag).toBe("Failure");
+      if (failure?._tag !== "Failure") throw new Error("Expected an update-required error");
+      expect(Cause.squash(failure.cause)).toMatchObject({
+        message:
+          "Update this environment's server before archiving threads and their subagents safely.",
+      });
+      expect(archiveFamilyQuery).not.toHaveBeenCalled();
+      expect(commands.archive).not.toHaveBeenCalled();
+      expect(archiveDialog).not.toHaveBeenCalled();
+    },
+  );
+
+  it("checks every selected environment before a mixed bulk archive reads any family", async () => {
+    const other = { ...target, environmentId: EnvironmentId.make("older-environment") };
+    familyState.unsupportedEnvironments.add(other.environmentId);
+    const outcome = await useThreadActions().archiveThreads([
+      { threadRef: target, threadKey: "undo-env:thread" },
+      { threadRef: other, threadKey: "older-environment:thread" },
+    ]);
+    expect(outcome?.mutationFailure?._tag).toBe("Failure");
+    expect(archiveFamilyQuery).not.toHaveBeenCalled();
+    expect(commands.archive).not.toHaveBeenCalled();
+  });
+});
+
+describe("stranded archive retry navigation", () => {
+  it.each([
+    { source: "provider", choice: "stop_and_archive", route: "child", leaves: true, nested: false },
+    { source: "mcp", choice: "promote", route: "child", leaves: false, nested: false },
+    { source: "mcp", choice: "promote", route: "owner", leaves: true, nested: false },
+    { source: "provider", choice: "promote", route: "child", leaves: false, nested: true },
+  ] as const)(
+    "$choice of $source child on $route route leaves=$leaves",
+    async ({ source, choice, route, leaves, nested }) => {
+      const ownerId = ThreadId.make("archived-owner");
+      const childId = ThreadId.make("stranded-child");
+      const keptOwnerId = ThreadId.make("kept-owner");
+      const inactiveId = ThreadId.make("inactive-intermediate");
+      const expectedChildThreadIds = nested ? [keptOwnerId, childId] : [childId];
+      const pending = {
+        threadId: ownerId,
+        commandId: CommandId.make("failed-archive"),
+        childDisposition: "stop_and_archive" as const,
+        childThreadIds: expectedChildThreadIds,
+        archiveThreadIds: [ownerId, ...expectedChildThreadIds],
+        promoteThreadIds: [],
+        status: "failed" as const,
+      };
+      const owner = makeThreadFixture({
+        id: ownerId,
+        environmentId: target.environmentId,
+        archivedAt: "2026-01-01T00:00:00.000Z",
+        archivePending: pending,
+      });
+      const childShell = makeThreadFixture({
+        id: childId,
+        environmentId: owner.environmentId,
+        archivePending: pending,
+        lineage: {
+          rootThreadId: ownerId,
+          parentThreadId: nested ? inactiveId : ownerId,
+          relationshipToParent: "subagent",
+        },
+      });
+      const child = { ...childShell, source: { ...childShell.source, creationSource: source } };
+      familyState.threads = [child];
+      const branch = nested
+        ? [
+            makeThreadFixture({
+              id: keptOwnerId,
+              environmentId: owner.environmentId,
+              archivePending: pending,
+              lineage: {
+                rootThreadId: ownerId,
+                parentThreadId: ownerId,
+                relationshipToParent: "subagent",
+              },
+            }),
+            makeThreadFixture({
+              id: inactiveId,
+              environmentId: owner.environmentId,
+              archivedAt: "2026-01-01T00:00:00.000Z",
+              lineage: {
+                rootThreadId: ownerId,
+                parentThreadId: keptOwnerId,
+                relationshipToParent: "subagent",
+              },
+            }),
+          ]
+        : [];
+      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [owner, ...branch, child] });
+      router.state.matches[0]!.params = {
+        environmentId: target.environmentId,
+        threadId: route === "child" ? childId : ownerId,
+      };
+      archiveDialog.mockImplementation(async (request) => {
+        expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      await useThreadActions().archiveThread({ ...target, threadId: childId });
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: { threadId: ownerId, childDisposition: choice, expectedChildThreadIds },
+      });
+      expect(newThread).toHaveBeenCalledTimes(leaves ? 1 : 0);
+      await currentUndo()();
+      expect(commands.unarchive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: { threadId: ownerId },
+      });
+    },
+  );
 });
 
 describe("archive family confirmation", () => {
@@ -424,6 +578,24 @@ describe("bulk archive progress", () => {
         },
       ]);
       expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["stop_and_archive", "promote"] as const)(
+    "handles the open descendant view after a bulk %s choice",
+    async (choice) => {
+      const { selected, children } = seedBulkFamilies();
+      router.state.matches[0]!.params = {
+        environmentId: target.environmentId,
+        threadId: children[0]!.id,
+      };
+      archiveDialog.mockImplementation(async (request) => {
+        expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      await useThreadActions().archiveThreads([selected[0]!]);
+      expect(newThread).toHaveBeenCalledTimes(choice === "stop_and_archive" ? 1 : 0);
+      expect(archiveDialog).toHaveBeenCalledOnce();
     },
   );
 

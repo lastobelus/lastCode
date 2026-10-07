@@ -11,6 +11,7 @@ import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import {
   archiveChildNeedsAttention,
   archiveRetryThreadId,
+  THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
 } from "@t3tools/client-runtime/state/thread-archive";
 import {
   AuthOrchestrationOperateScope,
@@ -55,6 +56,7 @@ import {
   readEnvironmentSupportsPinReorder,
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
+  readEnvironmentSupportsArchiveFamilies,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsWorktreeCleanup,
   readEnvironmentSupportsVisitedTracking,
@@ -92,6 +94,7 @@ function resolveArchiveFamily(threads: readonly EnvironmentThreadShell[], target
   );
   return {
     ...family,
+    keptThreadIds: keptIds,
     canPromote:
       family.promotableChildren.length > 0 &&
       family.protectedChildren.every((child) => keptIds.has(child.id)),
@@ -508,8 +511,13 @@ export function useThreadActions() {
           expectedChildThreadIds: ThreadId[];
         };
         familyOwner?: EnvironmentThreadShell;
+        familySnapshot?: ReturnType<typeof resolveArchiveFamily>;
       } = {},
     ) => {
+      const permissionFailure = threadOperationFailure(target);
+      if (permissionFailure) return permissionFailure;
+      if (!readEnvironmentSupportsArchiveFamilies(target.environmentId))
+        return AsyncResult.failure(Cause.fail(new Error(THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE)));
       const resolved =
         opts.familyOwner?.id === target.threadId &&
         opts.familyOwner.environmentId === target.environmentId
@@ -532,9 +540,8 @@ export function useThreadActions() {
       }
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
-      const shouldNavigateToDraft =
-        currentRouteThreadRef?.threadId === threadRef.threadId &&
-        currentRouteThreadRef.environmentId === threadRef.environmentId;
+      let archivedChildDisposition: ArchiveChildDisposition =
+        familyChoice?.childDisposition ?? "stop_and_archive";
       let action: ReturnType<typeof ThreadUndo.begin> | undefined;
       // Bulk actions already read every family before gathering one shared choice.
       const familyResult = familyChoice
@@ -561,10 +568,14 @@ export function useThreadActions() {
         thread = owner;
       }
       const family =
-        familyResult === null ? null : resolveArchiveFamily(familyResult.value, threadRef);
+        familyResult === null
+          ? (opts.familySnapshot ?? null)
+          : resolveArchiveFamily(familyResult.value, threadRef);
       const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
       const expectedChildThreadIds = family?.children.map((child) => child.id) ?? [];
       const mutate = (childDisposition?: ArchiveChildDisposition) => {
+        archivedChildDisposition =
+          familyChoice?.childDisposition ?? childDisposition ?? "stop_and_archive";
         action?.finish();
         action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
         return archiveThreadMutation({
@@ -582,7 +593,11 @@ export function useThreadActions() {
         });
       };
       let archiveResult: Awaited<ReturnType<typeof mutate>> | undefined;
-      if (family !== null && (activeChildren.length > 0 || family.protectedChildren.length > 0)) {
+      if (
+        !familyChoice &&
+        family !== null &&
+        (activeChildren.length > 0 || family.protectedChildren.length > 0)
+      ) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
           children: family.children,
@@ -621,6 +636,14 @@ export function useThreadActions() {
         action.finish();
         return archiveResult;
       }
+      const shouldNavigateToDraft =
+        currentRouteThreadRef !== null &&
+        currentRouteThreadRef.environmentId === threadRef.environmentId &&
+        (currentRouteThreadRef.threadId === threadRef.threadId ||
+          ((currentRouteThreadRef.threadId === target.threadId ||
+            family?.children.some((child) => child.id === currentRouteThreadRef.threadId)) &&
+            (archivedChildDisposition !== "promote" ||
+              !family?.keptThreadIds.has(currentRouteThreadRef.threadId))));
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -661,6 +684,17 @@ export function useThreadActions() {
 
   const archiveThreads = useCallback(
     async (selected: ReadonlyArray<{ threadKey: string; threadRef: ScopedThreadRef }>) => {
+      const unsupported = selected.some(
+        ({ threadRef }) => !readEnvironmentSupportsArchiveFamilies(threadRef.environmentId),
+      );
+      if (unsupported)
+        return {
+          archivedThreadKeys: [],
+          mutationFailure: AsyncResult.failure(
+            Cause.fail(new Error(THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE)),
+          ),
+          followupFailures: [],
+        };
       const families: Array<
         (typeof selected)[number] & {
           family: ReturnType<typeof resolveArchiveFamily>;
@@ -741,6 +775,7 @@ export function useThreadActions() {
                 expectedChildThreadIds: family.children.map((child) => child.id),
               },
               familyOwner: owner,
+              familySnapshot: family,
               onArchived,
             }),
         });

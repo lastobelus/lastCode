@@ -1,5 +1,12 @@
 import type { ThreadId } from "./baseSchemas.ts";
-import type { OrchestrationV2AppThreadLineage } from "./orchestrationV2.ts";
+import type {
+  OrchestrationV2AppThread,
+  OrchestrationV2AppThreadLineage,
+} from "./orchestrationV2.ts";
+
+export function getThreadArchivePlan(pending: OrchestrationV2AppThread["archivePending"]) {
+  return pending != null && "archiveThreadIds" in pending ? pending : null;
+}
 
 interface FamilyThread {
   readonly id: ThreadId;
