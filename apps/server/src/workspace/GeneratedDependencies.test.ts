@@ -506,6 +506,7 @@ type SweepCase =
   | "whole-shared-session-detached"
   | "whole-shared-session-error-released"
   | "whole-shared-session-error-live"
+  | "whole-shared-session-error-ownership-changed"
   | "disabled"
   | "recent"
   | "queued"
@@ -525,6 +526,10 @@ type SweepCase =
   | "initial-revision-changed"
   | "unrelated-streaming"
   | "batch"
+  | "provider-history-batch"
+  | "provider-binding-changed"
+  | "provider-cwd-changed"
+  | "provider-event-during-capture"
   | "session"
   | "session-error-released"
   | "session-error-live"
@@ -533,6 +538,8 @@ type SweepCase =
   | "shared-session-detached"
   | "shared-session-error-released"
   | "shared-session-error-live"
+  | "shared-session-error-ownership-changed"
+  | "shared-session-error-ownership-during-capture"
   | "shared-session-error-with-live-sibling"
   | "shared-session-starting"
   | "shared-session-running"
@@ -572,8 +579,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  const batch = mode === "batch" || mode === "provider-history-batch";
   let secondThread: typeof thread | null = null;
-  if (mode === "batch") {
+  if (batch) {
     const secondPath = f.path.join(f.input.managedWorktreesRoot, "second-feature");
     yield* f.runGit(f.repository, ["worktree", "add", "-b", "second-feature", secondPath]);
     const secondInstall = f.path.join(secondPath, "node_modules");
@@ -605,6 +613,16 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const detachedSession = mode.endsWith("-detached");
   const releasedErrorSession = mode.endsWith("-error-released");
   const liveErrorSession = mode.endsWith("-error-live");
+  const managerOwnershipCase =
+    mode === "whole-shared-session-error-ownership-changed" ||
+    mode === "shared-session-error-ownership-changed" ||
+    mode === "shared-session-error-ownership-during-capture";
+  let managerOwnsSession = liveErrorSession;
+  let ownershipRevision = 0;
+  const acquireManagerOwnership = () => {
+    managerOwnsSession = true;
+    ownershipRevision++;
+  };
   const visibleDeletedThread = wholeSharedDeleted
     ? {
         ...thread,
@@ -717,6 +735,35 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('sibling-session', ${threadId})`;
     }
   }
+  const providerPayload = (id: string, status: "error" | "ready", cwd: string) =>
+    encodeSession(
+      decodeSession({
+        id,
+        driver: "codex",
+        providerInstanceId: "codex",
+        status,
+        cwd,
+        model: null,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: DateTime.formatIso(at(30)),
+        updatedAt: DateTime.formatIso(at(20)),
+        lastError: status === "error" ? "Fixture provider error" : null,
+      }),
+    );
+  if (mode === "provider-history-batch") {
+    for (let index = 0; index < 40; index++) {
+      const sessionId = `released-session-${index}`;
+      const payload = providerPayload(sessionId, "error", f.repository);
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES (${sessionId}, 'error', ${payload})`;
+      for (const candidateId of [threadId, secondThread!.id])
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES (${sessionId}, ${candidateId})`;
+    }
+  }
+  if (mode === "provider-cwd-changed" || mode === "provider-event-during-capture") {
+    const status = mode === "provider-cwd-changed" ? "ready" : "error";
+    const payload = providerPayload("changed-session", status, f.repository);
+    yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('changed-session', ${status}, ${payload})`;
+  }
   if (mode === "batch") {
     yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
     for (const history of unrelatedHistory.slice(0, 8)) {
@@ -744,6 +791,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     updatedAt: "2026-05-01T00:00:00.000Z",
   };
   let reads = 0;
+  const sessionLookups = new Map<string, number>();
+  let providerEventInserted = false;
   const targetedReads: ThreadId[] = [];
   let processReads = 0;
   setProcessReader(() => {
@@ -781,6 +830,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
+          if (reads === 2 && mode === "whole-shared-session-error-ownership-changed")
+            acquireManagerOwnership();
           if (reads === 1 && mode === "initial-revision-changed")
             yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated')`;
           const threads =
@@ -813,6 +864,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getThreadShell: (requestedId) =>
         Effect.gen(function* () {
           targetedReads.push(requestedId);
+          if (targetedReads.length === 1 && mode === "shared-session-error-ownership-changed")
+            acquireManagerOwnership();
           if (targetedReads.length > 2 && mode === "policy-changed")
             settings = {
               ...settings,
@@ -834,6 +887,27 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           }
           if (targetedReads.length === 1 && mode === "unrelated-streaming")
             yield* sql`INSERT INTO orchestration_events VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated')`;
+          if (targetedReads.length === 1 && mode === "provider-binding-changed") {
+            const payload = providerPayload("changed-session", "error", f.repository);
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('changed-session', 'error', ${payload})`;
+                yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('changed-session', ${threadId})`;
+                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', 'changed-session', 'provider-session.attached')`;
+              }),
+            );
+            providerEventInserted = true;
+          }
+          if (targetedReads.length === 1 && mode === "provider-cwd-changed") {
+            const payload = providerPayload("changed-session", "ready", f.input.worktreePath);
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET payload_json = ${payload} WHERE provider_session_id = 'changed-session'`;
+                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', 'changed-session', 'provider-session.updated')`;
+              }),
+            );
+            providerEventInserted = true;
+          }
           if (requestedId === secondThread?.id) return secondThread;
           if (requestedId === visibleDeletedThread?.id) return visibleDeletedThread;
           if (requestedId !== thread.id || (deleted && mode !== "deleted-visible-pending"))
@@ -843,7 +917,28 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
     Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-      isLive: () => Effect.succeed(liveErrorSession),
+      ownershipRevision: Effect.sync(() => ownershipRevision),
+      isLive: (sessionId) =>
+        Effect.gen(function* () {
+          sessionLookups.set(sessionId, (sessionLookups.get(sessionId) ?? 0) + 1);
+          const live = managerOwnsSession || mode === "provider-binding-changed";
+          if (
+            mode === "shared-session-error-ownership-during-capture" &&
+            sessionLookups.get(sessionId) === 1
+          )
+            acquireManagerOwnership();
+          if (mode === "provider-event-during-capture" && sessionLookups.get(sessionId) === 1) {
+            const payload = providerPayload(sessionId, "ready", f.input.worktreePath);
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET status = 'ready', payload_json = ${payload} WHERE provider_session_id = ${sessionId}`;
+                yield* sql`INSERT INTO orchestration_events VALUES (1, 'provider-session', ${sessionId}, 'provider-session.updated')`;
+              }),
+            );
+            providerEventInserted = true;
+          }
+          return live;
+        }).pipe(Effect.orDie),
     }),
     Layer.mock(Settings.ServerSettingsService)({
       getSettings: Effect.sync(() => settings),
@@ -895,8 +990,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "shared-session-stopped" ||
     mode === "shared-session-detached" ||
     mode === "unrelated-streaming" ||
-    mode === "batch";
-  if (mode === "batch") {
+    batch;
+  if (batch) {
     assert.equal(reads, 1);
     assert.include(targetedReads, threadId);
     assert.include(targetedReads, secondThread!.id);
@@ -906,6 +1001,22 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       "export const value = 1;\n",
     );
   }
+  if (mode === "provider-history-batch") {
+    assert.equal(sessionLookups.size, 40);
+    for (const count of sessionLookups.values()) assert.equal(count, 1);
+  }
+  if (managerOwnershipCase) {
+    assert.equal(ownershipRevision, 1);
+    assert.isTrue(managerOwnsSession);
+    assert.isFalse(providerEventInserted);
+    assert.deepStrictEqual(yield* sql`SELECT sequence FROM orchestration_events`, []);
+  }
+  if (
+    mode === "provider-binding-changed" ||
+    mode === "provider-cwd-changed" ||
+    mode === "provider-event-during-capture"
+  )
+    assert.isTrue(providerEventInserted);
   if (mode === "initial-revision-changed") {
     assert.equal(targetedReads.length, 0);
     assert.equal(dependencyInspections(), 0);
@@ -936,6 +1047,7 @@ it.effect.each([
   "whole-shared-session-detached",
   "whole-shared-session-error-released",
   "whole-shared-session-error-live",
+  "whole-shared-session-error-ownership-changed",
   "disabled",
   "recent",
   "queued",
@@ -955,6 +1067,10 @@ it.effect.each([
   "initial-revision-changed",
   "unrelated-streaming",
   "batch",
+  "provider-history-batch",
+  "provider-binding-changed",
+  "provider-cwd-changed",
+  "provider-event-during-capture",
   "session",
   "session-error-released",
   "session-error-live",
@@ -963,6 +1079,8 @@ it.effect.each([
   "shared-session-detached",
   "shared-session-error-released",
   "shared-session-error-live",
+  "shared-session-error-ownership-changed",
+  "shared-session-error-ownership-during-capture",
   "shared-session-error-with-live-sibling",
   "shared-session-starting",
   "shared-session-running",

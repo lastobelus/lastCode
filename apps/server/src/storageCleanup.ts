@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
   OrchestrationV2ThreadShell,
-  OrchestrationV2ProviderSession,
+  ProviderSessionId,
   ProjectId,
   ServerSettings,
   ServerSettingsError,
@@ -199,42 +199,64 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const hasLiveProviderSession = Effect.fn("StorageCleanup.hasLiveProviderSession")(function* (
-    worktreePath: string,
-    threadId: ThreadId,
-  ) {
-    // Shared sessions retain their first cwd; every attached thread's
-    // workspace remains protected until its runtime releases or detaches.
-    // An error can be recoverable or terminal; the live manager distinguishes them.
-    const isLive = (session: OrchestrationV2ProviderSession) =>
-      session.status === "error"
-        ? providerSessions.isLive(session.id)
-        : Effect.succeed(session.status !== "stopped");
-    const boundRows = yield* sql<{ payload_json: string }>`
-        SELECT session.payload_json FROM orchestration_v2_projection_provider_session_bindings binding
-        JOIN orchestration_v2_projection_provider_sessions session
-          ON session.provider_session_id = binding.provider_session_id
-        WHERE binding.thread_id = ${threadId} AND session.status != 'stopped'
+  const makeProviderSessionGuard = Effect.fn("StorageCleanup.makeProviderSessionGuard")(
+    function* () {
+      const runtimeRevision = yield* providerSessions.ownershipRevision;
+      const sequence = yield* readApplicationSequence();
+      const rows = yield* sql<{ payload_json: string }>`
+      SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
+    `;
+      const sessions = yield* Effect.forEach(rows, (row) => decodeCleanupSession(row.payload_json));
+      const protectedSessions = (yield* Effect.forEach(sessions, (session) =>
+        session.status === "error"
+          ? providerSessions.isLive(session.id).pipe(Effect.map((live) => (live ? session : null)))
+          : Effect.succeed(session),
+      )).filter((session) => session !== null);
+      const sessionIds = new Set(protectedSessions.map((session) => session.id));
+      const bindings =
+        sessionIds.size === 0
+          ? []
+          : yield* sql<{ provider_session_id: ProviderSessionId; thread_id: ThreadId }>`
+      SELECT provider_session_id, thread_id FROM orchestration_v2_projection_provider_session_bindings
+      WHERE provider_session_id IN ${sql.in([...sessionIds])}
+    `;
+      // Shared sessions retain their first cwd, so index every live attachment too.
+      const protectedThreads = new Set(
+        bindings
+          .filter((binding) => sessionIds.has(binding.provider_session_id))
+          .map((binding) => binding.thread_id),
+      );
+      const protectedAncestors = new Set<string>();
+      for (const session of protectedSessions) {
+        let ancestor = path.resolve(session.cwd);
+        while (true) {
+          protectedAncestors.add(ancestor);
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) break;
+          ancestor = parent;
+        }
+      }
+      return Effect.fn("StorageCleanup.hasLiveProviderSession")(function* (
+        worktreePath: string,
+        threadId: ThreadId,
+      ) {
+        // Session projection writes and events commit together. Defer this batch
+        // on attachment/status/cwd changes instead of decoding history again.
+        // Startup holds the candidate lease through its durable attachment.
+        const changed = yield* sql`
+        SELECT 1 FROM orchestration_events
+        WHERE sequence > ${sequence} AND event_type LIKE 'provider-session.%'
+        LIMIT 1
       `;
-    const boundSessions = yield* Effect.forEach(boundRows, (row) =>
-      decodeCleanupSession(row.payload_json),
-    );
-    const boundLive = yield* Effect.forEach(boundSessions, isLive);
-    if (boundLive.some(Boolean)) return true;
-    const sessionRows = yield* sql<{ payload_json: string }>`
-        SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
-      `;
-    const sessions = yield* Effect.forEach(sessionRows, (row) =>
-      decodeCleanupSession(row.payload_json),
-    );
-    const liveCwds = yield* Effect.forEach(sessions, (session) => {
-      const cwd = path.resolve(session.cwd);
-      return cwd === worktreePath || inside(worktreePath, cwd)
-        ? isLive(session)
-        : Effect.succeed(false);
-    });
-    return liveCwds.some(Boolean);
-  });
+        return (
+          changed.length > 0 ||
+          (yield* providerSessions.ownershipRevision) !== runtimeRevision ||
+          protectedThreads.has(threadId) ||
+          protectedAncestors.has(path.resolve(worktreePath))
+        );
+      });
+    },
+  );
 
   // Local threads under another project need not have a worktreePath of their own.
   const containsProjectRoot = Effect.fn("StorageCleanup.containsProjectRoot")(function* (
@@ -338,6 +360,7 @@ export const make = Effect.gen(function* () {
     if (!(yield* fs.exists(config.worktreesDir))) return;
     const processCwds = yield* dependencies.processWorkingDirectories;
     if (processCwds === null) return;
+    const hasLiveProviderSession = yield* makeProviderSessionGuard();
     const sequence = yield* readApplicationSequence();
     const snapshot = yield* readThreads();
     const groups = Map.groupBy(
@@ -445,7 +468,10 @@ export const make = Effect.gen(function* () {
           if (!status.isRepo || status.branch !== thread.branch) return false;
           // Re-read policy, activity, roots, leases and durable pending state
           // after Git/session calls as well as after dependency inspection.
-          return yield* candidateStillIdle();
+          return (
+            (yield* candidateStillIdle()) &&
+            !(yield* hasLiveProviderSession(worktreePath, thread.id))
+          );
         });
         if (!(yield* revalidate())) return;
         const inspection = yield* dependencies.inspect({
@@ -511,6 +537,8 @@ export const make = Effect.gen(function* () {
       ...[...groups.values()].flatMap((group) => (group.length === 1 ? [group[0]!] : [])),
       ...deletedThreads.filter((thread) => !groups.has(path.resolve(thread.worktreePath!))),
     ];
+    if (candidates.length === 0) return;
+    const hasLiveProviderSession = yield* makeProviderSessionGuard();
     for (const thread of candidates) {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
       if (!worktreeCleanupEnabled(settings)) continue;
@@ -662,6 +690,7 @@ export const make = Effect.gen(function* () {
           )
         )
           return;
+        if (yield* hasLiveProviderSession(worktreePath, thread.id)) return;
         yield* git.removeWorktree({ cwd: project.workspaceRoot, path: worktreePath, force: false });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch and path: ProviderTurnStartService recreates the checkout

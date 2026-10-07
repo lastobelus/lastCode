@@ -2156,8 +2156,10 @@ it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all 
         runtimePolicy,
       });
 
+      const openedRevision = yield* manager.ownershipRevision;
       yield* TestClock.adjust("500 millis");
       assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.equal(yield* manager.ownershipRevision, openedRevision);
       yield* TestClock.adjust("500 millis");
       yield* Effect.yieldNow;
 
@@ -2679,6 +2681,7 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
       });
       assert.isFalse(yield* runtime.isShuttingDown!);
       assert.isTrue(yield* manager.isLive(providerSessionId));
+      const openedRevision = yield* manager.ownershipRevision;
       yield* manager.release({
         providerSessionId,
         reason: "runtime_error",
@@ -2692,6 +2695,7 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
 
       assert.isTrue(Option.isNone(liveSession));
       assert.isFalse(yield* manager.isLive(providerSessionId));
+      assert.isAbove(yield* manager.ownershipRevision, openedRevision);
       assert.equal(runtimeState.closeCount, 1);
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
       assert.equal(projection.providerSessions.at(-1)?.lastError, "process exited");
@@ -2721,12 +2725,15 @@ it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close 
         events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
       });
       yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const openedRevision = yield* manager.ownershipRevision;
       const release = yield* manager
         .release({ providerSessionId, reason: "runtime_error", detail: "process failed" })
         .pipe(Effect.forkChild);
       yield* Deferred.await(closeEntered);
       assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
       assert.isTrue(yield* manager.isLive(providerSessionId));
+      const closingRevision = yield* manager.ownershipRevision;
+      assert.isAbove(closingRevision, openedRevision);
 
       yield* TestClock.adjust("30 seconds");
       yield* Fiber.join(release);
@@ -2734,10 +2741,12 @@ it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close 
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
       assert.isTrue(yield* manager.isLive(providerSessionId));
       assert.equal((yield* Ref.get(state)).closeCount, 0);
+      assert.equal(yield* manager.ownershipRevision, closingRevision);
 
       yield* Deferred.succeed(allowClose, undefined);
       yield* manager.teardownThread({ threadId, providerSessionId });
       assert.isFalse(yield* manager.isLive(providerSessionId));
+      assert.isAbove(yield* manager.ownershipRevision, closingRevision);
       assert.equal((yield* Ref.get(state)).closeCount, 1);
     });
     yield* effect.pipe(

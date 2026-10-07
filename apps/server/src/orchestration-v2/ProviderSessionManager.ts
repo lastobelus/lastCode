@@ -161,6 +161,8 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
   /** Includes unfinished runtime shutdown without extending its idle lifetime. */
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Invalidates workspace protection even when ownership persistence fails. */
+  readonly ownershipRevision: Effect.Effect<number>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -402,6 +404,7 @@ export const layerWithOptions = (
       const threadAttachment = yield* KeyedLock.make<string>();
       const detachSerialization = yield* KeyedLock.make<string>();
       const closingSessionScopes = new Map<string, Set<Deferred.Deferred<void>>>();
+      let ownershipRevision = 0;
       const pendingThreadUnloads = new Map<
         string,
         {
@@ -863,6 +866,7 @@ export const layerWithOptions = (
               const closing = closingSessionScopes.get(key) ?? new Set<Deferred.Deferred<void>>();
               closing.add(existing.scopeClosed);
               closingSessionScopes.set(key, closing);
+              ownershipRevision += 1;
               updated.delete(key);
               return ["removed", updated] as const;
             }),
@@ -918,7 +922,7 @@ export const layerWithOptions = (
                             if (Exit.isSuccess(exit)) {
                               const key = sessionKey(input.providerSessionId);
                               const closing = closingSessionScopes.get(key);
-                              closing?.delete(entry.scopeClosed);
+                              if (closing?.delete(entry.scopeClosed)) ownershipRevision += 1;
                               if (closing?.size === 0) closingSessionScopes.delete(key);
                               for (const [key, pending] of pendingThreadUnloads) {
                                 if (pending.entry.runtime === entry.runtime)
@@ -1205,6 +1209,7 @@ export const layerWithOptions = (
               ...entry,
               attachedThreadIds: new Set([...entry.attachedThreadIds, input.threadId]),
             });
+            ownershipRevision += 1;
             return [true, updated] as const;
           }),
         );
@@ -1229,6 +1234,7 @@ export const layerWithOptions = (
             attachedThreadIds,
             loadedProviderThreadKeyByThread,
           });
+          ownershipRevision += 1;
           return updated;
         });
 
@@ -1867,6 +1873,7 @@ export const layerWithOptions = (
                 };
                 const updated = new Map(current);
                 updated.set(key, updatedEntry);
+                ownershipRevision += 1;
                 return [Option.some(updatedEntry), updated] as const;
               });
               // Plain detaches deliberately do not revoke: a detached thread's
@@ -2114,6 +2121,7 @@ export const layerWithOptions = (
               yield* Ref.update(sessions, (current) => {
                 const updated = new Map(current);
                 updated.set(key, entry);
+                ownershipRevision += 1;
                 return updated;
               });
               // The entry now guards the credential via its recorded id, so
@@ -2148,6 +2156,7 @@ export const layerWithOptions = (
             ? open
             : withWorkspaceLease(input.runtimePolicy.cwd, open);
         },
+        ownershipRevision: Effect.sync(() => ownershipRevision),
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => {
