@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import { readCarryGroupChain } from "./lastcode-carry-replay.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
+import { normalizeCheckpointCommits } from "./lastcode-quiet-references.ts";
 
 const NIGHTLY_A = "v9.9.9-nightly.20990101.1";
 const NIGHTLY_B = "v9.9.9-nightly.20990102.2";
@@ -35,6 +36,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-carry-set.ts",
   "scripts/lastcode-checkpoint-history.ts",
   "scripts/lastcode-checkpoint.ts",
+  "scripts/lastcode-quiet-references.ts",
   "scripts/lastcode-migration-history.ts",
   "scripts/lastcode-migration-validation.ts",
   "scripts/lastcode-lock.mjs",
@@ -212,7 +214,7 @@ function recoveryWorktree(repo: string): string {
   );
 }
 
-function historicalFixture(conflict = false) {
+function historicalFixture(conflict = false, sourceMessage?: string) {
   const fixture = initFixture();
   const { repo } = fixture;
   const manifest = JSON.parse(
@@ -225,6 +227,7 @@ function historicalFixture(conflict = false) {
     "node_modules/.bin/vp",
     `#!/bin/sh
 if [ "$1" = test ] && [ "$3" = apps/server/src/persistence/DatabaseMigrations.test.ts ] && [ "$FIXTURE_FAIL_MIGRATIONS" = 1 ]; then exit 79; fi
+if [ "$1" = install ] && [ -n "$FIXTURE_VALIDATED_HEAD" ]; then git rev-parse HEAD > "$FIXTURE_VALIDATED_HEAD"; fi
 if [ "$1" = install ] && [ "$FIXTURE_MERGE_PHASE" = smoke ] && [ -n "$FIXTURE_MERGE_COMMIT" ] && [ ! -f "$FIXTURE_MERGE_MARKER" ]; then
   git --git-dir="$FIXTURE_ORIGIN" update-ref refs/heads/lastcode/main "$FIXTURE_MERGE_COMMIT" "$FIXTURE_SOURCE" || exit 1
   touch "$FIXTURE_MERGE_MARKER"
@@ -236,7 +239,7 @@ exit 0
   const base = commit(repo, "fixture upstream base");
   git(repo, ["tag", NIGHTLY_A, base]);
   write(repo, "downstream.txt", "downstream behavior\n");
-  const source = commit(repo, "downstream source");
+  const source = commit(repo, "downstream source", sourceMessage);
   git(repo, ["push", "--quiet", "origin", `${source}:refs/heads/lastcode/main`]);
   annotatedCheckpoint(fixture, NIGHTLY_A, source, source);
   checkout(repo, "upstream-main", base);
@@ -246,7 +249,7 @@ exit 0
   git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_A, NIGHTLY_B]);
   checkout(repo, "lastcode-source", source);
   write(repo, "merged-during-checkpoint.txt", "concurrent merge must survive\n");
-  const merged = commit(repo, "concurrent feature merge");
+  const merged = commit(repo, "concurrent feature merge", sourceMessage);
   git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/fixture-merge`]);
   checkout(repo, "lastcode-source", source);
   NodeFS.writeFileSync(
@@ -282,6 +285,117 @@ done
     },
   };
 }
+
+describe("quiet checkpoint publication", () => {
+  it.each(["nightly", "revision", "recovery", "recovery-after-normalization"] as const)(
+    "publishes and validates quiet messages during %s generation",
+    (mode) => {
+      const references =
+        "Upstream: https://github.com/example/upstream/pull/42\nRelated: example/upstream#43";
+      const isRecovery = mode.startsWith("recovery");
+      const { fixture, source, merged, environment } = historicalFixture(isRecovery, references);
+      try {
+        const { repo } = fixture;
+        const validatedHead = NodePath.join(fixture.root, "validated-head");
+        const validationEnvironment = { ...environment, FIXTURE_VALIDATED_HEAD: validatedHead };
+        const nightly = NIGHTLY_B;
+        const tag =
+          mode === "revision" ? `lastcode/revision/${nightly}.1` : `lastcode/checkpoint/${nightly}`;
+        if (mode === "revision") {
+          const first = checkpoint(fixture, ["--push-tags"], environment);
+          assert.equal(first.status, 0, first.stderr || first.stdout);
+          git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
+        }
+        if (isRecovery) {
+          const failed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
+          assert.notEqual(failed.status, 0);
+          const retained = recoveryWorktree(repo);
+          write(retained, "downstream.txt", "upstream behavior\ndownstream behavior\n");
+          git(retained, ["add", "downstream.txt"]);
+          NodeChildProcess.execFileSync("git", ["rebase", "--continue"], {
+            cwd: retained,
+            env: { ...process.env, GIT_EDITOR: "true" },
+          });
+          // Simulate a selection saved before message normalization was installed.
+          const selectionPath = NodePath.join(
+            git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+            "lastcode-recovery-selection.json",
+          );
+          NodeFS.writeFileSync(
+            selectionPath,
+            JSON.stringify({
+              head: git(retained, ["rev-parse", "HEAD"]),
+              sourceCommit: source,
+              nightlyTag: nightly,
+            }),
+          );
+          if (mode === "recovery-after-normalization") {
+            // Simulate a crash after moving HEAD but before updating the selection.
+            normalizeCheckpointCommits(retained, nightly);
+          }
+        }
+        const result = checkpoint(
+          fixture,
+          mode === "revision" ? ["--push-tags"] : ["--push-tags", "--promote"],
+          validationEnvironment,
+        );
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        const published = remoteCommit(fixture.origin, `refs/tags/${tag}`);
+        assert.equal(NodeFS.readFileSync(validatedHead, "utf8").trim(), published);
+        assert.equal(
+          remoteCommit(
+            fixture.origin,
+            `refs/lastcode/sources/${nightly}${mode === "revision" ? ".1" : ""}`,
+          ),
+          mode === "revision" ? merged : source,
+        );
+        const messages = git(repo, ["log", "--format=%B", `${nightly}..${published}`]);
+        assert.include(messages, "https://redirect.github.com/example/upstream/pull/42");
+        assert.include(messages, "https://redirect.github.com/example/upstream/issues/43");
+        assert.notInclude(messages, "https://github.com/example/upstream/");
+        assert.notInclude(messages, "example/upstream#43");
+        assert.include(git(repo, ["show", "-s", "--format=%B", source]), references);
+        assert.equal(
+          remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_A}`),
+          source,
+        );
+        assert.equal(
+          git(repo, ["show", `${published}:downstream.txt`]),
+          isRecovery ? "upstream behavior\ndownstream behavior" : "downstream behavior",
+        );
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("keeps an existing merge-based source unchanged when a revision needs no replay", () => {
+    const { fixture, source, merged, environment } = historicalFixture();
+    try {
+      const { repo } = fixture;
+      checkout(repo, "side-source", source);
+      write(repo, "side.txt", "side behavior\n");
+      commit(repo, "side work", "Upstream: https://github.com/example/upstream/pull/42");
+      checkout(repo, "merged-source", merged);
+      git(repo, ["merge", "--no-ff", "side-source", "-m", "merge reviewed source"]);
+      const sourceHead = git(repo, ["rev-parse", "HEAD"]);
+      git(repo, ["push", "--quiet", "origin", `${sourceHead}:refs/heads/lastcode/main`]);
+      const result = checkpoint(
+        fixture,
+        ["--revision-only", NIGHTLY_A, "--push-tags"],
+        environment,
+      );
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(
+        remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_A}.1`),
+        sourceHead,
+      );
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), sourceHead);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("pinned checkpoint revisions", () => {
   it("accepts an older published lightweight tag while planning and publishing a revision", () => {
@@ -810,6 +924,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
 });
 
 describe("checkpoint carry lifecycle", () => {
+  // This complete lifecycle executes ten checkpoint subprocesses and two repair rebases.
   it("publishes compact revisions, folds a new source PR, and completes retained conflict recovery", () => {
     const fixture = initFixture();
     try {
@@ -858,6 +973,7 @@ describe("checkpoint carry lifecycle", () => {
         [
           "Carry-Group: tooling",
           "Carry-Fix: fixture#historical-checkpoint-b",
+          "Carry-Upstream: https://github.com/example/upstream/pull/42",
           "Carry-Observation: preserve the latest historical checkpoint tree",
           "Carry-Evidence: fixture://historical-checkpoint-b",
           `Carry-Applies-To: ${NIGHTLY_B}`,
@@ -927,6 +1043,19 @@ describe("checkpoint carry lifecycle", () => {
         "manual integration resolution on B",
       );
       assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
+      const quietProvenance = (head: string, base: string) => {
+        const contribution = readCarryGroupChain(repo, head, base)
+          .flatMap(({ contributions }) => contributions)
+          .find(({ sourceCommit }) => sourceCommit === partitionB);
+        assert.deepStrictEqual(contribution?.metadata["Carry-Upstream"], [
+          "https://redirect.github.com/example/upstream/pull/42",
+        ]);
+        assert.notInclude(
+          git(repo, ["log", "--format=%B", `${base}..${head}`]),
+          "https://github.com/example/upstream/pull/42",
+        );
+      };
+      quietProvenance(compactB, upstreamB);
 
       checkout(repo, "upstream-main", upstreamB);
       const skippedNightly = "v9.9.9-nightly.20990103.2";
@@ -948,6 +1077,7 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
       const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
       assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
+      quietProvenance(compactC, upstreamC);
       assert.equal(
         remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),
         true,
@@ -1003,6 +1133,7 @@ describe("checkpoint carry lifecycle", () => {
         ({ group }) => group === "build-ci",
       );
       assert.equal(buildGroup?.contributions.at(-1)?.sourceCommit, sourceHead);
+      quietProvenance(compactWithPr, upstreamC);
       assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainWithPr);
 
       const rollbackReason = "verify same-source historical rollback";
@@ -1194,6 +1325,7 @@ describe("checkpoint carry lifecycle", () => {
       assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_D}`), mainWithPr);
       assert.equal(NodeFS.existsSync(retained), false);
       assert.equal(readCarryGroupChain(repo, compactD, upstreamD).length, 6);
+      quietProvenance(compactD, upstreamD);
       assert.equal(
         git(repo, ["show", `${compactD}:lifecycle-conflict.txt`]),
         "upstream build behavior\ndownstream build behavior",
@@ -1219,7 +1351,7 @@ describe("checkpoint carry lifecycle", () => {
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   it("blocks the first carry revision when it would drop checkpoint-only resolutions", () => {
     const fixture = initFixture();

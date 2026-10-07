@@ -16,6 +16,10 @@ import * as Effect from "effect/Effect";
 import { acquirePortableLock } from "./lastcode-lock.mjs";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import {
+  isCheckpointMessageRewrite,
+  normalizeCheckpointCommits,
+} from "./lastcode-quiet-references.ts";
+import {
   immutableSourceFetchRefspec,
   installablePublicationArgs,
   readManifestReplayConfiguration,
@@ -1498,6 +1502,8 @@ function runSmokeGate(repoRoot: string, worktree: string): void {
       "run",
       "scripts/lastcode-carry-checkpoint.test.ts",
       "scripts/lastcode-carry-replay.test.ts",
+      "scripts/lastcode-quiet-references.test.ts",
+      "scripts/lastcode-quiet-recovery.test.ts",
       "scripts/lastcode-nightly.test.ts",
       "scripts/lastcode-checkpoint.test.ts",
       "scripts/lastcode-local-ci.test.ts",
@@ -1646,8 +1652,10 @@ function publishRevisionIfNeeded(
       } else {
         rebaseOnto(worktree, plan.ontoRef, plan.replayBase);
       }
-      candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+      candidateCommit = normalizeCheckpointCommits(worktree, plan.nightly.tag);
     }
+    // With no replay, the revision tags the existing published source object.
+    // Keep that history (which may contain merges) rather than manufacturing new commits.
     failurePhase = "smoke";
     if (options.smoke) runSmokeGate(repoRoot, worktree);
     if (
@@ -1904,6 +1912,15 @@ export interface RecoverySelection {
   readonly rollbackReason?: string;
 }
 
+function writeRecoverySelection(path: string, selection: RecoverySelection): void {
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(selection)}\n`, {
+    mode: 0o600,
+    flush: true,
+  });
+  NodeFS.renameSync(temporaryPath, path);
+}
+
 export function carryRecoveryBranch(nightlyTag: string): string {
   if (!parseNightlyTag(nightlyTag))
     throw new Error("Carry recovery requires an exact nightly tag.");
@@ -2095,9 +2112,15 @@ export function assertRecoverySelection(
 ): void {
   if (selection.sourceCommit !== sourceCommit)
     throw new Error("Recovery source changed; incorporate new main commits and select again.");
+  const plan = readCarryReplayPlan(worktree);
   if (
-    git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
-    git(worktree, ["branch", "--show-current"]) !== `sync/nightly/${selection.nightlyTag}`
+    git(worktree, ["branch", "--show-current"]) !== `sync/nightly/${selection.nightlyTag}` ||
+    !isCheckpointMessageRewrite(
+      worktree,
+      plan?.onto ?? selection.nightlyTag,
+      selection.head,
+      git(worktree, ["rev-parse", "HEAD"]),
+    )
   ) {
     throw new Error("Retained recovery head or branch changed; select again.");
   }
@@ -2119,10 +2142,17 @@ export function continueCarryRecovery(input: {
   readonly nightlyTag: string;
 }): string {
   const plan = readCarryReplayPlan(input.worktree);
-  if (!plan) return input.selectedHead;
-  if (git(input.worktree, ["rev-parse", "HEAD"]) !== input.selectedHead) {
+  if (
+    !isCheckpointMessageRewrite(
+      input.worktree,
+      plan?.onto ?? input.nightlyTag,
+      input.selectedHead,
+      git(input.worktree, ["rev-parse", "HEAD"]),
+    )
+  ) {
     throw new Error("Retained carry recovery head changed; inspect and select its exact head.");
   }
+  if (!plan) return normalizeCheckpointCommits(input.worktree, input.nightlyTag);
   const completed = completeCarryReplay(input.worktree);
   if (completed.phase !== "compile") return completed.head;
   console.log(
@@ -2195,14 +2225,16 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       );
       return;
     }
-    const selectedHead = carryPlan
-      ? continueCarryRecovery({
-          repoRoot,
-          worktree,
-          selectedHead: selected.head,
-          nightlyTag: selected.nightlyTag,
-        })
-      : selected.head;
+    const selectedHead = options.dryRun
+      ? selected.head
+      : carryPlan
+        ? continueCarryRecovery({
+            repoRoot,
+            worktree,
+            selectedHead: selected.head,
+            nightlyTag: selected.nightlyTag,
+          })
+        : normalizeCheckpointCommits(worktree, selected.nightlyTag);
     const selection = {
       ...selected,
       head: selectedHead,
@@ -2211,19 +2243,14 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     };
     assertRecoverySelection(worktree, selection, selection.sourceCommit);
     if (!options.dryRun) {
-      const temporaryPath = `${selectionPath}.${process.pid}.tmp`;
-      NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(selection)}\n`, {
-        mode: 0o600,
-        flush: true,
-      });
-      NodeFS.renameSync(temporaryPath, selectionPath);
+      writeRecoverySelection(selectionPath, selection);
     }
     console.log(
       `[lastcode:checkpoint] ${options.dryRun ? "Would select" : "Selected"} repaired ${selection.nightlyTag} at ${selection.head}. Request a service run, then use Wait for Checkpoint.`,
     );
     return;
   }
-  const selection =
+  let selection =
     !options.revisionOnly && NodeFS.existsSync(selectionPath)
       ? parseRecoverySelection(JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")))
       : undefined;
@@ -2437,6 +2464,19 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     let pendingTag: string | undefined;
     let failurePhase: "publication" | "smoke" = "smoke";
     try {
+      const normalizedHead =
+        replay.mode === "carry"
+          ? continueCarryRecovery({
+              repoRoot,
+              worktree,
+              selectedHead: selection.head,
+              nightlyTag: selection.nightlyTag,
+            })
+          : normalizeCheckpointCommits(worktree, selection.nightlyTag);
+      if (normalizedHead !== selection.head) {
+        selection = { ...selection, head: normalizedHead };
+        writeRecoverySelection(selectionPath, selection);
+      }
       runSmokeGate(repoRoot, worktree);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
@@ -3005,7 +3045,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       } else {
         rebaseOnto(worktree, nightly.tag, baseTag);
       }
-      candidateCommit = git(repoRoot, ["rev-parse", "HEAD"], { cwd: worktree });
+      candidateCommit = normalizeCheckpointCommits(worktree, nightly.tag);
       const historicalInstallable = !previousCompact
         ? installables.findLast(
             (installable) =>

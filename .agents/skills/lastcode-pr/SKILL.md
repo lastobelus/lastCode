@@ -13,6 +13,22 @@ commits using the ownership and provenance rules in
 `docs/lastcode/nightly-workflow.md#carry-replay-ownership` before validation
 and review. A PR may contain several groups; each source commit has one owner.
 
+## Keep Upstream References Quiet
+
+When a fork change derives from an upstream PR or issue, preserve the upstream
+repository and number, plus any existing pinned SHA or other hash, in the PR
+body and in every new commit message that carries the provenance, including
+the final squash message. Use
+`https://redirect.github.com/<owner>/<repo>/pull/<number>` (or `/issues/<number>`)
+for published cross-repository links. Ordinary GitHub
+links and `owner/repo#number` shorthand create backlinks; replaying downstream
+commits during checkpoint rebases repeats those entries and can spam the
+upstream PR. Keep canonical GitHub URLs for API and `gh` targets and Git
+operations. Before `pnpm lastcode:merge`, inspect the current PR body because
+the guarded wrapper derives the squash message from it. Do not rewrite
+existing historical commits or immutable checkpoint tags solely to change
+links.
+
 ## Classify and Branch
 
 Read `docs/lastcode/fork-conventions.md` and the repository `AGENTS.md` first.

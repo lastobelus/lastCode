@@ -7,6 +7,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { cleanGitEnvironment } from "./lastcode-nightly.ts";
+import {
+  isCheckpointMessageRewrite,
+  normalizeCheckpointCommits,
+} from "./lastcode-quiet-references.ts";
 
 export const CARRY_REPLAY_GROUPS = [
   "upstream-bugfixes",
@@ -615,9 +619,13 @@ function carryPlanPath(worktree: string): string {
 }
 
 function writeCarryReplayPlan(worktree: string, plan: CarryReplayPlan): void {
-  NodeFS.writeFileSync(carryPlanPath(worktree), `${JSON.stringify(plan, undefined, 2)}\n`, {
+  const path = carryPlanPath(worktree);
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(plan, undefined, 2)}\n`, {
     mode: 0o600,
+    flush: true,
   });
+  NodeFS.renameSync(temporaryPath, path);
 }
 
 export function readCarryReplayPlan(worktree: string): CarryReplayPlan | undefined {
@@ -735,22 +743,35 @@ export function completeCarryReplay(worktree: string): CarryReplayResult {
   if (!plan) throw new Error("Carry replay worktree has no persisted plan.");
   if (rebaseInProgress(worktree))
     throw new Error("Carry replay still has unresolved rebase state.");
-  const head = resolveCommit(worktree, "HEAD");
-  if (plan.status === "complete" && plan.resultHead !== head) {
+  const previousHead = resolveCommit(worktree, "HEAD");
+  if (
+    plan.status === "complete" &&
+    (!plan.resultHead ||
+      !isCheckpointMessageRewrite(worktree, plan.onto, plan.resultHead, previousHead))
+  ) {
     throw new Error(
-      `Completed carry replay recorded ${plan.resultHead ?? "no head"}, found ${head}.`,
+      `Completed carry replay recorded ${plan.resultHead ?? "no head"}, found ${previousHead}.`,
     );
   }
-  let groups: ReadonlyArray<CarryGroupResult> | undefined;
-  if (plan.phase !== "historical") groups = readCarryGroupChain(worktree, head, plan.onto);
+  const previousGroups =
+    plan.phase === "historical"
+      ? undefined
+      : readCarryGroupChain(worktree, previousHead, plan.onto);
   if (
     plan.phase === "compile" &&
     plan.expectedSourceTree !== undefined &&
-    resolveTree(worktree, head) !== plan.expectedSourceTree
+    resolveTree(worktree, previousHead) !== plan.expectedSourceTree
   ) {
     throw new Error("Compiled carry tree does not equal the expected source tree.");
   }
-  if (plan.status !== "complete") finishPlan(worktree, plan, head);
+  // Normalize before recording the completed head: validation and recovery must
+  // refer to the exact commits that will be published, including old metadata.
+  const head = normalizeCheckpointCommits(worktree, plan.onto);
+  const groups =
+    head === previousHead || plan.phase === "historical"
+      ? previousGroups
+      : readCarryGroupChain(worktree, head, plan.onto);
+  if (plan.status !== "complete" || plan.resultHead !== head) finishPlan(worktree, plan, head);
   return {
     phase: plan.phase,
     source: plan.source,
