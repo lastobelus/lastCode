@@ -33,6 +33,7 @@ import * as StorageCleanup from "../storageCleanup.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Settings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -503,6 +504,8 @@ type SweepCase =
   | "whole-shared-session-live"
   | "whole-shared-session-stopped"
   | "whole-shared-session-detached"
+  | "whole-shared-session-error-released"
+  | "whole-shared-session-error-live"
   | "disabled"
   | "recent"
   | "queued"
@@ -523,14 +526,23 @@ type SweepCase =
   | "unrelated-streaming"
   | "batch"
   | "session"
+  | "session-error-released"
+  | "session-error-live"
   | "shared-session-live"
   | "shared-session-stopped"
   | "shared-session-detached"
+  | "shared-session-error-released"
+  | "shared-session-error-live"
+  | "shared-session-error-with-live-sibling"
+  | "shared-session-starting"
+  | "shared-session-running"
+  | "shared-session-waiting"
   | "deleted"
   | "deleted-recent"
   | "deleted-pending"
   | "deleted-visible-pending"
   | "deleted-shared-session-live"
+  | "deleted-shared-session-error-released"
   | "deleted-event"
   | "process"
   | "process-unknown"
@@ -591,6 +603,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const wholeSession = mode.startsWith("whole-shared-session");
   const stoppedSession = mode.endsWith("-stopped");
   const detachedSession = mode.endsWith("-detached");
+  const releasedErrorSession = mode.endsWith("-error-released");
+  const liveErrorSession = mode.endsWith("-error-live");
   const visibleDeletedThread = wholeSharedDeleted
     ? {
         ...thread,
@@ -659,26 +673,49 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "deleted-event")
       yield* sql`INSERT INTO orchestration_v2_events VALUES (${threadId}, ${DateTime.formatIso(at(1))})`;
   }
-  if (mode === "session" || sharedSession) {
-    const sessionStatus = stoppedSession ? "stopped" : "ready";
-    const payload = encodeSession(
-      decodeSession({
-        id: "session",
-        driver: "codex",
-        providerInstanceId: "codex",
-        status: sessionStatus,
-        cwd: sharedSession ? f.repository : f.input.worktreePath,
-        model: null,
-        capabilities: CodexProviderCapabilitiesV2,
-        settings: {},
-        createdAt: DateTime.formatIso(at(30)),
-        updatedAt: DateTime.formatIso(at(20)),
-        lastError: null,
-      }),
-    );
+  if (mode.startsWith("session") || sharedSession) {
+    const sessionStatus = mode.includes("session-error")
+      ? "error"
+      : stoppedSession
+        ? "stopped"
+        : mode.endsWith("-starting")
+          ? "starting"
+          : mode.endsWith("-running")
+            ? "running"
+            : mode.endsWith("-waiting")
+              ? "waiting"
+              : "ready";
+    const session = decodeSession({
+      id: "session",
+      driver: "codex",
+      providerInstanceId: "codex",
+      status: sessionStatus,
+      cwd: sharedSession ? f.repository : f.input.worktreePath,
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      settings: {},
+      createdAt: DateTime.formatIso(at(30)),
+      updatedAt: DateTime.formatIso(at(20)),
+      lastError: sessionStatus === "error" ? "Fixture provider error" : null,
+    });
+    const payload = encodeSession(session);
     yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('session', ${sessionStatus}, ${payload})`;
     if (sharedSession && !detachedSession)
       yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('session', ${threadId})`;
+    if (mode === "shared-session-error-with-live-sibling") {
+      const siblingPayload = encodeSession(
+        decodeSession({
+          ...session,
+          id: "sibling-session",
+          status: "ready",
+          createdAt: DateTime.formatIso(session.createdAt),
+          updatedAt: DateTime.formatIso(session.updatedAt),
+          lastError: null,
+        }),
+      );
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('sibling-session', 'ready', ${siblingPayload})`;
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('sibling-session', ${threadId})`;
+    }
   }
   if (mode === "batch") {
     yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
@@ -805,6 +842,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         }).pipe(Effect.orDie),
     }),
     Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.empty }),
+    Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      isLive: () => Effect.succeed(liveErrorSession),
+    }),
     Layer.mock(Settings.ServerSettingsService)({
       getSettings: Effect.sync(() => settings),
       subscribeChanges: Effect.succeed(Stream.empty),
@@ -838,7 +878,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   if (!cleanSource)
     yield* f.fs.writeFileString(f.path.join(f.input.worktreePath, "source.ts"), source);
   yield* worker.sweep();
-  if (mode === "whole-removal" || (wholeSession && (stoppedSession || detachedSession))) {
+  if (
+    mode === "whole-removal" ||
+    (wholeSession && (stoppedSession || detachedSession || releasedErrorSession))
+  ) {
     assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
     assert.equal(dependencyInspections(), 0);
     return;
@@ -848,6 +891,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "archived" ||
     mode === "deleted" ||
     mode === "whole-policy" ||
+    releasedErrorSession ||
     mode === "shared-session-stopped" ||
     mode === "shared-session-detached" ||
     mode === "unrelated-streaming" ||
@@ -890,6 +934,8 @@ it.effect.each([
   "whole-shared-session-live",
   "whole-shared-session-stopped",
   "whole-shared-session-detached",
+  "whole-shared-session-error-released",
+  "whole-shared-session-error-live",
   "disabled",
   "recent",
   "queued",
@@ -910,14 +956,23 @@ it.effect.each([
   "unrelated-streaming",
   "batch",
   "session",
+  "session-error-released",
+  "session-error-live",
   "shared-session-live",
   "shared-session-stopped",
   "shared-session-detached",
+  "shared-session-error-released",
+  "shared-session-error-live",
+  "shared-session-error-with-live-sibling",
+  "shared-session-starting",
+  "shared-session-running",
+  "shared-session-waiting",
   "deleted",
   "deleted-recent",
   "deleted-pending",
   "deleted-visible-pending",
   "deleted-shared-session-live",
+  "deleted-shared-session-error-released",
   "deleted-event",
   "process",
   "process-unknown",

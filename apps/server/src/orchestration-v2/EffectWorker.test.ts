@@ -105,6 +105,7 @@ function makeExecutorLayer(input: {
         shutdown: Effect.void,
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
+        isLive: () => Effect.succeed(false),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         teardownThread: () => Effect.die("unused teardownThread"),

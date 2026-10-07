@@ -2156,7 +2156,9 @@ it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all 
         runtimePolicy,
       });
 
-      yield* TestClock.adjust("1 second");
+      yield* TestClock.adjust("500 millis");
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      yield* TestClock.adjust("500 millis");
       yield* Effect.yieldNow;
 
       const liveSession = yield* manager.get(providerSessionId);
@@ -2676,6 +2678,7 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
         runtimePolicy,
       });
       assert.isFalse(yield* runtime.isShuttingDown!);
+      assert.isTrue(yield* manager.isLive(providerSessionId));
       yield* manager.release({
         providerSessionId,
         reason: "runtime_error",
@@ -2688,12 +2691,66 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
       const projection = yield* projectionStore.getThreadProjection(threadId);
 
       assert.isTrue(Option.isNone(liveSession));
+      assert.isFalse(yield* manager.isLive(providerSessionId));
       assert.equal(runtimeState.closeCount, 1);
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
       assert.equal(projection.providerSessions.at(-1)?.lastError, "process exited");
     });
 
     yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000 })));
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close completes", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const closeEntered = yield* Deferred.make<void>();
+    const allowClose = yield* Deferred.make<void>();
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("runtime-error-pending-close");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const release = yield* manager
+        .release({ providerSessionId, reason: "runtime_error", detail: "process failed" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(closeEntered);
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+
+      yield* TestClock.adjust("30 seconds");
+      yield* Fiber.join(release);
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.providerSessions.at(-1)?.status, "error");
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+
+      yield* Deferred.succeed(allowClose, undefined);
+      yield* manager.teardownThread({ threadId, providerSessionId });
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          beforeClose: Deferred.succeed(closeEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(allowClose)),
+          ),
+        }),
+      ),
+    );
   }),
 );
 

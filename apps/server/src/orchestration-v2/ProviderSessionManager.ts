@@ -159,6 +159,8 @@ export interface ProviderSessionManagerV2Shape {
   readonly get: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
+  /** Includes unfinished runtime shutdown without extending its idle lifetime. */
+  readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -2146,6 +2148,13 @@ export const layerWithOptions = (
             ? open
             : withWorkspaceLease(input.runtimePolicy.cwd, open);
         },
+        isLive: (providerSessionId) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              const key = sessionKey(providerSessionId);
+              return current.has(key) || (closingSessionScopes.get(key)?.size ?? 0) > 0;
+            }),
+          ),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));

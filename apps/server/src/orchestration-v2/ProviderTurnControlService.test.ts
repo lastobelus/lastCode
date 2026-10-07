@@ -265,6 +265,7 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
           open: () => Effect.die("unused open"),
+          isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),

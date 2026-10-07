@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
   OrchestrationV2ThreadShell,
+  OrchestrationV2ProviderSession,
   ProjectId,
   ServerSettings,
   ServerSettingsError,
@@ -32,6 +33,7 @@ import * as GitManager from "./git/GitManager.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
@@ -129,6 +131,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
@@ -201,25 +204,36 @@ export const make = Effect.gen(function* () {
     threadId: ThreadId,
   ) {
     // Shared sessions retain their first cwd; every attached thread's
-    // workspace remains protected until its session stops or detaches.
-    const boundSessions = yield* sql`
-        SELECT 1 FROM orchestration_v2_projection_provider_session_bindings binding
+    // workspace remains protected until its runtime releases or detaches.
+    // An error can be recoverable or terminal; the live manager distinguishes them.
+    const isLive = (session: OrchestrationV2ProviderSession) =>
+      session.status === "error"
+        ? providerSessions.isLive(session.id)
+        : Effect.succeed(session.status !== "stopped");
+    const boundRows = yield* sql<{ payload_json: string }>`
+        SELECT session.payload_json FROM orchestration_v2_projection_provider_session_bindings binding
         JOIN orchestration_v2_projection_provider_sessions session
           ON session.provider_session_id = binding.provider_session_id
         WHERE binding.thread_id = ${threadId} AND session.status != 'stopped'
-        LIMIT 1
       `;
-    if (boundSessions.length > 0) return true;
+    const boundSessions = yield* Effect.forEach(boundRows, (row) =>
+      decodeCleanupSession(row.payload_json),
+    );
+    const boundLive = yield* Effect.forEach(boundSessions, isLive);
+    if (boundLive.some(Boolean)) return true;
     const sessionRows = yield* sql<{ payload_json: string }>`
         SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
       `;
     const sessions = yield* Effect.forEach(sessionRows, (row) =>
       decodeCleanupSession(row.payload_json),
     );
-    return sessions.some((session) => {
+    const liveCwds = yield* Effect.forEach(sessions, (session) => {
       const cwd = path.resolve(session.cwd);
-      return cwd === worktreePath || inside(worktreePath, cwd);
+      return cwd === worktreePath || inside(worktreePath, cwd)
+        ? isLive(session)
+        : Effect.succeed(false);
     });
+    return liveCwds.some(Boolean);
   });
 
   // Local threads under another project need not have a worktreePath of their own.
