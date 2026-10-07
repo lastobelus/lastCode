@@ -10,10 +10,15 @@
 import * as NodeStream from "@effect/platform-node/NodeStream";
 import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
 import {
+  DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES,
   DesktopBrowserCommand,
   DesktopBrowserEvent,
+  DesktopBrowserTransportError,
+  type DesktopBrowserEvent as DesktopBrowserEventType,
+  type PreviewAutomationProfiles,
   type DesktopBrowserCommand as DesktopBrowserCommandType,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -28,25 +33,56 @@ import * as Stream from "effect/Stream";
 import * as Ndjson from "effect/encoding/Ndjson";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 
 import * as ServerConfig from "../config.ts";
 import { writeAllToFileDescriptor } from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
 
 const decodeEvent = Schema.decodeUnknownEffect(DesktopBrowserEvent);
+const decodeCdpEvent = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      method: Schema.String,
+      params: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    }),
+  ),
+);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodeCommand = Schema.encodeEffect(Schema.fromJsonString(DesktopBrowserCommand));
 
 export interface DesktopTabKey {
   readonly threadId: string;
   readonly tabId: string;
+  readonly desktopHostId?: string | undefined;
 }
 
-const keyOf = ({ threadId, tabId }: DesktopTabKey) => `${threadId}\u0000${tabId}`;
+const keyOf = ({ threadId, tabId, desktopHostId = "local" }: DesktopTabKey) =>
+  JSON.stringify([desktopHostId, threadId, tabId]);
 
 export class DesktopBrowserChannel extends Context.Service<
   DesktopBrowserChannel,
   {
     /** False when this server was not started by a desktop app. */
     readonly available: boolean;
+    readonly resolveUrl: (input: {
+      readonly desktopHostId: string;
+      readonly threadId: string;
+      readonly url: string;
+    }) => Effect.Effect<string | null>;
+    readonly getProfiles: (input: {
+      readonly threadId: string;
+      readonly agentSessionId: string;
+    }) => Effect.Effect<(PreviewAutomationProfiles & { readonly desktopHostId: string }) | null>;
+    readonly subscribeCommands: (
+      owner: string,
+      desktopHostId: string,
+    ) => Stream.Stream<DesktopBrowserCommandType, DesktopBrowserTransportError>;
+    readonly receiveEvent: (
+      owner: string,
+      desktopHostId: string,
+      event: DesktopBrowserEventType,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
     /**
      * Waits for a tab to be attached. Subscribes before it checks, so an
      * attach landing in between is never missed. False after `timeout`.
@@ -73,24 +109,34 @@ const make = Effect.gen(function* () {
   const inputFd = config.desktopBrowserFd;
   const controlFd = config.desktopBrowserControlFd;
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
-  const attachedTabs = new Set<string>();
+  const attachedTabs = new Map<string, DesktopTabKey>();
+  const profileRequests = new Map<string, Deferred.Deferred<PreviewAutomationProfiles | null>>();
   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
   const inbound = new Map<string, Queue.Queue<string>>();
   const writeLock = yield* Semaphore.make(1);
 
-  if (inputFd === undefined || controlFd === undefined) {
-    return DesktopBrowserChannel.of({
-      available: false,
-      awaitAttached: () => Effect.succeed(false),
-      detached: Stream.empty,
-      isAttached: () => Effect.succeed(false),
-      endpoint: () => Effect.die("No desktop app is attached to this server."),
-      pointer: () => Effect.void,
-    });
-  }
+  const localAvailable = inputFd !== undefined && controlFd !== undefined;
+  const hosts = new Map<
+    string,
+    { owner: string; queue: Queue.Queue<DesktopBrowserCommandType>; lock: Semaphore.Semaphore }
+  >();
+  const profileOwners = new Map<string, string>();
+  const urlRequests = new Map<
+    string,
+    { desktopHostId: string; deferred: Deferred.Deferred<string | null> }
+  >();
+  const downloadDirectories = new Map<string, string>();
+  const downloadOffsets = new Map<string, Map<string, number>>();
+  const completedDownloads = new Map<string, Set<string>>();
+  const failedDownloads = new Map<string, Set<string>>();
 
-  const command = (message: DesktopBrowserCommandType) =>
-    writeLock.withPermits(1)(
+  const command = (message: DesktopBrowserCommandType, desktopHostId = "local") => {
+    if (desktopHostId !== "local") {
+      const host = hosts.get(desktopHostId);
+      return host ? Queue.offer(host.queue, message).pipe(Effect.asVoid) : Effect.void;
+    }
+    if (controlFd === undefined) return Effect.void;
+    return writeLock.withPermits(1)(
       encodeCommand(message).pipe(
         Effect.flatMap((line) => writeAllToFileDescriptor(controlFd, Buffer.from(`${line}\n`))),
         Effect.catchCause((cause) =>
@@ -98,43 +144,172 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+  };
 
-  const readable = yield* Effect.acquireRelease(
-    Effect.sync(() => NodeFS.createReadStream("", { fd: inputFd, autoClose: true })),
-    (stream) => Effect.sync(() => stream.destroy()),
-  );
-  yield* NodeStream.fromReadable<Uint8Array, Error>({
-    evaluate: () => readable,
-    closeOnDone: true,
-    onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
-  }).pipe(
-    Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
-    Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
-    Stream.runForEach((decoded) => {
-      if (Option.isNone(decoded)) return Effect.void;
-      const event = decoded.value;
-      const key = { threadId: event.threadId, tabId: event.tabId };
-      const id = keyOf(key);
-      switch (event.type) {
-        case "cdp": {
-          const queue = inbound.get(id);
-          return queue ? Queue.offer(queue, event.message).pipe(Effect.asVoid) : Effect.void;
-        }
-        case "attached":
-          attachedTabs.add(id);
-          return PubSub.publish(changes, { key, attached: true });
-        case "detached": {
-          attachedTabs.delete(id);
-          const queue = inbound.get(id);
-          return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
-            Effect.andThen(PubSub.publish(changes, { key, attached: false })),
+  const handleEvent = (
+    desktopHostId: string,
+    event: DesktopBrowserEventType,
+  ): Effect.Effect<void, DesktopBrowserTransportError> => {
+    if (event.type === "resolvedUrl") {
+      const pending = urlRequests.get(event.requestId);
+      return pending?.desktopHostId === desktopHostId
+        ? Deferred.succeed(pending.deferred, event.url).pipe(Effect.asVoid)
+        : Effect.void;
+    }
+    if (event.type === "profiles") {
+      const pending = profileRequests.get(event.requestId);
+      return pending && profileOwners.get(event.requestId) === desktopHostId
+        ? Deferred.succeed(pending, event.profiles).pipe(Effect.asVoid)
+        : Effect.void;
+    }
+    const key = { threadId: event.threadId, tabId: event.tabId, desktopHostId };
+    const id = keyOf(key);
+    switch (event.type) {
+      case "download": {
+        const directory = downloadDirectories.get(id);
+        const offsets = downloadOffsets.get(id) ?? new Map<string, number>();
+        const offset = offsets.get(event.guid) ?? 0;
+        // A remote host may only write the current connection's download, in
+        // the directory requested by Playwright, with bounded ordered chunks.
+        const bytes = Buffer.from(event.data, "base64");
+        if (
+          !directory ||
+          failedDownloads.get(id)?.has(event.guid) ||
+          !attachedTabs.has(id) ||
+          !/^[a-zA-Z0-9-]{1,128}$/.test(event.guid) ||
+          event.offset !== offset ||
+          bytes.toString("base64") !== event.data ||
+          offset + bytes.length > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES
+        ) {
+          return Effect.fail(
+            new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
           );
         }
+        return Effect.tryPromise({
+          try: async () => {
+            await NodeFSP.mkdir(directory, { recursive: true });
+            await NodeFSP.writeFile(NodePath.join(directory, event.guid), bytes, {
+              flag: offset === 0 ? "w" : "a",
+            });
+            if (event.done) {
+              offsets.delete(event.guid);
+              const completed = completedDownloads.get(id) ?? new Set<string>();
+              completed.add(event.guid);
+              completedDownloads.set(id, completed);
+            } else offsets.set(event.guid, offset + bytes.length);
+            downloadOffsets.set(id, offsets);
+          },
+          catch: () => new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
+        });
       }
-    }),
-    Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
-    Effect.forkScoped,
-  );
+      case "cdp": {
+        const queue = inbound.get(id);
+        if (!queue) return Effect.void;
+        const decoded = decodeCdpEvent(event.message);
+        if (
+          desktopHostId !== "local" &&
+          Option.isSome(decoded) &&
+          decoded.value.method === "Browser.downloadProgress" &&
+          decoded.value.params?.state === "completed"
+        ) {
+          const guid = decoded.value.params.guid;
+          if (typeof guid !== "string" || !completedDownloads.get(id)?.has(guid)) {
+            return Queue.offer(
+              queue,
+              encodeJson({
+                ...decoded.value,
+                params: { ...decoded.value.params, state: "canceled" },
+              }),
+            ).pipe(Effect.asVoid);
+          }
+        }
+        return Queue.offer(queue, event.message).pipe(Effect.asVoid);
+      }
+      case "attached":
+        attachedTabs.set(id, key);
+        return PubSub.publish(changes, { key, attached: true }).pipe(Effect.asVoid);
+      case "detached": {
+        attachedTabs.delete(id);
+        downloadDirectories.delete(id);
+        downloadOffsets.delete(id);
+        completedDownloads.delete(id);
+        failedDownloads.delete(id);
+        const queue = inbound.get(id);
+        return (queue ? Queue.shutdown(queue) : Effect.void).pipe(
+          Effect.andThen(PubSub.publish(changes, { key, attached: false })),
+          Effect.asVoid,
+        );
+      }
+    }
+  };
+
+  const releaseHost = (desktopHostId: string) =>
+    Effect.gen(function* () {
+      for (const key of [...attachedTabs.values()]) {
+        if (key.desktopHostId === desktopHostId) {
+          yield* handleEvent(desktopHostId, {
+            type: "detached",
+            threadId: key.threadId,
+            tabId: key.tabId,
+          });
+        }
+      }
+      for (const pending of urlRequests.values()) {
+        if (pending.desktopHostId === desktopHostId)
+          yield* Deferred.succeed(pending.deferred, null);
+      }
+      for (const [requestId, host] of profileOwners) {
+        const pending = profileRequests.get(requestId);
+        if (host === desktopHostId && pending) yield* Deferred.succeed(pending, null);
+      }
+    });
+
+  if (localAvailable) {
+    const readable = yield* Effect.acquireRelease(
+      Effect.sync(() => NodeFS.createReadStream("", { fd: inputFd, autoClose: true })),
+      (stream) => Effect.sync(() => stream.destroy()),
+    );
+    yield* NodeStream.fromReadable<Uint8Array, Error>({
+      evaluate: () => readable,
+      closeOnDone: true,
+      onError: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    }).pipe(
+      Stream.pipeThroughChannel(Ndjson.decode({ ignoreEmptyLines: true })),
+      Stream.mapEffect((value) => decodeEvent(value).pipe(Effect.option)),
+      Stream.runForEach((decoded) =>
+        Option.isSome(decoded) ? handleEvent("local", decoded.value) : Effect.void,
+      ),
+      Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
+      Effect.forkScoped,
+    );
+  }
+
+  const relayFrame = (key: DesktopTabKey, message: string) => {
+    if (key.desktopHostId && key.desktopHostId !== "local") {
+      try {
+        const frame = JSON.parse(message) as {
+          method?: string;
+          params?: { downloadPath?: unknown; behavior?: string };
+        };
+        if (frame.method === "Browser.setDownloadBehavior") {
+          const directory = frame.params?.downloadPath;
+          if (
+            typeof directory === "string" &&
+            NodePath.isAbsolute(directory) &&
+            frame.params?.behavior !== "deny"
+          ) {
+            downloadDirectories.set(keyOf(key), directory);
+          } else downloadDirectories.delete(keyOf(key));
+        }
+      } catch {
+        /* Malformed CDP frames are handled by the desktop relay. */
+      }
+    }
+    return command(
+      { type: "cdp", threadId: key.threadId, tabId: key.tabId, message },
+      key.desktopHostId,
+    );
+  };
 
   const endpoint = (key: DesktopTabKey) =>
     Effect.gen(function* () {
@@ -154,9 +329,15 @@ const make = Effect.gen(function* () {
       }
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
-          if (inbound.get(id) === queue) inbound.delete(id);
+          if (inbound.get(id) === queue) {
+            inbound.delete(id);
+            downloadDirectories.delete(id);
+          }
           yield* Queue.shutdown(queue);
-          yield* command({ type: "release", ...key });
+          yield* command(
+            { type: "release", threadId: key.threadId, tabId: key.tabId },
+            key.desktopHostId,
+          );
         }),
       );
       // The relay serves one Playwright connection; a second would see the first's sessions.
@@ -168,26 +349,22 @@ const make = Effect.gen(function* () {
             connected = true;
             const writer = yield* socket.writer;
             const reader = yield* socket.reader;
-            yield* Stream.fromQueue(queue).pipe(
+            const outgoing = Stream.fromQueue(queue).pipe(
               Stream.runForEach((message) => writer.write(message)),
-              Effect.forkScoped,
             );
             const decoder = new TextDecoder();
-            return yield* reader.pull.pipe(
+            const incoming = reader.pull.pipe(
               Effect.flatMap((frames) =>
                 Effect.forEach(
                   frames,
                   (frame) =>
-                    command({
-                      type: "cdp",
-                      ...key,
-                      message: typeof frame === "string" ? frame : decoder.decode(frame),
-                    }),
+                    relayFrame(key, typeof frame === "string" ? frame : decoder.decode(frame)),
                   { discard: true },
                 ),
               ),
               Effect.forever,
             );
+            return yield* Effect.raceFirst(incoming, outgoing);
           }).pipe(Effect.scoped, Effect.ignore),
         )
         .pipe(Effect.forkScoped);
@@ -197,7 +374,111 @@ const make = Effect.gen(function* () {
     });
 
   return DesktopBrowserChannel.of({
-    available: true,
+    get available() {
+      return localAvailable || hosts.size > 0;
+    },
+    subscribeCommands: (owner, desktopHostId) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          if (desktopHostId === "local" || hosts.has(desktopHostId)) {
+            return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+          }
+          const queue = yield* Queue.unbounded<DesktopBrowserCommandType>();
+          const lock = yield* Semaphore.make(1);
+          const host = { owner, queue, lock };
+          hosts.set(desktopHostId, host);
+          yield* Effect.addFinalizer(() =>
+            Effect.gen(function* () {
+              if (hosts.get(desktopHostId) !== host) return;
+              hosts.delete(desktopHostId);
+              yield* releaseHost(desktopHostId).pipe(Effect.ignore);
+              yield* Queue.shutdown(queue);
+            }),
+          );
+          yield* Queue.offer(queue, { type: "announce" });
+          return Stream.fromQueue(queue);
+        }),
+      ),
+    receiveEvent: (owner, desktopHostId, event) =>
+      Effect.suspend(() => {
+        const host = hosts.get(desktopHostId);
+        if (host?.owner !== owner) {
+          return Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }));
+        }
+        return host.lock.withPermits(1)(
+          Effect.suspend(() => handleEvent(desktopHostId, event)).pipe(
+            Effect.tapError(() => {
+              if (event.type !== "download") return Effect.void;
+              const id = keyOf({ ...event, desktopHostId });
+              const failed = failedDownloads.get(id) ?? new Set<string>();
+              failed.add(event.guid);
+              failedDownloads.set(id, failed);
+              completedDownloads.get(id)?.delete(event.guid);
+              downloadOffsets.get(id)?.delete(event.guid);
+              const directory = downloadDirectories.get(id);
+              const queue = inbound.get(id);
+              return Effect.gen(function* () {
+                if (directory && /^[a-zA-Z0-9-]{1,128}$/.test(event.guid)) {
+                  yield* Effect.promise(() =>
+                    NodeFSP.rm(NodePath.join(directory, event.guid), { force: true }).catch(
+                      () => undefined,
+                    ),
+                  );
+                }
+                if (queue)
+                  yield* Queue.offer(
+                    queue,
+                    encodeJson({
+                      method: "Browser.downloadProgress",
+                      params: { guid: event.guid, state: "canceled" },
+                    }),
+                  );
+              });
+            }),
+          ),
+        );
+      }),
+    resolveUrl: ({ desktopHostId, url }) =>
+      Effect.gen(function* () {
+        if (desktopHostId === "local") return url;
+        if (!hosts.has(desktopHostId)) return null;
+        const requestId = NodeCrypto.randomUUID();
+        const deferred = yield* Deferred.make<string | null>();
+        urlRequests.set(requestId, { desktopHostId, deferred });
+        return yield* command({ type: "resolveUrl", requestId, url }, desktopHostId).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOption("5 seconds"),
+          Effect.map((result) => Option.getOrElse(result, () => null)),
+          Effect.ensuring(Effect.sync(() => urlRequests.delete(requestId))),
+        );
+      }),
+    getProfiles: () =>
+      Effect.gen(function* () {
+        const desktopHostId = localAvailable
+          ? "local"
+          : hosts.size === 1
+            ? [...hosts.keys()][0]
+            : undefined;
+        if (!desktopHostId) return null;
+        const requestId = NodeCrypto.randomUUID();
+        const deferred = yield* Deferred.make<PreviewAutomationProfiles | null>();
+        profileRequests.set(requestId, deferred);
+        profileOwners.set(requestId, desktopHostId);
+        return yield* command({ type: "profiles", requestId }, desktopHostId).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOption("5 seconds"),
+          Effect.map((result) => {
+            const profiles = Option.getOrElse(result, () => null);
+            return profiles ? { ...profiles, desktopHostId } : null;
+          }),
+          Effect.ensuring(
+            Effect.sync(() => {
+              profileRequests.delete(requestId);
+              profileOwners.delete(requestId);
+            }),
+          ),
+        );
+      }),
     awaitAttached: (key, timeout) =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -218,7 +499,11 @@ const make = Effect.gen(function* () {
     ),
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
     endpoint,
-    pointer: (key, pointer) => command({ type: "pointer", ...key, ...pointer }),
+    pointer: (key, pointer) =>
+      command(
+        { type: "pointer", threadId: key.threadId, tabId: key.tabId, ...pointer },
+        key.desktopHostId,
+      ),
   });
 });
 

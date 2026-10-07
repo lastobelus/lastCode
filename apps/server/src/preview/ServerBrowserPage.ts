@@ -388,10 +388,14 @@ export const drag = async (
 };
 
 /** Sets files on one file input; false when no locator or selector names one. */
-export const setInputFiles = async (page: Page, input: PreviewAutomationUploadInput) => {
+export const setInputFiles = async (
+  page: Page,
+  input: PreviewAutomationUploadInput,
+  files: Parameters<Locator["setInputFiles"]>[0] = [...input.paths],
+) => {
   const locator = targetLocator(page, input);
   if (locator === null) return false;
-  await locator.setInputFiles([...input.paths], { timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS });
+  await locator.setInputFiles(files, { timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS });
   return true;
 };
 

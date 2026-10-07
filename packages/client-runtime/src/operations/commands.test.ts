@@ -37,12 +37,23 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
 import {
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
+  setThreadAttention,
+  clearThreadAttention,
+  deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
   archiveThread,
   cancelQueuedRun,
   createProject,
   dismissThreadUserInput,
   editQueuedRun,
   forkThreadFromRun,
+  requestSubagentPromotion,
+  cancelSubagentPromotion,
   interruptThreadTurn,
   mergeThreadBack,
   promoteQueuedRun,
@@ -148,6 +159,43 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("V2 environment commands", () => {
+  it.effect("dispatches durable LastCode controls through V2 without fetching history", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: ThreadId[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+      const attention = { kind: "question" as const, raisedAt: "2026-06-20T00:00:00.000Z" };
+      yield* Effect.all([
+        setThreadPersistence({ threadId: v2ThreadId, persistent: true }),
+        upsertThreadAnnotation({ threadId: v2ThreadId, body: "Keep this review open" }),
+        resolveThreadAnnotation({ threadId: v2ThreadId }),
+        reopenThreadAnnotation({ threadId: v2ThreadId }),
+        setThreadAttention({ threadId: v2ThreadId, attention }),
+        clearThreadAttention({ threadId: v2ThreadId }),
+        deleteThread({ threadId: v2ThreadId, deleteWorktree: true, repositoryKey: "repository-1" }),
+        retryThreadWorktreeCleanup({ threadId: v2ThreadId }),
+        abandonThreadWorktreeCleanup({ threadId: v2ThreadId }),
+      ]).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands.map(({ commandId: _id, ...command }) => command)).toEqual([
+        { type: "thread.persistence.set", threadId: v2ThreadId, persistent: true },
+        { type: "thread.annotation.upsert", threadId: v2ThreadId, body: "Keep this review open" },
+        { type: "thread.annotation.resolve", threadId: v2ThreadId },
+        { type: "thread.annotation.reopen", threadId: v2ThreadId },
+        { type: "thread.attention.set", threadId: v2ThreadId, attention },
+        { type: "thread.attention.clear", threadId: v2ThreadId },
+        {
+          type: "thread.delete",
+          threadId: v2ThreadId,
+          deleteWorktree: true,
+          repositoryKey: "repository-1",
+        },
+        { type: "thread.worktree-cleanup.retry", threadId: v2ThreadId },
+        { type: "thread.worktree-cleanup.abandon", threadId: v2ThreadId },
+      ]);
+      expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect("routes projects through the event-sourced project transport", () =>
     Effect.gen(function* () {
       const projects: ProjectMutation[] = [];
@@ -632,6 +680,98 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
+  it.effect("requests promotion on the source thread and cancels the same request", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const provide = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        supervisor,
+      );
+      const requestId = CommandId.make("subagent-promotion");
+      const targetThreadId = ThreadId.make(`${requestId}:interactive`);
+      yield* requestSubagentPromotion({
+        commandId: requestId,
+        threadId: v2ThreadId,
+        creationSource: "mobile",
+      }).pipe(provide);
+      yield* cancelSubagentPromotion({
+        commandId: CommandId.make("cancel-promotion"),
+        threadId: v2ThreadId,
+        requestId,
+      }).pipe(provide);
+      expect(commands).toEqual([
+        {
+          type: "subagent.promote.request",
+          commandId: requestId,
+          threadId: v2ThreadId,
+          targetThreadId,
+          createdBy: "user",
+          creationSource: "mobile",
+        },
+        {
+          type: "subagent.promote.cancel",
+          commandId: CommandId.make("cancel-promotion"),
+          threadId: v2ThreadId,
+          requestId,
+        },
+      ]);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect.each(["web", "mobile"] as const)(
+    "offers fresh promotion destinations for %s retries, preserving transport idempotency",
+    (creationSource) =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const occupiedTargetId = ThreadId.make("occupied-interactive-thread");
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          projection: {
+            ...v2Projection,
+            thread: {
+              ...v2Projection.thread,
+              subagentPromotion: {
+                requestId: CommandId.make("previous-promotion"),
+                targetThreadId: occupiedTargetId,
+                status: "failed",
+                createdBy: "user",
+                creationSource,
+                requestedAt: v2Now,
+                updatedAt: v2Now,
+                error: "The destination thread already exists",
+              },
+            },
+          },
+        });
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          supervisor,
+        );
+        const retry = {
+          commandId: CommandId.make("retry-promotion"),
+          threadId: v2ThreadId,
+          creationSource,
+        };
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion({
+          ...retry,
+          commandId: CommandId.make("next-retry-promotion"),
+        }).pipe(provide);
+        const destinations = commands
+          .filter((command) => command.type === "subagent.promote.request")
+          .map((command) => command.targetThreadId);
+        expect(destinations).toEqual([
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("next-retry-promotion:interactive"),
+        ]);
+        expect(destinations).not.toContain(occupiedTargetId);
+      }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect(
     "dispatches V2-native relationship and queue commands without compatibility shaping",
     () =>
@@ -743,7 +883,7 @@ describe("V2 environment commands", () => {
           })),
         );
         expect(projectionRequests).toEqual([]);
-      }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+      }).pipe(Effect.provide(layerTestCrypto)),
   );
 
   it.effect("delegates model selection to the server without fetching the full projection", () =>

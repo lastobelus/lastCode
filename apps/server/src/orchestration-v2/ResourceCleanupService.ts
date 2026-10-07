@@ -6,12 +6,13 @@ import * as Schema from "effect/Schema";
 
 import { resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 
 export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupError>()(
   "ResourceCleanupError",
   {
-    operation: Schema.Literals(["terminal", "attachment"]),
+    operation: Schema.Literals(["preview", "terminal", "attachment"]),
     threadId: Schema.optional(Schema.String),
     attachmentId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
@@ -20,12 +21,16 @@ export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupErro
 
 export class ResourceCleanupService extends Context.Reference<{
   readonly cleanupTerminals: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
+  readonly cleanupArchivedTerminals: (
+    threadId: string,
+  ) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupAttachments: (
     attachmentIds: ReadonlyArray<string>,
   ) => Effect.Effect<void, ResourceCleanupError>;
 }>("t3/orchestration-v2/ResourceCleanupService", {
   defaultValue: () => ({
     cleanupTerminals: () => Effect.void,
+    cleanupArchivedTerminals: () => Effect.void,
     cleanupAttachments: () => Effect.void,
   }),
 }) {}
@@ -34,17 +39,64 @@ export const layer = Layer.effect(
   ResourceCleanupService,
   Effect.gen(function* () {
     const terminals = yield* TerminalManager.TerminalManager;
+    const previews = yield* PreviewHosting.PreviewHosting;
     const fileSystem = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
     return {
       cleanupTerminals: (threadId: string) =>
-        terminals
-          .close({ threadId, deleteHistory: true })
-          .pipe(
-            Effect.mapError(
-              (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
-            ),
-          ),
+        Effect.gen(function* () {
+          const preview = yield* Effect.result(previews.removeThread(threadId));
+          // Deleted threads must lose ordinary terminals even when preview state needs retry.
+          const terminal = yield* Effect.result(terminals.close({ threadId, deleteHistory: true }));
+          if (preview._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "preview",
+                threadId,
+                cause:
+                  terminal._tag === "Failure"
+                    ? { preview: preview.failure, terminal: terminal.failure }
+                    : preview.failure,
+              }),
+            );
+          }
+          if (terminal._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "terminal",
+                threadId,
+                cause: terminal.failure,
+              }),
+            );
+          }
+        }),
+      cleanupArchivedTerminals: (threadId: string) =>
+        Effect.gen(function* () {
+          const previewsResult = yield* Effect.result(previews.list(threadId));
+          // An unreadable lease file cannot identify owners; preserve the managed namespace.
+          yield* terminals
+            .closeThreadExcept(
+              threadId,
+              previewsResult._tag === "Success"
+                ? previewsResult.success.map((lease) => lease.terminalId)
+                : [],
+              previewsResult._tag === "Failure" ? ["preview-"] : [],
+            )
+            .pipe(
+              Effect.mapError(
+                (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
+              ),
+            );
+          if (previewsResult._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "preview",
+                threadId,
+                cause: previewsResult.failure,
+              }),
+            );
+          }
+        }),
       cleanupAttachments: (attachmentIds: ReadonlyArray<string>) =>
         Effect.forEach(
           attachmentIds,

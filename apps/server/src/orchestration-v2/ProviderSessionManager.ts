@@ -6,6 +6,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -39,6 +40,7 @@ import {
   withMetrics,
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -164,6 +166,10 @@ export interface ProviderSessionManagerV2Shape {
   readonly get: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
+  /** Includes unfinished runtime shutdown without extending its idle lifetime. */
+  readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Invalidates workspace protection even when ownership persistence fails. */
+  readonly ownershipRevision: Effect.Effect<number>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -405,6 +411,7 @@ export const layerWithOptions = (
       const threadAttachment = yield* KeyedLock.make<string>();
       const detachSerialization = yield* KeyedLock.make<string>();
       const closingSessionScopes = new Map<string, Set<Deferred.Deferred<void>>>();
+      let ownershipRevision = 0;
       const pendingThreadUnloads = new Map<
         string,
         {
@@ -866,6 +873,7 @@ export const layerWithOptions = (
               const closing = closingSessionScopes.get(key) ?? new Set<Deferred.Deferred<void>>();
               closing.add(existing.scopeClosed);
               closingSessionScopes.set(key, closing);
+              ownershipRevision += 1;
               updated.delete(key);
               return ["removed", updated] as const;
             }),
@@ -921,7 +929,7 @@ export const layerWithOptions = (
                             if (Exit.isSuccess(exit)) {
                               const key = sessionKey(input.providerSessionId);
                               const closing = closingSessionScopes.get(key);
-                              closing?.delete(entry.scopeClosed);
+                              if (closing?.delete(entry.scopeClosed)) ownershipRevision += 1;
                               if (closing?.size === 0) closingSessionScopes.delete(key);
                               for (const [key, pending] of pendingThreadUnloads) {
                                 if (pending.entry.runtime === entry.runtime)
@@ -1217,6 +1225,7 @@ export const layerWithOptions = (
               ...entry,
               attachedThreadIds: new Set([...entry.attachedThreadIds, input.threadId]),
             });
+            ownershipRevision += 1;
             return [true, updated] as const;
           }),
         );
@@ -1241,6 +1250,7 @@ export const layerWithOptions = (
             attachedThreadIds,
             loadedProviderThreadKeyByThread,
           });
+          ownershipRevision += 1;
           return updated;
         });
 
@@ -1413,6 +1423,8 @@ export const layerWithOptions = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        publishEventsBarrier: ProviderAdapterV2SessionRuntime["publishEventsBarrier"],
+        driver: ProviderDriverKind,
       ): Effect.Effect<ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
@@ -1444,7 +1456,30 @@ export const layerWithOptions = (
             ),
             Stream.ensuring(close),
           );
-          return { events, close } satisfies ProviderAdapterV2EventSubscription;
+          return {
+            events,
+            close,
+            ...(publishEventsBarrier === undefined
+              ? {}
+              : {
+                  requestDrain: (input) =>
+                    publishEventsBarrier({
+                      observe: input.observe,
+                      after: (observation) =>
+                        Effect.gen(function* () {
+                          if (!(yield* Ref.get(subscribers)).has(subscriberId)) return;
+                          yield* Queue.offer(queue, {
+                            type: "event",
+                            event: {
+                              type: "events.barrier",
+                              driver,
+                              after: input.after(observation),
+                            },
+                          });
+                        }),
+                    }),
+                }),
+          } satisfies ProviderAdapterV2EventSubscription;
         });
 
       const decorateRuntime = (
@@ -1454,7 +1489,22 @@ export const layerWithOptions = (
         >,
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(
+          eventSubscribers,
+          runtime.publishEventsBarrier,
+          runtime.driver,
+        ).pipe(
+          Effect.tap((subscription) =>
+            Effect.gen(function* () {
+              // Register before checking residency: release either notifies this
+              // queue or has already removed this exact runtime, so close it here.
+              // A replacement with the same session id cannot revive its stream.
+              const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              if (current?.runtime !== runtime) yield* subscription.close;
+            }),
+          ),
+        );
+        const inspectTurn = runtime.inspectTurn;
         // Every provider's turn operations pass through here, so this is where they are
         // counted. Only turn starts are timed: until the provider accepts the turn.
         const turnMetrics = (operation: string, model?: string) =>
@@ -1469,7 +1519,29 @@ export const layerWithOptions = (
           });
         return {
           ...runtime,
+          ...(inspectTurn === undefined
+            ? {}
+            : {
+                inspectTurn: (input: Parameters<typeof inspectTurn>[0]) =>
+                  Effect.gen(function* () {
+                    const inspection = yield* inspectTurn(input);
+                    const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    // Cleanup can retain active references or clear them to unknown.
+                    // Lost ownership of this captured runtime is stronger evidence
+                    // than missing adapter state, but never proves native completion.
+                    if (current?.runtime === runtime) return inspection;
+                    if (inspection.status === "terminal")
+                      return { ...inspection, runtimeReleased: true as const };
+                    return {
+                      status: "released" as const,
+                      driver: runtime.driver,
+                      providerThreadId: input.providerThread.id,
+                      providerTurnId: input.providerTurnId,
+                    };
+                  }),
+              }),
           subscribeEvents,
+          isShuttingDown: Effect.sync(() => shutdownSignal.received),
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
           ),
@@ -1633,6 +1705,7 @@ export const layerWithOptions = (
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
+            if (event.type === "events.barrier") return event.after;
             if (
               event.type === "provider_session.updated" &&
               event.providerSession.status === "stopped"
@@ -1716,11 +1789,8 @@ export const layerWithOptions = (
                       cause: "Provider event stream ended unexpectedly.",
                     }),
                   );
-              yield* publishToSubscribers(entry.eventSubscribers, {
-                type: "failure",
-                cause,
-              });
-              yield* Ref.set(entry.eventSubscribers, new Map());
+              // Release removes this exact runtime before notifying subscribers.
+              // Their cleanup probes must already observe the lost ownership.
               yield* releaseEntry({
                 providerSessionId: entry.runtime.providerSessionId,
                 reason: "runtime_error",
@@ -1733,6 +1803,7 @@ export const layerWithOptions = (
       };
 
       const shutdown = Effect.gen(function* () {
+        shutdownSignal.received = true;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,
@@ -1836,6 +1907,7 @@ export const layerWithOptions = (
                 };
                 const updated = new Map(current);
                 updated.set(key, updatedEntry);
+                ownershipRevision += 1;
                 return [Option.some(updatedEntry), updated] as const;
               });
               // Plain detaches deliberately do not revoke: a detached thread's
@@ -1942,8 +2014,8 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
-        open: (input) =>
-          sessionOpen.withLock(
+        open: (input) => {
+          const open = sessionOpen.withLock(
             input.providerSessionId,
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
@@ -2087,6 +2159,7 @@ export const layerWithOptions = (
               yield* Ref.update(sessions, (current) => {
                 const updated = new Map(current);
                 updated.set(key, entry);
+                ownershipRevision += 1;
                 return updated;
               });
               // The entry now guards the credential via its recorded id, so
@@ -2112,6 +2185,21 @@ export const layerWithOptions = (
               yield* startEventPump(entry);
               yield* scheduleIdleRelease(input.providerSessionId);
               return exposedRuntime;
+            }),
+          );
+          // Cleanup owns the same lease until recursive deletion finishes.
+          // Keep startup protected until its durable attachment guards the cwd;
+          // running provider turns do not hold this lease.
+          return input.runtimePolicy.cwd === null
+            ? open
+            : withWorkspaceLease(input.runtimePolicy.cwd, open);
+        },
+        ownershipRevision: Effect.sync(() => ownershipRevision),
+        isLive: (providerSessionId) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              const key = sessionKey(providerSessionId);
+              return current.has(key) || (closingSessionScopes.get(key)?.size ?? 0) > 0;
             }),
           ),
         get: (providerSessionId) =>

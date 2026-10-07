@@ -259,14 +259,17 @@ export function coalesceStoredThreadEvents(
 
 /**
  * Converts a committed event and the affected thread's current shell into one
- * delta. `shell` is null when the thread is deleted or unknown.
+ * delta. Deleted threads keep a shell while worktree cleanup is pending.
  */
 export function shellStreamItemFromThreadShell(input: {
   readonly stored: Extract<ShellApplicationEvent, { readonly event: unknown }>;
   readonly shell: OrchestrationV2ThreadShell | null;
 }): Exclude<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }> {
   if (input.shell !== null) {
-    if (input.shell.archivedAt !== null) {
+    if (
+      input.shell.archivedAt !== null &&
+      !(input.shell.deletedAt !== null && input.shell.worktreeCleanup != null)
+    ) {
       return {
         kind: "thread.removed",
         sequence: input.stored.sequence,
@@ -295,7 +298,11 @@ export function archivedShellStreamItemFromThreadShell(input: {
   readonly stored: OrchestrationV2StoredEvent;
   readonly shell: OrchestrationV2ThreadShell | null;
 }): Exclude<OrchestrationV2ArchivedShellStreamItem, { readonly kind: "snapshot" }> | null {
-  if (input.shell !== null && input.shell.archivedAt !== null) {
+  if (
+    input.shell !== null &&
+    input.shell.archivedAt !== null &&
+    !(input.shell.deletedAt !== null && input.shell.worktreeCleanup != null)
+  ) {
     return {
       kind: "thread.updated",
       sequence: input.stored.sequence,
@@ -304,7 +311,11 @@ export function archivedShellStreamItemFromThreadShell(input: {
   }
   if (
     input.stored.event.type === "thread.unarchived" ||
-    (input.stored.event.type === "thread.deleted" && input.stored.event.payload.archivedAt !== null)
+    (input.stored.event.type === "thread.deleted" &&
+      input.stored.event.payload.archivedAt !== null) ||
+    (input.stored.event.type === "thread.metadata-updated" &&
+      input.stored.event.payload.archivedAt !== null &&
+      input.stored.event.payload.deletedAt !== null)
   ) {
     return {
       kind: "thread.removed",

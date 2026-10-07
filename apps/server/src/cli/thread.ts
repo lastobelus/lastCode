@@ -276,7 +276,7 @@ const isThreadDispatchUnknownError = Schema.is(ThreadDispatchUnknownError);
 
 export const retryAmbiguousTrackedDispatch = <R>(
   dispatch: Effect.Effect<void, ThreadCliError | ThreadDispatchUnknownError, R>,
-) => dispatch.pipe(Effect.catchTag("ThreadDispatchUnknownError", () => dispatch));
+) => dispatch.pipe(Effect.catchTags({ ThreadDispatchUnknownError: () => dispatch }));
 
 export type ThreadTargetResolution =
   | { readonly kind: "resolved"; readonly thread: OrchestrationV2ThreadShell }
@@ -881,7 +881,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
       );
     }).pipe(
       Effect.provide(
-        EnvironmentAuth.runtimeLayer.pipe(
+        EnvironmentAuth.layerRuntime.pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -1095,7 +1095,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -1170,7 +1170,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),

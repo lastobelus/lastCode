@@ -50,7 +50,16 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import * as ThreadWait from "../threadTools/ThreadWait.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
+import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -93,6 +102,10 @@ const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
     ),
   ),
 );
+const layerThreadWaitProvided = ThreadWait.layer.pipe(
+  Layer.provide(Layer.merge(ProjectionStore.layer, layerEventSinkProvided)),
+);
+
 const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(layerEventSinkProvided),
 );
@@ -149,6 +162,17 @@ const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 
+const layerThreadRecoveryProvided = ThreadRecovery.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerEventSinkProvided,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+    ),
+  ),
+);
+
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -156,6 +180,8 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       layerEventSinkProvided,
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
+      layerThreadRecoveryProvided,
+      ProjectionStore.layer,
     ),
   ),
 );
@@ -276,7 +302,7 @@ const layerWorktreeCleanupWorkerProvided = Layer.effectDiscard(
   Effect.flatMap(WorktreeCleanupService.WorktreeCleanupService, (service) => service.start()),
 ).pipe(Layer.provideMerge(layerWorktreeCleanupProvided));
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
-  Layer.provide(layerProjectService),
+  Layer.provide(Layer.merge(layerProjectService, layerUpdateDrainAdmission)),
 );
 const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),
@@ -299,6 +325,19 @@ const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+const layerThreadRecoveryRepairProvided = ThreadRecoveryRepair.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      layerCommandReceiptStoreProvided,
+      ProjectStore.layer,
+      layerThreadLaunchProvided,
+      layerThreadRecoveryProvided,
+    ),
+  ),
+);
+
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -322,6 +361,17 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
     Layer.mergeAll(layerThreadManagementProvided, ProjectStore.layer, TextGeneration.layer),
   ),
 );
+const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderAdapterRegistryProvided,
+      layerRuntimePolicyProvided,
+      layerOrchestratorProvided,
+    ),
+  ),
+);
+
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -333,6 +383,7 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerRuntimeRequestServiceProvided,
       layerThreadTitleRegenerationProvided,
       layerThreadManagementProvided,
+      layerSubagentPromotionProvided,
     ),
   ),
 );
@@ -352,6 +403,7 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
 );
 
 export const layer = Layer.mergeAll(
+  layerThreadRecoveryProvided,
   layerEventSinkProvided,
   layerOrchestratorProvided,
   layerThreadManagementProvided,
@@ -364,6 +416,9 @@ export const layer = Layer.mergeAll(
 );
 
 export const layerProduction = Layer.mergeAll(
+  layerThreadRecoveryRepairProvided,
+  layerThreadWaitProvided,
+  layerActionResumeProvided,
   layerWorktreeCleanupWorkerProvided,
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
@@ -378,4 +433,8 @@ export const layerProduction = Layer.mergeAll(
   layerProviderContinuationWorkerProvided,
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
-).pipe(Layer.provide(Scheduler.layer), Layer.provideMerge(layerEventInfrastructure));
+).pipe(
+  Layer.provideMerge(layerUpdateDrainAdmission),
+  Layer.provide(Scheduler.layer),
+  Layer.provideMerge(layerEventInfrastructure),
+);

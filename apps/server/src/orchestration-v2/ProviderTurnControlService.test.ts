@@ -214,6 +214,8 @@ it.effect(
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           getThreadShell: () => Effect.die("unused getThreadShell"),
+          getWorktreeCleanupThreads: Effect.die("unused getWorktreeCleanupThreads"),
+          getPersistentThreads: Effect.die("unused getPersistentThreads"),
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
@@ -263,12 +265,15 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
           open: () => Effect.die("unused open"),
+          isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
+          ownershipRevision: Effect.succeed(0),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
+          teardownThread: () => Effect.die("unused teardownThread"),
           release: () => Effect.void,
           detach: () => Effect.void,
         }),

@@ -9,6 +9,7 @@ import {
   PreviewAutomationHoverInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
+  PreviewAutomationProfiles,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
@@ -25,6 +26,10 @@ import {
   PreviewAutomationTypeInput,
   PreviewAutomationUploadInput,
   PreviewAutomationWaitForInput,
+  PreviewAutomationUnavailableError,
+  PreviewHostingError,
+  PreviewHostingLaunchInput,
+  PreviewHostingLeaseSummary,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
@@ -34,6 +39,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -64,7 +70,7 @@ const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
 
 const PreviewStatusTool = Tool.make("preview_status", {
   description:
-    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
+    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, measured CSS-pixel size, and actual profileId/profileName when the desktop supports profiles. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
   parameters: PreviewAutomationTabTargetInput,
   success: PreviewAutomationStatus,
   failure: PreviewToolFailure,
@@ -75,10 +81,54 @@ const PreviewStatusTool = Tool.make("preview_status", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+const PreviewProfilesTool = Tool.make("preview_profiles", {
+  description:
+    "List existing browser profiles (id, name, kind) and the configured defaultProfileId on this agent session's desktop host. Names may repeat; select a stable ID when they do. Profiles are desktop-local; their cookie jars are isolated per environment. This tool does not create profiles, change the default, or open a tab.",
+  success: PreviewAutomationProfiles,
+  failure: PreviewToolFailure,
+  dependencies,
+})
+  .annotate(Tool.Title, "List browser profiles")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const PreviewHostTool = Tool.make("preview_host", {
+  description:
+    "Start or recover a thread-owned local web preview in a managed terminal for 24 hours. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Opening the link in its owning thread restores a stopped server automatically within the fixed lease; viewing or recovering does not extend expiry.",
+  parameters: PreviewHostingLaunchInput,
+  success: PreviewHostingLeaseSummary,
+  failure: Schema.Union([
+    PreviewHostingError,
+    PreviewAutomationUnavailableError,
+    OrchestratorMcpFailure,
+  ]),
+  dependencies: [...dependencies, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Host a local preview")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true);
+
+const PreviewStopThreadTool = Tool.make("preview_stop_thread", {
+  description:
+    "Permanently cancel every managed preview lease and stop all app-managed terminal processes in this agent's own thread. Stopped previews cannot restart when their old links are opened. Ordinary terminal history is preserved, and other threads and agent providers are untouched.",
+  success: PreviewActionResult,
+  failure: Schema.Union([
+    PreviewHostingError,
+    PreviewAutomationUnavailableError,
+    OrchestratorMcpFailure,
+  ]),
+  dependencies: [...dependencies, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Stop thread previews and processes")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
-      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. Parallel subagents sharing a provider session must each open with reuseExistingTab=false and pass their returned tabId on every call. Server tabs use isolated storage and cannot be operated by a different agent session.",
+      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. To select an existing cookie jar without changing the default, use exactly one of profileName (exact unique name) or profileId from preview_profiles. Existing tabs retain their profile; a profile mismatch creates a new tab unless an exact tabId was supplied, which fails. Unknown or ambiguous profiles fail. Parallel subagents must each open with reuseExistingTab=false and pass the returned tabId on every call.",
     parameters: PreviewAutomationOpenInput,
     success: PreviewAutomationStatus,
     failure: PreviewToolFailure,
@@ -313,7 +363,10 @@ const PreviewRecordingStopTool = safeBrowserTool(
 
 export const PreviewToolkit = Toolkit.make(
   PreviewDialogTool,
+  PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,
@@ -335,7 +388,10 @@ export const PreviewToolkit = Toolkit.make(
 
 export const PreviewStandardToolkit = Toolkit.make(
   PreviewDialogTool,
+  PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,

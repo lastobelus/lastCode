@@ -5,6 +5,9 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
+  UpdateDrainAdmissionError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2Notification,
 } from "@t3tools/contracts";
@@ -22,6 +25,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderContinuationRequests from "./ProviderContinuationRequests.ts";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { OrchestratorDispatchError } from "./Orchestrator.ts";
 
 const threadId = ThreadId.make("thread-provider-continuation");
 const providerThreadId = ProviderThreadId.make("provider-thread-continuation");
@@ -105,6 +109,69 @@ function layerTest(input: {
 }
 
 describe("ProviderContinuationService", () => {
+  it.effect(
+    "retains buffered and text wakes across update drain without consuming their offer",
+    () =>
+      Effect.gen(function* () {
+        for (const delivery of ["adapter_buffered", "message_text"] as const) {
+          const attempted = yield* Queue.unbounded<unknown>();
+          const accepted = yield* Queue.unbounded<unknown>();
+          const closed = yield* Ref.make(true);
+          const consumed = yield* Ref.make(false);
+          const threads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                yield* Queue.offer(attempted, command);
+                if (yield* Ref.get(closed)) {
+                  return yield* new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: new UpdateDrainAdmissionError({
+                      reason: "update_draining",
+                      requestId: UpdateDrainRequestId.make("drain:continuation"),
+                      targetVersion: UpdateDrainTargetVersion.make("example-version"),
+                      message: "Update pending.",
+                    }),
+                  });
+                }
+                yield* Queue.offer(accepted, command);
+                return {} as never;
+              }),
+          });
+          const worker = ProviderContinuationService.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, threads),
+            ),
+          );
+          yield* Effect.gen(function* () {
+            const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+            yield* requests.offer({
+              ...request(),
+              delivery,
+              dispatchIfCurrent: (effect) =>
+                effect.pipe(
+                  Effect.tap(() => Ref.set(consumed, true)),
+                  Effect.asSome,
+                ),
+            });
+            yield* Queue.take(attempted);
+            yield* Effect.yieldNow;
+            assert.isFalse(yield* Ref.get(consumed));
+            assert.isTrue(Option.isNone(yield* Queue.poll(accepted)));
+            yield* Ref.set(closed, false);
+            yield* TestClock.adjust("100 millis");
+            yield* Queue.take(accepted);
+            yield* Effect.yieldNow;
+            assert.isTrue(yield* Ref.get(consumed));
+          }).pipe(
+            Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+            Effect.scoped,
+          );
+        }
+      }),
+  );
+
   it.effect("recovers an unaccepted persisted steer using the same delivery identity", () =>
     Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();

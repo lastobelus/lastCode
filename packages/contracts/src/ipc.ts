@@ -1,3 +1,4 @@
+import type { DesktopBrowserCommand, DesktopBrowserEvent } from "./desktopBrowser.ts";
 import * as Schema from "effect/Schema";
 
 import { SnapShotSource } from "./chatAttachment.ts";
@@ -374,6 +375,65 @@ export const DesktopLastCodeSettingsStateSchema = Schema.Struct({
   supported: Schema.Boolean,
   showAndInstallLocalNightlies: Schema.Boolean,
   message: Schema.NullOr(Schema.String),
+});
+
+export const LastCodeSettingsImportCategoryIdSchema = Schema.Literals([
+  "client-preferences",
+  "keybindings",
+  "server-preferences",
+]);
+export type LastCodeSettingsImportCategoryId = typeof LastCodeSettingsImportCategoryIdSchema.Type;
+
+export const LastCodeSettingsImportCategoryStatusSchema = Schema.Literals([
+  "ready",
+  "missing",
+  "invalid",
+]);
+export type LastCodeSettingsImportCategoryStatus =
+  typeof LastCodeSettingsImportCategoryStatusSchema.Type;
+
+export interface LastCodeSettingsImportCategory {
+  id: LastCodeSettingsImportCategoryId;
+  label: string;
+  sourceFile: string;
+  status: LastCodeSettingsImportCategoryStatus;
+  detail: string;
+}
+
+export const LastCodeSettingsImportCategorySchema = Schema.Struct({
+  id: LastCodeSettingsImportCategoryIdSchema,
+  label: Schema.String,
+  sourceFile: Schema.String,
+  status: LastCodeSettingsImportCategoryStatusSchema,
+  detail: Schema.String,
+});
+
+export interface LastCodeSettingsImportPreview {
+  sourceDirectory: string;
+  destinationDirectory: string;
+  categories: readonly LastCodeSettingsImportCategory[];
+  excluded: readonly string[];
+  canImport: boolean;
+  message: string | null;
+}
+
+export const LastCodeSettingsImportPreviewSchema = Schema.Struct({
+  sourceDirectory: Schema.String,
+  destinationDirectory: Schema.String,
+  categories: Schema.Array(LastCodeSettingsImportCategorySchema),
+  excluded: Schema.Array(Schema.String),
+  canImport: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
+});
+
+export interface LastCodeSettingsImportResult {
+  imported: readonly LastCodeSettingsImportCategoryId[];
+  backupDirectory: string;
+}
+
+export const LastCodeSettingsImportResultSchema = Schema.Struct({
+  imported: Schema.Array(LastCodeSettingsImportCategoryIdSchema),
+  backupDirectory: Schema.String,
 });
 
 export interface DesktopUpdateActionResult {
@@ -883,6 +943,8 @@ export interface PickedElementPayload {
   pageTitle: string | null;
   /** Lowercase tag name, e.g. `"button"`. */
   tagName: string;
+  /** Outer-to-inner iframe selectors, each scoped to its parent document URL. */
+  framePath?: ReadonlyArray<{ pageUrl: string; selector: string }>;
   /** CSS selector resolving back to the element on a re-render. */
   selector: string | null;
   /** Truncated outer-HTML preview (matches react-grab's `htmlPreview`). */
@@ -903,6 +965,9 @@ export const PickedElementPayloadSchema: Schema.Codec<PickedElementPayload> = Sc
   pageUrl: Schema.String,
   pageTitle: Schema.NullOr(Schema.String),
   tagName: Schema.String,
+  framePath: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ pageUrl: Schema.String, selector: Schema.String })),
+  ),
   selector: Schema.NullOr(Schema.String),
   htmlPreview: Schema.String,
   componentName: Schema.NullOr(Schema.String),
@@ -1075,7 +1140,11 @@ export const DesktopPreviewCreateTabInputSchema = Schema.Struct({
   zoomFactor: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
   colorScheme: Schema.optional(DesktopPreviewColorSchemeSchema),
   serverTab: Schema.optional(
-    Schema.Struct({ threadId: TrimmedNonEmptyString, tabId: TrimmedNonEmptyString }),
+    Schema.Struct({
+      threadId: TrimmedNonEmptyString,
+      tabId: TrimmedNonEmptyString,
+      desktopHostId: Schema.optional(TrimmedNonEmptyString),
+    }),
   ),
 });
 
@@ -1083,7 +1152,13 @@ export interface DesktopPreviewTabDefaults {
   readonly zoomFactor?: number | undefined;
   readonly colorScheme?: DesktopPreviewColorScheme | undefined;
   /** A tab of the desktop's own server: the server drives it through the desktop browser channel. */
-  readonly serverTab?: { readonly threadId: string; readonly tabId: string } | undefined;
+  readonly serverTab?:
+    | {
+        readonly threadId: string;
+        readonly tabId: string;
+        readonly desktopHostId?: string | undefined;
+      }
+    | undefined;
 }
 
 export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
@@ -1273,6 +1348,8 @@ export interface DesktopBridge {
   getUpdateState: () => Promise<DesktopUpdateState>;
   getLastCodeSettings: () => Promise<DesktopLastCodeSettingsState>;
   setShowAndInstallLocalNightlies: (enabled: boolean) => Promise<DesktopLastCodeSettingsState>;
+  previewT3SettingsImport: () => Promise<LastCodeSettingsImportPreview>;
+  importT3Settings: () => Promise<LastCodeSettingsImportResult>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
@@ -1295,6 +1372,16 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  browserCommand: (input: {
+    readonly desktopHostId: string;
+    readonly command: DesktopBrowserCommand;
+  }) => Promise<void>;
+  onBrowserEvent: (
+    listener: (input: {
+      readonly desktopHostId: string;
+      readonly event: DesktopBrowserEvent;
+    }) => void,
+  ) => () => void;
   setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;

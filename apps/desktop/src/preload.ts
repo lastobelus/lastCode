@@ -273,6 +273,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getLastCodeSettings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_GET_CHANNEL),
   setShowAndInstallLocalNightlies: (enabled) =>
     ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL, enabled),
+  previewT3SettingsImport: () =>
+    ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_PREVIEW_CHANNEL),
+  importT3Settings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_CHANNEL),
   setUpdateChannel: (channel) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),
   checkForUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL),
@@ -309,6 +312,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    browserCommand: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_COMMAND_CHANNEL, input),
+    onBrowserEvent: (listener) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        input: Parameters<typeof listener>[0],
+      ) => listener(input);
+      ipcRenderer.on(IpcChannels.DESKTOP_BROWSER_EVENT_CHANNEL, wrappedListener);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.DESKTOP_BROWSER_EVENT_CHANNEL, wrappedListener);
+    },
     setForwardedShortcuts: (shortcuts) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL, shortcuts),
     createTab: (tabId, defaults) =>

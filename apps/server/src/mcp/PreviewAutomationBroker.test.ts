@@ -1,25 +1,22 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
-  AuthOrchestrationOperateScope,
   EnvironmentId,
   PreviewAutomationClientDisconnectedError,
   PreviewAutomationInvalidSelectorError,
+  PreviewAutomationProfileError,
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationTargetNotEditableError,
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
-  WS_METHODS,
-  WsRpcGroup,
   type PreviewAutomationHost,
   type PreviewAutomationRequest,
   type PreviewAutomationStreamEvent,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -27,10 +24,7 @@ import * as Result from "effect/Result";
 import * as Scheduler from "effect/Scheduler";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import * as RpcGroup from "effect/rpc/RpcGroup";
-import * as RpcTest from "effect/rpc/RpcTest";
 
-import * as RpcAuthorization from "../auth/RpcAuthorization.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
@@ -937,110 +931,122 @@ it.effect("prefers a focused host over unrelated extra capabilities for a new se
   ),
 );
 
-it.effect("does not route new operations to legacy hosts that did not advertise support", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const legacyEvents = yield* broker.connect(makeHost());
-      yield* Stream.runDrain(legacyEvents).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
+  "does not route %s to legacy hosts that did not advertise support",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const legacyEvents = yield* broker.connect(makeHost());
+        yield* Stream.runDrain(legacyEvents).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      const error = yield* broker
-        .invoke<void>({ scope, operation: "resize", input: { mode: "fill" } })
-        .pipe(Effect.flip);
+        const error = yield* broker
+          .invoke<void>({ scope, operation, input: { mode: "fill" } })
+          .pipe(Effect.flip);
 
-      expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
-      expect(error).toMatchObject({ operation: "resize", environmentId: scope.environmentId });
-    }),
-  ),
+        expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+        expect(error).toMatchObject({ operation, environmentId: scope.environmentId });
+      }),
+    ),
 );
 
-it.effect("routes resize to a capable host instead of a newer legacy connection", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const capableRequests = requestsFrom(
-        yield* broker.connect(
-          makeHost({ clientId: "client-capable", supportedOperations: ["resize"] }),
-        ),
-      );
-      const legacyRequests = requestsFrom(
-        yield* broker.connect(makeHost({ clientId: "client-legacy" })),
-      );
-      yield* Stream.runForEach(capableRequests, (request) =>
-        broker.respond({
-          clientId: "client-capable",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "capable",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Stream.runForEach(legacyRequests, (request) =>
-        broker.respond({
-          clientId: "client-legacy",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "legacy",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
+  "routes %s to a capable host instead of a newer legacy connection",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const capableRequests = requestsFrom(
+          yield* broker.connect(
+            makeHost({
+              clientId: "client-capable",
+              supportedOperations: [operation],
+            }),
+          ),
+        );
+        const legacyRequests = requestsFrom(
+          yield* broker.connect(makeHost({ clientId: "client-legacy" })),
+        );
+        yield* Stream.runForEach(capableRequests, (request) =>
+          broker.respond({
+            clientId: "client-capable",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "capable",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Stream.runForEach(legacyRequests, (request) =>
+          broker.respond({
+            clientId: "client-legacy",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "legacy",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      expect(
-        yield* broker.invoke<string>({ scope, operation: "resize", input: { mode: "fill" } }),
-      ).toBe("capable");
-    }),
-  ),
+        expect(yield* broker.invoke<string>({ scope, operation, input: { mode: "fill" } })).toBe(
+          "capable",
+        );
+      }),
+    ),
 );
 
-it.effect("does not move a live legacy assignment to another runtime for resize", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const legacyRequests = requestsFrom(
-        yield* broker.connect(makeHost({ clientId: "client-legacy" })),
-      );
-      yield* Stream.runForEach(legacyRequests, (request) =>
-        broker.respond({
-          clientId: "client-legacy",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "legacy",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+it.effect.each(["resize", "profiles", "openWithProfile"] as const)(
+  "does not move a live legacy assignment to another runtime for %s",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const legacyRequests = requestsFrom(
+          yield* broker.connect(makeHost({ clientId: "client-legacy" })),
+        );
+        yield* Stream.runForEach(legacyRequests, (request) =>
+          broker.respond({
+            clientId: "client-legacy",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "legacy",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-        "legacy",
-      );
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "legacy",
+        );
 
-      const capableRequests = requestsFrom(
-        yield* broker.connect(
-          makeHost({ clientId: "client-capable", supportedOperations: ["resize"] }),
-        ),
-      );
-      yield* Stream.runForEach(capableRequests, (request) =>
-        broker.respond({
-          clientId: "client-capable",
-          connectionId: request.connectionId,
-          requestId: request.requestId,
-          ok: true,
-          result: "capable",
-        }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+        const capableRequests = requestsFrom(
+          yield* broker.connect(
+            makeHost({
+              clientId: "client-capable",
+              supportedOperations: [operation],
+            }),
+          ),
+        );
+        yield* Stream.runForEach(capableRequests, (request) =>
+          broker.respond({
+            clientId: "client-capable",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: "capable",
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
 
-      const error = yield* broker
-        .invoke<void>({ scope, operation: "resize", input: { mode: "fill" } })
-        .pipe(Effect.flip);
-      expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
-      expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
-        "legacy",
-      );
-    }),
-  ),
+        const error = yield* broker
+          .invoke<void>({ scope, operation, input: { mode: "fill" } })
+          .pipe(Effect.flip);
+        expect(error).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+        expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+          "legacy",
+        );
+      }),
+    ),
 );
 
 it.effect("ignores stale focus updates for a different environment", () =>
@@ -1498,6 +1504,38 @@ it.effect("keeps the host connected when a background status read times out", ()
       expect(yield* broker.invoke({ scope, operation: "snapshot", input: {} })).toEqual({
         operation: "snapshot",
       });
+    }),
+  ),
+);
+
+it.effect("returns profile selection advice from the desktop as a typed error", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const requests = requestsFrom(
+        yield* broker.connect(
+          makeHost({ supportedOperations: ["open", "profiles", "openWithProfile"] }),
+        ),
+      );
+      yield* Stream.runForEach(requests, (request) =>
+        broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: false,
+          error: {
+            _tag: "PreviewAutomationProfileError",
+            message: "Use profileId to disambiguate.",
+            detail: { reason: "ambiguous", detail: 'Use profileId: "work", "work-2".' },
+          },
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      const error = yield* broker
+        .invoke<void>({ scope, operation: "openWithProfile", input: { profileName: "Work" } })
+        .pipe(Effect.flip);
+      expect(error).toBeInstanceOf(PreviewAutomationProfileError);
+      expect(error.message).toBe('Use profileId: "work", "work-2".');
     }),
   ),
 );

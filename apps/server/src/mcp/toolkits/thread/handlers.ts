@@ -1,3 +1,5 @@
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -12,6 +14,7 @@ import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertFullAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -76,6 +79,43 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_recover: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecovery.ThreadRecoveryService;
+      yield* service
+        .recover(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+      return { ok: true as const };
+    }),
+  ),
+  t3_thread_repair: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readCaller().pipe(
+        Effect.tap((caller) =>
+          assertFullAccess(
+            caller,
+            "Starting a repair agent requires a live full-access/default thread or a full-access client.",
+          ),
+        ),
+      );
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+      return yield* service
+        .launch(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
@@ -153,6 +193,30 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence, targetThreadId: input.targetThreadId };
       }),
+  ),
+  t3_subagent_promote: writesThread((input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.request",
+      commandId,
+      threadId,
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "agent",
+      creationSource: "mcp",
+    })),
+  ),
+  t3_subagent_promotion_cancel: writesThread((input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.cancel",
+      commandId,
+      threadId,
+      requestId: input.requestId,
+    })),
+  ),
+  t3_subagent_promotion_status: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return { promotion: projection.thread.subagentPromotion ?? null };
+    }),
   ),
   t3_thread_transfers: McpToolAccess.reads((input) =>
     Effect.gen(function* () {

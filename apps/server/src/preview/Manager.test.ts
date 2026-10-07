@@ -6,6 +6,8 @@ import { PreviewUrlNormalizationError } from "@t3tools/shared/preview";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { expect } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -40,13 +42,112 @@ const collectEvents = Effect.gen(function* () {
   return collector;
 }).pipe(Effect.withSpan("preview.test.collectEvents"));
 
-const layer = PreviewManager.layer.pipe(
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-manager-" })),
-  Layer.provide(NodeCrypto.layer),
-  Layer.provide(NodeServices.layer),
+const PreviewManagerTestLayer = PreviewManager.layer.pipe(
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-manager-" })),
+  Layer.provideMerge(NodeCrypto.layer),
+  Layer.provideMerge(NodeServices.layer),
 );
 
-it.layer(layer)("PreviewManager", (it) => {
+it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect("shares durable recovery identity by thread and exact URL until a tab succeeds", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const first = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: "tab-a",
+        url: "http://localhost:5173/failed",
+      });
+      const sameClaimOtherTab = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: "tab-b",
+        url: "http://localhost:5173/failed",
+      });
+      const differentThread = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-b"),
+        tabId: "tab-c",
+        url: "http://localhost:5173/failed",
+      });
+      expect(sameClaimOtherTab).toEqual(first);
+      expect(differentThread).not.toEqual(first);
+
+      const tab = yield* manager.open({
+        threadId: ThreadId.make("recovery-thread-a"),
+        url: "http://localhost:5173/failed",
+      });
+      const originalClaim = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        url: "http://localhost:5173/redirected-from",
+      });
+      yield* manager.reportStatus({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        navStatus: { _tag: "Success", url: "http://localhost:5173/final", title: "Ready" },
+        canGoBack: true,
+        canGoForward: false,
+      });
+      const afterSuccess = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        url: "http://localhost:5173/redirected-from",
+      });
+      expect(afterSuccess).not.toEqual(originalClaim);
+    }),
+  );
+
+  it.effect("restores a recovery identity when the manager is reconstructed", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = ThreadId.make("recovery-restart-thread");
+      const first = yield* manager.claimRecovery({
+        threadId,
+        tabId: "tab-before-restart",
+        url: "http://localhost:5173/restart",
+      });
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const restartedManager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
+      const afterRestart = yield* restartedManager.claimRecovery({
+        threadId,
+        tabId: "tab-after-restart",
+        url: "http://localhost:5173/restart",
+      });
+      expect(afterRestart).toEqual(first);
+    }),
+  );
+
+  it.effect("keeps browser previews available when the recovery registry is unreadable", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.writeFileString(
+        path.join(config.stateDir, "preview-recovery-claims.json"),
+        "not valid recovery data",
+      );
+      const managerAfterCorruption = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
+      const claimResult = yield* Effect.exit(
+        managerAfterCorruption.claimRecovery({
+          threadId: ThreadId.make("corrupt-recovery-thread"),
+          tabId: "tab-corrupt",
+          url: "http://localhost:5173/corrupt",
+        }),
+      );
+      expect(claimResult._tag).toBe("Failure");
+      const opened = yield* manager.open({ threadId: ThreadId.make("browser-remains-available") });
+      expect(opened.navStatus._tag).toBe("Idle");
+    }),
+  );
   it.effect("opens a session and emits opened with normalized URL", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
