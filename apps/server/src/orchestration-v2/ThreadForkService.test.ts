@@ -179,6 +179,30 @@ it.effect("forks from a usage-limited failed run", () =>
   }),
 );
 
+it.effect("keeps the source thread's Project Action out of its fork", () =>
+  Effect.gen(function* () {
+    const source = makeSourceThread();
+    const actionResume = {
+      runId: "action:source-ci",
+      threadId: sourceThreadId,
+      projectId: source.projectId,
+      actionId: "quick-ci",
+      actionName: "Run Quick CI",
+      terminalId: "terminal:source-ci",
+      outcome: "running" as const,
+      delivery: "armed" as const,
+      startedAt: DateTime.formatIso(snoozedAt),
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+    };
+    const result = yield* planFork(makeSourceRun("completed"), { ...source, actionResume });
+    assert.isNull(result.targetThread.actionResume);
+    assert.equal(actionResume.threadId, sourceThreadId);
+    assert.equal(actionResume.outcome, "running");
+  }),
+);
+
 it.effect("does not inherit an ordinary source conversation's creator or placement", () =>
   Effect.gen(function* () {
     for (const creatorGrouping of ["grouped", "independent"] as const) {

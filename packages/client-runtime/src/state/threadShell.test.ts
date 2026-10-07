@@ -51,6 +51,51 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
 }
 
 describe("v2 thread shell lists", () => {
+  it("ignores a parent's Action in cached shells and later updates", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const action = {
+      runId: "parent-ci",
+      threadId: ThreadId.make("parent-action-owner"),
+      projectId: v2ThreadShell.projectId,
+      actionId: "quick-ci",
+      actionName: "Run Quick CI",
+      terminalId: "parent-ci-terminal",
+      outcome: "running" as const,
+      delivery: "armed" as const,
+      startedAt: DateTime.formatIso(v2ThreadShell.createdAt),
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+    };
+    const ref = { environmentId, threadId: v2ThreadShell.id };
+    const cached = { ...v2ThreadShell, actionResume: action };
+    let snapshot: OrchestrationV2ShellSnapshot = { ...v2ShellSnapshot, threads: [cached] };
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const selected = threads.threadShellAtom(ref);
+    const dispose = registry.mount(selected);
+    try {
+      expect(registry.get(selected)?.actionResume).toBeNull();
+      snapshot = applyShellStreamEvent(snapshot, {
+        kind: "thread.updated",
+        location: "active",
+        sequence: 1,
+        thread: { ...cached },
+      });
+      registry.set(snapshotAtom(environmentId), snapshot);
+      expect(registry.get(selected)?.actionResume).toBeNull();
+
+      const owned = { ...action, threadId: v2ThreadShell.id };
+      registry.set(snapshotAtom(environmentId), {
+        ...v2ShellSnapshot,
+        threads: [{ ...v2ThreadShell, actionResume: owned }],
+      });
+      expect(registry.get(selected)?.actionResume).toEqual(owned);
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it.each(["ordinary", "subagent"] as const)(
     "omits copied parent annotations from %s shells and retains independent live note changes",
     (kind) => {

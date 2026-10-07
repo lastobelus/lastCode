@@ -324,7 +324,8 @@ export function presentThreadShell(
     annotation: threadAnnotationOf(thread),
     attention: thread.attention ?? null,
     dashboardItems: thread.dashboardItems ?? [],
-    actionResume: thread.actionResume ?? null,
+    // Cached shells and retained events can still carry a parent's Action.
+    actionResume: thread.actionResume?.threadId === thread.id ? thread.actionResume : null,
     worktreeCleanup: thread.worktreeCleanup ?? null,
     source: thread,
   };
