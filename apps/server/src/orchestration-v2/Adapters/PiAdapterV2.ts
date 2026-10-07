@@ -2974,7 +2974,11 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
       return makePiAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         spawner,
         fileSystem,
         idAllocator,
@@ -3008,7 +3012,11 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
       return makePiAdapterV2({
         instanceId: PI_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_PI_SETTINGS,
-        environment: hostEnvironment,
+        environment: mergeProviderInstanceEnvironment(
+          undefined,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         spawner,
         fileSystem,
         idAllocator,

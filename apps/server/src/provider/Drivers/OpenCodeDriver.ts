@@ -201,7 +201,11 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const httpClient = yield* HttpClient.HttpClient;
       const crypto = yield* Crypto.Crypto;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv = mergeProviderInstanceEnvironment(
+        environment,
+        process.env,
+        serverConfig.settingsPath,
+      );
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,

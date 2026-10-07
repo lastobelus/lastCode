@@ -227,6 +227,7 @@ const multiTerminalHistoryLogPath = (
 interface CreateManagerOptions {
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
+  localCiSettingsPath?: string;
   subprocessInspector?: (terminalPid: number) => Effect.Effect<{
     readonly hasRunningSubprocess: boolean;
     readonly childCommand: string | null;
@@ -280,6 +281,9 @@ const createManager = (
           : {}),
         ...(options.shellResolver !== undefined ? { shellResolver: options.shellResolver } : {}),
         ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.localCiSettingsPath !== undefined
+          ? { localCiSettingsPath: options.localCiSettingsPath }
+          : {}),
         ...(options.subprocessInspector !== undefined
           ? { subprocessInspector: options.subprocessInspector }
           : {}),
@@ -2069,6 +2073,23 @@ it.layer(
           expect(env.COLORTERM).toBe(parentColor);
         }
       }),
+  );
+
+  it.effect("binds action terminals to the server settings path over shell overrides", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json" },
+        localCiSettingsPath: "/server/custom-state/settings.json",
+      });
+      yield* manager.open(
+        openInput({
+          env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/client/settings.json" },
+        }),
+      );
+      expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe(
+        "/server/custom-state/settings.json",
+      );
+    }),
   );
 
   it.effect("filters app runtime env variables from terminal sessions", () =>
