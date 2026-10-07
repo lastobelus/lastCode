@@ -1,6 +1,7 @@
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration uses temporary Node paths.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -47,6 +48,65 @@ import {
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
+
+it("keeps reconciliation JSON on stdout and migration diagnostics on stderr", () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-project-output-"));
+  try {
+    const workspaceRoot = NodePath.join(root, "workspace");
+    NodeFS.mkdirSync(workspaceRoot);
+    const sourceFile = NodePath.join(workspaceRoot, "t3.json");
+    const stateFile = NodePath.join(root, "managed-actions.json");
+    NodeFS.writeFileSync(
+      sourceFile,
+      JSON.stringify({
+        scripts: [
+          {
+            id: "lc-example",
+            name: "Example Action",
+            command: "node scripts/example.mjs",
+            icon: "test",
+          },
+        ],
+      }),
+    );
+    const args = [
+      NodePath.resolve(import.meta.dirname, "../bin.ts"),
+      "project",
+      "reconcile-actions",
+      workspaceRoot,
+      "--source-file",
+      sourceFile,
+      "--state-file",
+      stateFile,
+      "--create-if-missing",
+      "--base-dir",
+      NodePath.join(root, "state"),
+    ];
+    const result = NodeChildProcess.spawnSync(
+      process.execPath,
+      [...args, "--trusted-source-ids", "lc-example"],
+      { encoding: "utf8" },
+    );
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.deepInclude(JSON.parse(result.stdout), {
+      mode: "offline",
+      projectCreated: true,
+      scriptsChanged: true,
+      created: ["lc-example"],
+    });
+    assert.include(result.stderr, "Migrations ran successfully");
+    const state = JSON.parse(NodeFS.readFileSync(stateFile, "utf8"));
+    assert.isTrue(state.actions[0].managesResumePermission);
+
+    NodeFS.writeFileSync(sourceFile, "invalid JSON");
+    const failed = NodeChildProcess.spawnSync(process.execPath, args, { encoding: "utf8" });
+    assert.strictEqual(failed.status, 1);
+    assert.include(failed.stderr + failed.stdout, "Failed to decode source");
+    assert.deepEqual(JSON.parse(NodeFS.readFileSync(stateFile, "utf8")), state);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const makeConfig = (baseDir: string) =>
   Effect.gen(function* () {

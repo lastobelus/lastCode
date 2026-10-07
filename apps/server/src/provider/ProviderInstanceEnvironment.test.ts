@@ -8,6 +8,30 @@ import * as Path from "effect/Path";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
+  it("binds provider shells to the server settings path over inherited and instance values", () => {
+    const inherited = { T3CODE_LOCAL_CI_SETTINGS_PATH: "/other/settings.json", PATH: "/bin" };
+    expect(
+      mergeProviderInstanceEnvironment(
+        [
+          {
+            name: "T3CODE_LOCAL_CI_SETTINGS_PATH",
+            value: "/instance/settings.json",
+            sensitive: false,
+          },
+        ],
+        inherited,
+        "/server/custom-state/settings.json",
+      ),
+    ).toEqual({
+      ...inherited,
+      T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/custom-state/settings.json",
+    });
+    expect(mergeProviderInstanceEnvironment(undefined, inherited, "/server/settings.json")).toEqual(
+      { ...inherited, T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/settings.json" },
+    );
+    expect(inherited.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe("/other/settings.json");
+  });
+
   it.effect.each([
     { value: "~/.account", tail: ".account" },
     { value: "~\\.account\\work", tail: ".account\\work" },

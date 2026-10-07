@@ -23,6 +23,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
+  | "/settings/lastcode"
   | "/settings/archived";
 
 /**
@@ -98,6 +99,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
   "/settings/connections": "Connections",
+  "/settings/lastcode": "LastCode",
   "/settings/archived": "Archive",
 };
 
@@ -908,6 +910,46 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "GitHub sharing",
     to: "/settings/connections",
     searchTerms: ["pull request trusted environments shared credentials permissions read actions"],
+  },
+  {
+    id: "local-nightlies",
+    title: "Show and install local nightlies",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "local-ci-quick-mode",
+    title: "Quick CI mode",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["automatic always local github only checks capacity wait"],
+  },
+  {
+    id: "local-ci-runs",
+    title: "Concurrent CI runs",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["local quick full checks queue worktree concurrency limit"],
+  },
+  {
+    id: "local-ci-packages",
+    title: "Packages checked at once",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["local ci quick full checks package parallel concurrency limit"],
+  },
+  {
+    id: "local-ci-compiler-cpu",
+    title: "TypeScript compiler CPU limit",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["local ci compiler threads parallelism cpu native"],
+  },
+  {
+    id: "local-ci-background-priority",
+    title: "Background CI priority",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["local ci quick full cpu priority responsive nice"],
   },
   {
     id: "archive",

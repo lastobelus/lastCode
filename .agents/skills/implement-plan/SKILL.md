@@ -50,19 +50,16 @@ Implement a reviewed plan in this repository.
 
 ## Validation
 
-Required before completion:
+Use the focused validation required by `AGENTS.md`:
 
-```bash
-vp check
-vp run typecheck
-```
-
-Also run:
-
-- targeted `vp test ...` or package tests for touched areas
+- targeted tests and lint for touched areas
 - `vp run test` when the package script is specifically needed
 - `vp run lint:mobile` for native mobile changes
 - local build/smoke commands named by the plan
+
+For LastCode delivery, follow `lastcode-pr`: GitHub CI is required and local
+Quick CI follows the configured mode. Do not run repository-wide checks or
+recreate a GitHub deferral with direct parallel workspace typechecks.
 
 Do not move past a failed validation step unless you fix it and rerun, or stop and
 report the blocker.

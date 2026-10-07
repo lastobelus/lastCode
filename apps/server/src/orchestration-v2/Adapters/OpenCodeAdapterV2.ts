@@ -3750,7 +3750,11 @@ export const OpenCodeAdapterV2Driver: ProviderAdapterDriver<
       return makeOpenCodeAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         runtime: openCodeRuntime,
         idAllocator,
         serverConfig,
@@ -3786,7 +3790,11 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, OpenCodeAdapt
       return makeOpenCodeAdapterV2({
         instanceId: OPENCODE_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_OPENCODE_SETTINGS,
-        environment: hostEnvironment,
+        environment: mergeProviderInstanceEnvironment(
+          undefined,
+          hostEnvironment,
+          serverConfig.settingsPath,
+        ),
         runtime: openCodeRuntime,
         idAllocator,
         serverConfig,
