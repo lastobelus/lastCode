@@ -209,6 +209,9 @@ export function summarizeT3ToolCalls(
     case "thread-configuration":
       label = phrase("Checked", "check", `thread configuration ${times}`);
       break;
+    case "thread-archive-family":
+      label = phrase("Inspected", "inspect", `thread archive choices ${times}`);
+      break;
     case "thread-configure":
       label = phrase("Set", "set", `thread model ${times}`);
       break;

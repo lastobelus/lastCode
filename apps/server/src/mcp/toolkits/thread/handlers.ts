@@ -10,6 +10,7 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -231,6 +232,15 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           }),
         ),
       };
+    }),
+  ),
+  t3_thread_archive_family: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { threads, projection } = yield* readThread(input.threadId);
+      const family = yield* threads
+        .getThreadArchiveFamily(projection.thread.id)
+        .pipe(Effect.mapError(unavailable));
+      return Struct.omit(family, ["threads"]);
     }),
   ),
   t3_thread_configuration: McpToolAccess.reads((input) =>

@@ -22,6 +22,7 @@ export type T3McpToolSummaryAction =
   | "thread-wait"
   | "thread-interrupt"
   | "thread-configuration"
+  | "thread-archive-family"
   | "thread-configure"
   | "thread-fork"
   | "subagent-promote"
@@ -295,6 +296,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_configuration: tool(
     ["Read", "Reading", "Read", "thread configuration"],
     "thread-configuration",
+  ),
+  t3_thread_archive_family: tool(
+    ["Inspect", "Inspecting", "Inspected", "thread archive choices"],
+    "thread-archive-family",
   ),
   t3_thread_configure: tool(["Set", "Setting", "Set", "thread model"], "thread-configure"),
   t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),

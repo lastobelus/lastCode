@@ -1,0 +1,303 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { expect, it } from "@effect/vitest";
+import {
+  EnvironmentId,
+  EventId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationV2AppThread,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { McpSchema, McpServer } from "effect/ai";
+
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
+import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { ThreadToolkit } from "./tools.ts";
+
+const database = SqlitePersistence.layerMemory;
+const threadsLayer = ThreadManagement.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ProviderReplayHarness.layerWithRegistry(
+        { name: "mcp-archive-family" },
+        ProviderAdapterRegistry.layerFromAdapters([]),
+        { databaseLayer: database },
+      ),
+      ProjectionStore.layer.pipe(Layer.provide(database)),
+    ),
+  ),
+);
+const testLayer = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(threadsLayer),
+  Layer.provide(NodeCrypto.layer),
+);
+const rootId = ThreadId.make("archive-family:root");
+const appId = ThreadId.make("archive-family:app");
+const nestedId = ThreadId.make("archive-family:nested-native");
+const nativeId = ThreadId.make("archive-family:native");
+const forkId = ThreadId.make("archive-family:fork");
+const independentId = ThreadId.make("archive-family:independent");
+const instanceId = ProviderInstanceId.make("codex");
+const scope: McpInvocationContext.McpInvocationScope = {
+  environmentId: EnvironmentId.make("archive-family:environment"),
+  requestNamespace: "archive-family:session",
+  thread: {
+    threadId: rootId,
+    providerSessionId: "archive-family:session",
+    providerInstanceId: instanceId,
+  },
+  client: undefined,
+  issuedAt: 0,
+  capabilities: new Set(["orchestration"]),
+};
+const clientScope: McpInvocationContext.McpInvocationScope = {
+  ...scope,
+  thread: undefined,
+  client: { sessionId: "archive-family:client", label: "Test client", access: "full-access" },
+};
+const client = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "archive-family", version: "1" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "archive-family", version: "1" },
+  },
+  getClient: Effect.die("unused"),
+});
+const invoke = Effect.fnUntraced(function* (
+  name: string,
+  args: Record<string, unknown>,
+  invocation = scope,
+) {
+  const server = yield* McpServer.McpServer;
+  return yield* server
+    .callTool({ name, arguments: args })
+    .pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.provideService(McpSchema.McpServerClient, client),
+    );
+});
+const decodeFamily = Schema.decodeUnknownEffect(
+  ThreadToolkit.tools.t3_thread_archive_family.successSchema,
+);
+const declaredFailure = (result: McpSchema.CallToolResult) => {
+  const text = result.content[0];
+  return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
+};
+const seedFamily = Effect.fnUntraced(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const root: OrchestrationV2AppThread = {
+    id: rootId,
+    projectId: ProjectId.make("archive-family:project"),
+    title: "Planning task",
+    createdBy: "user",
+    creationSource: "web",
+    providerInstanceId: instanceId,
+    modelSelection: { instanceId, model: "example-model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: rootId, parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    settledAt: null,
+    settledOverride: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+  };
+  const child = (id: ThreadId, parent: ThreadId): OrchestrationV2AppThread => ({
+    ...root,
+    id,
+    createdBy: "agent",
+    creationSource: "mcp",
+    lineage: { ...root.lineage, parentThreadId: parent, relationshipToParent: "subagent" },
+  });
+  for (const thread of [
+    root,
+    child(appId, rootId),
+    { ...child(nestedId, appId), creationSource: "provider" as const },
+    { ...child(nativeId, rootId), creationSource: "provider" as const },
+    {
+      ...child(forkId, rootId),
+      lineage: { ...root.lineage, parentThreadId: rootId, relationshipToParent: "fork" as const },
+    },
+    {
+      ...child(independentId, rootId),
+      lineage: { ...child(independentId, rootId).lineage, independent: true },
+    },
+  ])
+    yield* store.apply({
+      id: EventId.make(`create:${thread.id}`),
+      type: "thread.created",
+      threadId: thread.id,
+      occurredAt: now,
+      payload: thread,
+    });
+  return { store, now, child };
+});
+
+it.effect.each([false, true])(
+  "discovers the recursive family before archive (explicit=%s)",
+  (explicit) =>
+    Effect.gen(function* () {
+      yield* seedFamily();
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const result = yield* invoke(
+        "t3_thread_archive_family",
+        explicit ? { threadId: rootId } : {},
+      );
+      expect(result.isError, JSON.stringify(result.content)).toBe(false);
+      const family = yield* decodeFamily(result.structuredContent);
+      expect(family.childThreadIds.toSorted()).toEqual([appId, nestedId, nativeId].toSorted());
+      expect(family.promotableChildThreadIds).toEqual([appId]);
+      expect(family.keptThreadIds.toSorted()).toEqual([appId, nestedId].toSorted());
+      expect(family).toMatchObject({
+        nativeStopCount: 1,
+        requiresConfirmation: false,
+        canPromote: true,
+        canStopAndArchive: true,
+      });
+      for (const id of [rootId, ...family.childThreadIds])
+        expect((yield* threads.getThreadShell(id))?.archivedAt).toBeNull();
+      const archived = yield* invoke(
+        "t3_thread_organize",
+        {
+          threadId: rootId,
+          action: "archive",
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: family.childThreadIds,
+        },
+        clientScope,
+      );
+      expect(archived.isError).toBe(false);
+      for (const id of [rootId, ...family.childThreadIds])
+        expect((yield* threads.getThreadShell(id))?.archivedAt).not.toBeNull();
+      for (const id of [forkId, independentId])
+        expect((yield* threads.getThreadShell(id))?.archivedAt).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("requires fresh family inspection when a nested child is added", () =>
+  Effect.gen(function* () {
+    const { store, now, child } = yield* seedFamily();
+    const first = yield* decodeFamily(
+      (yield* invoke("t3_thread_archive_family", {})).structuredContent,
+    );
+    const lateId = ThreadId.make("archive-family:late-child");
+    yield* store.apply({
+      id: EventId.make("create:late-child"),
+      type: "thread.created",
+      threadId: lateId,
+      occurredAt: now,
+      payload: child(lateId, appId),
+    });
+    const stale = yield* invoke(
+      "t3_thread_organize",
+      {
+        threadId: rootId,
+        action: "archive",
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: first.childThreadIds,
+      },
+      clientScope,
+    );
+    expect(declaredFailure(stale)).toMatchObject({
+      code: "orchestration_error",
+      message: "The subagents changed. Review the archive choices again.",
+    });
+    const fresh = yield* decodeFamily(
+      (yield* invoke("t3_thread_archive_family", {})).structuredContent,
+    );
+    expect(fresh.childThreadIds.toSorted()).toEqual([...first.childThreadIds, lateId].toSorted());
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    for (const id of [rootId, ...fresh.childThreadIds])
+      expect((yield* threads.getThreadShell(id))?.archivedAt).toBeNull();
+    const accepted = yield* invoke(
+      "t3_thread_organize",
+      {
+        threadId: rootId,
+        action: "archive",
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: fresh.childThreadIds,
+      },
+      clientScope,
+    );
+    expect(accepted.isError).toBe(false);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("lets a read-only client inspect choices without allowing archive", () =>
+  Effect.gen(function* () {
+    yield* seedFamily();
+    const readOnly = {
+      ...clientScope,
+      client: {
+        sessionId: "archive-family:client",
+        label: "Test client",
+        access: "read-only" as const,
+      },
+    };
+    const family = yield* decodeFamily(
+      (yield* invoke("t3_thread_archive_family", { threadId: rootId }, readOnly)).structuredContent,
+    );
+    expect(family.childThreadIds).toHaveLength(3);
+    const refused = yield* invoke(
+      "t3_thread_organize",
+      {
+        threadId: rootId,
+        action: "archive",
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: family.childThreadIds,
+      },
+      readOnly,
+    );
+    expect(declaredFailure(refused)).toMatchObject({ code: "capability_denied" });
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    expect((yield* threads.getThreadShell(rootId))?.archivedAt).toBeNull();
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["missing", "capability", "no-target"] as const)(
+  "refuses an unavailable archive family (%s)",
+  (kind) =>
+    Effect.gen(function* () {
+      yield* seedFamily();
+      const invocation =
+        kind === "no-target"
+          ? clientScope
+          : kind === "capability"
+            ? { ...scope, capabilities: new Set<never>() }
+            : scope;
+      const result = yield* invoke(
+        "t3_thread_archive_family",
+        kind === "missing" ? { threadId: ThreadId.make("archive-family:missing") } : {},
+        invocation,
+      );
+      expect(declaredFailure(result)).toMatchObject({
+        code:
+          kind === "missing"
+            ? "thread_not_found"
+            : kind === "capability"
+              ? "capability_denied"
+              : "target_required",
+      });
+    }).pipe(Effect.provide(testLayer)),
+);
