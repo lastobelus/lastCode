@@ -528,16 +528,6 @@ export function useThreadActions() {
       const threadRef = scopeThreadRef(target.environmentId, archiveRetryThreadId(resolved.thread));
       let thread = resolved.thread;
       const familyChoice = retry && !opts.familyOwner ? undefined : opts.familyChoice;
-      if (!retry && !threadRuntimeCanArchive(thread.runtime)) {
-        return AsyncResult.failure(
-          Cause.fail(
-            new ThreadArchiveBlockedError({
-              environmentId: threadRef.environmentId,
-              threadId: threadRef.threadId,
-            }),
-          ),
-        );
-      }
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
       let archivedChildDisposition: ArchiveChildDisposition =
@@ -571,6 +561,17 @@ export function useThreadActions() {
         familyResult === null
           ? (opts.familySnapshot ?? null)
           : resolveArchiveFamily(familyResult.value, threadRef);
+      if (!retry && !threadRuntimeCanArchive(thread.runtime) && !family?.children.length) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadArchiveBlockedError({
+              environmentId: threadRef.environmentId,
+              threadId: threadRef.threadId,
+            }),
+          ),
+        );
+      }
+
       const activeChildren = family?.children.filter(archiveChildNeedsAttention) ?? [];
       const expectedChildThreadIds = family?.children.map((child) => child.id) ?? [];
       const mutate = (childDisposition?: ArchiveChildDisposition) => {
@@ -596,7 +597,9 @@ export function useThreadActions() {
       if (
         !familyChoice &&
         family !== null &&
-        (activeChildren.length > 0 || family.protectedChildren.length > 0)
+        (activeChildren.length > 0 ||
+          family.protectedChildren.length > 0 ||
+          (!threadRuntimeCanArchive(thread.runtime) && family.children.length > 0))
       ) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
@@ -641,7 +644,8 @@ export function useThreadActions() {
         currentRouteThreadRef.environmentId === threadRef.environmentId &&
         (currentRouteThreadRef.threadId === threadRef.threadId ||
           ((currentRouteThreadRef.threadId === target.threadId ||
-            family?.children.some((child) => child.id === currentRouteThreadRef.threadId)) &&
+            (family?.children.some((child) => child.id === currentRouteThreadRef.threadId) ??
+              false)) &&
             (archivedChildDisposition !== "promote" ||
               !family?.keptThreadIds.has(currentRouteThreadRef.threadId))));
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
@@ -791,7 +795,14 @@ export function useThreadActions() {
       };
       const activeChildren = children.filter(archiveChildNeedsAttention);
       const protectedCount = children.filter((child) => child.persistent).length;
-      if (activeChildren.length > 0 || protectedCount > 0) {
+      if (
+        activeChildren.length > 0 ||
+        protectedCount > 0 ||
+        entries.some(
+          ({ owner, family }) =>
+            !threadRuntimeCanArchive(owner.runtime) && family.children.length > 0,
+        )
+      ) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive ${entries.length} threads?`,
           children,

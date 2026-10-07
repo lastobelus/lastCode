@@ -3920,15 +3920,41 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
+      const refusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("runtime-layer-archive-queued-refuse-active"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      assert.include(String(refusal.cause), "unfinished work");
+      const afterRefusal = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterRefusal.thread.archivedAt);
+      assert.isNull(afterRefusal.thread.archivePending ?? null);
+      assert.equal(afterRefusal.runs.find((run) => run.id === activeRun.id)?.status, "starting");
+      assert.equal(afterRefusal.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("runtime-layer-archive-queued-stop-active"),
+        threadId,
+        runId: activeRun.id,
+        holdQueue: true,
+      });
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopped.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopped.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+      assert.isTrue(stopped.runs.find((run) => run.id === queuedRun.id)?.queueHeld);
+
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
       });
       const stopping = yield* orchestrator.getThreadProjection(threadId);
-      assert.isNull(stopping.thread.archivedAt);
-      assert.equal(stopping.thread.archivePending?.status, "stopping");
-      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "cancelled");
+      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
       assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
       yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 

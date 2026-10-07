@@ -96,10 +96,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import {
-  threadRuntimeCanArchive,
-  threadShellIsVisible,
-} from "@t3tools/client-runtime/state/models";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -649,8 +646,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
     [discoveredPorts, navigateToThread, openPreview, thread.environmentId, threadRef],
   );
-  const isThreadRunning =
-    thread.archivePending?.status !== "failed" && !threadRuntimeCanArchive(thread.runtime);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -675,8 +670,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     canOperateThread &&
     !thread.persistent &&
     cleanup === null &&
-    confirmingArchiveThreadKey === threadKey &&
-    !isThreadRunning;
+    confirmingArchiveThreadKey === threadKey;
   const annotation = thread.annotation ?? null;
   const hasActiveAnnotation = annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
@@ -754,7 +748,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const threadMetaVisibilityClassName = isConfirmingArchive
     ? "opacity-0"
-    : canOperateThread && !thread.persistent && cleanup === null && !isThreadRunning
+    : canOperateThread && !thread.persistent && cleanup === null
       ? "transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "";
   const threadMetaClassName = `pointer-events-none inline-flex w-full justify-end ${
@@ -1465,7 +1459,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               >
                 Confirm
               </button>
-            ) : canOperateThread && !thread.persistent && !isThreadRunning && cleanup === null ? (
+            ) : canOperateThread && !thread.persistent && cleanup === null ? (
               appSettingsConfirmThreadArchive ? (
                 <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
                   <button
@@ -2730,10 +2724,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
       const count = selectedThreadEntries.length;
       if (count === 0) return;
-      const hasRunningThread = selectedThreadEntries.some(
-        ({ thread }) =>
-          thread.archivePending?.status !== "failed" && !threadRuntimeCanArchive(thread.runtime),
-      );
       const canOperateSelection = selectedThreadEntries.every(({ threadRef }) =>
         readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
       );
@@ -2751,7 +2741,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
-          buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
+          buildMultiSelectThreadContextMenuItems({ count }),
           hasPersistentThread,
         ).map((item) =>
           item.id === "archive" || item.id === "delete"

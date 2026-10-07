@@ -11118,10 +11118,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
-  const sameThreadIds = (left: ReadonlyArray<ThreadId>, right: ReadonlyArray<ThreadId>) =>
-    left.length === right.length &&
-    new Set(left).size === left.length &&
-    left.every((id) => right.includes(id));
+  const sameThreadIds = (left: ReadonlyArray<ThreadId>, right: ReadonlyArray<ThreadId>) => {
+    if (left.length !== right.length || new Set(left).size !== left.length) return false;
+    const rightIds = new Set(right);
+    return rightIds.size === right.length && left.every((id) => rightIds.has(id));
+  };
 
   const archiveParticipants = (
     threads: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -11449,11 +11450,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         root.id,
         pending.childDisposition,
       );
+      // Retained branches may keep delegating during shutdown. Consent still
+      // covers them as long as neither the stopped set nor promoted roots change.
       if (
-        !sameThreadIds(
-          current.family.children.map((child) => child.id),
-          pending.childThreadIds,
-        )
+        !sameThreadIds(current.archiveIds, pending.archiveThreadIds) ||
+        !sameThreadIds(current.promoteIds, pending.promoteThreadIds)
       )
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -11461,7 +11462,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The subagents changed while stopping. Review the archive choices again.",
         });
       if (pending.modeLimit !== undefined) {
-        for (const id of new Set([root.id, ...pending.childThreadIds])) {
+        for (const id of new Set([
+          root.id,
+          ...pending.childThreadIds,
+          ...current.family.children.map((child) => child.id),
+        ])) {
           const participant = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
           yield* refuseAboveDispatchModeLimit(command, id, participant).pipe(
             Effect.provideService(DispatchModeLimit, pending.modeLimit),

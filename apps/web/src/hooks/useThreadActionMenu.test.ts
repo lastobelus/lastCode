@@ -252,16 +252,20 @@ describe("thread menu archive retries", () => {
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  it("allows retry after native shutdown fails while retaining the active archive guard", async () => {
+  it("routes active work and failed native shutdown through the archive family handler", async () => {
     state.granted.add("secondary");
     state.runtime = nativeRuntime;
     const menu = createMenu();
     menu.openMenu(position);
-    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
 
     state.archivePendingStatus = "stopping";
     menu.openMenu(position);
-    expect(state.show.mock.calls[1]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
+    expect(state.show.mock.calls[1]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
 
     state.archivePendingStatus = "failed";
     state.show.mockResolvedValue("archive");

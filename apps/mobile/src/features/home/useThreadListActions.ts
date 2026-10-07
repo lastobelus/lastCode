@@ -177,13 +177,6 @@ function useThreadActionExecutor(
             ) ?? thread;
           const retry = thread.archivePending?.status === "failed";
           const archiveThreadId = archiveRetryThreadId(thread);
-          if (!retry && !threadCanArchive(thread.runtime)) {
-            Alert.alert(
-              actionFailureTitle(action),
-              "This thread is working. Interrupt it first, then try again.",
-            );
-            return false;
-          }
           const familyResult = await loadArchiveFamily({
             environmentId: thread.environmentId,
             input: { threadId: archiveThreadId },
@@ -218,6 +211,14 @@ function useThreadActionExecutor(
             return false;
           }
           const family = resolveThreadArchiveFamily(familyResult.value, thread);
+          if (!retry && !threadCanArchive(thread.runtime) && family.children.length === 0) {
+            Alert.alert(
+              actionFailureTitle(action),
+              "This thread is working. Interrupt it first, then try again.",
+            );
+            return false;
+          }
+
           const childDisposition = family.requiresConfirmation
             ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
                 Alert.alert(

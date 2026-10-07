@@ -207,6 +207,80 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("archive family reads", () => {
+  const workingRuntime = {
+    status: "running" as const,
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "codex",
+    lastError: null,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it.each([
+    ["Stop and archive", "stop_and_archive"],
+    ["Keep running separately", "promote"],
+    ["Cancel", null],
+  ])(
+    "asks before stopping a working owner with idle children: %s",
+    async (buttonText, disposition) => {
+      const root = makeThread({ runtime: workingRuntime });
+      const child = makeThread({
+        id: ThreadId.make("idle-child"),
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      state.shells = [root];
+      state.archiveFamily = [root, child];
+      const archiving = useThreadListActions().archiveThread(root);
+      await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+      expect(state.archiveFamilyReads).toHaveLength(1);
+      expect(state.requests).toEqual([]);
+      expect(state.alertMessages[0]).toContain("This thread is still working");
+      state.alerts[0]!.buttons!.find((button) => button.text === buttonText)!.onPress!();
+      await archiving;
+      expect(state.requests).toEqual(
+        disposition === null
+          ? []
+          : [
+              expect.objectContaining({
+                action: "archive",
+                input: {
+                  threadId: root.id,
+                  childDisposition: disposition,
+                  expectedChildThreadIds: [child.id],
+                },
+              }),
+            ],
+      );
+    },
+  );
+
+  it.each(["none", "fork", "independent"] as const)(
+    "blocks working standalone archive after the family read: %s",
+    async (kind) => {
+      const root = makeThread({ runtime: workingRuntime });
+      const unrelated = makeThread({
+        id: ThreadId.make("unowned-child"),
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: kind === "fork" ? "fork" : "subagent",
+          ...(kind === "independent" ? { independent: true } : {}),
+        },
+      });
+      state.shells = [root];
+      state.archiveFamily = kind === "none" ? [root] : [root, unrelated];
+      await useThreadListActions().archiveThread(root);
+      expect(state.archiveFamilyReads).toHaveLength(1);
+      expect(state.requests).toEqual([]);
+      expect(state.alertMessages[0]).toContain("Interrupt it first");
+      expect(state.alerts[0]?.buttons).toBeUndefined();
+    },
+  );
+
   it.each([undefined, false])(
     "requires a server update before querying unsupported archive families (%s)",
     async (support) => {

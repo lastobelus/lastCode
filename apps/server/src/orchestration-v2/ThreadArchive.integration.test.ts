@@ -1208,17 +1208,6 @@ it.effect.each(["child", "grandchild", "late descendant"] as const)(
       assert.isFalse(
         (yield* orchestrator.getThreadProjection(child)).thread.lineage.independent === true,
       );
-      if (target === "late descendant") {
-        const changed = yield* orchestrator
-          .dispatch({
-            type: "thread.archive.complete",
-            commandId: CommandId.make("stale-family-promotion-complete"),
-            threadId: parent,
-            requestId: promote.commandId,
-          })
-          .pipe(Effect.flip);
-        assert.include(String(changed.cause), "subagents changed");
-      }
       yield* orchestrator.dispatch({
         type: "thread.archive.fail",
         commandId: CommandId.make("promotion-shutdown-failed"),
@@ -1234,6 +1223,169 @@ it.effect.each(["child", "grandchild", "late descendant"] as const)(
         (yield* orchestrator.getThreadProjection(childThreadId)).runs.at(-1)?.status,
         "interrupted",
       );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("promotion retains new nested work created while shutdown waits", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const { parent, child, grandchild } = yield* family;
+    const providerThread = (yield* orchestrator.getThreadProjection(parent)).providerThreads[0]!;
+    yield* projections.apply({
+      id: EventId.make("growing-retained-parent-session"),
+      type: "provider-thread.updated",
+      threadId: parent,
+      occurredAt: yield* DateTime.now,
+      payload: { ...providerThread, providerSessionId: importSessionId },
+    });
+    const command = archive(parent, [child, grandchild], "promote");
+    yield* orchestrator.dispatch(command);
+    const stopping = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    const shutdown = yield* threads
+      .executeArchive({ threadId: parent, requestId: command.commandId })
+      .pipe(
+        Effect.provide(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            teardownThread: () =>
+              Deferred.succeed(stopping, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+          }),
+        ),
+        Effect.forkChild,
+      );
+    yield* Deferred.await(stopping);
+    const lateChild = yield* delegate(child, "growing-retained-child");
+    const lateNested = yield* delegate(lateChild, "growing-retained-nested");
+    yield* Deferred.succeed(resume, undefined);
+    yield* Fiber.join(shutdown);
+    const owner = (yield* orchestrator.getThreadProjection(parent)).thread;
+    assert.isNotNull(owner.archivedAt);
+    assert.isNull(owner.archivePending);
+    const promoted = yield* orchestrator.getThreadProjection(child);
+    assert.isTrue(promoted.thread.lineage.independent);
+    assert.isTrue(
+      (yield* orchestrator.getThreadProjection(parent)).subagents[0]?.ownershipReleased,
+    );
+    for (const id of [child, grandchild, lateChild, lateNested]) {
+      const projection = yield* orchestrator.getThreadProjection(id);
+      assert.isNull(projection.thread.archivedAt);
+      assert.isNull(projection.thread.archivePending ?? null);
+      assert.equal(projection.runs.at(-1)?.status, "starting");
+    }
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(lateChild)).thread.lineage.parentThreadId,
+      child,
+    );
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(lateNested)).thread.lineage.parentThreadId,
+      lateChild,
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("restore-growing-retained-owner"),
+      threadId: parent,
+    });
+    assert.isTrue((yield* orchestrator.getThreadProjection(child)).thread.lineage.independent);
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(lateNested)).runs.at(-1)?.status,
+      "starting",
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(archiveModeLimits)(
+  "new retained descendants must respect the saved $mode ceiling before ownership release",
+  (limit) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild } = yield* family;
+      for (const id of [parent, child, grandchild]) {
+        const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+        yield* projections.apply({
+          id: EventId.make(`growing-mode:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...thread,
+            runtimeMode: limit.runtimeMode,
+            interactionMode: limit.interactionMode,
+          },
+        });
+      }
+      const command = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(command).pipe(Effect.provideService(DispatchModeLimit, limit));
+      const lateChild = yield* delegate(child, "growing-high-mode-child");
+      yield* threads.executeArchive({ threadId: parent, requestId: command.commandId }).pipe(
+        Effect.provide(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            teardownThread: () => Effect.void,
+          }),
+        ),
+      );
+      const owner = yield* orchestrator.getThreadProjection(parent);
+      assert.isNull(owner.thread.archivedAt);
+      assert.equal(owner.thread.archivePending?.status, "failed");
+      assert.include(owner.thread.archivePending?.error, "Permissions changed while stopping");
+      assert.isUndefined(owner.subagents[0]?.ownershipReleased);
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(child)).thread.lineage.independent,
+      );
+      assert.isNull((yield* orchestrator.getThreadProjection(lateChild)).thread.archivedAt);
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(lateChild)).runs.at(-1)?.status,
+        "starting",
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["web", "provider"] as const)(
+  "a new direct %s child changes the consented partition and keeps completion retryable",
+  (creationSource) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { parent, child, grandchild } = yield* family;
+      const lateRoot = ThreadId.make("late-direct-family-child");
+      yield* createWatchingThread(lateRoot, 10);
+      const command = archive(parent, [child, grandchild], "promote");
+      yield* orchestrator.dispatch(command);
+      const late = (yield* orchestrator.getThreadProjection(lateRoot)).thread;
+      yield* projections.apply({
+        id: EventId.make("late-direct-family-lineage"),
+        type: "thread.metadata-updated",
+        threadId: lateRoot,
+        occurredAt: yield* DateTime.now,
+        payload: {
+          ...late,
+          creationSource,
+          lineage: {
+            parentThreadId: parent,
+            rootThreadId: parent,
+            relationshipToParent: "subagent",
+          },
+        },
+      });
+      yield* threads.executeArchive({ threadId: parent, requestId: command.commandId }).pipe(
+        Effect.provide(
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            teardownThread: () => Effect.void,
+          }),
+        ),
+      );
+      const owner = yield* orchestrator.getThreadProjection(parent);
+      assert.isNull(owner.thread.archivedAt);
+      assert.equal(owner.thread.archivePending?.status, "failed");
+      assert.isUndefined(owner.subagents[0]?.ownershipReleased);
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(child)).thread.lineage.independent,
+      );
+      assert.isNull((yield* orchestrator.getThreadProjection(lateRoot)).thread.archivedAt);
     }).pipe(Effect.provide(testLayer)),
 );
 

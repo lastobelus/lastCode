@@ -52,7 +52,6 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import {
   resolveThreadProviderStack,
-  threadRuntimeCanArchive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import {
@@ -4877,9 +4876,6 @@ export default function Sidebar() {
                 isSnoozed,
                 canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
                 isRegeneratingTitle,
-                isRunning:
-                  thread.archivePending?.status !== "failed" &&
-                  !threadRuntimeCanArchive(thread.runtime),
                 hasRunningAction: thread.actionResume?.outcome === "running",
                 hasStoppableProcesses,
                 supports: {

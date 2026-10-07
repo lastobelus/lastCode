@@ -1,4 +1,4 @@
-import { CommandId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -346,6 +346,101 @@ describe("stranded archive retry navigation", () => {
 });
 
 describe("archive family confirmation", () => {
+  function workingRoot() {
+    return makeThreadFixture({
+      id: target.threadId,
+      environmentId: target.environmentId,
+      runtime: {
+        status: "running",
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: "codex",
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+  }
+
+  it.each([
+    [false, "stop_and_archive"],
+    [false, "promote"],
+    [true, "stop_and_archive"],
+    [true, "promote"],
+  ] as const)(
+    "confirms a working owner with idle children (bulk=%s, choice=%s)",
+    async (bulk, choice) => {
+      const root = workingRoot();
+      const child = makeThreadFixture({
+        id: ThreadId.make("idle-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [root]; // The visible snapshot cannot establish ownership.
+      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [root, child] });
+      archiveDialog.mockImplementation(async (request) => {
+        expect(commands.archive).not.toHaveBeenCalled();
+        expect(request.children.map((thread: { id: string }) => thread.id)).toEqual([child.id]);
+        expect(request.activeChildren).toEqual([]);
+        expect(await request.submit(choice)).toBeNull();
+        return choice;
+      });
+      const actions = useThreadActions();
+      if (bulk) await actions.archiveThreads([{ threadRef: target, threadKey: "undo-env:thread" }]);
+      else await actions.archiveThread(target);
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(1);
+      expect(archiveDialog).toHaveBeenCalledTimes(1);
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: { threadId: root.id, childDisposition: choice, expectedChildThreadIds: [child.id] },
+      });
+    },
+  );
+
+  it.each(["none", "fork", "independent"] as const)(
+    "refuses working standalone archive after reading family (%s)",
+    async (kind) => {
+      const root = workingRoot();
+      const unrelated = makeThreadFixture({
+        id: ThreadId.make("unowned-child"),
+        environmentId: target.environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: kind === "fork" ? "fork" : "subagent",
+          ...(kind === "independent" ? { independent: true } : {}),
+        },
+      });
+      familyState.threads = [root];
+      archiveFamilyQuery.mockResolvedValue({
+        _tag: "Success",
+        value: kind === "none" ? [root] : [root, unrelated],
+      });
+      expect((await useThreadActions().archiveThread(target))._tag).toBe("Failure");
+      expect(archiveFamilyQuery).toHaveBeenCalledTimes(1);
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(commands.archive).not.toHaveBeenCalled();
+    },
+  );
+
+  it("cancels a working owner family without stopping any work", async () => {
+    const root = workingRoot();
+    const child = makeThreadFixture({
+      id: ThreadId.make("child"),
+      environmentId: target.environmentId,
+      lineage: { rootThreadId: root.id, parentThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    familyState.threads = [root];
+    archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [root, child] });
+    archiveDialog.mockResolvedValue(null);
+    expect((await useThreadActions().archiveThread(target))._tag).toBe("Failure");
+    expect(archiveDialog).toHaveBeenCalledTimes(1);
+    expect(commands.archive).not.toHaveBeenCalled();
+  });
+
   function seedFamily() {
     const child = makeThreadFixture({
       id: ThreadId.make("child"),

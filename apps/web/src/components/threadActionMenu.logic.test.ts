@@ -20,7 +20,6 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
-  isRunning: false,
   hasRunningAction: false,
   hasStoppableProcesses: false,
   supports: {
@@ -352,11 +351,9 @@ describe("buildThreadActionMenuItems", () => {
     ).toContain("archive");
   });
 
-  it("disables archive while the thread is running", () => {
-    const archiveItem = buildThreadActionMenuItems({ ...baseState, isRunning: true }).find(
-      (item) => item.id === "archive",
-    );
-    expect(archiveItem?.disabled).toBe(true);
+  it("offers archive so the handler can read the authoritative family", () => {
+    const archiveItem = buildThreadActionMenuItems(baseState).find((item) => item.id === "archive");
+    expect(archiveItem?.disabled).toBe(false);
   });
 
   it("replaces the mark action and blocks archive and delete for the persistent thread", () => {

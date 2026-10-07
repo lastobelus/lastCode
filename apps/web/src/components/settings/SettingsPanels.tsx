@@ -103,6 +103,7 @@ import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { derivePhysicalProjectKey } from "../../logicalProject";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
+import { groupArchivedThreadFamilies } from "./archiveFamilyOrder";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -3484,27 +3485,9 @@ export function ArchivedThreadsPanel() {
           const rightKey = right.archivedAt ?? right.createdAt;
           return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
         });
-        const byId = new Map(sorted.map((thread) => [thread.id, thread]));
-        const belongsToArchivedFamily = (thread: (typeof sorted)[number]) => {
-          const owner = thread.archivedWith && byId.get(thread.archivedWith.threadId);
-          return (
-            owner !== undefined &&
-            owner !== null &&
-            owner.id !== thread.id &&
-            owner.archivedWith?.commandId === thread.archivedWith?.commandId
-          );
-        };
-        const families = sorted
-          .filter((thread) => !belongsToArchivedFamily(thread))
-          .flatMap((root) => [
-            root,
-            ...sorted.filter(
-              (child) => belongsToArchivedFamily(child) && child.archivedWith?.threadId === root.id,
-            ),
-          ]);
         groups.push({
           project,
-          threads: families,
+          threads: groupArchivedThreadFamilies(sorted),
         });
       }
     }

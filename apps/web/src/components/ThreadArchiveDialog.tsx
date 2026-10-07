@@ -64,7 +64,9 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
   const listedChildren =
     request.activeChildren.length > 0
       ? request.activeChildren
-      : request.children.filter((thread) => thread.persistent);
+      : request.protectedCount > 0
+        ? request.children.filter((thread) => thread.persistent)
+        : request.children;
   const depthOf = (thread: EnvironmentThreadShell) => {
     let depth = 0;
     const seen = new Set([thread.id]);
@@ -109,12 +111,20 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
           <AlertDialogDescription>
             {activeCount > 0
               ? `${activeCount} ${activeCount === 1 ? "subagent is" : "subagents are"} still working or need${activeCount === 1 ? "s" : ""} your attention. `
-              : "This family includes protected subagents. "}
+              : request.protectedCount > 0
+                ? "This family includes protected subagents. "
+                : "The parent is still working and will stop when archived. "}
             Stopping archives all {count} {count === 1 ? "subagent" : "subagents"} with{" "}
             {request.title.includes("threads?") ? "these threads" : "this thread"}.
           </AlertDialogDescription>
           <ul
-            aria-label={activeCount > 0 ? "Active subagents" : "Protected subagents"}
+            aria-label={
+              activeCount > 0
+                ? "Active subagents"
+                : request.protectedCount > 0
+                  ? "Protected subagents"
+                  : "Subagents"
+            }
             className="space-y-1 text-sm"
           >
             {listedChildren.slice(0, 5).map((thread) => (

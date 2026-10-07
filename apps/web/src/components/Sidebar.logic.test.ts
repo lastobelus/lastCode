@@ -397,15 +397,10 @@ describe("collectUnprotectedBulkThreadEntries", () => {
 
 describe("buildMultiSelectThreadContextMenuItems", () => {
   it("offers bulk archive with the selected count", () => {
-    expect(
-      buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
-    ).toContainEqual({ id: "archive", label: "Archive (3)", disabled: false });
-  });
-
-  it("disables bulk archive when a selected thread is running", () => {
-    expect(
-      buildMultiSelectThreadContextMenuItems({ count: 2, hasRunningThread: true }),
-    ).toContainEqual({ id: "archive", label: "Archive (2)", disabled: true });
+    expect(buildMultiSelectThreadContextMenuItems({ count: 3 })).toContainEqual({
+      id: "archive",
+      label: "Archive (3)",
+    });
   });
 });
 

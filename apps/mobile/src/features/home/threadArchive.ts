@@ -8,8 +8,8 @@ import { resolveThreadStatus } from "../threads/thread-status";
 import { archiveChildNeedsAttention } from "@t3tools/client-runtime/state/thread-archive";
 
 /**
- * Archiving may discard queued work, but it must not detach a provider while
- * that provider is still executing a turn.
+ * Standalone archive must not detach an executing provider. A family can stop
+ * active work only after its authoritative child snapshot is confirmed.
  */
 export function threadCanArchive(runtime: ThreadRuntimeSummary | null | undefined): boolean {
   return threadRuntimeCanArchive(runtime);
@@ -83,10 +83,16 @@ export function resolveThreadArchiveFamily(
   if (remaining > 0) details.push(`+${remaining} more`);
   return {
     ...family,
-    requiresConfirmation: active > 0 || family.protectedChildren.length > 0,
+    requiresConfirmation:
+      active > 0 ||
+      family.protectedChildren.length > 0 ||
+      (!threadCanArchive(thread.runtime) && total > 0),
     canStopAndArchive: family.protectedChildren.length === 0,
     canKeepSeparately,
     message: [
+      !threadCanArchive(thread.runtime)
+        ? "This thread is still working and will stop when archived."
+        : null,
       summary,
       details.join("\n"),
       nativeStopCount > 0

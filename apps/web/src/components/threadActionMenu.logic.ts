@@ -98,8 +98,6 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
-  /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
-  readonly isRunning: boolean;
   readonly hasRunningAction: boolean;
   readonly hasStoppableProcesses: boolean;
   readonly supports: {
@@ -311,12 +309,12 @@ export function buildThreadActionMenuItems(
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
     // good), so it sits beside Delete without borrowing its destructive
-    // styling.
+    // styling. Eligibility is checked after the handler reads the owned family.
     {
       id: "archive",
       label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
-      disabled: state.isRunning || state.isPersistent,
+      disabled: state.isPersistent,
       separatorBefore: true,
     },
     {
