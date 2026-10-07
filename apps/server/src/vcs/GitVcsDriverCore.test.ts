@@ -2593,6 +2593,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* git(remote, ["init", "--bare"]);
         yield* git(cwd, ["remote", "add", "origin", remote]);
         yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(cwd, ["remote", "set-head", "origin", initialBranch]);
         yield* git(cwd, ["checkout", "-b", "feature/no-upstream"]);
         yield* writeTextFile(cwd, "feature.txt", "feature\n");
         yield* git(cwd, ["add", "feature.txt"]);
@@ -3300,8 +3301,8 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
 
         // Two threads can record the same worktree path; the second delete
         // must be a no-op instead of exit 128.
-        yield* driver.removeWorktree({ cwd, path: worktreePath });
-        yield* driver.removeWorktree({ cwd, path: worktreePath });
+        yield* driver.removeWorktree({ cwd, path: worktreePath, allowMissing: true });
+        yield* driver.removeWorktree({ cwd, path: worktreePath, allowMissing: true });
       }),
     );
 
@@ -3327,6 +3328,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* driver.removeWorktree({
           cwd,
           path: pathService.join(worktreesRoot, "never-registered"),
+          allowMissing: true,
         });
 
         const registered = yield* git(cwd, ["worktree", "list", "--porcelain"]);
