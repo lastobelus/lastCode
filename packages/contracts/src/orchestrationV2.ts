@@ -439,6 +439,10 @@ export const OrchestrationV2AppThread = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   archivedAt: Schema.NullOr(Schema.DateTimeUtc),
+  /** Identifies the archive operation that owns a cascading restore. */
+  archivedWith: Schema.optional(
+    Schema.NullOr(Schema.Struct({ threadId: ThreadId, commandId: CommandId })),
+  ),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),

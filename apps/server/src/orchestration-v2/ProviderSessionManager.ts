@@ -1945,7 +1945,11 @@ export const layerWithOptions = (
                 {
                   const providerThreads = new Map(
                     projection.providerThreads
-                      .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                      .filter(
+                        (thread) =>
+                          thread.providerSessionId === input.providerSessionId &&
+                          thread.appThreadId === input.threadId,
+                      )
                       .map((thread) => [thread.id, thread] as const),
                   );
                   detachedProviderThreads = [...providerThreads.values()];
@@ -1981,7 +1985,17 @@ export const layerWithOptions = (
               }
               const detached = yield* Ref.modify(sessions, (current) => {
                 const entry = current.get(key);
-                if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
+                // Native children are resident without an app attachment. Terminal
+                // cleanup still owns their provider threads and must unload them.
+                if (
+                  entry === undefined ||
+                  (!entry.attachedThreadIds.has(input.threadId) &&
+                    !(
+                      input.revokeMcpCredential === true &&
+                      entry.supportsMultipleProviderThreads &&
+                      detachedProviderThreads.length > 0
+                    ))
+                ) {
                   return [Option.none<LiveSessionEntry>(), current] as const;
                 }
                 const attachedThreadIds = new Set(entry.attachedThreadIds);

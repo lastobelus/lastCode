@@ -394,12 +394,57 @@ export const layer: Layer.Layer<
           case "app_thread.created": {
             // Native sessions can reannounce children after reconnecting. Creation
             // must not replace their durable app metadata, including promotion.
-            if ((yield* projections.getThreadShell(providerEvent.appThread.id)) !== null) return [];
+            const existing = yield* projections.getThread(providerEvent.appThread.id).pipe(
+              Effect.catchTags({
+                ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+              }),
+            );
+            if (existing !== null) return [];
+            const parentId = providerEvent.appThread.lineage.parentThreadId;
+            const parent =
+              parentId === null
+                ? null
+                : yield* projections.getThread(parentId).pipe(
+                    Effect.catchTags({
+                      ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                    }),
+                  );
+            const archiveOwner =
+              parent !== null && parent.archivedAt !== null && parent.deletedAt === null
+                ? (parent.archivedWith ?? {
+                    threadId: parent.id,
+                    commandId: CommandId.make(
+                      `legacy-archive:${parent.id}:${DateTime.formatIso(parent.archivedAt)}`,
+                    ),
+                  })
+                : parent?.archivedWith;
+            const appThread =
+              parent !== null && providerEvent.appThread.lineage.relationshipToParent === "subagent"
+                ? {
+                    ...providerEvent.appThread,
+                    archivedAt: parent.archivedAt,
+                    deletedAt: parent.deletedAt,
+                    archivedWith: archiveOwner,
+                  }
+                : providerEvent.appThread;
             return [
+              ...(parent !== null &&
+              parent.archivedAt !== null &&
+              parent.deletedAt === null &&
+              parent.archivedWith == null &&
+              providerEvent.appThread.lineage.relationshipToParent === "subagent"
+                ? [
+                    yield* makeDomainEvent(input, {
+                      type: "thread.metadata-updated",
+                      threadId: parent.id,
+                      payload: { ...parent, archivedWith: archiveOwner },
+                    }),
+                  ]
+                : []),
               yield* makeDomainEvent(input, {
                 type: "thread.created",
                 threadId: providerEvent.appThread.id,
-                payload: providerEvent.appThread,
+                payload: appThread,
               }),
             ];
           }
@@ -645,6 +690,11 @@ export const layer: Layer.Layer<
               );
             }),
           ),
+          (ingest) =>
+            input.event.type === "app_thread.created" &&
+            input.event.appThread.lineage.parentThreadId !== null
+              ? threadCommands.withLock(input.event.appThread.lineage.parentThreadId, ingest)
+              : ingest,
         ),
     });
   }),

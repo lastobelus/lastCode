@@ -325,6 +325,12 @@ retry and the normal snooze choices.
 On web and desktop, use **Agents** to follow work delegated to subagents.
 Stop on a thread also stops the subagents it delegated to.
 
+Archiving a thread also archives its subagents. Restoring the parent restores the
+subagents archived with it; deleting the parent deletes its subagents too.
+Stop unfinished work before archiving a family, and restore the parent before
+restoring subagents archived with it. Promoted interactive conversations remain
+independent.
+
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.

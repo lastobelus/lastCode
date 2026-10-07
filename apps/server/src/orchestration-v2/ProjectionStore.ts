@@ -143,6 +143,7 @@ export const ProjectionStoreV2Error = Schema.Union([
 export type ProjectionStoreV2Error = typeof ProjectionStoreV2Error.Type;
 
 export type ProjectionRecoveryKind =
+  | "thread-families"
   | "subagent-promotions"
   | "queued-runs"
   | "runtime"
@@ -366,6 +367,9 @@ export interface ProjectionStoreV2Shape {
     ReadonlyArray<OrchestrationV2AppThread>,
     ProjectionStoreV2Error
   >;
+  readonly getOwnedThreadIds: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2AppThread, ProjectionStoreV2Error>;
@@ -518,6 +522,8 @@ function needsRecovery(
 ): boolean {
   if (projection.thread.deletedAt !== null) return false;
   switch (kind) {
+    case "thread-families":
+      return false;
     case "subagent-promotions":
       return projection.thread.subagentPromotion?.status === "waiting";
     case "queued-runs":
@@ -3544,6 +3550,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
           switch (kind) {
+            case "thread-families":
+              return sql`
+                SELECT DISTINCT parent.thread_id
+                FROM orchestration_v2_projection_threads AS parent
+                JOIN orchestration_v2_projection_threads AS child
+                  ON parent.thread_id = CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT)
+                WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND child.deleted_at IS NULL
+                  AND (parent.deleted_at IS NOT NULL OR (parent.archived_at IS NOT NULL AND child.archived_at IS NULL))
+              `;
             case "subagent-promotions":
               return sql`
                 SELECT thread_id FROM orchestration_v2_projection_threads
@@ -3659,7 +3675,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         })();
         const rows = yield* sql<{ readonly thread_id: string }>`
           SELECT thread_id FROM orchestration_v2_projection_threads
-          WHERE deleted_at IS NULL
+          WHERE ${kind === "thread-families" ? sql`1` : sql`deleted_at IS NULL`}
             AND thread_id IN (${candidates})
             ${kind === "queued-runs" ? sql`AND archived_at IS NULL` : sql``}
           ORDER BY updated_at ASC, thread_id ASC
@@ -4130,15 +4146,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               FROM orchestration_v2_projection_provider_turns AS provider_turn
               WHERE provider_turn.thread_id = ${threadId}
                 AND provider_turn.status IN ('pending', 'starting', 'running', 'waiting')
-                AND provider_turn.run_attempt_id IN (
-                  SELECT attempt_id FROM orchestration_v2_projection_run_attempts
-                  WHERE thread_id = ${threadId}
-                    AND run_id IN (
-                      SELECT run_id FROM orchestration_v2_projection_runs
-                      WHERE thread_id = ${threadId}
-                        AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
-                    )
-                )
               ORDER BY provider_turn.provider_thread_id ASC, provider_turn.ordinal ASC
             `,
           sql<PayloadRow>`
@@ -4252,6 +4259,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         (cause) => new ProjectionStoreReadError({ threadId: ThreadId.make("thread:shell"), cause }),
       ),
     );
+
+    const getOwnedThreadIds: ProjectionStoreV2Shape["getOwnedThreadIds"] = (threadId) =>
+      sql<{ readonly thread_id: string }>`
+        WITH RECURSIVE family(thread_id) AS (
+          SELECT ${threadId}
+          UNION
+          SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
+          JOIN family ON CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT) = family.thread_id
+          WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+        )
+        SELECT thread_id FROM family
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))),
+        Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+      );
 
     const getThread: ProjectionStoreV2Shape["getThread"] = (threadId) =>
       Effect.gen(function* () {
@@ -5793,6 +5815,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getShellSnapshot,
       getThreadShell,
       getWorktreeCleanupThreads,
+      getOwnedThreadIds,
       getPersistentThreads,
       getThread,
       getSettlementCandidates,
@@ -5913,6 +5936,22 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             .filter((thread) => thread.deletedAt === null && thread.persistent === true),
         ),
       ),
+      getOwnedThreadIds: (threadId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const ids = new Set([threadId]);
+            for (const id of ids) {
+              for (const { thread } of state.projections.values()) {
+                if (
+                  thread.lineage.parentThreadId === id &&
+                  thread.lineage.relationshipToParent === "subagent"
+                )
+                  ids.add(thread.id);
+              }
+            }
+            return [...ids];
+          }),
+        ),
       getThread: (threadId) =>
         Effect.gen(function* () {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
@@ -6024,7 +6063,18 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Effect.gen(function* () {
           const projections = (yield* Ref.get(replayState)).projections;
           return [...projections.values()]
-            .filter((projection) => needsRecovery(projection, kind))
+            .filter((projection) =>
+              kind === "thread-families"
+                ? [...projections.values()].some(
+                    ({ thread: child }) =>
+                      child.lineage.parentThreadId === projection.thread.id &&
+                      child.lineage.relationshipToParent === "subagent" &&
+                      child.deletedAt === null &&
+                      (projection.thread.deletedAt !== null ||
+                        (projection.thread.archivedAt !== null && child.archivedAt === null)),
+                  )
+                : needsRecovery(projection, kind),
+            )
             .toSorted(
               (left, right) =>
                 DateTime.toEpochMillis(left.thread.updatedAt) -

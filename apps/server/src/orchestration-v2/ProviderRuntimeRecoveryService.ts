@@ -190,11 +190,12 @@ export const make = Effect.gen(function* () {
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
+      inactiveFamily = false,
     ) {
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
-        if (run.status === "waiting") {
+        if (run.status === "waiting" && !inactiveFamily) {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
             .pipe(
@@ -221,12 +222,16 @@ export const make = Effect.gen(function* () {
         projection.runtimeRequests
           .filter(
             (request) =>
-              request.status === "pending" && request.responseCapability.type === "message",
+              !inactiveFamily &&
+              request.status === "pending" &&
+              request.responseCapability.type === "message",
           )
           .map((request) => request.nodeId),
       );
       const requests = projection.runtimeRequests.filter(
-        (request) => request.status === "pending" && request.responseCapability.type !== "message",
+        (request) =>
+          request.status === "pending" &&
+          (inactiveFamily || request.responseCapability.type !== "message"),
       );
       // Delegated task rows, items and nodes stay open: the child settles them.
       const delegatedTaskNodeIds = new Set<string>([
@@ -622,6 +627,34 @@ export const make = Effect.gen(function* () {
           });
         }
       }
+      // Old inactive families can retain native turns after their node already
+      // settled. Cancel these independently of app runs and node status.
+      if (inactiveFamily) {
+        const updatedTurnIds = new Set(
+          events.flatMap((event) =>
+            event.type === "provider-turn.updated" ? [event.payload.id] : [],
+          ),
+        );
+        for (const turn of projection.providerTurns) {
+          if (
+            (turn.status !== "pending" && turn.status !== "running") ||
+            updatedTurnIds.has(turn.id)
+          )
+            continue;
+          events.push({
+            id: yield* allocateEventId(),
+            type: "provider-turn.updated",
+            threadId: projection.thread.id,
+            nodeId: turn.nodeId,
+            providerInstanceId: projection.thread.providerInstanceId,
+            occurredAt: now,
+            payload: { ...turn, status: "cancelled", completedAt: now },
+          });
+        }
+      }
+      const retiredEffectTypes = inactiveFamily
+        ? [...EffectOutbox.PROCESS_BOUND_EFFECT_TYPES, "provider-runtime.continue" as const]
+        : EffectOutbox.PROCESS_BOUND_EFFECT_TYPES;
       // All provider processes are gone on startup/shutdown: clear any
       // persisted Waiting roster (including idle threads from settled roots)
       // and idle active threads without resurrecting active status.
@@ -709,7 +742,7 @@ export const make = Effect.gen(function* () {
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,
-            effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
+            effectTypes: retiredEffectTypes,
             reason: detail,
           })
           .pipe(
@@ -734,7 +767,7 @@ export const make = Effect.gen(function* () {
             events,
             effects,
             cancelUnsettledEffects: {
-              effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
+              effectTypes: retiredEffectTypes,
               reason: detail,
             },
           })
@@ -759,7 +792,10 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const reconcile = (trigger: "startup" | "shutdown") =>
+  const reconcileScoped = (
+    trigger: "startup" | "shutdown",
+    inactiveFamilies: ReadonlySet<ThreadId>,
+  ) =>
     Effect.gen(function* () {
       const continueAfterRestart = yield* settings.getSettings.pipe(
         Effect.orElseSucceed(() => null),
@@ -775,7 +811,7 @@ export const make = Effect.gen(function* () {
       let stoppedSessions = 0;
       let closedRequests = 0;
       let retiredEffects = 0;
-      for (const threadId of threadIds) {
+      for (const threadId of new Set([...threadIds, ...inactiveFamilies])) {
         const projection = yield* projections.getRuntimeRecoveryProjection(threadId).pipe(
           Effect.mapError(
             (cause) =>
@@ -790,7 +826,13 @@ export const make = Effect.gen(function* () {
           continueAfterRestart !== null &&
           resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate;
-        const result = yield* reconcileProjection(projection, trigger, enabled);
+        const inactiveFamily = inactiveFamilies.has(threadId);
+        const result = yield* reconcileProjection(
+          projection,
+          trigger,
+          enabled && !inactiveFamily,
+          inactiveFamily,
+        );
         terminalizedRuns += result.terminalizedRuns;
         stoppedSessions += result.stoppedSessions;
         closedRequests += result.closedRequests;
@@ -809,6 +851,8 @@ export const make = Effect.gen(function* () {
         requeuedEffects: outboxReconciliation.requeued,
       } satisfies ProviderRuntimeReconciliationSummary;
     });
+
+  const reconcile = (trigger: "startup" | "shutdown") => reconcileScoped(trigger, new Set());
 
   // Snapshot intent only while providers are live. A provider may finish while
   // this commits; reconciliation reads fresh state after shutdown, and delivery
@@ -854,7 +898,22 @@ export const make = Effect.gen(function* () {
   );
 
   const recover = Effect.gen(function* () {
-    return (yield* reconcile("startup")) satisfies ProviderRuntimeRecoverySummary;
+    const inactiveFamilies = yield* Effect.gen(function* () {
+      const owners = yield* projections.getRecoveryThreadIds("thread-families");
+      const threadIds = new Set<ThreadId>();
+      for (const owner of owners) {
+        for (const threadId of yield* projections.getOwnedThreadIds(owner)) threadIds.add(threadId);
+      }
+      return threadIds;
+    }).pipe(
+      Effect.mapError(
+        (cause) => new ProviderRuntimeRecoveryError({ operation: "read-projections", cause }),
+      ),
+    );
+    return (yield* reconcileScoped(
+      "startup",
+      inactiveFamilies,
+    )) satisfies ProviderRuntimeRecoverySummary;
   });
 
   return ProviderRuntimeRecoveryService.of({ reconcile, prepareForShutdown, recover });

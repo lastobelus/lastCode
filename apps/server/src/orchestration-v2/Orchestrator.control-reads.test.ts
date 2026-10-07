@@ -266,11 +266,15 @@ it.effect(
         turnItemTypes: ["user_message"],
       });
       assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
-      yield* orchestrator.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make("archive-with-old-history"),
-        threadId,
-      });
+      const archiveRefusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-with-old-history"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(archiveRefusal._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* projections.getThread(threadId)).archivedAt);
       yield* orchestrator.dispatch({
         type: "thread.delete",
         commandId: CommandId.make("delete-with-old-history"),
