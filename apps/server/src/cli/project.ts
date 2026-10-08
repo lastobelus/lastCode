@@ -471,7 +471,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
         }),
       );
       return true;
-    }).pipe(Effect.provide(authLayer), Effect.provide(WorkspacePaths.layer));
+    }).pipe(Effect.provide(Layer.mergeAll(authLayer, WorkspacePaths.layer)));
     if (handled) return;
   }
 
