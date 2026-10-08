@@ -329,7 +329,7 @@ function useConfirmDeleteThread(
     (thread: EnvironmentThreadShell) => {
       if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
       const title = "Delete thread?";
-      const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
+      const message = `“${thread.title}” and any of its subagents, including archived ones, will be deleted; other forks and independent threads are kept. This cannot be undone.`;
       if (process.env.EXPO_OS === "ios") {
         Alert.alert(title, message, [
           { text: "Cancel", style: "cancel" },

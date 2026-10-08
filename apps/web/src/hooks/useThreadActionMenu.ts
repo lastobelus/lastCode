@@ -375,7 +375,7 @@ export function useThreadActionMenu(input: {
                 api.dialogs.confirm(
                   [
                     `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
                   ].join("\n"),
                   { variant: "destructive" },
                 ),

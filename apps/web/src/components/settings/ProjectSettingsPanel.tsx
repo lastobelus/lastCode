@@ -376,15 +376,10 @@ function ProjectDetail({
                     : []),
                 ]
               : [`This removes ${members.length} grouped project entries.`]),
-            ...(projectThreads.length > 0
-              ? [
-                  "This permanently clears conversation history for those threads and any archived threads.",
-                ]
-              : ["This permanently clears any archived conversation history."]),
+            "This deletes all threads in the selected project entries, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
             isWholeGroup && !hasOtherMembers
               ? "This removes only the project entries, not the files on disk."
               : "Other entries in this grouped project are unaffected.",
-            "This action cannot be undone.",
           ].join("\n"),
           { variant: "destructive" },
         ),

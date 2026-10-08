@@ -2361,9 +2361,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                           ...(member.environmentLabel
                             ? [`Environment: ${member.environmentLabel}`]
                             : []),
-                          "This permanently clears conversation history for those threads and any archived threads.",
+                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
                           "This removes only this project entry.",
-                          "This action cannot be undone.",
                         ].join("\n")
                       : [
                           `Remove project "${member.title}"?`,
@@ -2371,7 +2370,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                           ...(member.environmentLabel
                             ? [`Environment: ${member.environmentLabel}`]
                             : []),
-                          "This permanently clears any archived conversation history.",
+                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
                           "This removes only this project entry.",
                         ].join("\n"),
                     { variant: "destructive" },
@@ -2421,7 +2420,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         `Remove project "${member.title}"?`,
         `Path: ${member.workspaceRoot}`,
         ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-        "This permanently clears any archived conversation history.",
+        "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
         "This removes only this project entry.",
       ].join("\n");
       const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
@@ -2824,7 +2823,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-            "This permanently clears conversation history for these threads.",
+            `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
           ].join("\n"),
           { variant: "destructive" },
         );
@@ -3471,7 +3470,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete thread "${thread.title}"?`,
-            "This permanently clears conversation history for this thread.",
+            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
           ].join("\n"),
           { variant: "destructive" },
         );

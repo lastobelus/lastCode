@@ -4681,7 +4681,7 @@ export default function Sidebar() {
           api.dialogs.confirm(
             [
               `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              "This permanently clears conversation history for these threads.",
+              `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
             ].join("\n"),
             { variant: "destructive" },
           ),
@@ -5110,7 +5110,7 @@ export default function Sidebar() {
                 api.dialogs.confirm(
                   [
                     `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
                   ].join("\n"),
                   { variant: "destructive" },
                 ),
