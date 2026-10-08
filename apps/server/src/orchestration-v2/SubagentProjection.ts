@@ -18,7 +18,7 @@ import type {
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
-import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import { compactThreadArchiveParticipant, isOrchestrationV2WorkActive } from "@t3tools/contracts";
 
 function trimmed(value: string | null | undefined): string | undefined {
   const result = value?.trim();
@@ -51,8 +51,13 @@ export function makeSubagentChildThread(input: {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
+  const {
+    creatorThreadId: _creatorThreadId,
+    creatorGrouping: _creatorGrouping,
+    ...parentThread
+  } = input.parentThread;
   return {
-    ...input.parentThread,
+    ...parentThread,
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     id: input.childThreadId,
@@ -63,6 +68,10 @@ export function makeSubagentChildThread(input: {
     providerInstanceId: input.providerInstanceId,
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
+    dashboardItems: [],
+    actionResume: null,
+    persistent: false,
+    annotation: null,
     lineage: {
       parentThreadId: input.parentThread.id,
       relationshipToParent: "subagent",
@@ -74,13 +83,15 @@ export function makeSubagentChildThread(input: {
     },
     createdAt: input.now,
     updatedAt: input.now,
-    archivedAt: null,
+    archivedAt: input.parentThread.archivedAt,
+    archivedWith: input.parentThread.archivedWith,
+    archivePending: compactThreadArchiveParticipant(input.parentThread.archivePending),
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
     snoozedAt: null,
     lastVisitedAt: null,
-    deletedAt: null,
+    deletedAt: input.parentThread.deletedAt,
   };
 }
 
@@ -213,7 +224,10 @@ export function delegatedTaskProgress(projection: {
     Pick<OrchestrationV2ConversationMessage, "runId" | "notification">
   >;
   readonly subagents: ReadonlyArray<
-    Pick<OrchestrationV2ThreadProjection["subagents"][number], "status" | "completionDelivery">
+    Pick<
+      OrchestrationV2ThreadProjection["subagents"][number],
+      "status" | "completionDelivery" | "ownershipReleased"
+    >
   >;
   readonly providerThreads: ReadonlyArray<
     Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
@@ -233,11 +247,12 @@ export function delegatedTaskProgress(projection: {
   const children =
     projection.subagents.some(
       (task) =>
-        isOrchestrationV2WorkActive(task.status) ||
-        // Publishing a child's result precedes scheduling its parent's wake.
-        // The parent still owes that follow-up even between those transactions.
-        task.completionDelivery?.state === "pending" ||
-        task.completionDelivery?.state === "claimed",
+        task.ownershipReleased !== true &&
+        (isOrchestrationV2WorkActive(task.status) ||
+          // Publishing a child's result precedes scheduling its parent's wake.
+          // The parent still owes that follow-up even between those transactions.
+          task.completionDelivery?.state === "pending" ||
+          task.completionDelivery?.state === "claimed"),
     ) ||
     projection.providerThreads.some((thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0);
   const resultRun = workRuns

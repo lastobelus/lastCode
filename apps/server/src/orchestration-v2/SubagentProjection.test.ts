@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   type ModelSelection,
   NodeId,
   RunId,
@@ -75,6 +76,56 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
+it.each(["stopping", "failed"] as const)(
+  "native child construction keeps a compact %s archive reference through nested children",
+  (status) => {
+    const parentThread = {
+      ...makeParentThread(),
+      archivePending: {
+        threadId: parentThreadId,
+        commandId: CommandId.make("subagent-pending-archive"),
+        status,
+        ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
+        childDisposition: "stop_and_archive" as const,
+        childThreadIds: Array.from({ length: 128 }, (_, index) =>
+          ThreadId.make(`family-child:${index}`),
+        ),
+        archiveThreadIds: [parentThreadId],
+        promoteThreadIds: [],
+        modeLimit: { runtimeMode: "approval-required" as const, interactionMode: "plan" as const },
+      },
+    };
+    const makeChild = (parent: OrchestrationV2AppThread, id: ThreadId) =>
+      makeSubagentChildThread({
+        parentThread: parent,
+        childThreadId: id,
+        parentNodeId: NodeId.make("node:subagent-parent"),
+        activeProviderThreadId: null,
+        providerInstanceId: childProviderInstanceId,
+        modelSelection: childModelSelection,
+        title: "Late native child",
+        now: childCreatedAt,
+        createdBy: "agent",
+        creationSource: "provider",
+      });
+    const child = makeChild(parentThread, childThreadId);
+    const nested = makeChild(child, ThreadId.make("nested-late-native-child"));
+    const expected = {
+      threadId: parentThreadId,
+      commandId: parentThread.archivePending.commandId,
+      status,
+      ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
+    };
+    assert.deepEqual(child.archivePending, expected);
+    assert.deepEqual(nested.archivePending, expected);
+    assert.lengthOf(parentThread.archivePending.childThreadIds, 128);
+    assert.deepEqual(parentThread.archivePending.modeLimit, {
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+  },
+);
+
 it("keeps a subagent child awake when its parent thread is snoozed", () => {
   const parentThread = makeParentThread();
   const childProviderThreadId = ProviderThreadId.make("provider-thread:subagent-awake-child");
@@ -112,6 +163,139 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
     type: "node",
     nodeId: parentNodeId,
   });
+});
+
+it("starts native and app-owned subagents without the parent's protection or annotation", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const parentThread = {
+      ...makeParentThread(),
+      persistent: true,
+      annotation: {
+        body: "Parent note",
+        anchorMessageId: MessageId.make("message:parent-note"),
+        createdAt: DateTime.formatIso(parentCreatedAt),
+        updatedAt: DateTime.formatIso(parentCreatedAt),
+        resolvedAt: null,
+      },
+    } satisfies OrchestrationV2AppThread;
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Independent helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isFalse(childThread.persistent);
+    assert.isNull(childThread.annotation);
+    assert.isTrue(parentThread.persistent);
+    assert.equal(parentThread.annotation.body, "Parent note");
+  }
+});
+
+it("does not inherit the parent's ordinary creator history or placement for either subagent kind", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const parentThread = {
+      ...makeParentThread(),
+      createdBy: "agent" as const,
+      creationSource: "mcp" as const,
+      creatorThreadId: ThreadId.make("thread:ordinary-creator"),
+      creatorGrouping: "grouped" as const,
+    };
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isFalse("creatorThreadId" in childThread);
+    assert.isFalse("creatorGrouping" in childThread);
+    assert.equal(childThread.lineage.parentThreadId, parentThread.id);
+    assert.equal(childThread.lineage.relationshipToParent, "subagent");
+    assert.equal(childThread.creationSource, creationSource);
+    assert.equal(parentThread.creatorThreadId, "thread:ordinary-creator");
+    assert.equal(parentThread.creatorGrouping, "grouped");
+  }
+});
+
+it("keeps dashboard requests on their parent for both subagent kinds", () => {
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const request = {
+      id: "parent-qa",
+      title: "Check the parent result",
+      body: "Verify the parent thread's work.",
+      kind: "qa" as const,
+      status: "open" as const,
+      priority: "normal" as const,
+      effort: "focused" as const,
+      requiresComputer: true,
+      createdAt: DateTime.formatIso(parentCreatedAt),
+      updatedAt: DateTime.formatIso(snoozedAt),
+    };
+    const parentThread = { ...makeParentThread(), dashboardItems: [request] };
+    const childThread = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+
+    assert.deepEqual(childThread.dashboardItems, []);
+    assert.deepEqual(parentThread.dashboardItems, [request]);
+  }
+});
+
+it("keeps a running Project Action on its parent for both subagent kinds", () => {
+  const parentThread = {
+    ...makeParentThread(),
+    actionResume: {
+      runId: "action:parent-ci",
+      threadId: parentThreadId,
+      projectId: makeParentThread().projectId,
+      actionId: "quick-ci",
+      actionName: "Run Quick CI",
+      terminalId: "terminal:parent-ci",
+      outcome: "running" as const,
+      delivery: "armed" as const,
+      startedAt: DateTime.formatIso(snoozedAt),
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+    },
+  };
+  for (const creationSource of ["provider", "mcp"] as const) {
+    const child = makeSubagentChildThread({
+      parentThread,
+      childThreadId,
+      parentNodeId: NodeId.make("node:subagent-parent"),
+      activeProviderThreadId: null,
+      providerInstanceId: childProviderInstanceId,
+      modelSelection: childModelSelection,
+      title: "Review helper",
+      now: childCreatedAt,
+      createdBy: "agent",
+      creationSource,
+    });
+    assert.isNull(child.actionResume);
+    assert.equal(parentThread.actionResume.outcome, "running");
+    assert.equal(parentThread.actionResume.threadId, parentThreadId);
+  }
 });
 
 it("attributes native subagent prompts to their parent thread", () => {

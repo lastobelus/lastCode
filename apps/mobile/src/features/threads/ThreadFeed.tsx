@@ -58,6 +58,12 @@ import {
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { imageMimeType } from "@t3tools/shared/image";
 import { videoMimeType } from "@t3tools/shared/video";
+import {
+  actionResultDetails,
+  actionResultPresentation,
+  type ActionResultDetail,
+  type ActionResultPresentationOutcome,
+} from "@t3tools/shared/actionResume";
 import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -173,6 +179,7 @@ import {
   type ThreadFeedLatestRun,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
+import { parseActionResumeResultMessage } from "./actionResumeResultMessage";
 import {
   resolveThreadFeedLiveFollow,
   type ThreadFeedLiveFollowEvent,
@@ -1583,6 +1590,7 @@ function renderFeedEntry(
     | "workspaceRoot"
   > & {
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
@@ -1593,6 +1601,7 @@ function renderFeedEntry(
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string) => void;
     readonly onToggleTurnFold: (runId: RunId) => void;
+    readonly onToggleActionFollowUp: (rowId: string) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
@@ -1735,6 +1744,24 @@ function renderFeedEntry(
 
   if (entry.type === "message") {
     const { message } = entry;
+    const actionFollowUp = parseActionResumeResultMessage(message);
+    if (actionFollowUp) {
+      const presentation = actionResultPresentation(actionFollowUp);
+      return (
+        <ActionFollowUpCard
+          actionName={actionFollowUp.actionName}
+          outcome={presentation.outcome}
+          outcomeLabel={presentation.label}
+          summary={presentation.summary}
+          output={actionFollowUp.output}
+          detailedOutputAvailable={actionFollowUp.detailedOutputAvailable}
+          details={actionResultDetails(actionFollowUp.report)}
+          iconColor={iconSubtleColor}
+          expanded={props.expandedActionRows[entry.id] ?? false}
+          onToggle={() => props.onToggleActionFollowUp(entry.id)}
+        />
+      );
+    }
     const isUser = message.role === "user";
     const presentation = resolveUserMessagePresentation(message);
     const renderedText = renderAssistantCitationsAsText(presentation.text);
@@ -2050,6 +2077,146 @@ function renderFeedEntry(
   );
 }
 
+const ActionFollowUpCard = memo(function ActionFollowUpCard(props: {
+  readonly actionName: string;
+  readonly outcome: ActionResultPresentationOutcome;
+  readonly outcomeLabel: string;
+  readonly summary: string;
+  readonly output: string;
+  readonly detailedOutputAvailable: boolean;
+  readonly details: ReadonlyArray<ActionResultDetail>;
+  readonly iconColor: string | ColorValue;
+  readonly expanded: boolean;
+  readonly onToggle: () => void;
+}) {
+  const detailsAvailable = props.details.length > 0;
+  const expandable = !props.detailedOutputAvailable || detailsAvailable;
+  const tone =
+    props.outcome === "success"
+      ? {
+          container: "border-emerald-500/25 bg-emerald-500/[0.06]",
+          text: "text-adaptive-emerald-700-300",
+          color: "#30d158",
+          icon: "checkmark.circle" as const,
+        }
+      : props.outcome === "error"
+        ? {
+            container: "border-rose-500/25 bg-rose-500/[0.06]",
+            text: "text-adaptive-rose-700-300",
+            color: "#ff453a",
+            icon: "xmark.circle.fill" as const,
+          }
+        : props.outcome === "cancelled"
+          ? {
+              container: "border-adaptive-black-a10-white-a10 bg-neutral-500/[0.06]",
+              text: "text-foreground-muted",
+              color: props.iconColor,
+              icon: "xmark.circle.fill" as const,
+            }
+          : props.outcome === "blocked"
+            ? {
+                container: "border-violet-500/25 bg-violet-500/[0.06]",
+                text: "text-adaptive-violet-700-300",
+                color: "#bf5af2",
+                icon: "exclamationmark.triangle" as const,
+              }
+            : {
+                container: "border-amber-500/25 bg-amber-500/[0.06]",
+                text: "text-adaptive-amber-700-300",
+                color: "#eab308",
+                icon: "exclamationmark.triangle" as const,
+              };
+  const heading = (
+    <>
+      <SymbolView name={tone.icon} size={14} tintColor={tone.color} type="monochrome" />
+      <Text className={cn("min-w-0 flex-1 font-t3-medium text-xs", tone.text)} numberOfLines={1}>
+        {props.outcomeLabel}: {props.actionName}
+      </Text>
+    </>
+  );
+
+  return (
+    <View className={cn("mb-5 overflow-hidden rounded-xl border", tone.container)}>
+      {expandable ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: props.expanded }}
+          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
+          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+          onPress={props.onToggle}
+        >
+          {heading}
+          <SymbolView
+            name={props.expanded ? "chevron.down" : "chevron.right"}
+            size={14}
+            tintColor={props.iconColor}
+            type="monochrome"
+          />
+        </Pressable>
+      ) : (
+        <View
+          accessibilityLabel={`${props.outcomeLabel}: ${props.actionName}. ${props.summary}`}
+          className="min-h-10 flex-row items-center gap-1.5 px-3 pt-2.5"
+        >
+          {heading}
+        </View>
+      )}
+      {!props.detailedOutputAvailable && props.expanded ? (
+        <ScrollView
+          nestedScrollEnabled
+          className="mx-2.5 mb-2.5 mt-2 max-h-96 rounded-lg border border-adaptive-black-a10-white-a10 bg-neutral-950 px-3 py-2.5"
+        >
+          <Text selectable className="font-mono text-xs leading-5 text-neutral-100">
+            {props.output}
+          </Text>
+        </ScrollView>
+      ) : (
+        <View className="px-3 pb-2.5 pt-1">
+          <Text className="text-sm text-foreground" numberOfLines={1}>
+            {props.summary}
+          </Text>
+          {detailsAvailable && props.expanded ? (
+            <View className="mt-2 gap-1.5">
+              {props.details.map((detail) => {
+                const href = detail.href;
+                return (
+                  <View key={detail.id} className="gap-0.5">
+                    <Text className="font-t3-medium text-xs text-foreground-muted">
+                      {detail.label}
+                    </Text>
+                    {href ? (
+                      <Pressable
+                        accessibilityRole="link"
+                        accessibilityLabel={`${detail.label}: ${detail.value}`}
+                        onPress={() => {
+                          void tryOpenExternalUrl(href, "action-report");
+                        }}
+                      >
+                        <Text selectable className="text-xs leading-4 text-primary underline">
+                          {detail.value}
+                        </Text>
+                      </Pressable>
+                    ) : (
+                      <Text selectable className="text-xs leading-4 text-foreground">
+                        {detail.value}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
+          {props.detailedOutputAvailable && !detailsAvailable ? (
+            <Text className="mt-0.5 text-xs text-foreground-muted">
+              Detailed output retained in the Action terminal.
+            </Text>
+          ) : null}
+        </View>
+      )}
+    </View>
+  );
+});
+
 type UserMessageContentProps = {
   readonly text: string;
   readonly environmentId: EnvironmentId;
@@ -2295,16 +2462,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
+    readonly expandedActionRows: Record<string, boolean>;
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly expandedTurnIds: ReadonlySet<RunId>;
   }>({
     copiedRowId: null,
+    expandedActionRows: {},
     expandedWorkGroups: {},
     expandedWorkRows: {},
     expandedTurnIds: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedActionRows, expandedWorkGroups, expandedWorkRows, expandedTurnIds } =
+    interactionState;
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
   const fileShareSourceIdentifier = useId();
@@ -2883,7 +3053,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     if (disclosureAnchorKeyRef.current !== null) {
       settleDisclosureAfterLayout();
     }
-  }, [expandedTurnIds, expandedWorkGroups, expandedWorkRows, settleDisclosureAfterLayout]);
+  }, [
+    expandedActionRows,
+    expandedTurnIds,
+    expandedWorkGroups,
+    expandedWorkRows,
+    settleDisclosureAfterLayout,
+  ]);
 
   const handleItemSizeChanged = useCallback(() => {
     if (disclosureAnchorKeyRef.current !== null) {
@@ -2962,6 +3138,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         }
         return { ...current, expandedTurnIds: next };
       });
+    },
+    [suspendEndScrollMaintenanceForDisclosure],
+  );
+
+  const onToggleActionFollowUp = useCallback(
+    (rowId: string) => {
+      suspendEndScrollMaintenanceForDisclosure(rowId);
+      setInteractionState((current) => ({
+        ...current,
+        expandedActionRows: {
+          ...current.expandedActionRows,
+          [rowId]: !(current.expandedActionRows[rowId] ?? false),
+        },
+      }));
     },
     [suspendEndScrollMaintenanceForDisclosure],
   );
@@ -3060,6 +3250,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onUseArtifactTemplate: props.onUseArtifactTemplate,
             threadId: props.threadId,
             copiedRowId,
+            expandedActionRows,
             expandedWorkRows,
             workRowSizing,
             workGroupScrollPositions,
@@ -3070,6 +3261,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onToggleWorkGroup,
             onToggleWorkRow,
             onToggleTurnFold,
+            onToggleActionFollowUp,
             onPressPreview,
             onPressVideo,
             markdownLinkHandlers,
@@ -3106,6 +3298,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.dispatchingMessageId,
       props.onEditPendingMessage,
       copiedRowId,
+      expandedActionRows,
       disclosureToggleSettling,
       expandedWorkRows,
       workRowSizing,
@@ -3128,6 +3321,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onPressPreview,
       onPressVideo,
       onToggleTurnFold,
+      onToggleActionFollowUp,
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,

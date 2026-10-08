@@ -1,3 +1,4 @@
+import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
@@ -23,6 +24,7 @@ import type { TurnDiffSummary } from "../../types";
 import { describe, expect, it } from "vite-plus/test";
 import { MessageId, RunId } from "@t3tools/contracts";
 import {
+  isActionResumeResultMessage,
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
@@ -1114,6 +1116,29 @@ describe("deriveMessagesTimelineRows", () => {
     });
     const stable = computeStableMessagesTimelineRows(runningRows, { result: [], byId: new Map() });
     expect(computeStableMessagesTimelineRows(settledRows, stable).result).toEqual(settledRows);
+  });
+
+  it("keeps idle Action status in the composer while active turns keep timeline activity", () => {
+    const base = {
+      timelineEntries: [],
+      activeTurnStartedAt: "2026-01-01T00:01:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    };
+
+    expect(deriveMessagesTimelineRows({ ...base, isWorking: false })).toEqual([]);
+    expect(deriveMessagesTimelineRows({ ...base, isWorking: true })).toEqual([
+      {
+        kind: "working",
+        id: "working-indicator-row",
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+      {
+        kind: "thinking",
+        id: "live-activity-row",
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+    ]);
   });
 
   it("only enables assistant copy for the terminal assistant message in a turn", () => {
@@ -5160,5 +5185,37 @@ describe("live subagents after their parent turn settles", () => {
       supportsConversationRollback: false,
     });
     expect(rows.map((row) => row.id)).toEqual([`attempt-fold:${attempt.id}`, "child"]);
+  });
+});
+
+describe("V2 Action result attribution", () => {
+  const text = formatActionResumeFollowUp({
+    actionName: "Check project",
+    actionId: "check-project",
+    runId: "action-run-1",
+    validatedStatus: "done",
+    lifecycleOutcome: "succeeded",
+    exitCode: 0,
+    report: undefined,
+    output: "Check completed",
+  });
+
+  it("renders system-created Action follow-ups as results", () => {
+    expect(isActionResumeResultMessage({ role: "user", createdBy: "system", text })).toBe(true);
+  });
+
+  it("keeps user prompts, scheduled tasks, and cross-thread messages on their own paths", () => {
+    expect(isActionResumeResultMessage({ role: "user", createdBy: "user", text })).toBe(false);
+    expect(isActionResumeResultMessage({ role: "user", createdBy: "agent", text })).toBe(false);
+    expect(
+      isActionResumeResultMessage({
+        role: "user",
+        createdBy: "system",
+        text: "Run scheduled maintenance",
+      }),
+    ).toBe(false);
+    expect(isActionResumeResultMessage({ role: "assistant", createdBy: "system", text })).toBe(
+      false,
+    );
   });
 });

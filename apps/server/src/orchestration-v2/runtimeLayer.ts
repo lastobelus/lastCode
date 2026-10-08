@@ -258,9 +258,27 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(Layer.merge(layerOrchestratorProvided, layerLegacyV1ThreadImporterProvided)),
 );
+const layerActionResumeProvided = ActionResume.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerThreadManagementProvided,
+      ProjectStore.layer,
+      layerCommandReceiptStoreProvided,
+      ActionRunStore.layer,
+    ),
+  ),
+  Layer.provide(layerUpdateDrainAdmission),
+);
 const layerWorktreeCleanupProvided = WorktreeCleanupService.layer.pipe(
   Layer.provide(
-    Layer.mergeAll(layerThreadManagementProvided, ProjectionStore.layer, ProjectStore.layer, layerProviderSessionManagerProvided, layerLegacyV1ThreadImporterProvided, layerEventInfrastructure),
+    Layer.mergeAll(
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      ProjectStore.layer,
+      layerProviderSessionManagerProvided,
+      layerLegacyV1ThreadImporterProvided,
+      layerEventInfrastructure,
+    ),
   ),
 );
 const layerWorktreeCleanupWorkerProvided = Layer.effectDiscard(
