@@ -24,6 +24,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
+import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
@@ -952,6 +953,68 @@ it.effect(
         (yield* orchestrator.getThreadProjection(grandchild)).thread.lineage.independent,
       );
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retained child completion leaves its former parent unchanged", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const sink = yield* EventSink.EventSinkV2;
+    const parent = ThreadId.make("retained-completion:parent");
+    yield* createWatchingThread(parent, 1);
+    yield* send(parent, "work", "start_immediately");
+    const child = yield* delegate(parent, "retained-completion:child");
+    const keep = archive(parent, [child], "promote");
+    yield* orchestrator.dispatch(keep);
+    yield* threads.executeArchive({ threadId: parent, requestId: keep.commandId });
+    const before = yield* orchestrator.getThreadProjection(parent);
+    const childBefore = yield* orchestrator.getThreadProjection(child);
+    const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+    const now = yield* DateTime.now;
+    yield* sink.write({
+      commandId: CommandId.make("retained-completion:finished"),
+      events: [
+        {
+          id: EventId.make("retained-completion:run-completed"),
+          type: "run.updated",
+          threadId: child,
+          runId: childBefore.runs[0]!.id,
+          occurredAt: now,
+          payload: { ...childBefore.runs[0]!, status: "completed", completedAt: now },
+        },
+      ],
+    });
+    // The listener processes terminal runs in order. A normal child's result
+    // proves it consumed the retained child's earlier completion as well.
+    const controlParent = ThreadId.make("retained-completion:control-parent");
+    yield* createWatchingThread(controlParent, 2);
+    yield* send(controlParent, "control-work", "start_immediately");
+    const controlChild = yield* delegate(controlParent, "retained-completion:control-child");
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("retained-completion:control-stop"),
+      threadId: controlChild,
+    });
+    yield* orchestrator
+      .streamStoredEventsFrom({ threadId: controlParent, afterSequence: sequence })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "context-transfer.created" &&
+            stored.event.payload.type === "subagent_result" &&
+            stored.event.payload.sourceThreadId === controlChild,
+        ),
+        Stream.runHead,
+      );
+    assert.deepEqual(yield* orchestrator.getThreadProjection(parent), before);
+    yield* orchestrator.recoverDelegatedTask(child, childBefore.runs[0]!.id);
+    yield* orchestrator.recoverDelegatedTasks;
+    assert.deepEqual(yield* orchestrator.getThreadProjection(parent), before);
+    const finished = (yield* orchestrator.getThreadProjection(child)).thread;
+    assert.isTrue(finished.lineage.independent);
+    assert.deepEqual(finished.lineage, childBefore.thread.lineage);
+    assert.isNull(finished.archivedAt);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect(

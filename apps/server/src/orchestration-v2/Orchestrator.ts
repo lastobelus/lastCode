@@ -10182,15 +10182,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   /**
-   * Parent thread of an app-owned delegated child, or undefined when the
-   * thread is not one. Thread lineage and fork origin are immutable, so this
-   * is safe to read without holding either thread's dispatch lock.
+   * Looks up the parent of an app-owned child that still belongs to its task.
+   * Ownership can change after this unlocked read; finalization rechecks it
+   * under the parent's dispatch lock.
    */
   const appOwnedSubagentParentThreadId = (childThreadId: ThreadId) =>
     Effect.gen(function* () {
       const childThread = yield* projectionStore.getThread(childThreadId);
       const lineage = childThread.lineage;
       return lineage.relationshipToParent === "subagent" &&
+        lineage.independent !== true &&
         lineage.parentThreadId !== null &&
         childThread.forkedFrom?.type === "node"
         ? lineage.parentThreadId
@@ -10459,6 +10460,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const forkedFrom = childControls.thread.forkedFrom;
       if (
         childControls.thread.lineage.relationshipToParent !== "subagent" ||
+        childControls.thread.lineage.independent === true ||
         childControls.thread.lineage.parentThreadId === null ||
         forkedFrom?.type !== "node"
       ) {
@@ -10518,7 +10520,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           candidate.origin === "app_owned" &&
           candidate.childThreadId === childThreadId,
       );
-      if (task === undefined) {
+      if (task === undefined || task.ownershipReleased === true) {
         return;
       }
       const existingResultTransfer = parentProjection.contextTransfers.find(
