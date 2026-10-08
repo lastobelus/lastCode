@@ -247,10 +247,17 @@ export const make = Effect.gen(function* () {
     );
   };
   const observeWindow = (window: Electron.BrowserWindow, changed: () => void) => {
-    const events = ["show", "hide", "minimize", "restore", "closed"] as const;
-    for (const event of events) window.on(event, changed);
+    window.on("show", changed);
+    window.on("hide", changed);
+    window.on("minimize", changed);
+    window.on("restore", changed);
+    window.on("closed", changed);
     return () => {
-      for (const event of events) window.off(event, changed);
+      window.off("show", changed);
+      window.off("hide", changed);
+      window.off("minimize", changed);
+      window.off("restore", changed);
+      window.off("closed", changed);
     };
   };
   yield* Effect.addFinalizer(() =>
