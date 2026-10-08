@@ -293,7 +293,114 @@ it.effect.each(["complete", "fail"] as const)(
         assert.equal(result._tag, "Failure");
         assert.equal(root.archivePending?.status, "failed");
         assert.isNull(child.archivedAt);
+        assert.equal(child.archivePending?.status, "failed");
+        const restore = {
+          type: "thread.unarchive" as const,
+          threadId: rootId,
+          commandId: CommandId.make("service-archive:restore-failed-repair"),
+        };
+        const refused = yield* threads.dispatch(restore).pipe(
+          Effect.provideService(DispatchModeLimit, {
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+          }),
+          Effect.flip,
+        );
+        assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
+        assert.deepEqual(
+          (yield* threads.getThreadRecords(rootId, [])).thread.archivedAt,
+          root.archivedAt,
+        );
+        assert.deepEqual(
+          (yield* threads.getThreadRecords(childId, [])).thread.archivePending,
+          child.archivePending,
+        );
+        yield* threads.dispatch(restore);
+        for (const id of [rootId, childId]) {
+          const restored = (yield* threads.getThreadRecords(id, [])).thread;
+          assert.isNull(restored.archivedAt);
+          assert.isNull(restored.archivePending);
+        }
       }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["matching", "legacy", "other-owner", "other-request"] as const)(
+  "restore clears only the owner's matching failed repair (%s)",
+  (kind) =>
+    Effect.gen(function* () {
+      const original = yield* addStrandedChild(true);
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const nestedId = ThreadId.make("service-archive:nested-child");
+      const childBefore = (yield* threads.getThreadRecords(childId, [])).thread;
+      yield* projections.apply({
+        id: EventId.make("service-archive:create-nested-child"),
+        type: "thread.created",
+        threadId: nestedId,
+        occurredAt: now,
+        payload: {
+          ...childBefore,
+          id: nestedId,
+          lineage: { ...childBefore.lineage, parentThreadId: childId },
+        },
+      });
+      if (kind === "legacy")
+        yield* projections.apply({
+          id: EventId.make("service-archive:legacy-owner"),
+          type: "thread.metadata-updated",
+          threadId: rootId,
+          occurredAt: now,
+          payload: { ...original, archivedWith: null },
+        });
+      const repairId = CommandId.make("service-archive:failed-repair");
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        threadId: rootId,
+        commandId: repairId,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make("service-archive:fail-repair"),
+        threadId: rootId,
+        requestId: repairId,
+        error: "Synthetic shutdown failure",
+      });
+      const failedChild = (yield* threads.getThreadRecords(childId, [])).thread;
+      assert.equal(failedChild.archivePending?.status, "failed");
+      const pending = {
+        ...failedChild.archivePending!,
+        threadId: kind === "other-owner" ? childId : rootId,
+        commandId:
+          kind === "other-request" ? CommandId.make("service-archive:other-request") : repairId,
+      };
+      yield* projections.apply({
+        id: EventId.make("service-archive:child-failure-identity"),
+        type: "thread.metadata-updated",
+        threadId: childId,
+        occurredAt: now,
+        payload: { ...failedChild, archivePending: pending },
+      });
+      yield* threads.dispatch({
+        type: "thread.unarchive",
+        threadId: rootId,
+        commandId: CommandId.make("service-archive:restore-owner"),
+      });
+      const restoredRoot = (yield* threads.getThreadRecords(rootId, [])).thread;
+      const child = (yield* threads.getThreadRecords(childId, [])).thread;
+      const nested = (yield* threads.getThreadRecords(nestedId, [])).thread;
+      assert.isNull(restoredRoot.archivedAt);
+      assert.isNull(restoredRoot.archivePending);
+      assert.isNull(child.archivedAt);
+      assert.deepEqual(child.lineage, failedChild.lineage);
+      assert.isNull(nested.archivedAt);
+      assert.isNull(nested.archivePending);
+      assert.equal(nested.lineage.parentThreadId, childId);
+      assert.isUndefined(nested.lineage.independent);
+      if (kind === "matching" || kind === "legacy") assert.isNull(child.archivePending);
+      else assert.deepEqual(child.archivePending, pending);
     }).pipe(Effect.provide(testLayer)),
 );
 

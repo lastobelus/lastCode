@@ -11723,6 +11723,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
     const cohort = root.archivedWith;
+    const failedArchive = getThreadArchivePlan(root.archivePending);
     if (
       root.lineage.relationshipToParent === "subagent" &&
       root.lineage.independent !== true &&
@@ -11752,6 +11753,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
     }
     yield* dispatchThreadMutation(command, events, effects);
+    if (failedArchive?.status === "failed" && failedArchive.threadId === root.id) {
+      const now = yield* DateTime.now;
+      // A failed repair leaves live participants outside the original restore cohort.
+      for (const child of yield* archiveFamilyShells(command)) {
+        if (
+          child.id === root.id ||
+          child.archivedAt !== null ||
+          child.deletedAt !== null ||
+          child.archivePending?.status !== "failed" ||
+          child.archivePending.threadId !== root.id ||
+          child.archivePending.commandId !== failedArchive.commandId
+        )
+          continue;
+        const thread = yield* projectionStore.getThread(child.id).pipe(mapDispatchError(command));
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: child.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+    }
     if (cohort == null || (!releaseOwnership && cohort.threadId !== root.id)) return;
     const shells = yield* archiveFamilyShells(command);
     const survivingBranch = releaseOwnership
